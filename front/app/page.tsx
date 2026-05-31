@@ -6,7 +6,7 @@ import {
   Users, MapPin, Sparkles, Coffee, Camera, Car, PiggyBank, ArrowRight, Check, 
   UserPlus, Map as MapIcon, Compass, Headphones, TrendingDown, RefreshCw, 
   X, Play, AlertCircle, Clock, ThumbsUp, BrainCircuit,
-  MessageSquare, Wand2
+  MessageSquare, Wand2, History
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -45,6 +45,41 @@ function OmniLogo({ className = "w-8 h-8" }: { className?: string }) {
 }
 
 type Phase = 'drafting' | 'deduction' | 'decision';
+
+class SafeErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; errorMsg: string }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, errorMsg: '' };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, errorMsg: error.message };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('页面渲染异常:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="h-screen w-screen flex items-center justify-center bg-slate-50">
+          <div className="bg-white rounded-3xl p-10 shadow-xl border border-rose-100 max-w-md text-center">
+            <div className="w-14 h-14 bg-rose-50 text-rose-500 rounded-full flex items-center justify-center mx-auto mb-5">
+              <AlertCircle className="w-7 h-7" />
+            </div>
+            <h2 className="text-xl font-black text-slate-800 mb-2">渲染异常</h2>
+            <p className="text-sm text-slate-500 mb-6 font-medium">{this.state.errorMsg || '页面组件发生未预期错误'}</p>
+            <button
+              onClick={() => { this.setState({ hasError: false, errorMsg: '' }); window.location.reload(); }}
+              className="px-8 py-3 bg-slate-900 text-white rounded-xl font-bold text-sm hover:bg-blue-600 transition-all shadow-md"
+            >
+              <RefreshCw className="w-4 h-4 inline mr-2" /> 刷新页面
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function ContextualLobby() {
   const [selectedMode, setSelectedMode] = useState<string>('coop');
@@ -148,7 +183,7 @@ export default function ContextualLobby() {
     };
     const finalRole = selectedRole ? roleMapping[selectedRole] : '常规游玩';
     
-    return <UnifiedWorkspace mode={selectedMode} role={finalRole} onBack={() => setShowWorkspace(false)} />;
+    return <SafeErrorBoundary><UnifiedWorkspace mode={selectedMode} role={finalRole} onBack={() => setShowWorkspace(false)} /></SafeErrorBoundary>;
   }
 
   return (
@@ -269,10 +304,12 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
   const [consensusSummary, setConsensusSummary] = useState('');
   const [apiError, setApiError] = useState<string | null>(null);
 
+  // 🚨 核心增加点：显式记录对话上下文，支持多轮优化对齐
+  const [incrementalHistory, setIncrementalHistory] = useState<string[]>([]);
+
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    // 请确保这里的端口和 Go 服务一致，比如 8080 
     const ws = new WebSocket(`ws://localhost:8080/ws?room_id=room_omni_001&user_id=user_master`);
     
     ws.onopen = () => {
@@ -282,31 +319,46 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
     
     ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data);
+        const rawData = event.data as string;
+        const lines = rawData.split('\n').filter((line: string) => line.trim().length > 0);
+        
+        for (const line of lines) {
+          let msg: any;
+          try {
+            msg = JSON.parse(line);
+          } catch {
+            continue;
+          }
         
         if (msg.type === "stream_token") {
           setStreamedText(prev => {
             const newText = prev + msg.payload;
             
-            if (newText.includes("[FINAL_JSON]") && newText.endsWith("}")) {
+            if (newText.includes("[FINAL_JSON]")) {
                try {
-                 const jsonStr = newText.split("[FINAL_JSON]")[1].trim().replace(/```json/g, "").replace(/```/g, "");
+                 const parts = newText.split("[FINAL_JSON]");
+                 if (parts.length < 2) return newText;
+                 const afterMarker = parts[1];
+                 const jsonMatch = afterMarker.match(/\{[\s\S]*\}/);
+                 if (!jsonMatch) return newText;
+                 const jsonStr = jsonMatch[0].replace(/```json/g, "").replace(/```/g, "");
                  const finalData = JSON.parse(jsonStr);
                  
                  if (finalData.route) {
                      const mappedRoutes = finalData.route.map((r: any) => ({
                          name: r.location,
                          lnglat: r.lnglat,
-                         color: "#3b82f6", 
+                         color: r.type === "food" || r.tags?.includes("寻味") ? "#f97316" : "#3b82f6", 
                          desc: r.action,
                          time: r.time,             
                          transport: r.transport,   
-                         tags: r.tags,             
-                         cost: r.cost_estimate     
+                         tags: r.tags || [],             
+                         cost: r.cost_estimate,
+                         trust_reason: r.trust_reason || "核心地标推荐" // 🚨 新增：智能体挑选的特殊亮点解释
                      }));
                      setDynamicRoutes(mappedRoutes);
                      setConsensusSummary(finalData.negotiation_summary || "");
-                     setTimeout(() => setPhase('decision'), 1000); 
+                     setTimeout(() => setPhase('decision'), 800); 
                  }
                } catch (e) {}
             }
@@ -317,6 +369,7 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
           setIntentsReady(false);
           setPhase('drafting');
           setShowBlackboard(false);
+        }
         }
       } catch (err) {}
     };
@@ -342,36 +395,47 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
     setApiError(null);
     setStreamedText(""); 
 
-    console.log(`📤 [WS 发送意图]: ${userIntent} | 模式: ${mode} | 偏好: ${role}`);
+    // 更新增量对话历史
+    const updatedHistory = [...incrementalHistory, userIntent];
+    setIncrementalHistory(updatedHistory);
 
-    // 🔴 智能捕获用户意图中的城市，告别强制洛阳！
-    let targetCity = "洛阳"; // 默认兜底
-    const cityMatch = userIntent.match(/去(.*?)(玩|游|旅|，|,|的|待)/);
-    if (cityMatch && cityMatch[1]) {
-      targetCity = cityMatch[1].trim();
-    }
-
+    // 🚨 彻底移除落后的前端模糊 Regex 拦截，将全量对话序列与当前路线送回大模型处理
     const wsPayload = {
       type: "agent_negotiate",
       payload: {
-        destinations: [targetCity], // 🔴 动态传参！
+        destinations: [], // 交给 Python 模型端智能提取
         user_preferences: {
           mode: mode,
           role: role, 
-          intent: userIntent
+          intent: userIntent,
+          history_sequence: updatedHistory, // 发送多轮迭代对话历史
+          current_existing_route: dynamicRoutes // 把当前路线打包，做差量精进优化
         }
       }
     };
-    wsRef.current.send(JSON.stringify(wsPayload));
+    try {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(wsPayload));
+      } else {
+        setApiError("WebSocket 连接已断开，请刷新页面后重试。");
+        setIntentsReady(false);
+        setPhase('drafting');
+        setShowBlackboard(false);
+      }
+    } catch (e) {
+      console.error("WebSocket 发送失败:", e);
+      setApiError("消息发送失败，请刷新页面后重试。");
+      setIntentsReady(false);
+      setPhase('drafting');
+      setShowBlackboard(false);
+    }
   };
 
   const handleResetIntent = () => {
+    // 🚨 完美满足诉求：点击调优时，不洗掉之前的 userIntent，让用户可以连续追问修改！
     setPhase('drafting');
     setIntentsReady(false);
     setSelectedPoiIndex(null);
-    setShowBlackboard(false);
-    setDynamicRoutes([]);
-    setUserIntent('');
   };
 
   return (
@@ -401,7 +465,7 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
             <div className="flex items-center gap-2 mt-1">
                <span className={`w-2 h-2 rounded-full ${phase === 'deduction' ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`}></span>
                <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">
-                 {phase === 'drafting' ? '阶段 1: 意图感知' : phase === 'deduction' ? '阶段 2: 寻优拓扑' : '阶段 3: 路线交付'}
+                 {phase === 'drafting' ? '阶段 1: 意图对齐' : phase === 'deduction' ? '阶段 2: 动态推演' : '阶段 3: 路线交付'}
                </p>
             </div>
           </div>
@@ -409,9 +473,29 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
 
         <div className="flex-1 overflow-y-auto p-8 bg-gradient-to-b from-white to-slate-50/50">
           <AnimatePresence mode="wait">
-            {phase === 'drafting' && <DraftingPanel mode={mode} onSubmit={handleSubmitIntent} isReady={intentsReady} userIntent={userIntent} setUserIntent={setUserIntent} apiError={apiError} key="drafting" />}
+            {phase === 'drafting' && (
+              <DraftingPanel 
+                mode={mode} 
+                onSubmit={handleSubmitIntent} 
+                isReady={intentsReady} 
+                userIntent={userIntent} 
+                setUserIntent={setUserIntent} 
+                apiError={apiError} 
+                historyLength={incrementalHistory.length}
+                key="drafting" 
+              />
+            )}
             {phase === 'deduction' && <DeductionPanel key="deduction" />}
-            {phase === 'decision' && <DecisionPanel mode={mode} routes={dynamicRoutes} selectedPoiIndex={selectedPoiIndex} onPoiSelect={setSelectedPoiIndex} onReset={handleResetIntent} key="decision" />}
+            {phase === 'decision' && (
+              <DecisionPanel 
+                mode={mode} 
+                routes={dynamicRoutes} 
+                selectedPoiIndex={selectedPoiIndex} 
+                onPoiSelect={setSelectedPoiIndex} 
+                onReset={handleResetIntent} 
+                key="decision" 
+              />
+            )}
           </AnimatePresence>
         </div>
 
@@ -425,7 +509,6 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
                 <button onClick={() => setShowBlackboard(false)} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg"><X className="w-5 h-5"/></button>
               </div>
               
-              {/* 🔴 重构终端 UI：改用亮色极客风，调大字体 */}
               <div className="flex-1 overflow-y-auto p-6 bg-slate-50 font-mono text-slate-700 text-sm shadow-inner custom-scrollbar relative border-t border-slate-200">
                  <pre className="whitespace-pre-wrap leading-relaxed tracking-wide font-medium">
                     {streamedText.split("[FINAL_JSON]")[0]}
@@ -491,17 +574,16 @@ function InviteSlot() {
   );
 }
 
-function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, apiError }: { mode: string, onSubmit: () => void, isReady: boolean, userIntent: string, setUserIntent: (val: string) => void, apiError?: string | null }) {
+function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, apiError, historyLength }: any) {
   return (
     <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col h-full relative">
       <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-blue-50/80 to-indigo-50/50 border border-blue-100 p-5 shadow-sm mb-6">
-        <div className="absolute -right-4 -top-4 w-20 h-20 bg-blue-200/40 blur-2xl rounded-full pointer-events-none"></div>
         <h3 className="text-sm font-extrabold text-blue-900 mb-2 flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-blue-500" />
-          {mode === 'coop' ? '圆桌意图同步中' : '专属向导已就绪'}
+          {historyLength > 0 ? `多轮对齐模式 (已追加 ${historyLength} 次诉求)` : '专属向导已就绪'}
         </h3>
         <p className="text-xs text-blue-700/80 leading-relaxed font-medium">
-          {mode === 'coop' ? '系统正在等待多名用户的输入。当全员陈述完毕提交后，将合并意图触发底层拓扑推演。' : '我是你的专属路线向导。请随性写下你对这趟旅程的想象，哪怕是模糊的念头，底层的智能体也会为你补全细节。'}
+          {historyLength > 0 ? '支持增量精进！您可以直接输入：“把第一天的路线缩短”、“中午想吃火锅”等。系统会在当前成果上打差量补丁。' : '我是你的专属路线向导。请随性写下你对这趟旅程的想象（支持模糊意图），底层的智能体也会为你补全细节。'}
         </p>
       </div>
 
@@ -511,7 +593,6 @@ function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, api
           <div>
             <p className="text-sm font-bold text-rose-700">引擎连接失败</p>
             <p className="text-xs text-rose-500 mt-1 leading-relaxed">{apiError}</p>
-            <p className="text-[10px] text-rose-400 mt-1.5">请确保 Go 网关已启动并在监听 WebSocket。</p>
           </div>
         </motion.div>
       )}
@@ -520,7 +601,7 @@ function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, api
         <div className={`flex-1 min-h-[220px] p-5 bg-white rounded-2xl shadow-[0_4px_20px_rgba(0,0,0,0.03)] border transition-all duration-300 flex flex-col group relative ${isReady ? 'border-emerald-200 bg-emerald-50/30' : 'border-slate-200 focus-within:border-blue-400 focus-within:shadow-xl focus-within:ring-4 focus-within:ring-blue-50'}`}>
           <div className="flex justify-between items-center mb-3">
             <span className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-              <MessageSquare className="w-3.5 h-3.5" /> 你的个性化旅行诉求
+              <MessageSquare className="w-3.5 h-3.5" /> {historyLength > 0 ? "追问/精进当前路线需求" : "你的个性化旅行诉求"}
             </span>
             {isReady && <span className="text-[10px] bg-emerald-100 text-emerald-600 px-2.5 py-1 rounded-full font-bold flex items-center gap-1"><Check className="w-3 h-3"/> 已提交推演</span>}
           </div>
@@ -530,32 +611,9 @@ function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, api
             value={userIntent}
             onChange={(e) => setUserIntent(e.target.value)}
             className="w-full flex-1 bg-transparent resize-none outline-none text-sm text-slate-700 placeholder:text-slate-300 font-medium leading-relaxed custom-scrollbar"
-            placeholder="例如：我打算去成都玩4天，希望能深入体验特色美食，预算有限，同行有一位老人..."
+            placeholder={historyLength > 0 ? "例如：还是去那儿，但是把第二天的午餐平替成便宜一点的老字号小吃..." : "例如：我打算去成都玩4天，希望能深入体验特色美食，预算有限，同行有一位老人..."}
           ></textarea>
-
-          <div className="flex justify-between items-center mt-3 pt-3 border-t border-slate-50">
-             <span className="text-[10px] text-slate-400 font-medium">支持自然语言，系统将自动捕获天数与核心诉求</span>
-             {!isReady && (
-               <div className="flex items-center gap-2">
-                 <span className="text-[10px] text-blue-400 font-bold">AI Listening</span>
-                 <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.6)]"></span>
-               </div>
-             )}
-          </div>
         </div>
-
-        {!isReady && (
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="mt-4 px-1">
-            <p className="text-[11px] font-bold text-slate-400 mb-2 flex items-center gap-1.5">
-              <Wand2 className="w-3 h-3" /> 试试补充这些细节：
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <span className="text-[11px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 cursor-pointer rounded-lg text-slate-600 font-medium transition-colors border border-slate-200/50">🗓️ 明确指出想要游玩的天数</span>
-              <span className="text-[11px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 cursor-pointer rounded-lg text-slate-600 font-medium transition-colors border border-slate-200/50">👵 告知同行人员构成</span>
-              <span className="text-[11px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 cursor-pointer rounded-lg text-slate-600 font-medium transition-colors border border-slate-200/50">💰 是否对某种花费比较敏感</span>
-            </div>
-          </motion.div>
-        )}
       </div>
 
       <div className="mt-auto pt-4">
@@ -565,9 +623,9 @@ function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, api
           className={`w-full py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all duration-300 shadow-lg ${isReady ? 'bg-emerald-500 text-white shadow-emerald-200' : userIntent.trim() ? 'bg-slate-900 text-white hover:bg-blue-600 hover:shadow-blue-200 hover:-translate-y-0.5' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
         >
           {isReady ? (
-            <><RefreshCw className="w-4 h-4 animate-spin" /> 智能体矩阵推演进行中...</>
+            <><RefreshCw className="w-4 h-4 animate-spin" /> 智能体增量差量精进中...</>
           ) : (
-            <>锁定意图并开始推演 <ArrowRight className="w-4 h-4" /></>
+            <>{historyLength > 0 ? "追加诉求并迭代路书" : "锁定意图并开始推演"} <ArrowRight className="w-4 h-4" /></>
           )}
         </button>
       </div>
@@ -582,25 +640,24 @@ function DeductionPanel() {
         <motion.div animate={{ rotate: 360 }} transition={{ duration: 4, repeat: Infinity, ease: "linear" }} className="absolute inset-0 border-2 border-dashed border-blue-400 rounded-full" />
         <div className="absolute inset-0 flex items-center justify-center"><RefreshCw className="w-6 h-6 text-blue-500 animate-spin" /></div>
       </div>
-      <h3 className="text-base font-black text-slate-800">正在生成路径规划...</h3>
-      <p className="text-xs text-slate-400 mt-2 text-center max-w-xs leading-relaxed">左侧高德地图正在执行空间跨度拉伸，多智能体正将文本画像映射为空间坐标拓扑图。请尝试点击“河南省”板块查看下钻交互！</p>
+      <h3 className="text-base font-black text-slate-800">正在协同寻优空间拓扑...</h3>
+      <p className="text-xs text-slate-400 mt-2 text-center max-w-xs leading-relaxed">全息雷达数据已捕获。多智能体正在计算天气拥堵权重并覆写静态时间轴。</p>
     </motion.div>
   );
 }
 
-// 🔴 整体放大字体，确保文本清晰易读
 function DecisionPanel({ mode, routes, selectedPoiIndex, onPoiSelect, onReset }: any) {
   return (
     <motion.div initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-48"> 
       <div className="p-6 bg-gradient-to-br from-blue-50/50 to-emerald-50/30 border border-slate-100 rounded-3xl shadow-sm">
-        <h3 className="text-base font-black text-slate-800 flex items-center gap-2"><Sparkles className="w-4 h-4 text-blue-500"/> 专属共识路书已固化</h3>
+        <h3 className="text-base font-black text-slate-800 flex items-center gap-2"><Sparkles className="w-4 h-4 text-blue-500"/> 专属共识路书已交付</h3>
         <p className="text-sm text-slate-600 leading-relaxed mt-2 font-medium">
-          多智能体已根据您的时间、预算和偏好完成推演。点击下方卡片，左侧地图将聚焦至对应空间节点。
+          已整合多轮意图。时间轴已根据路况自适应错峰计算。点击节点查看理由。
         </p>
       </div>
 
       <div className="relative pl-4 border-l-2 border-slate-100 space-y-6">
-        {routes.map((pt: any, idx: number) => (
+        {Array.isArray(routes) && routes.map((pt: any, idx: number) => (
           <div 
             key={idx} 
             onClick={() => onPoiSelect(idx)}
@@ -610,10 +667,15 @@ function DecisionPanel({ mode, routes, selectedPoiIndex, onPoiSelect, onReset }:
             
             <div className="flex justify-between items-start mb-2">
               <h4 className="text-base font-black text-slate-800 tracking-tight">{pt.name}</h4>
-              {pt.time && <span className="text-xs font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">{pt.time}</span>}
+              {pt.time && <span className="text-xs font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">{pt.time}</span>}
             </div>
             
-            <p className="text-sm text-slate-600 leading-relaxed mb-4 font-medium">{pt.desc}</p>
+            <p className="text-sm text-slate-600 leading-relaxed mb-2 font-medium">{pt.desc}</p>
+            
+            {/* 🚨 增加点：展示智能体挑选的入选理由，建立公信力 */}
+            <div className="mb-4 text-xs bg-slate-50 text-slate-500 p-2.5 rounded-xl border border-slate-100/60 font-medium">
+               <span className="font-extrabold text-blue-600">💡 推荐依据:</span> {pt.trust_reason}
+            </div>
             
             <div className="flex flex-wrap items-center gap-2">
               {pt.transport && (
@@ -639,9 +701,9 @@ function DecisionPanel({ mode, routes, selectedPoiIndex, onPoiSelect, onReset }:
       <div className="mt-8 pt-6 border-t border-slate-100 flex justify-center">
         <button 
           onClick={onReset} 
-          className="px-6 py-3 bg-white border border-slate-200 text-slate-600 rounded-xl font-bold text-sm flex items-center gap-2 hover:bg-slate-50 hover:text-blue-600 transition-all shadow-sm"
+          className="px-6 py-3 bg-slate-900 border border-slate-800 text-white rounded-xl font-bold text-sm flex items-center gap-2 hover:bg-blue-600 transition-all shadow-md"
         >
-          <RefreshCw className="w-4 h-4" /> 重新调整定制需求
+          <Wand2 className="w-4 h-4" /> 对当前路线增量调优
         </button>
       </div>
     </motion.div>

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
+	"time"
 
 	"gateway/internal/models"
 	"gateway/internal/service"
@@ -21,9 +21,11 @@ type FrontendMessage struct {
 	Payload struct {
 		Destinations    []string `json:"destinations"`
 		UserPreferences struct {
-			Mode   string `json:"mode"`
-			Role   string `json:"role"`
-			Intent string `json:"intent"`
+			Mode                 string        `json:"mode"`
+			Role                 string        `json:"role"`
+			Intent               string        `json:"intent"`
+			HistorySequence      []string      `json:"history_sequence"`
+			CurrentExistingRoute []interface{} `json:"current_existing_route"`
 		} `json:"user_preferences"`
 	} `json:"payload"`
 }
@@ -85,29 +87,15 @@ func HandleWebSocket(c *gin.Context) {
 			intent := msg.Payload.UserPreferences.Intent
 			log.Printf("🚀 接收到前端意图: 模式[%s], 诉求[%s]", msg.Payload.UserPreferences.Mode, intent)
 
-			// ==========================================
-			// 🚨 核心改造 1：包装符合 Python 引擎期望的 GatewayMessage 格式
-			// ==========================================
-			targetCity := "洛阳"
-			if len(msg.Payload.Destinations) > 0 {
-				targetCity = msg.Payload.Destinations[0]
-			}
-			// 简单的意图感知纠正
-			if strings.Contains(intent, "濮阳") || strings.Contains(intent, "范县") {
-				targetCity = "濮阳"
-			} else if strings.Contains(intent, "广州") {
-				targetCity = "广州"
-			}
-
-			// 强行对齐 Python schemas.py 中的 GatewayMessage
+			// 将城市提取完全交给 Python 引擎处理，不再做硬编码猜测
 			pythonPayload := map[string]interface{}{
 				"type":    "negotiation_request",
 				"room_id": roomID,
 				"user_id": userID,
 				"payload": map[string]interface{}{
 					"current_request": map[string]interface{}{
-						"destinations":     []string{targetCity},
-						"city":             targetCity,
+						"destinations":     msg.Payload.Destinations,
+						"city":             "",
 						"user_preferences": msg.Payload.UserPreferences,
 					},
 					"evolution_memory": []interface{}{}, // 预留给 RLHF 持续学习库
@@ -119,7 +107,10 @@ func HandleWebSocket(c *gin.Context) {
 			reqBody, _ := json.Marshal(pythonPayload)
 
 			log.Println("🧠 正在呼叫 Python 多智能体推演矩阵 (流式模式)...")
-			resp, err := http.Post(pythonURL, "application/json", bytes.NewBuffer(reqBody))
+			httpClient := &http.Client{
+				Timeout: 300 * time.Second,
+			}
+			resp, err := httpClient.Post(pythonURL, "application/json", bytes.NewBuffer(reqBody))
 
 			if err != nil {
 				log.Println("🔥 呼叫 Python 引擎失败:", err)

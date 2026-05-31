@@ -60,31 +60,13 @@ for {
 				return
 			}
 
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-
-			// 🚨 核心修复点：将结构体 message 序列化为 JSON 字节
 			js, err := json.Marshal(message)
 			if err != nil {
 				log.Printf("序列化发送消息失败: %v", err)
 				return
 			}
-			
-			// 现在写入的是字节流了
-			w.Write(js)
 
-			// 优化：处理队列中的其他消息（如果有）
-			n := len(c.Send)
-			for i := 0; i < n; i++ {
-				w.Write([]byte{'\n'})
-				nextMsg := <-c.Send
-				nextJs, _ := json.Marshal(nextMsg)
-				w.Write(nextJs)
-			}
-
-			if err := w.Close(); err != nil {
+			if err := c.Conn.WriteMessage(websocket.TextMessage, js); err != nil {
 				return
 			}
 		case <-ticker.C:
