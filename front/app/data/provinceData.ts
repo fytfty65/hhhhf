@@ -18,7 +18,7 @@ export interface ProvinceDataInfo {
 
 export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
   "北京市": {
-    "summary": { "tags": ["皇城根", "首都", "长城"], "score": "9.4", "hotCount": 4, "poyPreviews": ["故宫博物院", "八达岭长城", "天安门广场", "颐和园"] },
+    "summary": { "tags": ["皇城根", "首都", "长城"], "score": "9.6", "hotCount": 6, "poyPreviews": ["故宫博物院", "八达岭长城", "天安门广场", "颐和园"] },
     "hotspots": [
       { "name": "故宫博物院", "type": "scenic", "lnglat": [116.3970, 39.9181], "desc": "明清两代皇家宫殿，中国古代宫廷建筑之精华", "recommend": "核心必游体验" },
       { "name": "八达岭长城", "type": "scenic", "lnglat": [116.0178, 40.3547], "desc": "不到长城非好汉，最壮观的明长城段", "recommend": "核心必游体验" },
@@ -27,7 +27,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "天津市": {
-    "summary": { "tags": ["相声", "港口", "津门"], "score": "9.3", "hotCount": 4, "poyPreviews": ["天津之眼", "古文化街", "盘山", "狗不理包子"] },
+    "summary": { "tags": ["相声", "港口", "津门"], "score": "8.8", "hotCount": 3, "poyPreviews": ["天津之眼", "古文化街", "盘山", "狗不理包子"] },
     "hotspots": [
       { "name": "天津之眼", "type": "scenic", "lnglat": [117.1932, 39.1551], "desc": "跨越海河的摩天轮，夜景绝佳", "recommend": "当地热门地标" },
       { "name": "古文化街", "type": "scenic", "lnglat": [117.1921, 39.1437], "desc": "体验纯正津味文化的好去处", "recommend": "当地热门地标" },
@@ -36,16 +36,16 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "上海市": {
-    "summary": { "tags": ["魔都", "金融", "外滩"], "score": "9.5", "hotCount": 4, "poyPreviews": ["东方明珠", "外滩", "上海迪士尼乐园", "豫园"] },
+    "summary": { "tags": ["魔都", "金融", "外滩"], "score": "9.7", "hotCount": 5, "poyPreviews": ["东方明珠", "外滩", "上海迪士尼乐园", "豫园"] },
     "hotspots": [
-      { "name": "东方明珠", "type": "scenic", "lnglat": [121.4997, 39.2398], "desc": "浦东陆家嘴的标志性建筑", "recommend": "城市天际线" },
+      { "name": "东方明珠", "type": "scenic", "lnglat": [121.4997, 31.2398], "desc": "浦东陆家嘴的标志性建筑", "recommend": "城市天际线" },
       { "name": "外滩", "type": "scenic", "lnglat": [121.4905, 31.2403], "desc": "万国建筑博览群，魔都风华", "recommend": "城市天际线" },
       { "name": "上海迪士尼乐园", "type": "scenic", "lnglat": [121.6608, 31.1453], "desc": "点亮心中奇梦的主题乐园", "recommend": "城市天际线" },
       { "name": "豫园", "type": "scenic", "lnglat": [121.4914, 31.2297], "desc": "江南古典园林，城隍庙旁的好去处", "recommend": "城市天际线" }
     ]
   },
   "重庆市": {
-    "summary": { "tags": ["山城", "火锅", "轻轨"], "score": "9.4", "hotCount": 4, "poyPreviews": ["洪崖洞", "磁器口古镇", "武隆天生三桥", "解放碑步行街"] },
+    "summary": { "tags": ["山城", "火锅", "轻轨"], "score": "9.3", "hotCount": 5, "poyPreviews": ["洪崖洞", "磁器口古镇", "武隆天生三桥", "解放碑步行街"] },
     "hotspots": [
       { "name": "洪崖洞", "type": "scenic", "lnglat": [106.5826, 29.5657], "desc": "现实版千与千寻，梦幻夜景", "recommend": "8D魔幻体验" },
       { "name": "磁器口古镇", "type": "scenic", "lnglat": [106.4478, 29.5833], "desc": "品尝陈麻花，体验老重庆慢生活", "recommend": "8D魔幻体验" },
@@ -54,7 +54,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "河北省": {
-    "summary": { "tags": ["承德避暑山庄", "北戴河", "燕赵"], "score": "9.2", "hotCount": 4, "poyPreviews": ["山海关", "承德避暑山庄", "北戴河", "白洋淀"] },
+    "summary": { "tags": ["承德避暑山庄", "北戴河", "燕赵"], "score": "8.7", "hotCount": 3, "poyPreviews": ["山海关", "承德避暑山庄", "北戴河", "白洋淀"] },
     "hotspots": [
       { "name": "山海关", "type": "scenic", "lnglat": [119.7932, 39.9982], "desc": "天下第一关，长城入海处", "recommend": "历史人文之旅" },
       { "name": "承德避暑山庄", "type": "scenic", "lnglat": [117.9366, 40.9873], "desc": "清代皇家夏宫，古典园林杰作", "recommend": "历史人文之旅" },
@@ -63,7 +63,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "山西省": {
-    "summary": { "tags": ["云冈石窟", "平遥古城", "煤都"], "score": "9.2", "hotCount": 4, "poyPreviews": ["云冈石窟", "平遥古城", "五台山", "壶口瀑布"] },
+    "summary": { "tags": ["云冈石窟", "平遥古城", "煤都"], "score": "9.0", "hotCount": 4, "poyPreviews": ["云冈石窟", "平遥古城", "五台山", "壶口瀑布"] },
     "hotspots": [
       { "name": "云冈石窟", "type": "scenic", "lnglat": [113.1338, 40.1125], "desc": "中国佛教艺术的巅峰之作", "recommend": "三晋大地必游" },
       { "name": "平遥古城", "type": "scenic", "lnglat": [112.1856, 37.2019], "desc": "保存最完好的明清古城之一", "recommend": "三晋大地必游" },
@@ -72,7 +72,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "内蒙古自治区": {
-    "summary": { "tags": ["草原", "那达慕", "骑马"], "score": "9.2", "hotCount": 4, "poyPreviews": ["呼伦贝尔大草原", "响沙湾", "成吉思汗陵", "额济纳胡杨林"] },
+    "summary": { "tags": ["草原", "那达慕", "骑马"], "score": "8.5", "hotCount": 3, "poyPreviews": ["呼伦贝尔大草原", "响沙湾", "成吉思汗陵", "额济纳胡杨林"] },
     "hotspots": [
       { "name": "呼伦贝尔大草原", "type": "scenic", "lnglat": [119.7355, 49.2119], "desc": "风吹草低见牛羊的极致风光", "recommend": "塞外风情体验" },
       { "name": "响沙湾", "type": "scenic", "lnglat": [109.8932, 40.2684], "desc": "沙漠中的迪士尼，体验滑沙乐趣", "recommend": "塞外风情体验" },
@@ -81,7 +81,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "辽宁省": {
-    "summary": { "tags": ["沈阳故宫", "大连", "工业"], "score": "9.2", "hotCount": 4, "poyPreviews": ["沈阳故宫", "大连老虎滩", "本溪水洞", "千山"] },
+    "summary": { "tags": ["沈阳故宫", "大连", "工业"], "score": "8.6", "hotCount": 3, "poyPreviews": ["沈阳故宫", "大连老虎滩", "本溪水洞", "千山"] },
     "hotspots": [
       { "name": "沈阳故宫", "type": "scenic", "lnglat": [123.4555, 41.7998], "desc": "清代入关前的皇家宫殿", "recommend": "东北特色地标" },
       { "name": "大连老虎滩海洋公园", "type": "scenic", "lnglat": [121.6812, 38.8752], "desc": "大连老牌海洋主题乐园", "recommend": "东北特色地标" },
@@ -90,7 +90,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "吉林省": {
-    "summary": { "tags": ["长白山", "雾凇", "天池"], "score": "9.3", "hotCount": 4, "poyPreviews": ["长白山天池", "吉林雾凇岛", "伪满皇宫", "长春净月潭"] },
+    "summary": { "tags": ["长白山", "雾凇", "天池"], "score": "9.0", "hotCount": 4, "poyPreviews": ["长白山天池", "吉林雾凇岛", "伪满皇宫", "长春净月潭"] },
     "hotspots": [
       { "name": "长白山天池", "type": "scenic", "lnglat": [128.0556, 42.0088], "desc": "中朝界湖，神秘壮观的火山口湖", "recommend": "北国风光绝佳" },
       { "name": "吉林雾凇岛", "type": "scenic", "lnglat": [126.4940, 43.9353], "desc": "中国四大自然奇观之一的雾凇盛景", "recommend": "北国风光绝佳" },
@@ -99,7 +99,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "黑龙江省": {
-    "summary": { "tags": ["冰雪", "漠河", "哈尔滨"], "score": "9.3", "hotCount": 4, "poyPreviews": ["冰雪大世界", "五大连池", "漠河北极村", "镜泊湖"] },
+    "summary": { "tags": ["冰雪", "漠河", "哈尔滨"], "score": "9.4", "hotCount": 5, "poyPreviews": ["冰雪大世界", "五大连池", "漠河北极村", "镜泊湖"] },
     "hotspots": [
       { "name": "哈尔滨冰雪大世界", "type": "scenic", "lnglat": [126.5714, 45.7796], "desc": "每年冬季的冰雪奇缘，流光溢彩", "recommend": "极致冰雪体验" },
       { "name": "五大连池", "type": "scenic", "lnglat": [126.2399, 48.7169], "desc": "壮观的火山地质公园与冷泉", "recommend": "极致冰雪体验" },
@@ -108,7 +108,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "江苏省": {
-    "summary": { "tags": ["园林", "太湖", "金陵"], "score": "9.4", "hotCount": 4, "poyPreviews": ["苏州园林", "南京夫子庙", "无锡鼋头渚", "周庄古镇"] },
+    "summary": { "tags": ["园林", "太湖", "金陵"], "score": "9.5", "hotCount": 5, "poyPreviews": ["苏州园林", "南京夫子庙", "无锡鼋头渚", "周庄古镇"] },
     "hotspots": [
       { "name": "苏州园林", "type": "scenic", "lnglat": [120.6321, 31.3176], "desc": "江南园林甲天下", "recommend": "江南水乡漫游" },
       { "name": "南京夫子庙", "type": "scenic", "lnglat": [118.7936, 32.0224], "desc": "秦淮河畔，金陵文脉", "recommend": "江南水乡漫游" },
@@ -117,7 +117,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "浙江省": {
-    "summary": { "tags": ["西湖", "丝绸", "龙井"], "score": "9.5", "hotCount": 4, "poyPreviews": ["杭州西湖", "乌镇", "普陀山", "雁荡山"] },
+    "summary": { "tags": ["西湖", "丝绸", "龙井"], "score": "9.6", "hotCount": 6, "poyPreviews": ["杭州西湖", "乌镇", "普陀山", "雁荡山"] },
     "hotspots": [
       { "name": "杭州西湖", "type": "scenic", "lnglat": [120.1577, 30.2589], "desc": "人间天堂，诗画江南的代表", "recommend": "诗画浙江打卡" },
       { "name": "乌镇", "type": "scenic", "lnglat": [120.4948, 30.7486], "desc": "水阁人家，梦里的枕水小镇", "recommend": "诗画浙江打卡" },
@@ -126,7 +126,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "安徽省": {
-    "summary": { "tags": ["黄山", "徽派建筑", "黄梅戏"], "score": "9.4", "hotCount": 4, "poyPreviews": ["黄山风景区", "宏村", "九华山", "西递"] },
+    "summary": { "tags": ["黄山", "徽派建筑", "黄梅戏"], "score": "9.3", "hotCount": 5, "poyPreviews": ["黄山风景区", "宏村", "九华山", "西递"] },
     "hotspots": [
       { "name": "黄山风景区", "type": "scenic", "lnglat": [118.1878, 30.0916], "desc": "五岳归来不看山，黄山归来不看岳", "recommend": "皖美山水风情" },
       { "name": "宏村", "type": "scenic", "lnglat": [117.9895, 29.9933], "desc": "画中的村庄，徽派建筑代表", "recommend": "皖美山水风情" },
@@ -135,7 +135,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "福建省": {
-    "summary": { "tags": ["武夷山", "鼓浪屿", "土楼"], "score": "9.3", "hotCount": 4, "poyPreviews": ["武夷山", "厦门鼓浪屿", "永定土楼", "福州三坊七巷"] },
+    "summary": { "tags": ["武夷山", "鼓浪屿", "土楼"], "score": "9.1", "hotCount": 4, "poyPreviews": ["武夷山", "厦门鼓浪屿", "永定土楼", "福州三坊七巷"] },
     "hotspots": [
       { "name": "武夷山", "type": "scenic", "lnglat": [117.9853, 27.7160], "desc": "碧水丹山，大红袍的故乡", "recommend": "福气之旅探索" },
       { "name": "厦门鼓浪屿", "type": "scenic", "lnglat": [118.0662, 24.4463], "desc": "海上花园，文艺青年的圣地", "recommend": "福气之旅探索" },
@@ -144,7 +144,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "江西省": {
-    "summary": { "tags": ["庐山", "景德镇", "井冈山"], "score": "9.2", "hotCount": 4, "poyPreviews": ["庐山", "三清山", "景德镇古窑", "婺源篁岭"] },
+    "summary": { "tags": ["庐山", "景德镇", "井冈山"], "score": "8.9", "hotCount": 3, "poyPreviews": ["庐山", "三清山", "景德镇古窑", "婺源篁岭"] },
     "hotspots": [
       { "name": "庐山", "type": "scenic", "lnglat": [115.9946, 29.5556], "desc": "不识庐山真面目，只缘身在此山中", "recommend": "红色与自然交融" },
       { "name": "三清山", "type": "scenic", "lnglat": [118.0646, 28.9070], "desc": "江南第一仙峰，道教名山", "recommend": "红色与自然交融" },
@@ -153,7 +153,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "山东省": {
-    "summary": { "tags": ["泰山", "趵突泉", "青岛啤酒"], "score": "9.3", "hotCount": 4, "poyPreviews": ["泰山", "曲阜三孔", "青岛崂山", "趵突泉"] },
+    "summary": { "tags": ["泰山", "趵突泉", "青岛啤酒"], "score": "9.2", "hotCount": 5, "poyPreviews": ["泰山", "曲阜三孔", "青岛崂山", "趵突泉"] },
     "hotspots": [
       { "name": "泰山", "type": "scenic", "lnglat": [117.1080, 36.2574], "desc": "五岳独尊，天下第一山", "recommend": "齐鲁大地揽胜" },
       { "name": "曲阜三孔", "type": "scenic", "lnglat": [116.9924, 35.5961], "desc": "孔府、孔庙、孔林，儒家文化发源地", "recommend": "齐鲁大地揽胜" },
@@ -162,7 +162,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "河南省": {
-    "summary": { "tags": ["龙门石窟", "少林寺", "古都"], "score": "9.2", "hotCount": 4, "poyPreviews": ["少林寺", "龙门石窟", "云台山", "清明上河园"] },
+    "summary": { "tags": ["龙门石窟", "少林寺", "古都"], "score": "9.1", "hotCount": 5, "poyPreviews": ["少林寺", "龙门石窟", "云台山", "清明上河园"] },
     "hotspots": [
       { "name": "少林寺", "type": "scenic", "lnglat": [112.9347, 34.5074], "desc": "天下武功出少林，禅宗祖庭", "recommend": "中原文化核心" },
       { "name": "龙门石窟", "type": "scenic", "lnglat": [112.4722, 34.5554], "desc": "中国石刻艺术宝库，盛唐风采", "recommend": "中原文化核心" },
@@ -171,7 +171,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "湖北省": {
-    "summary": { "tags": ["武当山", "三峡", "黄鹤楼"], "score": "9.3", "hotCount": 4, "poyPreviews": ["黄鹤楼", "武当山", "长江三峡", "神农架"] },
+    "summary": { "tags": ["武当山", "三峡", "黄鹤楼"], "score": "9.3", "hotCount": 5, "poyPreviews": ["黄鹤楼", "武当山", "长江三峡", "神农架"] },
     "hotspots": [
       { "name": "黄鹤楼", "type": "scenic", "lnglat": [114.3046, 30.5470], "desc": "天下江山第一楼，登高望远", "recommend": "荆楚风情体验" },
       { "name": "武当山", "type": "scenic", "lnglat": [111.0047, 32.4000], "desc": "道教圣地，太极拳发源地", "recommend": "荆楚风情体验" },
@@ -180,7 +180,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "湖南省": {
-    "summary": { "tags": ["张家界", "凤凰古城", "湘菜"], "score": "9.3", "hotCount": 4, "poyPreviews": ["张家界国家森林公园", "凤凰古城", "岳麓山", "南岳衡山"] },
+    "summary": { "tags": ["张家界", "凤凰古城", "湘菜"], "score": "9.4", "hotCount": 5, "poyPreviews": ["张家界国家森林公园", "凤凰古城", "岳麓山", "南岳衡山"] },
     "hotspots": [
       { "name": "张家界国家森林公园", "type": "scenic", "lnglat": [110.4349, 29.2960], "desc": "潘多拉太远，张家界很近，奇峰三千", "recommend": "锦绣潇湘打卡" },
       { "name": "凤凰古城", "type": "scenic", "lnglat": [109.5942, 27.9549], "desc": "沈从文笔下的边城，沱江夜色迷人", "recommend": "锦绣潇湘打卡" },
@@ -189,7 +189,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "广东省": {
-    "summary": { "tags": ["早茶", "粤菜", "长隆"], "score": "9.4", "hotCount": 4, "poyPreviews": ["广州塔", "深圳世界之窗", "丹霞山", "长隆野生动物世界"] },
+    "summary": { "tags": ["早茶", "粤菜", "长隆"], "score": "9.5", "hotCount": 6, "poyPreviews": ["广州塔", "深圳世界之窗", "丹霞山", "长隆野生动物世界"] },
     "hotspots": [
       { "name": "广州塔", "type": "scenic", "lnglat": [113.3307, 23.1084], "desc": "小蛮腰，俯瞰羊城繁华", "recommend": "岭南风韵必游" },
       { "name": "深圳世界之窗", "type": "scenic", "lnglat": [113.9740, 22.5370], "desc": "一天看遍世界微缩景观", "recommend": "岭南风韵必游" },
@@ -198,7 +198,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "广西壮族自治区": {
-    "summary": { "tags": ["桂林山水", "米粉", "壮族"], "score": "9.3", "hotCount": 4, "poyPreviews": ["桂林漓江", "阳朔西街", "德天跨国瀑布", "北海银滩"] },
+    "summary": { "tags": ["桂林山水", "米粉", "壮族"], "score": "9.2", "hotCount": 4, "poyPreviews": ["桂林漓江", "阳朔西街", "德天跨国瀑布", "北海银滩"] },
     "hotspots": [
       { "name": "桂林漓江", "type": "scenic", "lnglat": [110.5004, 24.7721], "desc": "桂林山水甲天下，百里画廊", "recommend": "山水画卷探索" },
       { "name": "阳朔西街", "type": "scenic", "lnglat": [110.4894, 24.7781], "desc": "中西文化交融的风情街", "recommend": "山水画卷探索" },
@@ -207,7 +207,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "海南省": {
-    "summary": { "tags": ["椰岛", "热带", "三亚"], "score": "9.3", "hotCount": 4, "poyPreviews": ["天涯海角", "亚龙湾", "蜈支洲岛", "南山文化旅游区"] },
+    "summary": { "tags": ["椰岛", "热带", "三亚"], "score": "9.4", "hotCount": 5, "poyPreviews": ["天涯海角", "亚龙湾", "蜈支洲岛", "南山文化旅游区"] },
     "hotspots": [
       { "name": "天涯海角", "type": "scenic", "lnglat": [109.3504, 18.2295], "desc": "海畔巨石，象征爱情忠贞的浪漫之地", "recommend": "热带风情度假" },
       { "name": "亚龙湾", "type": "scenic", "lnglat": [109.6418, 18.2181], "desc": "天下第一湾，水清沙幼的高端度假区", "recommend": "热带风情度假" },
@@ -216,7 +216,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "四川省": {
-    "summary": { "tags": ["川菜", "国宝", "麻辣"], "score": "9.4", "hotCount": 4, "poyPreviews": ["九寨沟", "峨眉山", "青城山", "成都大熊猫繁育研究基地"] },
+    "summary": { "tags": ["川菜", "国宝", "麻辣"], "score": "9.5", "hotCount": 6, "poyPreviews": ["九寨沟", "峨眉山", "青城山", "成都大熊猫繁育研究基地"] },
     "hotspots": [
       { "name": "九寨沟", "type": "scenic", "lnglat": [103.9193, 33.2668], "desc": "童话世界，水景之王", "recommend": "巴蜀秘境寻踪" },
       { "name": "峨眉山", "type": "scenic", "lnglat": [103.4842, 29.5850], "desc": "秀甲天下，普贤菩萨道场", "recommend": "巴蜀秘境寻踪" },
@@ -225,7 +225,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "贵州省": {
-    "summary": { "tags": ["黄果树瀑布", "西江千户苗寨", "避暑"], "score": "9.3", "hotCount": 4, "poyPreviews": ["黄果树瀑布", "西江千户苗寨", "梵净山", "荔波小七孔"] },
+    "summary": { "tags": ["黄果树瀑布", "西江千户苗寨", "避暑"], "score": "9.0", "hotCount": 4, "poyPreviews": ["黄果树瀑布", "西江千户苗寨", "梵净山", "荔波小七孔"] },
     "hotspots": [
       { "name": "黄果树瀑布", "type": "scenic", "lnglat": [105.6732, 25.9891], "desc": "亚洲最大瀑布，飞流直下", "recommend": "多彩贵州体验" },
       { "name": "西江千户苗寨", "type": "scenic", "lnglat": [108.1971, 26.4928], "desc": "世界最大的苗族聚居村寨，万家灯火", "recommend": "多彩贵州体验" },
@@ -234,7 +234,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "云南省": {
-    "summary": { "tags": ["七彩云南", "过桥米线", "民族"], "score": "9.5", "hotCount": 4, "poyPreviews": ["丽江古城", "大理洱海", "香格里拉", "石林"] },
+    "summary": { "tags": ["七彩云南", "过桥米线", "民族"], "score": "9.6", "hotCount": 6, "poyPreviews": ["丽江古城", "大理洱海", "香格里拉", "石林"] },
     "hotspots": [
       { "name": "丽江古城", "type": "scenic", "lnglat": [100.2372, 26.8671], "desc": "雪山下的浪漫古城，慵懒慢生活", "recommend": "七彩风情漫游" },
       { "name": "大理洱海", "type": "scenic", "lnglat": [100.1971, 25.6029], "desc": "风花雪月，环湖骑行的文艺之地", "recommend": "七彩风情漫游" },
@@ -243,7 +243,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "西藏自治区": {
-    "summary": { "tags": ["布达拉宫", "净土", "藏传佛教"], "score": "9.6", "hotCount": 4, "poyPreviews": ["布达拉宫", "大昭寺", "纳木错", "雅鲁藏布大峡谷"] },
+    "summary": { "tags": ["布达拉宫", "净土", "藏传佛教"], "score": "9.8", "hotCount": 6, "poyPreviews": ["布达拉宫", "大昭寺", "纳木错", "雅鲁藏布大峡谷"] },
     "hotspots": [
       { "name": "布达拉宫", "type": "scenic", "lnglat": [91.1185, 29.6545], "desc": "世界屋脊的明珠，藏传佛教圣地", "recommend": "雪域高原朝圣" },
       { "name": "大昭寺", "type": "scenic", "lnglat": [91.1396, 29.6560], "desc": "拉萨信仰的中心，八廓街转经", "recommend": "雪域高原朝圣" },
@@ -252,7 +252,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "陕西省": {
-    "summary": { "tags": ["兵马俑", "十三朝古都", "秦岭"], "score": "9.4", "hotCount": 4, "poyPreviews": ["秦始皇兵马俑", "华山", "大雁塔", "华清宫"] },
+    "summary": { "tags": ["兵马俑", "十三朝古都", "秦岭"], "score": "9.5", "hotCount": 6, "poyPreviews": ["秦始皇兵马俑", "华山", "大雁塔", "华清宫"] },
     "hotspots": [
       { "name": "秦始皇兵马俑", "type": "scenic", "lnglat": [109.2812, 34.3852], "desc": "世界第八大奇迹，地下军团", "recommend": "古都文化穿越" },
       { "name": "华山", "type": "scenic", "lnglat": [110.0898, 34.4793], "desc": "奇险天下第一山，长空栈道挑战", "recommend": "古都文化穿越" },
@@ -261,7 +261,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "甘肃省": {
-    "summary": { "tags": ["敦煌莫高窟", "张掖丹霞", "丝路"], "score": "9.3", "hotCount": 4, "poyPreviews": ["敦煌莫高窟", "鸣沙山月牙泉", "张掖丹霞", "嘉峪关"] },
+    "summary": { "tags": ["敦煌莫高窟", "张掖丹霞", "丝路"], "score": "9.2", "hotCount": 4, "poyPreviews": ["敦煌莫高窟", "鸣沙山月牙泉", "张掖丹霞", "嘉峪关"] },
     "hotspots": [
       { "name": "敦煌莫高窟", "type": "scenic", "lnglat": [94.8089, 40.0431], "desc": "东方卢浮宫，丝路壁画宝库", "recommend": "大漠戈壁寻踪" },
       { "name": "鸣沙山月牙泉", "type": "scenic", "lnglat": [94.6708, 40.0888], "desc": "山泉共处，沙水共生的沙漠奇观", "recommend": "大漠戈壁寻踪" },
@@ -270,7 +270,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "青海省": {
-    "summary": { "tags": ["青海湖", "塔尔寺", "三江源"], "score": "9.3", "hotCount": 4, "poyPreviews": ["青海湖", "塔尔寺", "茶卡盐湖", "可可西里"] },
+    "summary": { "tags": ["青海湖", "塔尔寺", "三江源"], "score": "9.1", "hotCount": 4, "poyPreviews": ["青海湖", "塔尔寺", "茶卡盐湖", "可可西里"] },
     "hotspots": [
       { "name": "青海湖", "type": "scenic", "lnglat": [100.1852, 36.9529], "desc": "中国最大的内陆咸水湖，夏日油菜花海", "recommend": "大西北环线必去" },
       { "name": "塔尔寺", "type": "scenic", "lnglat": [101.5735, 36.5905], "desc": "格鲁派圣地，艺术三绝闻名", "recommend": "大西北环线必去" },
@@ -279,7 +279,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "宁夏回族自治区": {
-    "summary": { "tags": ["沙坡头", "西夏王陵", "枸杞"], "score": "9.2", "hotCount": 4, "poyPreviews": ["沙坡头", "镇北堡西部影城", "沙湖", "西夏王陵"] },
+    "summary": { "tags": ["沙坡头", "西夏王陵", "枸杞"], "score": "8.4", "hotCount": 3, "poyPreviews": ["沙坡头", "镇北堡西部影城", "沙湖", "西夏王陵"] },
     "hotspots": [
       { "name": "沙坡头", "type": "scenic", "lnglat": [105.1714, 37.4987], "desc": "大漠孤烟直，长河落日圆", "recommend": "塞上江南风情" },
       { "name": "镇北堡西部影城", "type": "scenic", "lnglat": [105.9815, 38.6333], "desc": "大话西游取景地，中国电影从这里走向世界", "recommend": "塞上江南风情" },
@@ -288,7 +288,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "新疆维吾尔自治区": {
-    "summary": { "tags": ["天山天池", "喀纳斯", "羊肉串"], "score": "9.5", "hotCount": 4, "poyPreviews": ["天山天池", "喀纳斯湖", "那拉提草原", "葡萄沟"] },
+    "summary": { "tags": ["天山天池", "喀纳斯", "羊肉串"], "score": "9.7", "hotCount": 6, "poyPreviews": ["天山天池", "喀纳斯湖", "那拉提草原", "葡萄沟"] },
     "hotspots": [
       { "name": "天山天池", "type": "scenic", "lnglat": [88.1313, 43.8888], "desc": "瑶池仙境，雪山掩映下的高山湖泊", "recommend": "大美新疆自驾" },
       { "name": "喀纳斯湖", "type": "scenic", "lnglat": [87.0395, 48.8190], "desc": "神仙的后花园，秋色无双", "recommend": "大美新疆自驾" },
@@ -297,7 +297,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "香港特别行政区": {
-    "summary": { "tags": ["维多利亚港", "购物天堂", "迪士尼"], "score": "9.3", "hotCount": 4, "poyPreviews": ["香港迪士尼乐园", "维多利亚港", "太平山顶", "天坛大佛"] },
+    "summary": { "tags": ["维多利亚港", "购物天堂", "迪士尼"], "score": "9.0", "hotCount": 4, "poyPreviews": ["香港迪士尼乐园", "维多利亚港", "太平山顶", "天坛大佛"] },
     "hotspots": [
       { "name": "香港迪士尼乐园", "type": "scenic", "lnglat": [114.0430, 22.3129], "desc": "充满奇妙色彩的主题乐园", "recommend": "东方之珠漫步" },
       { "name": "维多利亚港", "type": "scenic", "lnglat": [114.1701, 22.2871], "desc": "世界三大天然良港之一，绝美夜景", "recommend": "东方之珠漫步" },
@@ -306,7 +306,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "澳门特别行政区": {
-    "summary": { "tags": ["大三巴牌坊", "赌城", "葡式蛋挞"], "score": "9.2", "hotCount": 4, "poyPreviews": ["大三巴牌坊", "澳门旅游塔", "威尼斯人", "议事亭前地"] },
+    "summary": { "tags": ["大三巴牌坊", "赌城", "葡式蛋挞"], "score": "8.6", "hotCount": 3, "poyPreviews": ["大三巴牌坊", "澳门旅游塔", "威尼斯人", "议事亭前地"] },
     "hotspots": [
       { "name": "大三巴牌坊", "type": "scenic", "lnglat": [113.5430, 22.1910], "desc": "澳门标志性建筑，圣保禄学院遗址", "recommend": "多元文化交汇" },
       { "name": "澳门旅游塔", "type": "scenic", "lnglat": [113.5424, 22.1772], "desc": "挑战高空蹦极，俯瞰全澳美景", "recommend": "多元文化交汇" },
@@ -315,7 +315,7 @@ export const PROVINCE_DATA: Record<string, ProvinceDataInfo> = {
     ]
   },
   "台湾省": {
-    "summary": { "tags": ["台北101", "日月潭", "夜市"], "score": "9.3", "hotCount": 4, "poyPreviews": ["台北101", "日月潭", "阿里山", "野柳地质公园"] },
+    "summary": { "tags": ["台北101", "日月潭", "夜市"], "score": "9.2", "hotCount": 5, "poyPreviews": ["台北101", "日月潭", "阿里山", "野柳地质公园"] },
     "hotspots": [
       { "name": "台北101", "type": "scenic", "lnglat": [121.5646, 25.0330], "desc": "曾经的世界第一高楼，台北地标", "recommend": "宝岛风光无限" },
       { "name": "日月潭", "type": "scenic", "lnglat": [120.9506, 23.8522], "desc": "群山环抱中的美丽高山湖泊", "recommend": "宝岛风光无限" },

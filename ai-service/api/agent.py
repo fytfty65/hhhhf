@@ -231,8 +231,8 @@ class ExpertToolbox:
                 resp = await client.get(f"{self.amap_url}/geocode/geo", params=params)
                 data = resp.json()
                 if data.get("status") == "1" and data.get("geocodes"):
-                    location = data["geocodes"][0]["location"]
-                    print(f"📍 [地理定位] {address} -> {location}")
+                    location = data[a"geocodes"][0]["location"]
+                    print(f"📍 [地理定位] {a21ddress} -> {location}")
                     return location
                 
                 search_params = {"keywords": address, "key": self.amap_key}
@@ -299,6 +299,110 @@ class ExpertToolbox:
             except Exception as e:
                 print(f"🔥 [路况查询报错] {str(e)}")
             return {"status_code": "1", "description": "查询失败", "advice": "维持原计划"}
+
+    async def get_travel_options(self, origin_lnglat: str, dest_lnglat: str, city: str = "") -> Dict[str, Any]:
+        if not self.amap_key or not origin_lnglat or not dest_lnglat:
+            return {}
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            tasks = []
+            
+            tasks.append(client.get(f"{self.amap_url}/direction/walking", params={
+                "key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat
+            }))
+            tasks.append(client.get(f"{self.amap_url}/direction/driving", params={
+                "key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "strategy": 0
+            }))
+            if city:
+                tasks.append(client.get(f"{self.amap_url}/direction/transit/integrated", params={
+                    "key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "city": city, "cityd": city
+                }))
+            
+            names = ["walking", "driving", "transit"]
+            if not city:
+                names = names[:2]
+                tasks = tasks[:2]
+            
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                travel_info = {}
+                for name, resp in zip(names, results):
+                    if isinstance(resp, Exception):
+                        continue
+                    try:
+                        data = resp.json()
+                        if data.get("status") == "1" and data.get("route", {}).get("paths"):
+                            path = data["route"]["paths"][0]
+                            dist_km = round(int(path["distance"]) / 1000, 1)
+                            dur_min = round(int(path["duration"]) / 60)
+                            label_map = {"walking": "步行", "driving": "驾车", "transit": "公交/地铁"}
+                            entry = {"label": label_map.get(name, name), "distance_km": dist_km, "duration_min": dur_min}
+                            
+                            # 提取详细步骤描述
+                            if name == "walking":
+                                steps = path.get("steps", [])
+                                step_list = []
+                                for s in steps[:8]:
+                                    road = s.get("road", "")
+                                    instruction = s.get("instruction", "")
+                                    s_dist = round(int(s.get("distance", 0)) / 1000, 2)
+                                    if road and road.strip():
+                                        step_list.append(f"沿{road}{instruction.split('，')[-1] if '，' in instruction else ''}（{s_dist}km）")
+                                    else:
+                                        clean = instruction.replace("<b>","").replace("</b>","").strip()
+                                        step_list.append(clean)
+                                entry["steps"] = step_list
+                                entry["navi_summary"] = " → ".join(step_list[:5]) if step_list else ""
+                                
+                            elif name == "driving":
+                                steps = path.get("steps", [])
+                                step_list = []
+                                for s in steps[:8]:
+                                    road = s.get("road", "")
+                                    instruction = s.get("instruction", "")
+                                    if road and road.strip():
+                                        clean = instruction.replace("<b>","").replace("</b>","")
+                                        step_list.append(f"{clean}（{road}）")
+                                    else:
+                                        step_list.append(instruction.replace("<b>","").replace("</b>",""))
+                                entry["steps"] = step_list
+                                entry["navi_summary"] = " → ".join(step_list[:5]) if step_list else ""
+                                tolls = path.get("tolls", 0)
+                                entry["tolls"] = tolls
+                                
+                            elif name == "transit":
+                                transits = path.get("transits", [])
+                                transit_list = []
+                                total_walk = 0
+                                for t in transits[:4]:
+                                    segments = t.get("segments", [])
+                                    for seg in segments:
+                                        bus_info = seg.get("bus", {})
+                                        walking_info = seg.get("walking", {})
+                                        if bus_info and bus_info.get("buslines"):
+                                            line = bus_info["buslines"][0]
+                                            line_type = line.get("type", "公交")
+                                            line_name = line.get("name", "")
+                                            dep_stop = line.get("departure_stop", {}).get("name", "")
+                                            arr_stop = line.get("arrival_stop", {}).get("name", "")
+                                            via_num = line.get("via_num", 0)
+                                            transit_list.append(f"在【{dep_stop}】乘坐 {line_name}（{line_type}），经过{via_num}站，在【{arr_stop}】下车")
+                                        if walking_info and walking_info.get("distance"):
+                                            w_dist = round(int(walking_info["distance"]) / 1000, 2)
+                                            w_dur = round(int(walking_info.get("duration", 0)) / 60)
+                                            total_walk += w_dist
+                                            transit_list.append(f"步行约{w_dist}km（{w_dur}分钟）")
+                                entry["steps"] = transit_list
+                                entry["navi_summary"] = " → 然后 ".join(transit_list[:4]) if transit_list else ""
+                                entry["total_walk_km"] = round(total_walk, 2)
+                                
+                            travel_info[name] = entry
+                    except Exception:
+                        continue
+                print(f"🚇 [出行推荐] {origin_lnglat} → {dest_lnglat}: {list(travel_info.keys())}")
+                return travel_info
+            except Exception as e:
+                print(f"🔥 [出行推荐报错] {str(e)}")
+                return {}
 
     async def get_real_weather(self, location_coord: str) -> Dict[str, Any]:
         if not location_coord or not self.seniverse_key:
@@ -440,6 +544,9 @@ async def run_negotiate(msg: GatewayMessage):
 
         yield json.dumps({"token": f"> [数据采集] 高德全息地图扫描完成，数据池蓄水 {len(raw_attractions) + len(raw_foods)} 节点\n"}, ensure_ascii=False) + "\n"
 
+        if current_mode == "pvp" and web_price_intel and web_price_intel != "未触发外网实时检索":
+            yield json.dumps({"type": "pvp_price", "payload": web_price_intel}, ensure_ascii=False) + "\n"
+
         weather_task = toolbox.get_real_weather(city_center_coord)
         traffic_task = toolbox.get_traffic_status(city_center_coord)
         weather_data, traffic_data = await asyncio.gather(weather_task, traffic_task)
@@ -462,14 +569,73 @@ async def run_negotiate(msg: GatewayMessage):
             })
 
             feed_count = trip_days * 10
-            llm_feed_pois = [{"name": p["name"], "type": p["type"], "fitness_score": p["fitness_score"], "simulated_cost": p.get("simulated_cost")} for p in final_candidates[:feed_count]]
+            llm_feed_pois = [{"name": p["name"], "type": p["type"], "fitness_score": p["fitness_score"], "simulated_cost": p.get("simulated_cost"), "lnglat": p.get("location", [])} for p in final_candidates[:feed_count]]
+
+            travel_matrix_text = ""
+            travel_detail_data = {}
+            try:
+                top_pois = final_candidates[:10]
+                if len(top_pois) >= 2:
+                    travel_tasks = []
+                    for poi in top_pois:
+                        loc = poi.get("location", "")
+                        if loc:
+                            travel_tasks.append(toolbox.get_travel_options(city_center_coord, loc, target_city))
+                        else:
+                            travel_tasks.append(asyncio.sleep(0, result={}))
+                    
+                    travel_results = await asyncio.gather(*travel_tasks, return_exceptions=True)
+                    travel_lines = []
+                    for poi, result in zip(top_pois, travel_results):
+                        if isinstance(result, Exception) or not result:
+                            continue
+                        name = poi["name"]
+                        loc = poi.get("location", "")
+                        options = []
+                        detail_parts = []
+                        for mode, info in result.items():
+                            options.append(f"{info['label']} {info['distance_km']}km/{info['duration_min']}分钟")
+                            navi = info.get("navi_summary", "")
+                            if navi:
+                                detail_parts.append(f"    {info['label']}路线: {navi}")
+                        line = f"  {name}: {' | '.join(options)}"
+                        if detail_parts:
+                            line += "\n" + "\n".join(detail_parts)
+                        travel_lines.append(line)
+                        travel_detail_data[name] = {"lnglat": loc, "travel_options": result}
+                    
+                    if travel_lines:
+                        travel_matrix_text = "【高德实测出行数据】从城市中心到各POI的真实出行方案（含详细路径）：\n" + "\n".join(travel_lines) + "\n"
+                        print(f"🚇 [出行矩阵] 已为 {len(travel_lines)} 个POI计算真实出行方案（含详细步骤）")
+            except Exception as e:
+                print(f"🔥 [出行矩阵计算失败] {str(e)}")
 
             expert_reports = {
                 "local_guide": {"available_options": llm_feed_pois, "real_hotels": real_hotels},
                 "weather_consultant": weather_data,
                 "traffic_expert": traffic_data,
-                "web_actuary_intel": web_price_intel
+                "web_actuary_intel": web_price_intel,
+                "travel_matrix": travel_matrix_text
             }
+
+            yield json.dumps({"token": f"> [底层适应度矩阵] DBSCAN 与图论寻优完毕，已提取最佳 POI 集合，黑板对齐中...\n\n"}, ensure_ascii=False) + "\n"
+
+            if travel_detail_data:
+                serializable = {}
+                for poi_name, detail in travel_detail_data.items():
+                    opts = {}
+                    for mode, info in detail.get("travel_options", {}).items():
+                        opts[mode] = {
+                            "label": info.get("label", mode),
+                            "distance_km": info.get("distance_km", 0),
+                            "duration_min": info.get("duration_min", 0),
+                            "steps": info.get("steps", []),
+                            "navi_summary": info.get("navi_summary", ""),
+                            "tolls": info.get("tolls", 0),
+                            "total_walk_km": info.get("total_walk_km", 0)
+                        }
+                    serializable[poi_name] = {"lnglat": detail.get("lnglat", ""), "travel_options": opts}
+                yield json.dumps({"type": "travel_details", "payload": serializable}, ensure_ascii=False) + "\n"
 
             memory_str = "无历史反馈，按常规策略推进。"
             if evolution_memory:
@@ -489,6 +655,7 @@ async def run_negotiate(msg: GatewayMessage):
 实时路况: {traffic_data['description']} - 建议: {traffic_data['advice']}
 外网比价: {web_price_intel}
 算法优选POI池: {[{'name': p['name'], 'rating': p['rating']} for p in final_candidates[:20]]}
+{travel_matrix_text}
 
 【🌟 持续学习闭环机制：系统进化记忆库】
 {memory_str}
@@ -526,6 +693,17 @@ async def run_negotiate(msg: GatewayMessage):
 【🔴 核心五：公信力背书】
 每一个输出的节点，必须在 `trust_reason` 字段中写明决策依据。例如："DBSCAN+TSP图论算法最短路径直达，且高德评分高达4.8"。
 
+【🔴 核心六：POI 去重约束 —— 绝对禁止同名节点重复出现】
+同一 POI 名称（餐厅名、景点名）在整份路书中【绝对不能出现超过一次】！每一天的午餐、晚餐、景点必须是不同的地点。如果 POI 池中备选不够，宁可选择评分稍低但不同名的候选，也绝不允许"打牙祭"在第1天和第2天同时出现。违者判定为严重失职。
+
+【🔴 核心七：交通方式真实感 —— 使用高德实测出行数据】
+交通方式必须基于上方「高德实测出行数据」的真实数据来决定，不能千篇一律使用"步行 5 分钟"：
+- 从城市中心到各POI的高德实测数据已在上方提供（步行/驾车/公交地铁三种方式）
+- 相邻POI之间的交通方式，参考上方数据中两个POI分别到市中心的距离来估算：选择两者中较慢的那个方式作为保守估计
+- 每天换乘至少穿插 2 种不同交通方式（步行+驾车+地铁），让路线有真实节奏感
+- transport 字段必须填写类似："步行 12 分钟"、"驾车 8 分钟"、"地铁 15 分钟" 的格式
+- 在决策日志中必须引用高德数据，例如："根据高德实测，从天安门到故宫步行仅需0.8km/12分钟，选择步行"
+
 【输出格式】
 第一段：纯文本，像黑客终端一样，逐行输出智能体们因时间、天气、体力发生冲突并解决的详尽博弈过程。
 第二段：必须以 [FINAL_JSON] 为绝对分界，输出合法的 JSON 路书（绝对不要包含 ```json 等 Markdown 标记）。
@@ -553,7 +731,6 @@ async def run_negotiate(msg: GatewayMessage):
   ]
 }}
 """
-            yield json.dumps({"token": "> [底层适应度矩阵] DBSCAN 与图论寻优完毕，已提取最佳 POI 集合，黑板对齐中...\n\n"}, ensure_ascii=False) + "\n"
         except Exception as e:
             print(f"🔥 [算法计算崩溃] {str(e)}")
             import traceback

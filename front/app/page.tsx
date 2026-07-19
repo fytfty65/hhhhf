@@ -140,7 +140,7 @@ export default function ContextualLobby() {
                 <div>
                   <p className="text-xs font-bold text-slate-400 mb-1">当前测算状态</p>
                   <p className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                    <RefreshCw className="w-4 h-4 text-rose-500 animate-spin" /> 正在抓取波动价格...
+                    <TrendingDown className="w-4 h-4 text-rose-500" /> 全网比价引擎就绪，进入推演后自动拉取
                   </p>
                 </div>
               </div>
@@ -236,7 +236,7 @@ export default function ContextualLobby() {
                   <div>
                     <h3 className="text-lg font-extrabold text-slate-800 mb-2">
                       {selectedMode === 'solo' && "✨ 专注自我，深度探索"}
-                      {selectedMode === 'coop' && "✨ 什么是“多智能体协同”？"}
+                      {selectedMode === 'coop' && '✨ 什么是"多智能体协同"？'}
                       {selectedMode === 'pvp' && "✨ 极致性价比是如何做到的？"}
                     </h3>
                     <p className="text-sm text-slate-600 leading-relaxed font-medium">
@@ -304,20 +304,29 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
   const [consensusSummary, setConsensusSummary] = useState('');
   const [apiError, setApiError] = useState<string | null>(null);
 
-  // 🚨 核心增加点：显式记录对话上下文，支持多轮优化对齐
+  const [pvpPriceIntel, setPvpPriceIntel] = useState<string>("");
+  const [pvpPriceLoading, setPvpPriceLoading] = useState<boolean>(true);
+
   const [incrementalHistory, setIncrementalHistory] = useState<string[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const ws = new WebSocket(`ws://localhost:8080/ws?room_id=room_omni_001&user_id=user_master`);
-    
-    ws.onopen = () => {
-      console.log("🟢 [WS 协同网关] 连接成功！");
-      setApiError(null); 
-    };
-    
-    ws.onmessage = (event) => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let isMounted = true;
+
+    const connect = () => {
+      if (!isMounted) return;
+      console.log("🟡 [WS 协同网关] 尝试连接...");
+      ws = new WebSocket(`ws://localhost:8080/ws?room_id=room_omni_001&user_id=user_master`);
+      
+      ws.onopen = () => {
+        console.log("🟢 [WS 协同网关] 连接成功");
+        setApiError(null); 
+      };
+      
+      ws.onmessage = (event) => {
       try {
         const rawData = event.data as string;
         const lines = rawData.split('\n').filter((line: string) => line.trim().length > 0);
@@ -354,7 +363,7 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
                          transport: r.transport,   
                          tags: r.tags || [],             
                          cost: r.cost_estimate,
-                         trust_reason: r.trust_reason || "核心地标推荐" // 🚨 新增：智能体挑选的特殊亮点解释
+                         trust_reason: r.trust_reason || "核心地标推荐"
                      }));
                      setDynamicRoutes(mappedRoutes);
                      setConsensusSummary(finalData.negotiation_summary || "");
@@ -369,6 +378,9 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
           setIntentsReady(false);
           setPhase('drafting');
           setShowBlackboard(false);
+        } else if (msg.type === "pvp_price") {
+          setPvpPriceIntel(msg.payload);
+          setPvpPriceLoading(false);
         }
         }
       } catch (err) {}
@@ -378,12 +390,22 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
       setApiError("协同网络中断，请检查 Go 网关是否正常运行。");
     };
 
-    ws.onclose = () => console.log("🔴 [WS 协同网关] 连接断开");
+    ws.onclose = () => {
+      console.log("🔴 [WS 协同网关] 连接断开");
+      if (!isMounted) return;
+      reconnectTimer = setTimeout(connect, 2000);
+    };
     
     wsRef.current = ws;
-    return () => {
-      ws.close();
-    };
+  };
+
+  connect();
+
+  return () => {
+    isMounted = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (ws) ws.close();
+  };
   }, []);
 
   const handleSubmitIntent = () => {
@@ -395,21 +417,19 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
     setApiError(null);
     setStreamedText(""); 
 
-    // 更新增量对话历史
     const updatedHistory = [...incrementalHistory, userIntent];
     setIncrementalHistory(updatedHistory);
 
-    // 🚨 彻底移除落后的前端模糊 Regex 拦截，将全量对话序列与当前路线送回大模型处理
     const wsPayload = {
       type: "agent_negotiate",
       payload: {
-        destinations: [], // 交给 Python 模型端智能提取
+        destinations: [],
         user_preferences: {
           mode: mode,
           role: role, 
           intent: userIntent,
-          history_sequence: updatedHistory, // 发送多轮迭代对话历史
-          current_existing_route: dynamicRoutes // 把当前路线打包，做差量精进优化
+          history_sequence: updatedHistory,
+          current_existing_route: dynamicRoutes
         }
       }
     };
@@ -432,7 +452,6 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
   };
 
   const handleResetIntent = () => {
-    // 🚨 完美满足诉求：点击调优时，不洗掉之前的 userIntent，让用户可以连续追问修改！
     setPhase('drafting');
     setIntentsReady(false);
     setSelectedPoiIndex(null);
@@ -583,7 +602,7 @@ function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, api
           {historyLength > 0 ? `多轮对齐模式 (已追加 ${historyLength} 次诉求)` : '专属向导已就绪'}
         </h3>
         <p className="text-xs text-blue-700/80 leading-relaxed font-medium">
-          {historyLength > 0 ? '支持增量精进！您可以直接输入：“把第一天的路线缩短”、“中午想吃火锅”等。系统会在当前成果上打差量补丁。' : '我是你的专属路线向导。请随性写下你对这趟旅程的想象（支持模糊意图），底层的智能体也会为你补全细节。'}
+          {historyLength > 0 ? '支持增量精进！您可以直接输入："把第一天的路线缩短"、"中午想吃火锅"等。系统会在当前成果上打差量补丁。' : '我是你的专属路线向导。请随性写下你对这趟旅程的想象（支持模糊意图），底层的智能体也会为你补全细节。'}
         </p>
       </div>
 
@@ -672,7 +691,6 @@ function DecisionPanel({ mode, routes, selectedPoiIndex, onPoiSelect, onReset }:
             
             <p className="text-sm text-slate-600 leading-relaxed mb-2 font-medium">{pt.desc}</p>
             
-            {/* 🚨 增加点：展示智能体挑选的入选理由，建立公信力 */}
             <div className="mb-4 text-xs bg-slate-50 text-slate-500 p-2.5 rounded-xl border border-slate-100/60 font-medium">
                <span className="font-extrabold text-blue-600">💡 推荐依据:</span> {pt.trust_reason}
             </div>
