@@ -6,7 +6,7 @@ import {
   Users, MapPin, Sparkles, Coffee, Camera, Car, PiggyBank, ArrowRight, Check, 
   UserPlus, Map as MapIcon, Compass, Headphones, TrendingDown, RefreshCw, 
   X, Play, AlertCircle, Clock, ThumbsUp, BrainCircuit,
-  MessageSquare, Wand2, History, ChevronDown, ChevronUp, ArrowDown, Maximize2, Minimize2, Navigation, Sun, CloudRain
+  MessageSquare, Wand2, History, ChevronDown, ChevronUp, ArrowDown, Navigation, Sun, CloudRain, ExternalLink, Hotel, RotateCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -26,7 +26,7 @@ const InteractiveAmapComponent = dynamic(
   }
 );
 
-// 👑 智能 JSON 提解助手：动态捕捉流式传输中的有效 JSON 对象，防死锁！
+// 👑 智能 JSON 提解助手：全局完整 JSON 解析
 function tryExtractJson(text: string) {
   if (!text) return null;
   let jsonCandidate = "";
@@ -59,9 +59,121 @@ function tryExtractJson(text: string) {
   }
 }
 
+// 👑 核心解决卡顿：流式增量提取解析器！只要大模型吐出单条 POI 对象，无需等待全文结尾，秒级提取！
+function extractStreamingRoutes(text: string): any[] {
+  if (!text) return [];
+  let jsonPart = text;
+  if (text.includes("[FINAL_JSON]")) {
+    jsonPart = text.split("[FINAL_JSON]")[1];
+  } else if (text.includes("```json")) {
+    jsonPart = text.split("```json")[1];
+  }
+
+  // 正则精准捕获包含 location 或 name 的独立 JSON 对象块
+  const objectMatches = jsonPart.match(/\{\s*"day"\s*:\s*\d+[\s\S]*?\}/g);
+  if (!objectMatches) return [];
+
+  const parsedItems: any[] = [];
+  for (const matchStr of objectMatches) {
+    try {
+      const item = JSON.parse(matchStr);
+      if (item && (item.location || item.name)) {
+        parsedItems.push({
+          day: item.day || 1,
+          name: item.location || item.name,
+          lnglat: item.lnglat || [104.06, 30.67],
+          color: item.tags?.includes("寻味") || item.type === "food" ? "#f97316" : "#3b82f6",
+          desc: item.desc || item.action || "",
+          time: item.time || "",
+          time_reason: item.time_reason || "",
+          transport: item.transport || "",
+          tags: item.tags || [],
+          cost: item.cost_estimate || "",
+          photos: item.photos || [],
+          trust_reason: item.trust_reason || "核心地标推荐",
+          amap_url: item.amap_url || "",
+          hotel_candidates: item.hotel_candidates || []
+        });
+      }
+    } catch (e) {
+      // 当前单条对象未生成完毕
+    }
+  }
+  return parsedItems;
+}
+
+// 👑 智能实景图片分类与图集离散匹配：彻底解决长城/公园显示路边摊与图片重复问题
+function getCleanPhotoUrl(photoUrl?: string, poiName: string = '', photoIndex: number = 0) {
+  // 过滤高德返回的脏占位图或路边菜摊脏图
+  const isJunkUrl = photoUrl && (
+    photoUrl.includes('-0') || photoUrl.includes('-1') || photoUrl.includes('-2') ||
+    photoUrl.includes('market') || photoUrl.includes('shop') || photoUrl.includes('stall')
+  );
+
+  const isSuperLandmark = poiName.includes('长城') || poiName.includes('故宫') || poiName.includes('北海公园') || poiName.includes('颐和园') || poiName.includes('天坛') || poiName.includes('熊猫基地');
+
+  // 若不是脏图且不是著名超级地标，可优先显示高德实景
+  if (photoUrl && photoUrl.startsWith('http') && !isJunkUrl && !isSuperLandmark) {
+    return photoUrl;
+  }
+
+  // 👑 深度品类 + 图集索引 (photoIndex) 差异化离散高清图库
+  if (poiName.includes('长城') || poiName.includes('八达岭') || poiName.includes('居庸关') || poiName.includes('慕田峪')) {
+    const wallPhotos = [
+      'https://images.unsplash.com/photo-1508804185872-d7badad00f7d?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1547981609-4b6bfe67ca0b?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1529655683826-aba9b3e77383?auto=format&fit=crop&w=600&q=80'
+    ];
+    return wallPhotos[photoIndex % wallPhotos.length];
+  }
+
+  if (poiName.includes('北海') || poiName.includes('颐和园') || poiName.includes('皇家园林') || poiName.includes('公园') || poiName.includes('植物园')) {
+    const gardenPhotos = [
+      'https://images.unsplash.com/photo-1584252520626-64e031023793?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1599839575945-a9e5af0c3fa5?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=600&q=80'
+    ];
+    return gardenPhotos[photoIndex % gardenPhotos.length];
+  }
+
+  if (poiName.includes('故宫') || poiName.includes('天坛') || poiName.includes('恭王府') || poiName.includes('博物馆') || poiName.includes('展览馆')) {
+    const museumPhotos = [
+      'https://images.unsplash.com/photo-1566127444979-b3d2b654e3d7?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1584252520626-64e031023793?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1548013146-72479768bada?auto=format&fit=crop&w=600&q=80'
+    ];
+    return museumPhotos[photoIndex % museumPhotos.length];
+  }
+
+  if (poiName.includes('餐') || poiName.includes('店') || poiName.includes('美食') || poiName.includes('火锅') || poiName.includes('羊肉') || poiName.includes('烤') || poiName.includes('小吃') || poiName.includes('酒楼')) {
+    const foodPhotos = [
+      'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1563245372-f21724e3856d?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=80'
+    ];
+    return foodPhotos[photoIndex % foodPhotos.length];
+  }
+
+  if (poiName.includes('酒店') || poiName.includes('民宿') || poiName.includes('客栈') || poiName.includes('度假')) {
+    const hotelPhotos = [
+      'https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1582719478250-c89cae4dc85b?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1571896349842-33c89424de2d?auto=format&fit=crop&w=600&q=80'
+    ];
+    return hotelPhotos[photoIndex % hotelPhotos.length];
+  }
+
+  const defaultPhotos = [
+    'https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&w=600&q=80',
+    'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=80',
+    'https://images.unsplash.com/photo-1488646953014-85cb44e25828?auto=format&fit=crop&w=600&q=80'
+  ];
+  return defaultPhotos[photoIndex % defaultPhotos.length];
+}
+
 function OmniLogo({ className = "w-8 h-8" }: { className?: string }) {
   return (
-    <svg viewBox="0 0 48 48" fill="none" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" className={className}>
+    <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
       <defs>
         <linearGradient id="warmGrad" x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stopColor="#FF8E53" /> 
@@ -252,7 +364,7 @@ export default function ContextualLobby() {
                   系统引擎已就绪
                 </div>
                 <div className="w-11 h-11 rounded-full overflow-hidden bg-white border border-slate-200 shadow-sm">
-                   <img src="[https://api.dicebear.com/7.x/notionists/svg?seed=Felix&backgroundColor=transparent](https://api.dicebear.com/7.x/notionists/svg?seed=Felix&backgroundColor=transparent)" alt="avatar" className="w-full h-full object-cover" />
+                   <img src="https://api.dicebear.com/9.x/avataaars/svg?seed=Felix&backgroundColor=b6e3f4" alt="avatar" className="w-full h-full object-cover" />
                 </div>
               </div>
             </header>
@@ -341,7 +453,6 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
   
   const [selectedPoiIndex, setSelectedPoiIndex] = useState<number | null>(0);
   const [activeDayIndex, setActiveDayIndex] = useState<number>(0);
-  const [isMapFullscreen, setIsMapFullscreen] = useState(false);
 
   const [userIntent, setUserIntent] = useState('');
   const [dynamicRoutes, setDynamicRoutes] = useState<any[]>([]);
@@ -351,6 +462,9 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
   const [weatherInfo, setWeatherInfo] = useState<any>(null);
   const [trafficInfo, setTrafficInfo] = useState<any>(null);
   const [travelDetails, setTravelDetails] = useState<Record<string, any>>({});
+  
+  // 👑 全动态预算拆解数据状态
+  const [budgetData, setBudgetData] = useState<any>(null);
 
   const [streamedText, setStreamedText] = useState(""); 
   const [consensusSummary, setConsensusSummary] = useState('');
@@ -379,87 +493,98 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
       };
       
       ws.onmessage = (event) => {
-      try {
-        const rawData = event.data as string;
-        const lines = rawData.split('\n').filter((line: string) => line.trim().length > 0);
-        
-        for (const line of lines) {
-          let msg: any;
-          try { msg = JSON.parse(line); } catch { continue; }
-        
-        if (msg.type === "target_city") {
-          setTargetCityInfo(msg.payload);
-        } else if (msg.type === "weather_info") {
-          setWeatherInfo(msg.payload);
-        } else if (msg.type === "traffic_info") {
-          setTrafficInfo(msg.payload);
-        } else if (msg.type === "travel_details") {
-          setTravelDetails(msg.payload);
-        } else if (msg.type === "stream_token") {
-          setStreamedText(prev => {
-            const rawToken = msg.payload ? String(msg.payload) : "";
-            const cleanToken = rawToken.replace(/null/g, "");
-            const cleanPrev = (prev || "").replace(/null/g, "");
-            const newText = cleanPrev + cleanToken;
-            
-            // 👑 防死锁动态提取 JSON！解析成功即刻下钻进入 decision 状态！
-            const finalData = tryExtractJson(newText);
-            if (finalData && finalData.route && Array.isArray(finalData.route) && finalData.route.length > 0) {
-                 const mappedRoutes = finalData.route.map((r: any) => ({
-                     day: r.day || 1,
-                     name: r.location,
-                     lnglat: r.lnglat,
-                     color: r.type === "food" || r.tags?.includes("寻味") ? "#f97316" : "#3b82f6", 
-                     desc: r.desc || r.action,
-                     time: r.time,             
-                     transport: r.transport,   
-                     tags: r.tags || [],             
-                     cost: r.cost_estimate,
-                     photos: r.photos || [],
-                     trust_reason: r.trust_reason || "核心地标推荐"
-                 }));
-                 
-                 setDynamicRoutes(mappedRoutes);
-                 setConsensusSummary(finalData.negotiation_summary || "");
-                 setSelectedPoiIndex(0);
-                 setActiveDayIndex(0);
-                 setTimeout(() => setPhase('decision'), 400); 
+        try {
+          const rawData = event.data as string;
+          const lines = rawData.split('\n').filter((line: string) => line.trim().length > 0);
+          
+          for (const line of lines) {
+            let msg: any;
+            try { msg = JSON.parse(line); } catch { continue; }
+          
+            if (msg.type === "target_city") {
+              setTargetCityInfo(msg.payload);
+            } else if (msg.type === "weather_info") {
+              setWeatherInfo(msg.payload);
+            } else if (msg.type === "traffic_info") {
+              setTrafficInfo(msg.payload);
+            } else if (msg.type === "travel_details") {
+              setTravelDetails(msg.payload);
+            } else if (msg.type === "budget_breakdown") {
+              setBudgetData(msg.payload);
+            } else if (msg.type === "stream_token") {
+              setStreamedText(prev => {
+                const rawToken = msg.payload ? String(msg.payload) : "";
+                const cleanToken = rawToken.replace(/null/g, "");
+                const cleanPrev = (prev || "").replace(/null/g, "");
+                const newText = cleanPrev + cleanToken;
+                
+                // 1. 尝试全量 JSON 解析
+                const finalData = tryExtractJson(newText);
+                if (finalData && finalData.route && Array.isArray(finalData.route) && finalData.route.length > 0) {
+                  const mappedRoutes = finalData.route.map((r: any) => ({
+                    day: r.day || 1,
+                    name: r.location,
+                    lnglat: r.lnglat,
+                    color: r.type === "food" || r.tags?.includes("寻味") ? "#f97316" : "#3b82f6", 
+                    desc: r.desc || r.action,
+                    time: r.time,             
+                    time_reason: r.time_reason || "",
+                    transport: r.transport,   
+                    tags: r.tags || [],             
+                    cost: r.cost_estimate,
+                    photos: r.photos || [],
+                    trust_reason: r.trust_reason || "核心地标推荐",
+                    amap_url: r.amap_url || "",
+                    hotel_candidates: r.hotel_candidates || []
+                  }));
+                  
+                  setDynamicRoutes(mappedRoutes);
+                  if (finalData.negotiation_summary) setConsensusSummary(finalData.negotiation_summary);
+                  setSelectedPoiIndex(0);
+                  setActiveDayIndex(0);
+                  setPhase('decision');
+                } else {
+                  // 👑 2. 秒级切屏核心修复：增量流式提取！只要吐出单条 POI 对象（2秒内），立刻秒级切屏上屏，决不卡死！
+                  const incrementalItems = extractStreamingRoutes(newText);
+                  if (incrementalItems.length > 0) {
+                    setDynamicRoutes(incrementalItems);
+                    setPhase('decision');
+                  }
+                }
+                return newText;
+              });
+            } else if (msg.type === "error") {
+              setApiError(msg.payload);
+              setIntentsReady(false);
+              setPhase('drafting');
+              setShowBlackboard(false);
+            } else if (msg.type === "pvp_price") {
+              setPvpPriceIntel(msg.payload);
+              setPvpPriceLoading(false);
+            } else if (msg.actual_path) {
+               setRealPath(msg.actual_path);
             }
-            return newText;
-          });
-        } else if (msg.type === "error") {
-          setApiError(msg.payload);
-          setIntentsReady(false);
-          setPhase('drafting');
-          setShowBlackboard(false);
-        } else if (msg.type === "pvp_price") {
-          setPvpPriceIntel(msg.payload);
-          setPvpPriceLoading(false);
-        } else if (msg.actual_path) {
-           setRealPath(msg.actual_path);
-        }
-        }
-      } catch (err) {}
+          }
+        } catch (err) {}
+      };
+
+      ws.onerror = () => setApiError("协同网络中断，请检查 Go 网关是否正常运行。");
+      ws.onclose = () => {
+        if (!isMounted) return;
+        reconnectTimer = setTimeout(connect, 2000);
+      };
+      wsRef.current = ws;
     };
 
-    ws.onerror = () => setApiError("协同网络中断，请检查 Go 网关是否正常运行。");
-    ws.onclose = () => {
-      if (!isMounted) return;
-      reconnectTimer = setTimeout(connect, 2000);
+    connect();
+
+    return () => {
+      isMounted = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
     };
-    wsRef.current = ws;
-  };
-
-  connect();
-
-  return () => {
-    isMounted = false;
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    if (ws) ws.close();
-  };
   }, []);
 
-  // 👑 净化推演日志：只截取自然语言博弈部分，彻底过滤 JSON 源码与 null 杂质！
   const humanReadableLogs = useMemo(() => {
     if (!streamedText) return "智能体空间思考中...";
     
@@ -479,14 +604,12 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
     return cleaned || "[系统中枢]: 多智能体正在分析全域 POI 节点与最佳时空图论，生成定制路书中...";
   }, [streamedText]);
 
-  // 👑 计算当前路线中包含的总天数列表
   const totalDays = useMemo(() => {
     if (!dynamicRoutes || dynamicRoutes.length === 0) return [1];
     const daysSet = new Set<number>(dynamicRoutes.map((r: any) => Number(r.day) || 1));
     return Array.from(daysSet).sort((a, b) => a - b);
   }, [dynamicRoutes]);
 
-  // 👑 根据选中的 Day 过滤出当天的路线列表
   const currentDayRoutes = useMemo(() => {
     if (!dynamicRoutes || dynamicRoutes.length === 0) return [];
     const targetDay = totalDays[activeDayIndex] || 1;
@@ -541,11 +664,19 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
     setSelectedPoiIndex(null);
   };
 
+  // 👑 彻底解决切城市问题：强行锁定当前目标城市名，绝对不准跳变成成都！
+  const handleSinglePoiSwap = (poiName: string) => {
+    const currentCityName = targetCityInfo?.name || '北京';
+    const swapPrompt = `保持在【${currentCityName}】不变，仅把行程中的景点【${poiName}】平替换成【${currentCityName}】另一个同等知名度的高评分景点或地标，绝对不要改变城市和其它天数的规划。`;
+    setUserIntent(swapPrompt);
+    handleSubmitIntent();
+  };
+
   return (
     <motion.div key="workspace-root" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="h-screen w-full bg-white flex overflow-hidden font-sans text-slate-800">
       
-      {/* 👑 黄金比例：左侧长图文游记与路径排版区占据 60% 宽度 (w-[620px] xl:w-[700px]) */}
-      <div className="w-[620px] xl:w-[700px] flex flex-col relative z-20 border-r border-slate-200 bg-white shadow-2xl">
+      {/* 黄金比例：左侧长图文游记与路径排版区 */}
+      <div className="w-[620px] xl:w-[700px] flex flex-col relative z-20 border-r border-slate-200 bg-white shadow-2xl shrink-0">
         <header className="px-8 py-5 border-b border-slate-100 flex justify-between items-center bg-white shadow-xs z-10">
           <div>
             <h2 className="text-2xl font-black text-slate-800 tracking-tight">{targetCityInfo ? targetCityInfo.name + '全景路线规划' : '规划您的行程'}</h2>
@@ -572,7 +703,12 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
                 historyLength={incrementalHistory.length}
               />
             )}
-            {phase === 'deduction' && <DeductionPanel key="workspace-deduction-panel" />}
+            {phase === 'deduction' && (
+              <DeductionPanel 
+                key="workspace-deduction-panel" 
+                latestLog={humanReadableLogs.split('\n').filter(Boolean).pop()}
+              />
+            )}
             {phase === 'decision' && (
               <motion.div key="workspace-decision-panel" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 <MafengwoStylePanel 
@@ -586,6 +722,9 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
                   weatherInfo={weatherInfo}
                   trafficInfo={trafficInfo}
                   onReset={handleResetIntent}
+                  consensusSummary={consensusSummary}
+                  budgetData={budgetData}
+                  onSwapPoi={handleSinglePoiSwap}
                 />
               </motion.div>
             )}
@@ -593,10 +732,8 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
         </div>
       </div>
 
-      {/* =============== 右侧：地图与可全屏展示区 (40% 宽度) =============== */}
-      <div className={`relative flex-1 bg-slate-100 overflow-hidden flex flex-col transition-all duration-300 ${isMapFullscreen ? 'fixed inset-0 z-50 w-screen h-screen' : ''}`}>
-        
-        {/* 地图核心主渲染组件 */}
+      {/* =============== 右侧：地图与全视图渲染 =============== */}
+      <div className="relative flex-1 bg-slate-100 overflow-hidden flex flex-col">
         <FullRouteVisualizer 
           phase={phase}
           routes={currentDayRoutes}
@@ -606,17 +743,10 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
           onWakeAgent={() => setShowBlackboard(true)}
           onExit={onBack}
           targetCityInfo={targetCityInfo}
+          travelDetails={travelDetails}
         />
 
-        {/* 右上角：地图全屏切换与黑板唤醒按钮 */}
         <div className="absolute top-6 right-6 z-40 flex items-center gap-3 pointer-events-auto">
-          <button 
-            onClick={() => setIsMapFullscreen(!isMapFullscreen)}
-            className="bg-white/90 backdrop-blur-md px-4 py-2.5 rounded-xl shadow-lg border border-slate-200/80 text-slate-700 hover:text-orange-500 font-bold text-xs flex items-center gap-2 transition-all hover:scale-105 cursor-pointer"
-          >
-            {isMapFullscreen ? <><Minimize2 className="w-4 h-4"/> 退出全屏</> : <><Maximize2 className="w-4 h-4"/> 全屏地图</>}
-          </button>
-          
           <button 
             onClick={() => setShowBlackboard(!showBlackboard)} 
             className="bg-white/90 backdrop-blur-md p-2.5 rounded-xl shadow-lg text-slate-700 hover:text-orange-500 border border-slate-200/80 transition-all hover:scale-105 cursor-pointer"
@@ -626,23 +756,16 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
           </button>
         </div>
 
-        {/* 👑 地图底部贴地真实照片轮播 */}
         <div className="absolute bottom-6 left-0 w-full z-30 pointer-events-none">
           <AnimatePresence>
             {phase === 'decision' && (
               <motion.div key="bottom-carousel-wrapper" initial={{ y: 120, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 120, opacity: 0 }} className="pointer-events-auto flex flex-col items-center">
                 <BottomMapCarousel selectedIndex={selectedPoiIndex} onSelect={setSelectedPoiIndex} routes={currentDayRoutes} />
-                {(mode === 'coop' || mode === 'pvp') && (
-                  <div className="w-full max-w-xl px-6 mt-3">
-                    <VotingLayer key="voting-layer-panel" />
-                  </div>
-                )}
               </motion.div>
             )}
           </AnimatePresence>
         </div>
         
-        {/* 👑 净化后的多智能体推演日志侧边栏 */}
         <AnimatePresence>
           {showBlackboard && (
             <motion.div key="blackboard-drawer-panel" initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: "spring", damping: 25 }} className="absolute top-0 right-0 w-[420px] h-full bg-white/95 backdrop-blur-2xl shadow-2xl z-50 flex flex-col border-l border-slate-200">
@@ -664,7 +787,7 @@ function UnifiedWorkspace({ mode, role, onBack }: { mode: string, role: string, 
 }
 
 // -------------------------------------------------------------------------
-// 大厅复用小组件
+// 大厅与工具组件
 // -------------------------------------------------------------------------
 function TravelModeCard({ title, desc, icon, color, selected, onClick }: any) {
   return (
@@ -696,7 +819,7 @@ function MemberSlot({ name, role, status, isSelf, avatarSeed }: any) {
     <div className={`p-3 rounded-xl flex items-center justify-between border ${isSelf ? 'bg-orange-50/80 border-orange-200 shadow-sm' : 'bg-white border-slate-100'}`}>
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 bg-white rounded-full overflow-hidden border border-slate-200">
-          <img src={`[https://api.dicebear.com/7.x/notionists/svg?seed=$](https://api.dicebear.com/7.x/notionists/svg?seed=$){avatarSeed}&backgroundColor=transparent`} alt="avatar" />
+          <img src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${avatarSeed}&backgroundColor=b6e3f4`} alt="avatar" />
         </div>
         <div>
           <p className="text-sm font-bold text-slate-800">{name}</p>
@@ -776,21 +899,210 @@ function DraftingPanel({ mode, onSubmit, isReady, userIntent, setUserIntent, api
   );
 }
 
-function DeductionPanel() {
+// 👑 加载等待面板：显示动态推演日志，避免死等发呆
+function DeductionPanel({ latestLog }: { latestLog?: string }) {
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center py-24 h-full text-center">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center py-20 h-full text-center px-8">
       <div className="relative w-24 h-24 mb-6">
-        <motion.div animate={{ rotate: 360 }} transition={{ duration: 4, repeat: Infinity, ease: "linear" }} className="absolute inset-0 border-2 border-dashed border-orange-400 rounded-full" />
-        <div className="absolute inset-0 flex items-center justify-center"><RefreshCw className="w-6 h-6 text-orange-500 animate-spin" /></div>
+        <motion.div animate={{ rotate: 360 }} transition={{ duration: 3, repeat: Infinity, ease: "linear" }} className="absolute inset-0 border-2 border-dashed border-orange-400 rounded-full" />
+        <div className="absolute inset-0 flex items-center justify-center">
+          <RefreshCw className="w-6 h-6 text-orange-500 animate-spin" />
+        </div>
       </div>
       <h3 className="text-base font-black text-slate-800">正在协同寻优空间拓扑...</h3>
-      <p className="text-xs text-slate-400 mt-2 text-center max-w-xs leading-relaxed">全息雷达数据已捕获。多智能体正在计算天气拥堵权重并覆写静态时间轴。</p>
+      
+      <div className="mt-4 p-3.5 rounded-2xl bg-slate-900 text-slate-200 text-xs font-mono max-w-sm w-full border border-slate-800 shadow-md">
+        <div className="flex items-center gap-1.5 text-orange-400 font-bold mb-1">
+          <span className="w-2 h-2 rounded-full bg-orange-500 animate-ping"></span>
+          <span>智能体实时推演中:</span>
+        </div>
+        <p className="text-[11px] text-slate-300 leading-relaxed line-clamp-2">
+          {latestLog || "全息雷达数据已捕获，多智能体正在计算拓扑并交织生成行程..."}
+        </p>
+      </div>
     </motion.div>
   );
 }
 
-// 👑 马蜂窝风格长图文路线面板 (含全域天气组件 + 真实 Day 过滤 + 折叠高德分步导航)
-function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, travelDetails, selectedPoiIndex, onSelectPoi, weatherInfo, trafficInfo, onReset }: any) {
+// 👑 全动态预算展示卡片
+function DynamicBudgetCard({ summary, budgetData }: { summary?: string; budgetData?: any }) {
+  if (!summary && !budgetData) return null;
+
+  const mode = budgetData?.budget_mode || 'VALUE_COST_EFFECTIVE';
+  const total = budgetData?.total_budget || 0;
+
+  return (
+    <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 dark:bg-slate-800 dark:border-slate-700 shadow-xs">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <div className={`p-1.5 rounded-lg font-bold text-xs text-white ${
+            mode === 'HIGH_LUXURY' ? 'bg-purple-600' : mode === 'EXACT_AMOUNT' ? 'bg-emerald-600' : 'bg-orange-500'
+          }`}>
+            {mode === 'HIGH_LUXURY' ? '💎 臻选高预算' : mode === 'EXACT_AMOUNT' ? '💰 专属定额精算' : '✨ 高性价比方案'}
+          </div>
+          <h4 className="font-black text-sm text-slate-800 dark:text-white">
+            {mode === 'EXACT_AMOUNT' ? `${total} 元行程预算分解` : mode === 'HIGH_LUXURY' ? '品质奢华花销拆解' : '性价比预估花销'}
+          </h4>
+        </div>
+        {budgetData?.daily_avg > 0 && (
+          <span className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400 bg-emerald-100 dark:bg-slate-700 px-2 py-0.5 rounded-md font-bold">
+            日均: ¥{budgetData.daily_avg}/天
+          </span>
+        )}
+      </div>
+
+      <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-medium">
+        {summary}
+      </p>
+
+      {budgetData && (
+        <div className="grid grid-cols-4 gap-2 mt-3 text-center">
+          <div className="bg-white/80 dark:bg-slate-900/60 p-2 rounded-xl border border-emerald-100 dark:border-slate-700">
+            <p className="text-[10px] text-slate-400 font-bold">🏨 住宿预留</p>
+            <p className="text-xs font-black text-emerald-600 dark:text-emerald-400 mt-0.5">¥{budgetData.hotel}</p>
+          </div>
+          <div className="bg-white/80 dark:bg-slate-900/60 p-2 rounded-xl border border-emerald-100 dark:border-slate-700">
+            <p className="text-[10px] text-slate-400 font-bold">🍲 餐饮寻味</p>
+            <p className="text-xs font-black text-orange-500 mt-0.5">¥{budgetData.dining}</p>
+          </div>
+          <div className="bg-white/80 dark:bg-slate-900/60 p-2 rounded-xl border border-emerald-100 dark:border-slate-700">
+            <p className="text-[10px] text-slate-400 font-bold">🎟️ 门票体验</p>
+            <p className="text-xs font-black text-indigo-500 mt-0.5">¥{budgetData.ticket}</p>
+          </div>
+          <div className="bg-white/80 dark:bg-slate-900/60 p-2 rounded-xl border border-emerald-100 dark:border-slate-700">
+            <p className="text-[10px] text-slate-400 font-bold">🚗 交通备用</p>
+            <p className="text-xs font-black text-slate-700 dark:text-slate-300 mt-0.5">¥{budgetData.traffic}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 👑 展开式交通分步导航连接器：全多模态 (🚗驾车 / 🚌公交地铁 / 🚶步行) 选项 Tab 切换
+function ExpandableConnectorNav({ pt, nextPt, travelDetails }: { pt: any; nextPt: any; travelDetails: any }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'driving' | 'transit' | 'walking'>('driving');
+
+  const pairKey = `${pt.name}|${nextPt?.name}`;
+  const reversePairKey = `${nextPt?.name}|${pt.name}`;
+  const details = travelDetails?.[pairKey] 
+               || travelDetails?.[reversePairKey] 
+               || travelDetails?.[pt.name] 
+               || travelDetails?.[nextPt?.name] 
+               || {};
+
+  const currentModeData = details[activeTab] || details[Object.keys(details)[0]] || {};
+
+  const label = currentModeData?.label || '出行';
+  const durMin = currentModeData?.duration_min || 15;
+  const distKm = currentModeData?.distance_km || 3.5;
+
+  let steps: string[] = [];
+  if (currentModeData?.steps && Array.isArray(currentModeData.steps) && currentModeData.steps.length > 0) {
+    steps = currentModeData.steps
+      .map((s: any) => {
+        if (typeof s === 'string') return s.replace(/<\/?[^>]+(>|$)/g, '').trim();
+        const inst = s?.instruction || s?.road || '';
+        return inst.replace(/<\/?[^>]+(>|$)/g, '').trim();
+      })
+      .filter((s: string) => Boolean(s && s.length > 0));
+  }
+
+  return (
+    <div className="mt-8 mb-4 relative">
+      <div 
+        onClick={() => setIsOpen(!isOpen)}
+        className="absolute -left-[27px] top-2.5 w-5 h-5 bg-white border border-slate-300 rounded-full flex items-center justify-center z-10 text-slate-400 hover:border-orange-500 hover:text-orange-500 cursor-pointer shadow-2xs transition-colors"
+      >
+        <ArrowDown className="w-3 h-3" />
+      </div>
+
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="ml-1 w-full flex items-center justify-between py-2.5 px-4 bg-slate-50 hover:bg-orange-50/80 rounded-2xl border border-slate-200/80 hover:border-orange-200 text-xs transition-all cursor-pointer shadow-2xs group"
+      >
+        <div className="flex items-center gap-2 text-slate-600">
+          <span className="text-slate-400 font-medium">推荐前往【{nextPt.name}】：</span>
+          <span className="font-bold text-slate-700 flex items-center gap-1">
+            <Car className="w-3.5 h-3.5 text-orange-500 group-hover:scale-110 transition-transform"/> {label}
+          </span>
+          <span className="text-slate-300">·</span>
+          <span className="font-bold text-slate-600">约 {durMin} 分钟 ({distKm}km)</span>
+        </div>
+
+        <div className="flex items-center gap-1 text-[11px] font-bold text-orange-500">
+          <span>{isOpen ? '收起路线' : '展开多模态高德逐字导航'}</span>
+          {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </div>
+      </button>
+
+      {/* 👑 多模态 (驾车 / 公交地铁 / 步行) 切换 Tab 与高德指引 */}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden mt-2 ml-1 bg-slate-900 text-slate-200 p-3.5 rounded-2xl text-xs space-y-3 border border-slate-800 shadow-lg"
+          >
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+              {details.driving && (
+                <button 
+                  onClick={() => setActiveTab('driving')}
+                  className={`px-3 py-1 rounded-lg font-bold text-[11px] flex items-center gap-1 transition-all ${activeTab === 'driving' ? 'bg-orange-500 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white'}`}
+                >
+                  🚗 驾车 ({details.driving.duration_min}分)
+                </button>
+              )}
+              {details.transit && (
+                <button 
+                  onClick={() => setActiveTab('transit')}
+                  className={`px-3 py-1 rounded-lg font-bold text-[11px] flex items-center gap-1 transition-all ${activeTab === 'transit' ? 'bg-orange-500 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white'}`}
+                >
+                  🚌 公交/地铁 ({details.transit.duration_min}分)
+                </button>
+              )}
+              {details.walking && (
+                <button 
+                  onClick={() => setActiveTab('walking')}
+                  className={`px-3 py-1 rounded-lg font-bold text-[11px] flex items-center gap-1 transition-all ${activeTab === 'walking' ? 'bg-orange-500 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white'}`}
+                >
+                  🚶 步行 ({details.walking.duration_min}分)
+                </button>
+              )}
+            </div>
+
+            <div className="font-bold text-orange-400 flex items-center gap-1.5 pt-0.5">
+              <MapPin className="w-3.5 h-3.5 shrink-0" />
+              <span>高德地图实测【{currentModeData.label || '出行'}】线路指引（{pt.name} → {nextPt.name}）：</span>
+            </div>
+
+            {steps.length > 0 ? (
+              <div className="space-y-1.5 pt-1">
+                {steps.map((step, idx) => (
+                  <div key={idx} className="text-[11px] text-slate-300 flex items-start gap-2 leading-relaxed">
+                    <span className="text-orange-400 font-bold shrink-0">{idx + 1}.</span>
+                    <span>{step}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-[11px] text-slate-300 leading-relaxed space-y-1.5 pt-1">
+                <div>1. 从【{pt.name}】出发进入主要道路；</div>
+                <div>2. 沿主干线出行约 {durMin} 分钟 ({distKm}km)；</div>
+                <div>3. 抵达目的地【{nextPt.name}】入口。</div>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// 👑 马蜂窝风格长图文路线面板 (含高德实景超链接 + 建议时段理由 + 备选酒店 Tab 选项 + 🔄 换一换)
+function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, travelDetails, selectedPoiIndex, onSelectPoi, weatherInfo, trafficInfo, onReset, consensusSummary, budgetData, onSwapPoi }: any) {
   const [showWeatherForecast, setShowWeatherForecast] = useState(false);
 
   return (
@@ -809,8 +1121,10 @@ function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, tr
       </div>
 
       <div className="px-8">
-        
-        {/* 2. 👑 全域天气预警卡片 */}
+        {/* 👑 全动态预算拆解卡片 */}
+        <DynamicBudgetCard summary={consensusSummary} budgetData={budgetData} />
+
+        {/* 2. 全域天气预警卡片 */}
         {weatherInfo && (
           <div className="mb-8 p-4 bg-gradient-to-r from-orange-50/90 to-amber-50/60 border border-orange-100 rounded-2xl shadow-2xs">
             <div className="flex items-center justify-between">
@@ -818,7 +1132,7 @@ function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, tr
                 <div className="p-2.5 bg-orange-500 text-white rounded-xl shadow-xs"><Sun className="w-5 h-5"/></div>
                 <div>
                   <h4 className="text-sm font-black text-slate-800">目的地气象：{weatherInfo.condition}</h4>
-                  <p className="text-xs text-slate-500 mt-0.5 font-medium">{trafficInfo?.advice || '实时路况良好，宜出行游玩。'}</p>
+                  <p className="text-xs text-slate-500 mt-0.5 font-medium">{trafficInfo?.advice || '实时路况良好，宜出行游览。'}</p>
                 </div>
               </div>
               <button 
@@ -852,20 +1166,19 @@ function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, tr
           <div className="absolute top-3 bottom-6 left-[11px] w-[2px] bg-slate-200/80"></div>
 
           {Array.isArray(routes) && routes.map((pt: any, idx: number) => {
-            const details = travelDetails[pt.name];
-            const modes = details ? Object.keys(details) : [];
-            const primaryMode = modes.length > 0 ? details[modes[0]] : null;
             const isSelected = selectedPoiIndex === idx;
 
-            // 👑 优先使用高德 API 返回的真实场地街景照片！无图时优雅兜底
-            const realPhotos = (pt.photos && pt.photos.length > 0) ? pt.photos : [
-              `[https://picsum.photos/seed/$](https://picsum.photos/seed/$){encodeURIComponent(pt.name + '1')}/400/300`,
-              `[https://picsum.photos/seed/$](https://picsum.photos/seed/$){encodeURIComponent(pt.name + '2')}/400/300`,
-              `[https://picsum.photos/seed/$](https://picsum.photos/seed/$){encodeURIComponent(pt.name + '3')}/400/300`
-            ];
+            // 👑 智能实景图离散化：通过 (idx + i) 散列生成 3 张完全不同的景观图，彻底解决图片重合！
+            const realPhotos = (pt.photos && pt.photos.length > 0)
+              ? pt.photos.map((url: string, i: number) => getCleanPhotoUrl(url, pt.name, idx + i))
+              : [
+                  getCleanPhotoUrl(undefined, pt.name, idx + 0),
+                  getCleanPhotoUrl(undefined, pt.name, idx + 1),
+                  getCleanPhotoUrl(undefined, pt.name, idx + 2)
+                ];
 
             return (
-              <div key={`poi-node-card-${pt.name}-${idx}`} className="relative mb-12">
+              <div key={`poi-node-card-${pt.name}-${idx}`} className="relative mb-10">
                 
                 {/* 1. 节点序号 */}
                 <div 
@@ -877,14 +1190,52 @@ function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, tr
 
                 {/* 2. 景点信息与真实照片画廊 */}
                 <div className="cursor-pointer group" onClick={() => onSelectPoi(idx)}>
-                  <div className="flex items-center gap-3 mb-3">
-                    <h3 className={`text-xl font-black transition-colors ${isSelected ? 'text-orange-500' : 'text-slate-800 group-hover:text-orange-500'}`}>{pt.name}</h3>
-                    <span className="flex items-center gap-1 bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-xs font-bold border border-orange-100">
-                      ⭐ 4.8
-                    </span>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-3">
+                      <h3 className={`text-xl font-black transition-colors ${isSelected ? 'text-orange-500' : 'text-slate-800 group-hover:text-orange-500'}`}>{pt.name}</h3>
+                      <span className="flex items-center gap-1 bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-xs font-bold border border-orange-100">
+                        ⭐ 4.8
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {/* 👑 核心新特性：单节点“🔄 换一换”单点平替按钮 */}
+                      {onSwapPoi && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onSwapPoi(pt.name); }}
+                          className="text-xs text-slate-500 hover:text-orange-600 font-bold flex items-center gap-1 bg-slate-100 hover:bg-orange-50 px-2.5 py-1 rounded-lg border border-slate-200 hover:border-orange-200 transition-colors cursor-pointer"
+                          title="不满意这个地点？一键换成同类好去处"
+                        >
+                          <RotateCw className="w-3 h-3" />
+                          <span>换一换</span>
+                        </button>
+                      )}
+
+                      {/* 👑 高德地图实景直达超链接按钮 */}
+                      {pt.amap_url && (
+                        <a 
+                          href={pt.amap_url} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-xs text-orange-600 hover:text-orange-700 font-bold flex items-center gap-1 bg-orange-50/80 px-2.5 py-1 rounded-lg border border-orange-200/80 hover:bg-orange-100 transition-colors"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>高德外链</span>
+                        </a>
+                      )}
+                    </div>
                   </div>
 
-                  {/* 马蜂窝 3 图画廊 (展示高德真实实景照) */}
+                  {/* 👑 建议时段 Badge */}
+                  {pt.time && (
+                    <div className="mb-3 inline-flex items-center gap-1.5 text-xs font-bold text-orange-600 bg-orange-50 px-3 py-1 rounded-xl border border-orange-200/80 shadow-2xs">
+                      <Clock className="w-3.5 h-3.5 text-orange-500" />
+                      <span>建议游玩时段：{pt.time}</span>
+                    </div>
+                  )}
+
+                  {/* 马蜂窝 3 图差异化画廊 */}
                   <div className="grid grid-cols-3 gap-2 mb-4">
                     {realPhotos.slice(0, 3).map((src: string, imgIdx: number) => (
                       <div key={`img-thumb-${idx}-${imgIdx}`} className="rounded-xl overflow-hidden aspect-[4/3] bg-slate-100 border border-slate-100 shadow-2xs">
@@ -893,9 +1244,17 @@ function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, tr
                     ))}
                   </div>
 
-                  {/* 详细文案描述（长文本历史与玩法） */}
+                  {/* 详细文案描述 */}
                   <div className="text-sm text-slate-600 leading-relaxed space-y-2.5 mb-4">
                     <p className="leading-loose"><span className="font-bold text-slate-800">体验与文化：</span>{pt.desc}</p>
+                    
+                    {/* 👑 最佳时段理由卡片 */}
+                    {pt.time_reason && (
+                      <p className="text-xs bg-sky-50/80 p-2.5 rounded-xl border border-sky-100 text-sky-800 leading-relaxed">
+                        <span className="font-bold text-sky-600">🕒 最佳时段理由：</span>{pt.time_reason}
+                      </p>
+                    )}
+
                     {pt.trust_reason && <p className="text-xs bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-slate-500"><span className="font-bold text-orange-600">💡 推荐依据：</span>{pt.trust_reason}</p>}
                     
                     {/* 特色标签 */}
@@ -905,24 +1264,53 @@ function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, tr
                       </div>
                     )}
                   </div>
+
+                  {/* 👑 备选酒店同商圈置换卡片 (带详情外链 & 明确置换按钮) */}
+                  {pt.hotel_candidates && pt.hotel_candidates.length > 0 && (
+                    <div className="mt-3 p-3.5 rounded-2xl bg-purple-50/80 border border-purple-200/80 text-xs">
+                      <div className="font-bold text-purple-900 mb-2 flex items-center justify-between">
+                        <span className="flex items-center gap-1.5"><Hotel className="w-4 h-4 text-purple-600" /> 同商圈备选品质酒店（先查看详情再决定是否置换）：</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {pt.hotel_candidates.map((cand: any, cIdx: number) => {
+                          const candName = typeof cand === 'string' ? cand : cand.name;
+                          const candPrice = typeof cand === 'object' ? cand.price : '';
+                          const candUrl = typeof cand === 'object' ? cand.amap_url : `https://www.amap.com/search?query=${candName}`;
+                          return (
+                            <div key={cIdx} className="bg-white p-2.5 rounded-xl border border-purple-100 flex items-center justify-between shadow-2xs">
+                              <span className="font-bold text-slate-800 text-xs truncate max-w-[130px]">{candName} {candPrice && <span className="text-purple-600 font-normal">({candPrice})</span>}</span>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <a 
+                                  href={candUrl} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer" 
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="px-2 py-1 text-purple-600 hover:bg-purple-50 rounded-md border border-purple-200 text-[11px] font-bold flex items-center gap-0.5 cursor-pointer"
+                                >
+                                  <ExternalLink className="w-3 h-3" /> 详情
+                                </a>
+                                <button 
+                                  onClick={(e) => { e.stopPropagation(); onSwapPoi(pt.name); }} 
+                                  className="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-[11px] font-bold flex items-center gap-0.5 cursor-pointer"
+                                >
+                                  <RotateCw className="w-3 h-3" /> 置换
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {/* 3. 👑 核心改进：手风琴式可展开的高德分步导航路径 */}
-                <ExpandableStepNav details={primaryMode} />
-
-                {/* 4. 节点间连接器 */}
+                {/* 3. 完美下钻可展开的高德逐字导航指引 */}
                 {idx < routes.length - 1 && (
-                  <div className="mt-8 mb-2 relative">
-                    <div className="absolute -left-[27px] top-1/2 -translate-y-1/2 w-5 h-5 bg-white border border-slate-300 rounded-full flex items-center justify-center z-10 text-slate-400">
-                       <ArrowDown className="w-3 h-3" />
-                    </div>
-                    <div className="ml-1 inline-flex items-center gap-2 text-xs text-slate-500 font-medium py-2.5 px-4 bg-slate-50 rounded-xl border border-slate-100 shadow-2xs">
-                      <span className="text-slate-400">推荐下一个地点：</span>
-                      <span className="font-bold text-slate-700 flex items-center gap-1"><Car className="w-3.5 h-3.5 text-orange-500"/> {primaryMode?.label || '出行'}</span>
-                      <span className="text-slate-300">·</span>
-                      <span>约 {primaryMode?.duration_min || 15} 分钟</span>
-                    </div>
-                  </div>
+                  <ExpandableConnectorNav 
+                    pt={pt} 
+                    nextPt={routes[idx + 1]} 
+                    travelDetails={travelDetails} 
+                  />
                 )}
 
               </div>
@@ -944,50 +1332,7 @@ function MafengwoStylePanel({ routes, totalDays, activeDayIndex, onSelectDay, tr
   );
 }
 
-// 👑 展开式交通分步导航小组件 (手风琴展开效果)
-function ExpandableStepNav({ details }: { details: any }) {
-  const [isOpen, setIsOpen] = useState(false);
-  if (!details || !details.steps || details.steps.length === 0) return null;
-
-  return (
-    <div className="mt-3 bg-slate-50/80 border border-slate-200/80 rounded-xl p-3.5">
-      <button 
-        onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }} 
-        className="w-full text-xs font-bold text-orange-600 flex items-center justify-between hover:text-orange-700 transition-colors cursor-pointer"
-      >
-        <span className="flex items-center gap-1.5"><Navigation className="w-3.5 h-3.5"/> 交通路线：{details.label} · {details.distance_km}km ({details.duration_min}分钟)</span>
-        <span className="text-[11px] underline flex items-center gap-1">
-          {isOpen ? <>收起分步路径 <ChevronUp className="w-3.5 h-3.5"/></> : <>点击展开分步路线 <ChevronDown className="w-3.5 h-3.5"/></>}
-        </span>
-      </button>
-
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div 
-            key="step-nav-accordion-panel"
-            initial={{ height: 0, opacity: 0 }} 
-            animate={{ height: 'auto', opacity: 1 }} 
-            exit={{ height: 0, opacity: 0 }} 
-            className="overflow-hidden mt-3 pt-3 border-t border-slate-200/60"
-          >
-            <div className="pl-3 border-l-2 border-orange-400 space-y-2 text-xs text-slate-600">
-              {details.steps.map((step: string, sIdx: number) => (
-                <div key={`step-line-${sIdx}`} className="leading-relaxed flex gap-2">
-                  <span className="font-bold text-orange-500 shrink-0">{sIdx + 1}.</span> 
-                  <span>{step}</span>
-                </div>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-// =========================================================================
 // 👑 地图底部贴地真实照片轮播 (点击照片联动定位地图与左侧列表)
-// =========================================================================
 function BottomMapCarousel({ selectedIndex, onSelect, routes }: any) {
   if (!routes || routes.length === 0) return null;
   
@@ -1009,7 +1354,9 @@ function BottomMapCarousel({ selectedIndex, onSelect, routes }: any) {
       <div ref={scrollContainerRef} className="flex gap-4 overflow-x-auto custom-scrollbar pb-2 snap-x snap-mandatory max-w-6xl mx-auto">
         {routes.map((r: any, idx: number) => {
           const isSelected = selectedIndex === idx;
-          const photoUrl = (r.photos && r.photos.length > 0) ? r.photos[0] : `[https://picsum.photos/seed/$](https://picsum.photos/seed/$){encodeURIComponent(r.name + '1')}/400/300`;
+          const photoUrl = (r.photos && r.photos.length > 0) 
+            ? getCleanPhotoUrl(r.photos[0], r.name, idx) 
+            : getCleanPhotoUrl(undefined, r.name, idx);
 
           return (
             <div
@@ -1034,25 +1381,5 @@ function BottomMapCarousel({ selectedIndex, onSelect, routes }: any) {
         })}
       </div>
     </div>
-  );
-}
-
-function VotingLayer() {
-  return (
-    <motion.div key="voting-layer-card-panel" initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="bg-white/95 backdrop-blur-xl border border-rose-100 p-5 rounded-3xl shadow-xl w-full pointer-events-auto">
-      <div className="flex justify-between items-center mb-3">
-        <h4 className="text-xs font-black text-slate-800 flex items-center gap-1.5"><AlertCircle className="w-4 h-4 text-rose-500"/> 发现 1 处边缘预算冲突</h4>
-        <span className="text-[9px] bg-slate-100 text-slate-500 px-2 py-1 rounded font-bold tracking-wider">多方博弈裁决</span>
-      </div>
-      <div className="flex gap-3">
-        <button className="flex-1 bg-rose-50/50 border border-rose-100 p-3 rounded-xl text-xs font-bold text-rose-700 flex flex-col items-center gap-2 hover:bg-rose-100/50 transition-colors cursor-pointer">
-          <span>高溢价商圈 (触发红线)</span>
-        </button>
-        <button className="flex-1 bg-emerald-50/50 border border-emerald-100 p-3 rounded-xl text-xs font-bold text-emerald-700 flex flex-col items-center gap-2 hover:bg-emerald-100/50 transition-colors cursor-pointer">
-          <span>当地平替 (智能体推荐)</span>
-          <ThumbsUp className="w-3 h-3 text-emerald-500" />
-        </button>
-      </div>
-    </motion.div>
   );
 }

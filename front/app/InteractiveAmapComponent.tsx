@@ -2,10 +2,34 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot, Root } from 'react-dom/client';
+import dynamic from 'next/dynamic';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { Layers, ArrowLeft, Map as MapIcon, Compass, AlertCircle, Loader2, MessageSquareText, MapPin, Navigation } from 'lucide-react';
+import { 
+  ArrowLeft, 
+  Map as MapIcon, 
+  Compass, 
+  MessageSquareText, 
+  Navigation,
+  ShieldCheck,
+  ShieldAlert,
+  AlertTriangle,
+  Info,
+  Activity,
+  Globe2
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+
+// 👑 SSR 安全导入：动态加载 3D 地球组件，彻底解决 Next.js Window 对象未定义报错
+const WorldSafetyGlobe = dynamic(() => import('./components/WorldSafetyGlobe'), {
+  ssr: false,
+  loading: () => (
+    <div className="fixed inset-0 z-[100] bg-slate-950/90 backdrop-blur-md text-white flex flex-col items-center justify-center gap-3">
+      <div className="w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
+      <span className="text-xs font-bold text-slate-300">正在载入 WorldMonitor 3D 态势感知引擎...</span>
+    </div>
+  )
+});
 
 export interface RoutePoint {
   name: string;
@@ -20,12 +44,29 @@ export interface RoutePoint {
   photos?: string[];
 }
 
+export interface SafetyAlert {
+  type: string;
+  level: 'LOW' | 'MEDIUM' | 'HIGH';
+  title: string;
+  detail: string;
+  position?: [number, number];
+}
+
+export interface SafetyInfo {
+  city?: string;
+  cii_score?: number;
+  risk_level?: 'LOW' | 'MEDIUM' | 'HIGH';
+  active_alerts?: SafetyAlert[];
+  safety_advice?: string;
+}
+
 interface MapProps {
   phase: 'drafting' | 'deduction' | 'decision';
   selectedPoiIndex: number | null;
   onPoiSelect: (index: number) => void;
   luoyangRoute?: RoutePoint[];
   actualPath?: [number, number][]; 
+  safetyInfo?: SafetyInfo; // 👑 WorldMonitor 实时安全风控数据
   onExit?: () => void;
   onWakeAgent?: () => void;
 }
@@ -36,6 +77,7 @@ export default function InteractiveAmapComponent({
   onPoiSelect,
   luoyangRoute = [],
   actualPath = [], 
+  safetyInfo,
   onExit,
   onWakeAgent
 }: MapProps) {
@@ -46,6 +88,8 @@ export default function InteractiveAmapComponent({
   const [mapStyle, setMapStyle] = useState<'normal' | 'satellite'>('normal');
   const [showTraffic, setShowTraffic] = useState(false);
   const [showPoiInfo, setShowPoiInfo] = useState<number | null>(null);
+  const [showSafetyCard, setShowSafetyCard] = useState(false);
+  const [show3DGlobe, setShow3DGlobe] = useState(false); // 👑 3D 态势大屏模态框开关
   const [mapLoaded, setMapLoaded] = useState(false);
 
   // ================= 1. 初始化 2D 地图引擎 (高德Tile底图 + MapLibre GL) =================
@@ -149,7 +193,6 @@ export default function InteractiveAmapComponent({
     if (!mapLoaded || !mapInstance.current || luoyangRoute.length === 0) return;
     const map = mapInstance.current;
 
-    // 👑 自动居中定位逻辑：单景点精细定位，多景点 Bounds 全揽 (全部采用 pitch: 0)
     if (luoyangRoute.length === 1) {
       map.flyTo({
         center: luoyangRoute[0].lnglat,
@@ -169,7 +212,6 @@ export default function InteractiveAmapComponent({
 
     if (luoyangRoute.length < 2) return;
 
-    // 优先使用高德真实弯道路网坐标，无路网时使用景点坐标连线
     const finalCoordinates = actualPath && actualPath.length > 0 
       ? JSON.parse(actualPathStr) 
       : JSON.parse(routeDataStr);
@@ -242,8 +284,8 @@ export default function InteractiveAmapComponent({
       mapInstance.current.flyTo({
         center: targetLngLat,
         zoom: 15,
-        pitch: 0,   // 👑 2D 视角平移
-        bearing: 0, // 👑 正北朝向
+        pitch: 0,   
+        bearing: 0, 
         speed: 1.2,
         curve: 1.4
       });
@@ -256,7 +298,6 @@ export default function InteractiveAmapComponent({
     if (!mapLoaded || !mapInstance.current) return;
     const map = mapInstance.current;
 
-    // 清理旧标记，防止 unmount 冲突
     markersRef.current.forEach(item => {
       setTimeout(() => {
         try { item.root.unmount(); } catch(e) {}
@@ -285,7 +326,6 @@ export default function InteractiveAmapComponent({
           onMouseEnter={() => setShowPoiInfo(index)}
           onMouseLeave={() => setShowPoiInfo(null)}
         >
-          {/* Hover 悬浮预览提示框 */}
           <AnimatePresence>
             {isHovered && (
               <motion.div
@@ -304,7 +344,6 @@ export default function InteractiveAmapComponent({
             )}
           </AnimatePresence>
 
-          {/* 马蜂窝风格橙色序号图钉 */}
           <div 
             className={`w-9 h-9 rounded-full border-2 flex items-center justify-center shadow-xl transition-all duration-300 ${isSelected ? 'bg-orange-500 border-white text-white ring-4 ring-orange-300/80 scale-125 z-30' : 'bg-white border-orange-500 text-orange-600 hover:scale-110'}`}
           >
@@ -322,12 +361,17 @@ export default function InteractiveAmapComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPoiIndex, showPoiInfo, mapLoaded, markersDataStr, onPoiSelect]);
 
+  const activeAlertCount = safetyInfo?.active_alerts?.length || 0;
+  const isHighRisk = safetyInfo?.risk_level === 'HIGH' || (safetyInfo?.cii_score && safetyInfo.cii_score > 30);
+  const targetCityName = safetyInfo?.city || (luoyangRoute.length > 0 ? '目标目的地' : '海口');
+  const cityCoords = luoyangRoute.length > 0 ? luoyangRoute[0].lnglat : [104.0665, 30.5722];
+
   return (
     <div className="w-full h-full relative bg-slate-900 overflow-hidden">
       <div ref={mapContainer} className="w-full h-full absolute inset-0" />
 
-      {/* 👑 清爽整洁的地图底图控制小组件 (包含实时路况颜色图例) */}
-      <div className="absolute top-6 left-16 flex items-center gap-2.5 z-10 pointer-events-auto">
+      {/* 👑 顶部控制面板（包含图层、路况、WorldMonitor 状态卡与 3D 态势雷达切换按钮） */}
+      <div className="absolute top-6 left-16 flex items-center gap-2.5 z-10 pointer-events-auto flex-wrap">
         <button 
           onClick={() => setMapStyle(prev => prev === 'normal' ? 'satellite' : 'normal')} 
           className="bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-xl border border-slate-200 text-slate-700 hover:text-orange-500 shadow-md flex items-center gap-1.5 text-xs font-bold transition-all hover:scale-105 cursor-pointer"
@@ -344,7 +388,90 @@ export default function InteractiveAmapComponent({
           <span>{showTraffic ? '关闭路况' : '实时路况'}</span>
         </button>
 
-        {/* 👑 实时路况开启时的官方颜色图例标注卡片 */}
+        {/* 👑 方案 A 核心：3D 态势/安全雷达视角切换按钮 */}
+        <button
+          onClick={() => setShow3DGlobe(true)}
+          className="bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 text-white px-3.5 py-2 rounded-xl shadow-lg border border-blue-400/30 flex items-center gap-1.5 text-xs font-bold hover:brightness-110 transition-all cursor-pointer hover:scale-105"
+        >
+          <Globe2 className="w-3.5 h-3.5 text-cyan-300 animate-spin-slow" />
+          <span>3D 态势雷达</span>
+        </button>
+
+        {/* 👑 WorldMonitor 实时安全风控信息提示按钮 */}
+        {safetyInfo && (
+          <div className="relative">
+            <button
+              onClick={() => setShowSafetyCard(!showSafetyCard)}
+              className={`backdrop-blur-md px-3.5 py-2 rounded-xl border shadow-md flex items-center gap-1.5 text-xs font-bold transition-all hover:scale-105 cursor-pointer ${
+                isHighRisk 
+                  ? 'bg-rose-500 border-rose-500 text-white animate-pulse' 
+                  : activeAlertCount > 0 
+                    ? 'bg-amber-500 border-amber-500 text-white' 
+                    : 'bg-emerald-600 border-emerald-600 text-white'
+              }`}
+            >
+              {isHighRisk ? <ShieldAlert className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+              <span>WorldMonitor {safetyInfo.cii_score !== undefined ? `CII:${safetyInfo.cii_score}` : '风控网'}</span>
+              {activeAlertCount > 0 && (
+                <span className="bg-white/20 text-white px-1.5 py-0.5 rounded-full text-[10px]">
+                  {activeAlertCount}
+                </span>
+              )}
+            </button>
+
+            {/* 安全风控事件下钻面板 */}
+            <AnimatePresence>
+              {showSafetyCard && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                  className="absolute top-full mt-2 left-0 w-80 bg-slate-900/95 backdrop-blur-md text-white p-4 rounded-2xl shadow-2xl border border-slate-700 z-50"
+                >
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-orange-400" />
+                      <span className="font-bold text-sm text-orange-400">WorldMonitor 安全情报</span>
+                    </div>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                      isHighRisk ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    }`}>
+                      {safetyInfo.risk_level || 'SAFE'}
+                    </span>
+                  </div>
+
+                  <div className="my-3 space-y-2 max-h-48 overflow-y-auto pr-1">
+                    {safetyInfo.active_alerts && safetyInfo.active_alerts.length > 0 ? (
+                      safetyInfo.active_alerts.map((alert, idx) => (
+                        <div key={idx} className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/80 text-xs">
+                          <div className="flex items-center gap-1.5 font-bold text-amber-400 mb-1">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                            <span>{alert.title}</span>
+                          </div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">{alert.detail}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-xs text-slate-400 py-2 text-center flex items-center justify-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                        <span>当前未检测到突发自然灾害或管制风险</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {safetyInfo.safety_advice && (
+                    <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-300 flex items-start gap-1.5">
+                      <Info className="w-3.5 h-3.5 text-orange-400 shrink-0 mt-0.5" />
+                      <span>{safetyInfo.safety_advice}</span>
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {/* 实时路况开启时的官方颜色图例 */}
         <AnimatePresence>
           {showTraffic && (
             <motion.div 
@@ -380,6 +507,16 @@ export default function InteractiveAmapComponent({
         >
           <ArrowLeft className="w-4 h-4" />
         </button>
+      )}
+
+      {/* 👑 方案 A 模态框：3D 态势/安全雷达沉浸式大屏 */}
+      {show3DGlobe && (
+        <WorldSafetyGlobe
+          targetCity={targetCityName}
+          cityCoords={cityCoords}
+          safetyInfo={safetyInfo}
+          onClose={() => setShow3DGlobe(false)}
+        />
       )}
     </div>
   );
