@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"gateway/internal/database"
 	"gateway/internal/models"
 	"gateway/internal/service"
 
@@ -34,10 +35,59 @@ var omniUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// collectCommunityReference 拉取社区热门行程作为软引导参考，注入给 Python 推理时借用（不改动 AI 核心逻辑）。
+func collectCommunityReference() []map[string]string {
+	var posts []models.CommunityPost
+	if err := database.DB.Order("likes desc, created_at desc").Limit(3).Find(&posts).Error; err != nil {
+		return []map[string]string{}
+	}
+	ref := make([]map[string]string, 0, len(posts))
+	for _, p := range posts {
+		// 截断内容，避免把超长 JSON 灌入 Prompt
+		content := p.Content
+		runes := []rune(content)
+		if len(runes) > 400 {
+			content = string(runes[:400]) + "..."
+		}
+		ref = append(ref, map[string]string{
+			"title":     p.Title,
+			"dest_city": p.DestCity,
+			"content":   content,
+		})
+	}
+	return ref
+}
+
+// collectEvolutionMemory 拉取房间内最近的真实交互反馈（正/负样本），实现系统自我进化闭环。
+func collectEvolutionMemory(roomID string) []models.FeedbackLog {
+	feedback := make([]models.FeedbackLog, 0)
+	if database.DB == nil {
+		return feedback
+	}
+	database.DB.Where("room_id = ?", roomID).Order("created_at desc").Limit(5).Find(&feedback)
+	return feedback
+}
+
+// collectMemberProfiles 聚合房间内各在线成员的用户旅行画像，供推荐引擎做多画像融合。
+func collectMemberProfiles(roomMembers []map[string]string) map[string]interface{} {
+	profiles := map[string]interface{}{}
+	for _, m := range roomMembers {
+		id, ok := m["id"]
+		if !ok || id == "" {
+			continue
+		}
+		profiles[id] = service.ProfilePayload(id)
+	}
+	return profiles
+}
+
 // HandleWebSocket 处理前端的 WS 升级请求
 func HandleWebSocket(c *gin.Context) {
 	roomID := c.Query("room_id")
 	userID := c.Query("user_id")
+	nickname := c.Query("nickname")
+	role := c.Query("role")
+	intent := c.Query("intent")
 
 	// 容错处理
 	if roomID == "" {
@@ -45,6 +95,12 @@ func HandleWebSocket(c *gin.Context) {
 	}
 	if userID == "" {
 		userID = "user_anonymous"
+	}
+	if nickname == "" {
+		nickname = userID
+	}
+	if role == "" {
+		role = "成员"
 	}
 
 	conn, err := omniUpgrader.Upgrade(c.Writer, c.Request, nil)
@@ -54,11 +110,14 @@ func HandleWebSocket(c *gin.Context) {
 	}
 
 	client := &service.Client{
-		Hub:    GlobalHub,
-		Conn:   conn,
-		Send:   make(chan models.WSMessage, 256),
-		RoomID: roomID,
-		UserID: userID,
+		Hub:      GlobalHub,
+		Conn:     conn,
+		Send:     make(chan models.WSMessage, 256),
+		RoomID:   roomID,
+		UserID:   userID,
+		Nickname: nickname,
+		Role:     role,
+		Intent:   intent,
 	}
 	client.Hub.Register <- client
 	go client.WritePump()
@@ -87,6 +146,31 @@ func HandleWebSocket(c *gin.Context) {
 			intent := msg.Payload.UserPreferences.Intent
 			log.Printf("🚀 接收到前端意图: 模式[%s], 诉求[%s]", msg.Payload.UserPreferences.Mode, intent)
 
+			// 👑 多人协同：聚合当前房间内所有在线成员的画像，传递给 Python 做多智能体博弈
+			roomMembers := GlobalHub.CollectMembers(roomID)
+			if len(roomMembers) == 0 {
+				// 兜底：至少带上当前发起人自己
+				roomMembers = []map[string]string{{
+					"id":     userID,
+					"name":   nickname,
+					"role":   role,
+					"intent": intent,
+				}}
+			}
+
+			userPrefsMap := map[string]interface{}{
+				"mode":                   msg.Payload.UserPreferences.Mode,
+				"role":                   msg.Payload.UserPreferences.Role,
+				"intent":                 msg.Payload.UserPreferences.Intent,
+				"history_sequence":       msg.Payload.UserPreferences.HistorySequence,
+				"current_existing_route": msg.Payload.UserPreferences.CurrentExistingRoute,
+				"room_members":           roomMembers,
+				"community_reference":    collectCommunityReference(),
+				// 🎯 个性化旅行画像注入：发起人与房间成员的画像一并下发给推荐引擎
+				"personalized_profile": service.ProfilePayload(userID),
+				"member_profiles":      collectMemberProfiles(roomMembers),
+			}
+
 			// 将城市提取完全交给 Python 引擎处理，不再做硬编码猜测
 			pythonPayload := map[string]interface{}{
 				"type":    "negotiation_request",
@@ -96,9 +180,9 @@ func HandleWebSocket(c *gin.Context) {
 					"current_request": map[string]interface{}{
 						"destinations":     msg.Payload.Destinations,
 						"city":             "",
-						"user_preferences": msg.Payload.UserPreferences,
+						"user_preferences": userPrefsMap,
 					},
-					"evolution_memory": []interface{}{}, // 预留给 RLHF 持续学习库
+					"evolution_memory": collectEvolutionMemory(roomID),
 				},
 			}
 
@@ -138,16 +222,41 @@ func HandleWebSocket(c *gin.Context) {
 				}
 
 				var chunk map[string]interface{}
-				if err := json.Unmarshal(line, &chunk); err == nil {
-					// 瞬间将 Token 广播给房间内所有用户
-					outMsg := models.WSMessage{
-						Type:    "stream_token", // 👈 对应前端 page.tsx 监听的事件
+				if err := json.Unmarshal(line, &chunk); err != nil {
+					continue
+				}
+
+				// 1. 👑 流式推理 token（正文逐字下发）
+				if token, ok := chunk["token"]; ok {
+					GlobalHub.Broadcast <- models.WSMessage{
+						Type:    "stream_token",
 						RoomID:  roomID,
 						UserID:  "system_omnigateway",
-						Payload: chunk["token"],
+						Payload: token,
 					}
+					continue
+				}
 
-					GlobalHub.Broadcast <- outMsg
+				// 2. � 真实导航路网坐标（高德 polyline），驱动前端绘制真实路线
+				if path, ok := chunk["actual_path"]; ok {
+					GlobalHub.Broadcast <- models.WSMessage{
+						Type:    "actual_path",
+						RoomID:  roomID,
+						UserID:  "system_omnigateway",
+						Payload: path,
+					}
+					continue
+				}
+
+				// 3. 👑 结构化事件透传：target_city / weather_info / traffic_info /
+				//    travel_details / budget_breakdown / safety_info / final_route 等
+				if msgType, ok := chunk["type"].(string); ok {
+					GlobalHub.Broadcast <- models.WSMessage{
+						Type:    msgType,
+						RoomID:  roomID,
+						UserID:  "system_omnigateway",
+						Payload: chunk["payload"],
+					}
 				}
 			}
 			resp.Body.Close() // 读取完毕后关闭连接

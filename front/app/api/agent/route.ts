@@ -29,8 +29,8 @@ export async function POST(request: Request) {
 
     console.log("🚀 [发起跨域请求] 转发至 FastAPI 引擎...");
 
-    // 调用你的 Python FastAPI 接口
-    const pythonResponse = await fetch('http://127.0.0.1:8001/api/v1/agent/negotiate', {
+    // 调用你的 Python FastAPI 接口（AI 服务运行在 8000 端口）
+    const pythonResponse = await fetch('http://127.0.0.1:8000/api/v1/agent/negotiate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(gatewayPayload),

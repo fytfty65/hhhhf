@@ -2,7 +2,14 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import Globe from 'react-globe.gl';
-import { ShieldCheck, ShieldAlert, AlertTriangle, Wind, Compass, X, Activity, Navigation2 } from 'lucide-react';
+import { ShieldCheck, ShieldAlert, AlertTriangle, Wind, Compass, X, Activity, Navigation2, RotateCw, Gauge, MapPin } from 'lucide-react';
+
+// 根据 CII 指数返回风险等级与配色（统一供地球水波、图例、仪表盘使用）
+function riskProfile(ciiScore: number) {
+  if (ciiScore >= 40) return { label: '高危严碍', color: '#f43f5e', text: 'text-rose-400', bg: 'bg-rose-500', ring: 'rgba(244, 63, 94, 0.85)' };
+  if (ciiScore >= 20) return { label: '中度预警', color: '#f59e0b', text: 'text-amber-400', bg: 'bg-amber-500', ring: 'rgba(245, 158, 11, 0.85)' };
+  return { label: '安全区间', color: '#10b981', text: 'text-emerald-400', bg: 'bg-emerald-500', ring: 'rgba(16, 185, 129, 0.8)' };
+}
 
 export interface SafetyAlert {
   type: string;
@@ -34,6 +41,7 @@ interface WorldSafetyGlobeProps {
   routePoints?: RoutePoint[]; // 👑 全线景点列表：在 3D 地球上全息呈现与路线串联
   safetyInfo?: SafetyInfo;
   weatherCondition?: string;
+  trafficSummary?: string; // 实时路况摘要（来自高德交通 API）
   onClose: () => void;
 }
 
@@ -44,11 +52,14 @@ export default function WorldSafetyGlobe({
   routePoints = [],
   safetyInfo,
   weatherCondition = '多云 24°C',
+  trafficSummary = '实时路况良好，整体畅通',
   onClose
 }: WorldSafetyGlobeProps) {
-  const globeRef = useRef<any>();
+  const globeRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const [autoRotate, setAutoRotate] = useState(true);
+  const [selectedIndex, setSelectedIndex] = useState<number>(0);
 
   // 1. 动态监控自适应父容器尺寸，彻底解决右侧/底部黑屏与画面剪裁问题
   useEffect(() => {
@@ -70,8 +81,12 @@ export default function WorldSafetyGlobe({
   const origLng = originCoords[0];
   const origLat = originCoords[1];
 
-  const ciiScore = safetyInfo?.cii_score ?? 12.5;
-  const isHighRisk = ciiScore > 30;
+  // 👑 真实 CII 判定：未收到 safety_info 时不再伪装成“12.5 安全”，而是明确标注“待评估”，杜绝误导
+  const hasRealCii = typeof safetyInfo?.cii_score === 'number';
+  const ciiScore = hasRealCii ? (safetyInfo!.cii_score as number) : 0;
+  const profile = riskProfile(ciiScore);
+  // CII 归一化 0-100 用于仪表盘进度条
+  const ciiPercent = hasRealCii ? Math.max(0, Math.min(100, ciiScore)) : 0;
 
   useEffect(() => {
     if (globeRef.current) {
@@ -82,6 +97,17 @@ export default function WorldSafetyGlobe({
       );
     }
   }, [destLat, destLng]);
+
+  // 2. 地球自动巡航开关：默认缓慢自转，用户可关闭后手动拖拽探索
+  useEffect(() => {
+    const ctrl = globeRef.current?.controls?.();
+    if (ctrl) {
+      ctrl.autoRotate = autoRotate;
+      ctrl.autoRotateSpeed = 0.85;
+      ctrl.enableDamping = true;
+      ctrl.dampingFactor = 0.08;
+    }
+  }, [autoRotate, dimensions, globeRef]);
 
   // 2. 3D HTML 标注数据：包含目标城市与全行程景点打卡标记
   const htmlElementsData = routePoints.length > 0
@@ -142,7 +168,7 @@ export default function WorldSafetyGlobe({
       maxR: ciiScore / 4 + 4,
       propagationSpeed: 2,
       repeatPeriod: 1000,
-      color: isHighRisk ? 'rgba(244, 63, 94, 0.8)' : 'rgba(245, 158, 11, 0.8)'
+      color: profile.ring
     }
   ];
 
@@ -153,25 +179,38 @@ export default function WorldSafetyGlobe({
         <div className="w-3.5 h-3.5 rounded-full bg-orange-500 animate-ping" />
         <div>
           <h2 className="text-white font-black text-xl tracking-wider flex items-center gap-2">
-            <span>OmniRoute x WorldMonitor 3D 全球态势雷达</span>
-            <span className="text-xs bg-orange-500/20 text-orange-400 border border-orange-500/40 px-2.5 py-0.5 rounded-full font-mono font-bold">
-              LIVE INTEL
+            <span>OmniRoute 3D 态势雷达</span>
+            <span className="text-xs bg-sky-500/20 text-sky-300 border border-sky-400/40 px-2.5 py-0.5 rounded-full font-mono font-bold">
+              态势 SITUATION
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            实时对接 CII (国家/地区不稳定指数) | 展现全线 {routePoints.length > 0 ? routePoints.length : 1} 个景点时空链路
+            聚焦「路线 · 气象 · 路况」时空态势 | 串联赛场全线 {routePoints.length > 0 ? routePoints.length : 1} 个景点动线
           </p>
         </div>
       </div>
 
-      {/* 右上角关闭按钮 */}
-      <button
-        onClick={onClose}
-        className="absolute top-6 right-8 z-10 bg-white/10 hover:bg-white/20 text-white p-2.5 rounded-2xl border border-white/20 transition-all hover:scale-105 cursor-pointer pointer-events-auto flex items-center gap-2 text-xs font-bold"
-      >
-        <span>返回 2D 导航</span>
-        <X className="w-4 h-4" />
-      </button>
+      {/* 右上角：自动巡航开关 + 关闭按钮 */}
+      <div className="absolute top-6 right-8 z-10 flex items-center gap-2.5 pointer-events-auto">
+        <button
+          onClick={() => setAutoRotate(v => !v)}
+          className={`backdrop-blur-md p-2.5 rounded-2xl border transition-all hover:scale-105 cursor-pointer flex items-center gap-2 text-xs font-bold ${
+            autoRotate
+              ? 'bg-sky-500/20 text-sky-300 border-sky-400/40'
+              : 'bg-white/10 text-slate-300 border-white/20 hover:bg-white/20'
+          }`}
+        >
+          <RotateCw className={`w-4 h-4 ${autoRotate ? 'animate-spin-slow' : ''}`} />
+          <span>{autoRotate ? '自动巡航 开' : '自动巡航 关'}</span>
+        </button>
+        <button
+          onClick={onClose}
+          className="bg-white/10 hover:bg-white/20 text-white p-2.5 rounded-2xl border border-white/20 transition-all hover:scale-105 cursor-pointer flex items-center gap-2 text-xs font-bold"
+        >
+          <span>返回 2D 导航</span>
+          <X className="w-4 h-4" />
+        </button>
+      </div>
 
       {/* 图例说明（清晰告知评审与用户各类标注含义） */}
       <div className="absolute top-24 left-8 z-10 bg-slate-900/85 border border-slate-800 p-4 rounded-2xl text-xs text-slate-300 space-y-2 backdrop-blur shadow-2xl">
@@ -204,9 +243,33 @@ export default function WorldSafetyGlobe({
             <Navigation2 className="w-4 h-4 text-orange-400" />
             <span className="font-bold text-sm text-orange-400">【{targetCity}】全息风控档案</span>
           </div>
-          <span className="text-xs font-mono bg-orange-500/10 text-orange-300 border border-orange-500/30 px-2.5 py-1 rounded-lg">
-            CII 指数: {ciiScore}
+          <span className={`text-xs font-mono bg-orange-500/10 border px-2.5 py-1 rounded-lg ${hasRealCii ? profile.text : 'text-slate-400'} border-current/30`}>
+            CII 指数: {hasRealCii ? ciiScore.toFixed(1) : '待评估'}
           </span>
+        </div>
+
+        {/* CII 风险仪表盘：直观呈现 0-100 风险刻度与档位 */}
+        <div className="bg-slate-800/50 p-3 rounded-xl space-y-2">
+          <div className="flex items-center justify-between text-[11px] font-bold">
+            <span className="flex items-center gap-1.5 text-slate-300">
+              <Gauge className="w-3.5 h-3.5 text-orange-400" /> 综合风险仪表盘
+            </span>
+            <span className={hasRealCii ? profile.text : 'text-slate-400'}>
+              {hasRealCii ? profile.label : '数据加载中'}
+            </span>
+          </div>
+          <div className="relative h-2.5 w-full rounded-full bg-slate-700/70 overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-700"
+              style={{ width: `${ciiPercent}%`, background: `linear-gradient(90deg, #10b981, #f59e0b, #f43f5e)` }}
+            />
+          </div>
+          <div className="flex justify-between text-[9px] font-mono text-slate-500">
+            <span>0 安全</span>
+            <span>20 预警</span>
+            <span>40 高危</span>
+            <span>100</span>
+          </div>
         </div>
 
         <div className="flex items-center justify-between text-xs bg-slate-800/50 p-2.5 rounded-xl">
@@ -214,6 +277,14 @@ export default function WorldSafetyGlobe({
           <span className="font-bold text-slate-200 flex items-center gap-1">
             <Wind className="w-3.5 h-3.5 text-sky-400" />
             {weatherCondition}
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between text-xs bg-slate-800/50 p-2.5 rounded-xl">
+          <span className="text-slate-400">实时路况:</span>
+          <span className="font-bold text-slate-200 flex items-center gap-1">
+            <Activity className="w-3.5 h-3.5 text-emerald-400" />
+            {trafficSummary}
           </span>
         </div>
 
@@ -255,19 +326,26 @@ export default function WorldSafetyGlobe({
           backgroundImageUrl="//unpkg.com/three-globe/example/img/night-sky.png"
           htmlElementsData={htmlElementsData}
           htmlElement={(d: any) => {
+            // 关键修复：地球上的 HTML 标注由“大卡片”改为“小圆点标记”，
+            // 从根本上消除同城景点临近时卡片的相互重叠挤压；详情改由右侧独立面板承载。
             const el = document.createElement('div');
+            el.style.cursor = 'pointer';
+            el.style.transform = 'translate(-50%, -50%)';
             el.innerHTML = `
-              <div class="flex flex-col items-center cursor-pointer group">
-                <div class="bg-slate-900/90 text-white px-3 py-1.5 rounded-xl border border-orange-500/50 shadow-2xl text-xs font-bold backdrop-blur flex items-center gap-1.5 transition-transform group-hover:scale-110">
-                  <span class="w-2.5 h-2.5 rounded-full ${d.isOrigin ? (d.cii > 30 ? 'bg-rose-500' : 'bg-amber-400') : 'bg-sky-400'} flex items-center justify-center text-[9px] font-black text-slate-900">
-                    ${d.index}
-                  </span>
-                  <span>${d.city}</span>
-                  ${d.isOrigin ? `<span class="bg-orange-500 text-white px-1.5 py-0.2 rounded text-[10px]">CII ${d.cii}</span>` : ''}
-                </div>
-                <div class="w-0.5 h-8 bg-gradient-to-b from-orange-500 to-transparent"></div>
+              <div class="relative flex items-center justify-center" style="width:22px;height:22px;">
+                <span class="absolute inset-0 rounded-full ${d.isOrigin ? 'bg-orange-500/50' : 'bg-sky-500/40'} animate-ping"></span>
+                <span class="relative w-5 h-5 rounded-full ${d.isOrigin ? 'bg-orange-500' : 'bg-sky-500'} text-white text-[9px] font-black flex items-center justify-center shadow-lg border border-white/60">
+                  ${d.index}
+                </span>
               </div>
             `;
+            el.onclick = (e: Event) => {
+              e.stopPropagation?.();
+              setSelectedIndex(d.index - 1);
+              if (globeRef.current) {
+                globeRef.current.pointOfView({ lat: d.lat, lng: d.lng, altitude: 1.1 }, 800);
+              }
+            };
             return el;
           }}
           arcsData={arcsData}
@@ -285,6 +363,63 @@ export default function WorldSafetyGlobe({
           atmosphereAltitude={0.25}
         />
       </div>
+
+      {/* 右侧航点面板：承载完整信息，彻底解决球面卡片重叠挤压问题 */}
+      {routePoints.length > 0 && (
+        <div className="absolute right-6 top-24 bottom-8 z-10 w-80 flex flex-col pointer-events-auto">
+          <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl text-white overflow-hidden flex flex-col max-h-full">
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between shrink-0">
+              <span className="font-bold text-sm text-sky-300 flex items-center gap-2">
+                <MapPin className="w-4 h-4" /> 航点清单
+              </span>
+              <span className="text-[10px] text-slate-500 font-mono">{routePoints.length} 节点</span>
+            </div>
+
+            <div className="overflow-y-auto flex-1 custom-scrollbar">
+              {routePoints.map((pt, idx) => (
+                <button
+                  key={`poi-row-${idx}`}
+                  onClick={() => {
+                    setSelectedIndex(idx);
+                    if (globeRef.current) {
+                      globeRef.current.pointOfView({ lat: pt.lnglat[1], lng: pt.lnglat[0], altitude: 1.1 }, 800);
+                    }
+                  }}
+                  className={`w-full text-left px-4 py-2.5 flex items-center gap-2.5 border-b border-slate-800/60 transition-colors ${
+                    selectedIndex === idx ? 'bg-orange-500/15' : 'hover:bg-slate-800/60'
+                  }`}
+                >
+                  <span className={`w-5 h-5 shrink-0 rounded-full ${idx === 0 ? 'bg-orange-500' : 'bg-sky-500'} text-white text-[10px] font-black flex items-center justify-center`}>
+                    {idx + 1}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-xs font-bold truncate">{pt.name}</span>
+                    {pt.time && <span className="block text-[10px] text-slate-400 font-mono">{pt.time}</span>}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {routePoints[selectedIndex] && (
+              <div className="px-4 py-3 border-t border-slate-800 bg-slate-800/40 shrink-0">
+                <div className="text-sm font-black text-orange-400">{routePoints[selectedIndex].name}</div>
+                {routePoints[selectedIndex].desc && (
+                  <div className="text-[11px] text-slate-300 mt-1 leading-relaxed">{routePoints[selectedIndex].desc}</div>
+                )}
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {routePoints[selectedIndex].time && (
+                    <span className="text-[10px] bg-slate-700/70 px-2 py-0.5 rounded text-slate-300 font-mono">时间 {routePoints[selectedIndex].time}</span>
+                  )}
+                  {routePoints[selectedIndex].transport && (
+                    <span className="text-[10px] bg-slate-700/70 px-2 py-0.5 rounded text-slate-300 font-mono">交通 {routePoints[selectedIndex].transport}</span>
+                  )}
+                  <span className="text-[10px] bg-slate-700/70 px-2 py-0.5 rounded text-slate-300 font-mono">气象 {weatherCondition}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

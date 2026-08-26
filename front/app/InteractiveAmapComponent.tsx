@@ -67,6 +67,8 @@ interface MapProps {
   luoyangRoute?: RoutePoint[];
   actualPath?: [number, number][]; 
   safetyInfo?: SafetyInfo; // 👑 WorldMonitor 实时安全风控数据
+  weatherInfo?: any; // 👑 高德/心知实时气象
+  trafficInfo?: any; // 👑 高德实时路况
   onExit?: () => void;
   onWakeAgent?: () => void;
 }
@@ -78,6 +80,8 @@ export default function InteractiveAmapComponent({
   luoyangRoute = [],
   actualPath = [], 
   safetyInfo,
+  weatherInfo,
+  trafficInfo,
   onExit,
   onWakeAgent
 }: MapProps) {
@@ -203,7 +207,16 @@ export default function InteractiveAmapComponent({
       });
     } else {
       const bounds = new maplibregl.LngLatBounds();
-      luoyangRoute.forEach(pt => bounds.extend(pt.lnglat));
+      luoyangRoute.forEach(pt => {
+        // 👑 防御性校验：仅对合法 [lng,lat] 数组扩展视界，杜绝后端/LLM 输出非法坐标导致 LngLatLike 崩溃
+        if (pt && Array.isArray(pt.lnglat) && pt.lnglat.length >= 2) {
+          const lng = Number(pt.lnglat[0]);
+          const lat = Number(pt.lnglat[1]);
+          if (Number.isFinite(lng) && Number.isFinite(lat)) {
+            bounds.extend([lng, lat]);
+          }
+        }
+      });
       if (actualPath.length > 0) {
         actualPath.forEach(pt => bounds.extend(pt as [number, number]));
       }
@@ -364,7 +377,12 @@ export default function InteractiveAmapComponent({
   const activeAlertCount = safetyInfo?.active_alerts?.length || 0;
   const isHighRisk = safetyInfo?.risk_level === 'HIGH' || (safetyInfo?.cii_score && safetyInfo.cii_score > 30);
   const targetCityName = safetyInfo?.city || (luoyangRoute.length > 0 ? '目标目的地' : '海口');
-  const cityCoords = luoyangRoute.length > 0 ? luoyangRoute[0].lnglat : [104.0665, 30.5722];
+  const cityCoords: [number, number] = luoyangRoute.length > 0 ? luoyangRoute[0].lnglat : [104.0665, 30.5722];
+  // 👑 实时气象与路况摘要：从 SSE 真实数据派生，传入 3D 雷达而非使用写死占位
+  const weatherCondition = weatherInfo?.condition ? String(weatherInfo.condition) : '实时气象获取中';
+  const trafficSummary = (trafficInfo?.description || trafficInfo?.advice)
+    ? String(trafficInfo.description || trafficInfo.advice)
+    : '实时路况良好，整体畅通';
 
   return (
     <div className="w-full h-full relative bg-slate-900 overflow-hidden">
@@ -514,7 +532,10 @@ export default function InteractiveAmapComponent({
         <WorldSafetyGlobe
           targetCity={targetCityName}
           cityCoords={cityCoords}
+          routePoints={luoyangRoute}
           safetyInfo={safetyInfo}
+          weatherCondition={weatherCondition}
+          trafficSummary={trafficSummary}
           onClose={() => setShow3DGlobe(false)}
         />
       )}

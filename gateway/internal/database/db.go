@@ -25,9 +25,19 @@ func InitDB() {
 	// 自动同步表结构，省去了写 SQL 建表语句的麻烦
 	err = DB.AutoMigrate(
 		&models.User{},
+		&models.TripPlan{},
+		&models.CommunityPost{},
+		&models.Comment{},
 		&models.Room{},
 		&models.RoomMember{},
 		&models.Message{},
+		&models.FeedbackLog{},
+		&models.UserPreference{},
+		&models.NodeAnnotation{},
+		&models.NodeAnnotationVote{},
+		&models.RecommendationEvent{},
+		&models.BudgetPlan{},
+		&models.ExpenseRecord{},
 	)
 	if err != nil {
 		log.Fatalf("🔥 数据库表结构同步失败: %v", err)

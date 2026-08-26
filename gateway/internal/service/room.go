@@ -36,7 +36,7 @@ func (c *Client) triggerAgentNegotiation(wsMsg models.WSMessage) {
 	reqBody, _ := json.Marshal(wsMsg)
 
 	// 调用 Python 后端（多智能体博弈引擎）
-	resp, err := http.Post("http://localhost:8000/api/v1/agent_negotiate", "application/json", bytes.NewBuffer(reqBody))
+	resp, err := http.Post("http://localhost:8000/api/v1/agent/negotiate", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		log.Printf("调用 Python 协商接口网络失败: %v", err)
 		return
@@ -110,6 +110,12 @@ func (c *Client) HandleIncomingMessage(message []byte) {
 			RoleType: "human",
 			Content:  chatContent,
 		})
+	}
+
+	// 行程节点级协作批注：走独立实时同步链路（持久化 + 规范广播），避免重复广播原始报文
+	if wsMsg.Type == "annotation_add" || wsMsg.Type == "annotation_vote" || wsMsg.Type == "annotation_resolve" {
+		c.handleAnnotation(wsMsg.Type, wsMsg.Payload)
+		return
 	}
 
 	// 2. 实时广播给房间内的其他小伙伴

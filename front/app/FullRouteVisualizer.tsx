@@ -16,7 +16,8 @@ import {
   Scale,
   MapPin,
   Car,
-  Hotel
+  Hotel,
+  RotateCw
 } from 'lucide-react';
 import InteractiveAmapComponent, { RoutePoint, SafetyInfo } from './InteractiveAmapComponent';
 
@@ -35,48 +36,37 @@ const Globe = dynamic(() => import('react-globe.gl'), {
 export function RealPoiImage({ photoUrl, poiName, className = '' }: { photoUrl?: string; poiName: string; className?: string }) {
   const [imgError, setImgError] = useState(false);
 
-  // 严格校验高德原始图片 URL 合法性
-  const isValidUrl = Boolean(
-    photoUrl && 
-    (photoUrl.startsWith('http://') || photoUrl.startsWith('https://')) &&
-    !photoUrl.includes('-0') && 
-    !photoUrl.includes('-1') && 
-    !photoUrl.includes('-2')
-  );
+  // 统一升级 https + 兼容协议相对 `//`，禁用 Referer 绕过 CDN 防盗链
+  const normalizedUrl = (photoUrl && typeof photoUrl === 'string')
+    ? (photoUrl.startsWith('//') ? 'https:' + photoUrl : photoUrl.startsWith('http://') ? 'https://' + photoUrl.slice(7) : photoUrl)
+    : '';
+  const isValidUrl = Boolean(normalizedUrl.startsWith('https://'));
 
-  // 深度精确品类图片匹配（防止大学/地标错配为充电站等）
-  const getAccurateFallbackUrl = (name: string) => {
-    if (name.includes('大学') || name.includes('学院') || name.includes('校区') || name.includes('学校')) {
-      return 'https://images.unsplash.com/photo-1541829070764-84a7d30dd3f3?auto=format&fit=crop&w=600&q=80';
-    }
-    if (name.includes('博物') || name.includes('展览') || name.includes('艺术') || name.includes('科技') || name.includes('馆')) {
-      return 'https://images.unsplash.com/photo-1566127444979-b3d2b654e3d7?auto=format&fit=crop&w=600&q=80';
-    }
-    if (name.includes('巴扎') || name.includes('古镇') || name.includes('老街') || name.includes('寺') || name.includes('塔') || name.includes('遗址')) {
-      return 'https://images.unsplash.com/photo-1548013146-72479768bada?auto=format&fit=crop&w=600&q=80';
-    }
-    if (name.includes('餐') || name.includes('店') || name.includes('美食') || name.includes('包子') || name.includes('小吃') || name.includes('烤') || name.includes('馍') || name.includes('羊汤') || name.includes('凉皮') || name.includes('粉') || name.includes('抓饭') || name.includes('烧鸡')) {
-      return 'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=600&q=80';
-    }
-    if (name.includes('谷') || name.includes('山') || name.includes('公园') || name.includes('河') || name.includes('湖') || name.includes('景')) {
-      return 'https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&w=600&q=80';
-    }
-    return 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=80';
-  };
-
-  const src = isValidUrl && !imgError ? photoUrl : getAccurateFallbackUrl(poiName);
+  const showReal = isValidUrl && !imgError;
 
   return (
     <div className={`relative overflow-hidden bg-slate-100 dark:bg-slate-800 rounded-xl ${className}`}>
-      <img
-        src={src}
-        alt={poiName}
-        onError={() => setImgError(true)}
-        className="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
-        loading="lazy"
-      />
+      {showReal ? (
+        <img
+          src={normalizedUrl}
+          alt={poiName}
+          onError={() => setImgError(true)}
+          className="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
+          loading="lazy"
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <div className="flex flex-col items-center justify-center gap-1 w-full h-full">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-8 h-8 text-slate-300 dark:text-slate-600">
+            <rect x="3" y="5" width="18" height="14" rx="2" />
+            <circle cx="8.5" cy="10" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
+          </svg>
+          <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 text-center px-2">{poiName}·实景暂不可用</span>
+        </div>
+      )}
       <div className="absolute top-1.5 right-1.5 bg-slate-900/80 backdrop-blur text-[10px] text-orange-300 font-bold px-2 py-0.5 rounded-full border border-orange-500/30 pointer-events-none">
-        {isValidUrl && !imgError ? '📷 高德实景' : '🌟 景观实拍'}
+        {showReal ? '📷 高德实景' : '实景暂不可用'}
       </div>
     </div>
   );
@@ -98,6 +88,13 @@ export function getNaviSteps(naviObj: any): string[] {
   return [];
 }
 
+// 从"门票 ¥45/人"、"人均餐饮 ¥65"、"住宿预留 ¥380/晚"等成本文本中解析出数字金额
+function parseCostNumber(cost?: string): number {
+  if (!cost) return 0;
+  const m = String(cost).match(/¥\s*([\d.]+)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
 interface FullRouteVisualizerProps {
   phase: 'drafting' | 'deduction' | 'decision';
   routes?: RoutePoint[];
@@ -108,7 +105,10 @@ interface FullRouteVisualizerProps {
   onExit?: () => void;
   targetCityInfo?: { name: string; lnglat: [number, number] };
   safetyInfo?: SafetyInfo;
+  weatherInfo?: any;
+  trafficInfo?: any;
   travelDetails?: Record<string, any>;
+  budgetData?: any;
 }
 
 export default function FullRouteVisualizer({
@@ -120,7 +120,10 @@ export default function FullRouteVisualizer({
   onWakeAgent, 
   onExit, 
   targetCityInfo,
-  safetyInfo
+  safetyInfo,
+  weatherInfo,
+  trafficInfo,
+  budgetData
 }: FullRouteVisualizerProps) {
   // 控制 2D 地图 (MICRO) 与 3D 态势雷达 (MACRO)
   const [viewState, setViewState] = useState<'MACRO' | 'MICRO'>('MICRO');
@@ -131,6 +134,7 @@ export default function FullRouteVisualizer({
   const containerRef = useRef<HTMLDivElement>(null);
   const [globeDimensions, setGlobeDimensions] = useState({ width: 800, height: 600 });
   const globeEl = useRef<any>(null);
+  const [macroAutoRotate, setMacroAutoRotate] = useState(true);
 
   useEffect(() => {
     setWindowReady(true);
@@ -165,12 +169,26 @@ export default function FullRouteVisualizer({
     }
   }, [targetCityInfo, viewState]);
 
+  // 地球自动巡航：默认缓慢自转，支持手动拖拽探索（带阻尼）
+  useEffect(() => {
+    if (globeEl.current && globeEl.current.controls) {
+      const ctrl = globeEl.current.controls();
+      if (ctrl) {
+        ctrl.autoRotate = macroAutoRotate;
+        ctrl.autoRotateSpeed = 0.85;
+        ctrl.enableDamping = true;
+        ctrl.dampingFactor = 0.08;
+      }
+    }
+  }, [macroAutoRotate, globeDimensions, viewState]);
+
   const destLng = routes.length > 0 ? routes[0].lnglat[0] : (targetCityInfo?.lnglat[0] || 110.34);
   const destLat = routes.length > 0 ? routes[0].lnglat[1] : (targetCityInfo?.lnglat[1] || 20.03);
   const cityName = targetCityInfo?.name || (routes.length > 0 ? routes[0].name : '目标城市');
   
-  const ciiScore = safetyInfo?.cii_score ?? (16.8 + (cityName.length * 4) % 15);
-  const isHighRisk = ciiScore > 30;
+  const hasRealCii = typeof safetyInfo?.cii_score === 'number';
+  const ciiScore = hasRealCii ? (safetyInfo?.cii_score as number) : 0;
+  const isHighRisk = hasRealCii && ciiScore > 30;
 
   const macroArcs: any[] = [
     { startLat: 39.90, startLng: 116.40, endLat: destLat, endLng: destLng, color: ['#ffffff', '#f97316'] },
@@ -223,6 +241,24 @@ export default function FullRouteVisualizer({
   const realReplacementNode = routes.find(r => r.tags?.includes('住宿') || r.name.includes('酒店') || r.name.includes('民宿')) 
     || (routes.length > 0 ? routes[routes.length - 1] : { name: '精选品质宿所/特色体验点' });
 
+  // 👑 基于真实节点成本计算博弈裁决数据（替代硬编码的"预算偏离红线"话术）
+  const dayNodes = (routes || []).filter((r: any) => r && typeof r.name === 'string');
+  const dayTotal = dayNodes.reduce((sum: number, r: any) => sum + parseCostNumber(r.cost), 0);
+  const dailyBudget = Number(budgetData?.daily_avg || budgetData?.total_budget || 0);
+  const highestCostNode = dayNodes.length > 0
+    ? dayNodes.reduce((max: any, r: any) => (parseCostNumber(r.cost) > parseCostNumber(max.cost) ? r : max), dayNodes[0])
+    : null;
+  const lowestCostNode = dayNodes.length > 1
+    ? dayNodes.reduce((min: any, r: any) => (parseCostNumber(r.cost) < parseCostNumber(min.cost) ? r : min), dayNodes[0])
+    : null;
+  const overrun = dailyBudget > 0 ? dayTotal - dailyBudget : 0;
+  const hasOverrun = overrun > 0;
+  const avgCost = dayNodes.length > 0 ? Math.round(dayTotal / dayNodes.length) : 0;
+  const overrunPercent = dailyBudget > 0 ? Math.max(0, Math.round((overrun / dailyBudget) * 100)) : 0;
+  // 按成本降序排列的节点，用于决策看板成本条形图
+  const costSortedNodes = [...dayNodes].sort((a, b) => parseCostNumber(b.cost) - parseCostNumber(a.cost)).slice(0, 6);
+  const maxNodeCost = costSortedNodes.length > 0 ? Math.max(1, parseCostNumber(costSortedNodes[0].cost)) : 1;
+
   if (!windowReady) return null;
 
   return (
@@ -237,6 +273,8 @@ export default function FullRouteVisualizer({
           luoyangRoute={routes} 
           actualPath={actualPath}
           safetyInfo={safetyInfo}
+          weatherInfo={weatherInfo}
+          trafficInfo={trafficInfo}
           onExit={onExit} 
           onWakeAgent={onWakeAgent}
         />
@@ -289,7 +327,7 @@ export default function FullRouteVisualizer({
                 initial={{ opacity: 0, scale: 0.9, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-lg w-full shadow-2xl relative text-slate-800 dark:text-white"
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-xl w-full shadow-2xl relative text-slate-800 dark:text-white max-h-[90vh] overflow-y-auto custom-scrollbar"
               >
                 <button
                   onClick={() => setShowArbitrationModal(false)}
@@ -308,15 +346,82 @@ export default function FullRouteVisualizer({
                   </div>
                 </div>
 
-                <p className="text-xs text-slate-600 dark:text-slate-300 my-4 leading-relaxed bg-amber-50 dark:bg-slate-800/60 p-3 rounded-xl border border-amber-200/60 dark:border-slate-700">
-                  检测到【{cityName}】行程中初始节点存在预算偏离红线，精算 Agent 已自动完成裁决，为您置换为高性价比节点【{realReplacementNode.name}】，整体优化约 45% 费用。
+                <div className="grid grid-cols-4 gap-2 my-4">
+                  <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
+                    <div className="text-[10px] text-slate-400 font-bold">今日总消费</div>
+                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{dayTotal}</div>
+                  </div>
+                  <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
+                    <div className="text-[10px] text-slate-400 font-bold">日均预算</div>
+                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{dailyBudget || '—'}</div>
+                  </div>
+                  <div className={`rounded-2xl p-2.5 text-center ${hasOverrun ? 'bg-rose-50 dark:bg-rose-950/40' : 'bg-emerald-50 dark:bg-emerald-950/40'}`}>
+                    <div className={`text-[10px] font-bold ${hasOverrun ? 'text-rose-400' : 'text-emerald-400'}`}>预算状态</div>
+                    <div className={`text-sm font-black mt-0.5 ${hasOverrun ? 'text-rose-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                      {dailyBudget > 0 ? (hasOverrun ? `超 ¥${Math.round(overrun)}` : '健康') : '未设'}
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
+                    <div className="text-[10px] text-slate-400 font-bold">人均估算</div>
+                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{avgCost}</div>
+                  </div>
+                </div>
+
+                {/* 预算使用进度条 */}
+                {dailyBudget > 0 && (
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between text-[11px] font-bold mb-1.5">
+                      <span className="text-slate-500">预算使用进度</span>
+                      <span className={hasOverrun ? 'text-rose-500' : 'text-emerald-600'}>{Math.round((dayTotal / dailyBudget) * 100)}%</span>
+                    </div>
+                    <div className="h-2.5 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-700 ${hasOverrun ? 'bg-gradient-to-r from-amber-500 to-rose-500' : 'bg-gradient-to-r from-emerald-500 to-teal-400'}`}
+                        style={{ width: `${Math.min(100, Math.round((dayTotal / dailyBudget) * 100))}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* 成本最高节点条形图 */}
+                {costSortedNodes.length > 0 && (
+                  <div className="mb-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl p-3.5">
+                    <div className="text-[11px] font-bold text-slate-500 mb-2.5 flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-amber-500" /> 节点成本分布（TOP {costSortedNodes.length}）
+                    </div>
+                    <div className="space-y-1.5">
+                      {costSortedNodes.map((node: any, i: number) => {
+                        const cost = parseCostNumber(node.cost);
+                        const w = Math.max(8, Math.round((cost / maxNodeCost) * 100));
+                        return (
+                          <div key={`costbar-${i}`} className="flex items-center gap-2">
+                            <span className="text-[10px] text-slate-500 font-bold w-24 truncate shrink-0">{node.name}</span>
+                            <div className="flex-1 h-3 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${i === 0 && hasOverrun ? 'bg-rose-500' : 'bg-orange-400'}`}
+                                style={{ width: `${w}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] text-slate-500 font-mono w-12 text-right shrink-0">{node.cost}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <p className="text-xs text-slate-600 dark:text-slate-300 mb-4 leading-relaxed bg-amber-50 dark:bg-slate-800/60 p-3 rounded-xl border border-amber-200/60 dark:border-slate-700">
+                  {hasOverrun
+                    ? `精算 Agent 检测到【${cityName}】今日估算消费 ¥${dayTotal}，超出日均预算 ¥${dailyBudget} 约 ${overrunPercent}%（¥${Math.round(overrun)}）。建议优先优化最高成本节点【${highestCostNode?.name || '—'}】，或参考更低成本节点【${lowestCostNode?.name || '—'}】进行团队平替置换。`
+                    : `【${cityName}】今日估算消费 ¥${dayTotal}${dailyBudget > 0 ? `，处于日均预算 ¥${dailyBudget} 以内（使用率 ${Math.round((dayTotal / dailyBudget) * 100)}%）` : ''}。多智能体已完成成本与体验的多目标帕累托权衡，当前组合预算健康。`}
                 </p>
 
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     onClick={() => {
                       setActiveArbitrationTab('original');
-                      if (routes.length > 0) onPoiSelect(0);
+                      const idx = routes.findIndex((r: any) => r.name === highestCostNode?.name);
+                      if (idx >= 0) onPoiSelect(idx);
                       setShowArbitrationModal(false);
                     }}
                     className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
@@ -325,17 +430,16 @@ export default function FullRouteVisualizer({
                         : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40'
                     }`}
                   >
-                    <div className="text-rose-500 font-bold text-xs mb-1">高溢价节点 (已拦截)</div>
-                    <div className="text-xs font-bold truncate">{cityName}核心商圈高溢价点</div>
-                    <div className="text-[10px] text-rose-500 mt-1 font-mono">均价 ¥880/晚 (超预算)</div>
+                    <div className="text-rose-500 font-bold text-xs mb-1">{hasOverrun ? '最高成本节点' : '今日成本最高'}</div>
+                    <div className="text-xs font-bold truncate">{highestCostNode?.name || '暂无数据'}</div>
+                    <div className="text-[10px] text-rose-500 mt-1 font-mono">{highestCostNode?.cost || '—'}</div>
                   </button>
 
                   <button
                     onClick={() => {
                       setActiveArbitrationTab('replacement');
-                      const hotelIdx = routes.findIndex(r => r.tags?.includes('住宿') || r.name.includes('酒店') || r.name.includes('民宿'));
-                      if (hotelIdx >= 0) onPoiSelect(hotelIdx);
-                      else if (routes.length > 0) onPoiSelect(0);
+                      const idx = routes.findIndex((r: any) => r.name === lowestCostNode?.name);
+                      if (idx >= 0) onPoiSelect(idx);
                       setShowArbitrationModal(false);
                     }}
                     className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
@@ -345,10 +449,10 @@ export default function FullRouteVisualizer({
                     }`}
                   >
                     <div className="text-emerald-600 dark:text-emerald-400 font-bold text-xs mb-1 flex items-center gap-1">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> 智能体平替推荐
+                      <CheckCircle2 className="w-3.5 h-3.5" /> {hasOverrun ? '更低成本平替' : '今日成本最低'}
                     </div>
-                    <div className="text-xs font-bold truncate">{realReplacementNode.name}</div>
-                    <div className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 font-mono">性价比优化 (省45%)</div>
+                    <div className="text-xs font-bold truncate">{lowestCostNode?.name || realReplacementNode.name}</div>
+                    <div className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 font-mono">{lowestCostNode?.cost || '性价比优先'}</div>
                   </button>
                 </div>
               </motion.div>
@@ -396,7 +500,13 @@ export default function FullRouteVisualizer({
                 htmlElementsData={elementsData}
                 htmlElement={(d: any) => {
                    const el = document.createElement('div');
-                   el.style.pointerEvents = 'auto'; 
+                   el.style.pointerEvents = 'auto';
+                   el.style.cursor = 'pointer';
+                   // 👑 态势节点可交互：点击聚焦到 2D 地图对应节点
+                   el.onclick = () => {
+                     if (d.index) onPoiSelect(d.index - 1);
+                     setViewState('MICRO');
+                   };
                    el.innerHTML = `
                     <div class="flex flex-col items-center group cursor-pointer">
                       <div class="bg-slate-900/90 text-white p-3 rounded-2xl shadow-[0_10px_35px_rgba(249,115,22,0.4)] border border-orange-500/50 max-w-xs transform transition-all duration-300 hover:scale-110 backdrop-blur">
@@ -408,6 +518,7 @@ export default function FullRouteVisualizer({
                         </div>
                         <h3 class="text-sm font-black text-orange-400 tracking-tight">${d.name}</h3>
                         <p class="text-[11px] text-slate-300 line-clamp-2 mt-1 leading-relaxed">${d.desc}</p>
+                        <div class="text-[9px] text-orange-400/70 mt-1.5 text-center">点击聚焦 2D 导航定位</div>
                       </div>
                       <div class="w-0.5 h-6 bg-gradient-to-b from-orange-500 to-transparent opacity-80"></div>
                       <div class="w-3.5 h-3.5 bg-orange-500 rounded-full ring-4 ring-orange-300/80 shadow-[0_0_20px_#f97316] animate-ping"></div>
@@ -420,15 +531,33 @@ export default function FullRouteVisualizer({
               <div className="absolute top-8 left-8 z-10 pointer-events-none">
                 <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 shadow-2xl p-5 rounded-3xl max-w-sm text-white">
                   <h2 className="text-xl font-black text-white tracking-tight flex items-center gap-2.5">
-                    <div className={`w-3 h-3 rounded-full ${phase === 'deduction' ? 'bg-orange-500 animate-pulse' : 'bg-orange-500'}`} />
-                    WorldMonitor 风控雷达
+                    <div className={`w-3 h-3 rounded-full ${phase === 'deduction' ? 'bg-rose-500 animate-pulse' : 'bg-rose-500'}`} />
+                    <span>OmniRoute 3D 风控雷达</span>
+                    <span className="text-[10px] bg-rose-500/20 text-rose-300 border border-rose-400/40 px-2 py-0.5 rounded-full font-mono font-bold">
+                      风控 RISK CONTROL
+                    </span>
                   </h2>
                   <p className="text-slate-400 mt-1.5 text-xs font-medium leading-relaxed">
                     {phase === 'deduction' 
-                      ? `多智能体正在全球版图中定位【${cityName}】并计算最优时空拓扑...` 
-                      : `已为您定位【${cityName}】，包含 ${routes.length} 个考量节点的 3D 时空拓扑链路。`}
+                      ? `多智能体正在评估【${cityName}】CII 风险与安全隐患，计算最优时空拓扑...` 
+                      : `已评估【${cityName}】综合风险，覆盖 ${routes.length} 个节点的 CII 风险与安全隐患链路。`}
                   </p>
                 </div>
+              </div>
+
+              {/* 自动巡航开关 */}
+              <div className="absolute top-24 left-8 z-10 pointer-events-auto">
+                <button
+                  onClick={() => setMacroAutoRotate(v => !v)}
+                  className={`backdrop-blur-md px-3.5 py-2 rounded-2xl border shadow-2xl transition-all hover:scale-105 cursor-pointer flex items-center gap-2 text-xs font-bold ${
+                    macroAutoRotate
+                      ? 'bg-sky-500/20 text-sky-300 border-sky-400/40'
+                      : 'bg-slate-900/80 text-slate-300 border-slate-700'
+                  }`}
+                >
+                  <RotateCw className={`w-4 h-4 ${macroAutoRotate ? 'animate-spin-slow' : ''}`} />
+                  <span>{macroAutoRotate ? '自动巡航 开' : '自动巡航 关'}</span>
+                </button>
               </div>
 
               {/* WorldMonitor 全息安全简报 */}
@@ -439,8 +568,45 @@ export default function FullRouteVisualizer({
                     <span className="font-bold text-sm text-orange-400">WorldMonitor 安全风控简报</span>
                   </div>
                   <span className="text-xs font-mono bg-orange-500/20 text-orange-300 border border-orange-500/30 px-2.5 py-0.5 rounded-full">
-                    CII: {ciiScore.toFixed(1)}
+                    CII: {hasRealCii ? ciiScore.toFixed(1) : '待评估'}
                   </span>
+                </div>
+
+                {/* CII 综合风险仪表盘 */}
+                {hasRealCii && (
+                  <div className="bg-slate-800/50 p-3 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between text-[11px] font-bold">
+                      <span className="text-slate-300">综合风险指数</span>
+                      <span className={ciiScore > 40 ? 'text-rose-400' : ciiScore > 20 ? 'text-amber-400' : 'text-emerald-400'}>
+                        {ciiScore > 40 ? '高危' : ciiScore > 20 ? '预警' : '安全'}
+                      </span>
+                    </div>
+                    <div className="relative h-2.5 w-full rounded-full bg-slate-700/70 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${Math.max(0, Math.min(100, ciiScore))}%`, background: 'linear-gradient(90deg, #10b981, #f59e0b, #f43f5e)' }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[9px] font-mono text-slate-500">
+                      <span>0</span><span>20</span><span>40</span><span>100</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* 实时气象 + 路况：来自高德/心知真实数据，非写死占位 */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-slate-800/60 p-2.5 rounded-xl">
+                    <div className="text-[10px] text-slate-400 font-bold mb-1">实时气象</div>
+                    <div className="text-xs font-bold text-slate-200">
+                      {weatherInfo?.condition ? String(weatherInfo.condition) : '获取中'}
+                    </div>
+                  </div>
+                  <div className="bg-slate-800/60 p-2.5 rounded-xl">
+                    <div className="text-[10px] text-slate-400 font-bold mb-1">实时路况</div>
+                    <div className="text-xs font-bold text-slate-200">
+                      {(trafficInfo?.description || trafficInfo?.advice) ? String(trafficInfo.description || trafficInfo.advice) : '数据获取中'}
+                    </div>
+                  </div>
                 </div>
 
                 <div className="space-y-2 text-xs text-slate-300 max-h-40 overflow-y-auto pr-1">
@@ -457,14 +623,14 @@ export default function FullRouteVisualizer({
                   ) : (
                     <div className="space-y-2">
                       <div className="bg-slate-800/60 p-2.5 rounded-xl border border-slate-700/60">
-                        <div className="font-bold text-emerald-400 mb-0.5 flex items-center gap-1">
-                          <ShieldCheck className="w-3.5 h-3.5" /> 治安与交通评分良好
+                        <div className="font-bold text-slate-300 mb-1 flex items-center gap-1">
+                          <ShieldCheck className="w-3.5 h-3.5" /> 实时风控状态
                         </div>
-                        <p className="text-[11px] text-slate-300">【{cityName}】当前 CII 风险处于 LOW 安全区间，道路网通畅。</p>
-                      </div>
-                      <div className="bg-slate-800/60 p-2.5 rounded-xl border border-slate-700/60">
-                        <div className="font-bold text-sky-400 mb-0.5">🌦️ 气象与出行提示</div>
-                        <p className="text-[11px] text-slate-300">适宜景区打卡与户外漫步，已自动避开高峰期人流拥堵节点。</p>
+                        <p className="text-[11px] text-slate-400 leading-relaxed">
+                          {hasRealCii
+                            ? `【${cityName}】综合风险指数 CII ${ciiScore.toFixed(1)}（${safetyInfo?.risk_level || 'LOW'}），当前无中高风险预警。`
+                            : `【${cityName}】暂未接入第三方实时风控数据，风险评级待评估；安全数据源就绪后将自动刷新。`}
+                        </p>
                       </div>
                     </div>
                   )}
