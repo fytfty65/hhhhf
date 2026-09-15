@@ -1,18 +1,75 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"gateway/internal/database"
 	"gateway/internal/models"
 )
 
+var legacyNegotiationSlots = struct {
+	sync.Mutex
+	active map[string]bool
+}{active: make(map[string]bool)}
+
+var legacyAgentWindows = struct {
+	sync.Mutex
+	entries map[string]legacyRateWindow
+}{entries: make(map[string]legacyRateWindow)}
+
+type legacyRateWindow struct {
+	started time.Time
+	count   int
+}
+
+func acquireLegacyNegotiation(roomID, userID string) bool {
+	now := time.Now()
+	legacyAgentWindows.Lock()
+	entry := legacyAgentWindows.entries[userID]
+	if entry.started.IsZero() || now.Sub(entry.started) >= time.Minute {
+		entry = legacyRateWindow{started: now}
+	}
+	if entry.count >= 4 {
+		legacyAgentWindows.entries[userID] = entry
+		legacyAgentWindows.Unlock()
+		return false
+	}
+	entry.count++
+	legacyAgentWindows.entries[userID] = entry
+	legacyAgentWindows.Unlock()
+
+	legacyNegotiationSlots.Lock()
+	defer legacyNegotiationSlots.Unlock()
+	if legacyNegotiationSlots.active[roomID] {
+		return false
+	}
+	legacyNegotiationSlots.active[roomID] = true
+	return true
+}
+
+func releaseLegacyNegotiation(roomID string) {
+	legacyNegotiationSlots.Lock()
+	delete(legacyNegotiationSlots.active, roomID)
+	legacyNegotiationSlots.Unlock()
+}
+
 // triggerAgentNegotiation 触发 AI 推演并携带群聊记忆与进化反馈
 func (c *Client) triggerAgentNegotiation(wsMsg models.WSMessage) {
+	if !acquireLegacyNegotiation(c.RoomID, c.UserID) {
+		c.Hub.Broadcast <- models.WSMessage{Type: "error", RoomID: c.RoomID, UserID: "system", Payload: map[string]interface{}{"code": "AI_RATE_LIMITED", "message": "智能体推演请求过于频繁或房间已有任务进行中"}}
+		return
+	}
+	defer releaseLegacyNegotiation(c.RoomID)
 	var chatHistory []models.Message
 	var feedbackHistory []models.FeedbackLog // 🚨 关键：引入进化反馈历史
 
@@ -36,25 +93,66 @@ func (c *Client) triggerAgentNegotiation(wsMsg models.WSMessage) {
 	reqBody, _ := json.Marshal(wsMsg)
 
 	// 调用 Python 后端（多智能体博弈引擎）
-	resp, err := http.Post("http://localhost:8000/api/v1/agent/negotiate", "application/json", bytes.NewBuffer(reqBody))
+	baseURL := strings.TrimSpace(os.Getenv("AI_SERVICE_URL"))
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:8000"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/v1/agent/negotiate", bytes.NewReader(reqBody))
+	if reqErr != nil {
+		log.Printf("构造 Python 协商请求失败: %v", reqErr)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token := strings.TrimSpace(os.Getenv("AI_SERVICE_INTERNAL_TOKEN")); token != "" {
+		req.Header.Set("X-Omni-Internal-Token", token)
+	}
+	resp, err := (&http.Client{Timeout: 300 * time.Second}).Do(req)
 	if err != nil {
 		log.Printf("调用 Python 协商接口网络失败: %v", err)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		log.Printf("Python 协商接口返回状态 %d", resp.StatusCode)
+		return
+	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
 	if err != nil {
 		log.Printf("读取 Python 返回数据流失败: %v", err)
 		return
 	}
 
-	log.Printf("🎉 成功接收到 AI 推演原始结果: %s", string(bodyBytes))
+	if len(bodyBytes) > 16<<20 {
+		log.Printf("AI 推演响应超过大小限制")
+		return
+	}
+	log.Printf("🎉 成功接收到 AI 推演结果 (%d bytes)", len(bodyBytes))
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		log.Printf("将 AI 结果解析为 JSON 失败: %v", err)
-		return
+		// The current AI endpoint streams newline-delimited JSON. Keep the
+		// legacy room endpoint compatible by selecting its final_route payload
+		// instead of discarding an otherwise valid response.
+		scanner := bufio.NewScanner(bytes.NewReader(bodyBytes))
+		scanner.Buffer(make([]byte, 64*1024), 1<<20)
+		for scanner.Scan() {
+			var chunk map[string]interface{}
+			if json.Unmarshal(bytes.TrimSpace(scanner.Bytes()), &chunk) != nil {
+				continue
+			}
+			if payload, ok := chunk["payload"].(map[string]interface{}); ok {
+				if typ, _ := chunk["type"].(string); typ == "final_route" {
+					result = payload
+				}
+			}
+		}
+		if result == nil {
+			log.Printf("将 AI 结果解析为 JSON 失败: %v", err)
+			return
+		}
 	}
 
 	// 4. 将 AI 决策结果存入数据库（作为未来的历史记忆）
@@ -118,6 +216,12 @@ func (c *Client) HandleIncomingMessage(message []byte) {
 		return
 	}
 
+	// 协作光标/编辑节点在场态（模块8）：经 Hub 串行化落地 + 广播，避免直接读写 Rooms 造成数据竞争
+	if wsMsg.Type == "cursor_move" || wsMsg.Type == "editing_node" || wsMsg.Type == "cursor_leave" {
+		c.handlePresence(wsMsg)
+		return
+	}
+
 	// 2. 实时广播给房间内的其他小伙伴
 	c.Hub.Broadcast <- wsMsg
 
@@ -138,4 +242,20 @@ func (c *Client) HandleIncomingMessage(message []byte) {
 	default:
 		log.Printf("📩 房间 %s 收到常规消息", wsMsg.RoomID)
 	}
+}
+
+// handlePresence 处理协作光标/编辑节点在场态消息（模块8）。
+// 融合「客户端上报身份」与「连接注册身份」后经 Hub 串行化落地并广播，线程安全。
+func (c *Client) handlePresence(wsMsg models.WSMessage) {
+	if wsMsg.Type == "cursor_leave" {
+		c.Hub.ClearPresence(c.RoomID, c.UserID)
+		return
+	}
+	payload, _ := wsMsg.Payload.(map[string]interface{})
+	p := ParsePresence(c.UserID, c.Nickname, c.Role, c.AvatarUrl, payload)
+	if p.NodeKey == "" {
+		c.Hub.ClearPresence(c.RoomID, c.UserID)
+		return
+	}
+	c.Hub.TrackPresence(c.RoomID, p)
 }

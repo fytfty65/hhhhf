@@ -29,3 +29,24 @@ Thumbs.db
 *.swp
 *.swo
 *.exe
+
+# Runtime data and compiler metadata
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+gateway/uploads/
+work/
+
+# Go build cache (created by the local toolchain shim, not source)
+.gocache/
+
+# Runtime process bookkeeping and manual perf sampling, not source
+gateway/gateway.pid
+front/resource_monitor.csv
+
+# Bandit learning state is a runtime artifact derived from user feedback. It is
+# machine-local and encodes behavioural data, so it must never be committed.
+bandit_state.json
+ai-service/bandit_state.json
+ai-service/bandit_state.json.tmp

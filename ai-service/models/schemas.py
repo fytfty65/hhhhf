@@ -40,6 +40,8 @@ class NegotiateResponse(BaseModel):
     expert_reports: Dict[str, Any]
     route: List[dict]
     recommended_pois: Optional[List[Dict[str, Any]]] = []
+    plan_variants: Optional[List[Dict[str, Any]]] = []
+    preference_validation: Optional[Dict[str, Any]] = None
 
 class AgentProposal(BaseModel):
     proposal_id: str

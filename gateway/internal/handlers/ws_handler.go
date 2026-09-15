@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"gateway/internal/database"
@@ -32,7 +35,28 @@ type FrontendMessage struct {
 }
 
 var omniUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: websocketOriginAllowed,
+}
+
+var negotiationSlots = struct {
+	sync.Mutex
+	active map[string]bool
+}{active: make(map[string]bool)}
+
+func acquireNegotiation(roomID string) bool {
+	negotiationSlots.Lock()
+	defer negotiationSlots.Unlock()
+	if negotiationSlots.active[roomID] {
+		return false
+	}
+	negotiationSlots.active[roomID] = true
+	return true
+}
+
+func releaseNegotiation(roomID string) {
+	negotiationSlots.Lock()
+	delete(negotiationSlots.active, roomID)
+	negotiationSlots.Unlock()
 }
 
 // collectCommunityReference 拉取社区热门行程作为软引导参考，注入给 Python 推理时借用（不改动 AI 核心逻辑）。
@@ -84,17 +108,20 @@ func collectMemberProfiles(roomMembers []map[string]string) map[string]interface
 // HandleWebSocket 处理前端的 WS 升级请求
 func HandleWebSocket(c *gin.Context) {
 	roomID := c.Query("room_id")
-	userID := c.Query("user_id")
+	userID := CurrentUserID(c)
 	nickname := c.Query("nickname")
 	role := c.Query("role")
 	intent := c.Query("intent")
+	avatarUrl := c.Query("avatar_url")
 
 	// 容错处理
 	if roomID == "" {
-		roomID = "room_omni_001"
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "缺少 room_id", "code": "ROOM_ID_REQUIRED"})
+		return
 	}
 	if userID == "" {
-		userID = "user_anonymous"
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未登录", "code": "AUTH_REQUIRED"})
+		return
 	}
 	if nickname == "" {
 		nickname = userID
@@ -102,22 +129,32 @@ func HandleWebSocket(c *gin.Context) {
 	if role == "" {
 		role = "成员"
 	}
+	// Query-string display fields are untrusted input and are later included in
+	// prompts/logs. Bound them before retaining them for the connection.
+	nickname = truncateRunes(strings.TrimSpace(nickname), 80)
+	role = truncateRunes(strings.TrimSpace(role), 40)
+	intent = truncateRunes(strings.TrimSpace(intent), 500)
+	if _, ok := requireRoomMember(c, roomID); !ok {
+		return
+	}
 
 	conn, err := omniUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Println("🔥 WebSocket 升级失败:", err)
 		return
 	}
+	conn.SetReadLimit(1 << 20)
 
 	client := &service.Client{
-		Hub:      GlobalHub,
-		Conn:     conn,
-		Send:     make(chan models.WSMessage, 256),
-		RoomID:   roomID,
-		UserID:   userID,
-		Nickname: nickname,
-		Role:     role,
-		Intent:   intent,
+		Hub:       GlobalHub,
+		Conn:      conn,
+		Send:      make(chan models.WSMessage, 256),
+		RoomID:    roomID,
+		UserID:    userID,
+		Nickname:  nickname,
+		Role:      role,
+		Intent:    intent,
+		AvatarUrl: avatarUrl,
 	}
 	client.Hub.Register <- client
 	go client.WritePump()
@@ -135,6 +172,10 @@ func HandleWebSocket(c *gin.Context) {
 			log.Printf("🔴 节点断开 (%s): %v", userID, err)
 			break
 		}
+		if len(message) > 1<<20 {
+			_ = conn.WriteJSON(map[string]interface{}{"type": "error", "payload": map[string]string{"code": "MESSAGE_TOO_LARGE", "message": "消息体过大"}})
+			continue
+		}
 
 		var msg FrontendMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
@@ -142,7 +183,66 @@ func HandleWebSocket(c *gin.Context) {
 			continue
 		}
 
+		// 模块8：协作光标同步 / 编辑节点在场态（头像悬浮）。经 Hub 串行化落地 + 广播，线程安全。
+		switch msg.Type {
+		case "editing_node", "cursor_move":
+			var p struct {
+				Payload struct {
+					NodeKey    string `json:"node_key"`
+					Name       string `json:"name"`
+					Role       string `json:"role"`
+					AvatarUrl  string `json:"avatar_url"`
+					AvatarSeed string `json:"avatar_seed"`
+				} `json:"payload"`
+			}
+			_ = json.Unmarshal(message, &p)
+			presence := service.ParsePresence(userID, nickname, role, avatarUrl, map[string]interface{}{
+				"node_key":    p.Payload.NodeKey,
+				"name":        p.Payload.Name,
+				"role":        p.Payload.Role,
+				"avatar_url":  p.Payload.AvatarUrl,
+				"avatar_seed": p.Payload.AvatarSeed,
+			})
+			if presence.NodeKey == "" {
+				GlobalHub.ClearPresence(roomID, userID)
+			} else {
+				GlobalHub.TrackPresence(roomID, presence)
+			}
+			continue
+		case "cursor_leave":
+			GlobalHub.ClearPresence(roomID, userID)
+			continue
+		}
+
 		if msg.Type == "agent_negotiate" {
+			if len(msg.Payload.Destinations) > 20 || len(msg.Payload.UserPreferences.HistorySequence) > 100 || len(msg.Payload.UserPreferences.CurrentExistingRoute) > 500 {
+				GlobalHub.Broadcast <- models.WSMessage{Type: "error", RoomID: roomID, UserID: "system_omnigateway", Payload: map[string]string{"code": "NEGOTIATION_PAYLOAD_TOO_LARGE", "message": "推演参数过大，请精简诉求后重试"}}
+				continue
+			}
+			if allowed, retryAfter := allowAgentNegotiation(userID); !allowed {
+				seconds := int(retryAfter.Seconds())
+				if retryAfter > time.Duration(seconds)*time.Second {
+					seconds++
+				}
+				if seconds < 1 {
+					seconds = 1
+				}
+				GlobalHub.Broadcast <- models.WSMessage{
+					Type:   "error",
+					RoomID: roomID,
+					UserID: "system_omnigateway",
+					Payload: map[string]interface{}{
+						"code":        "AI_RATE_LIMITED",
+						"message":     "智能体推演请求过于频繁，请稍后再试",
+						"retry_after": seconds,
+					},
+				}
+				continue
+			}
+			if !acquireNegotiation(roomID) {
+				GlobalHub.Broadcast <- models.WSMessage{Type: "error", RoomID: roomID, Payload: map[string]string{"code": "NEGOTIATION_IN_PROGRESS", "message": "该房间已有推演任务进行中，请稍后再试"}}
+				continue
+			}
 			intent := msg.Payload.UserPreferences.Intent
 			log.Printf("🚀 接收到前端意图: 模式[%s], 诉求[%s]", msg.Payload.UserPreferences.Mode, intent)
 
@@ -151,10 +251,11 @@ func HandleWebSocket(c *gin.Context) {
 			if len(roomMembers) == 0 {
 				// 兜底：至少带上当前发起人自己
 				roomMembers = []map[string]string{{
-					"id":     userID,
-					"name":   nickname,
-					"role":   role,
-					"intent": intent,
+					"id":         userID,
+					"name":       nickname,
+					"role":       role,
+					"intent":     intent,
+					"avatar_url": avatarUrl,
 				}}
 			}
 
@@ -187,16 +288,37 @@ func HandleWebSocket(c *gin.Context) {
 			}
 
 			// 向 Python 算法引擎发起 HTTP POST 请求
-			pythonURL := "http://localhost:8000/api/v1/agent/negotiate"
+			pythonBase := os.Getenv("AI_SERVICE_URL")
+			if pythonBase == "" {
+				pythonBase = "http://127.0.0.1:8000"
+			}
+			pythonURL := strings.TrimRight(pythonBase, "/") + "/api/v1/agent/negotiate"
 			reqBody, _ := json.Marshal(pythonPayload)
 
 			log.Println("🧠 正在呼叫 Python 多智能体推演矩阵 (流式模式)...")
 			httpClient := &http.Client{
 				Timeout: 300 * time.Second,
 			}
-			resp, err := httpClient.Post(pythonURL, "application/json", bytes.NewBuffer(reqBody))
+			httpReq, reqErr := http.NewRequest(http.MethodPost, pythonURL, bytes.NewBuffer(reqBody))
+			if reqErr == nil {
+				httpReq.Header.Set("Content-Type", "application/json")
+				if internalToken := strings.TrimSpace(os.Getenv("AI_SERVICE_INTERNAL_TOKEN")); internalToken != "" {
+					httpReq.Header.Set("X-Omni-Internal-Token", internalToken)
+				}
+				if requestID := c.GetHeader("X-Request-ID"); requestID != "" {
+					httpReq.Header.Set("X-Request-ID", requestID)
+				}
+			}
+			var resp *http.Response
+			var err error
+			if reqErr != nil {
+				err = reqErr
+			} else {
+				resp, err = httpClient.Do(httpReq)
+			}
 
 			if err != nil {
+				releaseNegotiation(roomID)
 				log.Println("🔥 呼叫 Python 引擎失败:", err)
 				GlobalHub.Broadcast <- models.WSMessage{
 					Type:    "error",
@@ -205,11 +327,24 @@ func HandleWebSocket(c *gin.Context) {
 				}
 				continue
 			}
+			if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+				status := resp.StatusCode
+				resp.Body.Close()
+				releaseNegotiation(roomID)
+				GlobalHub.Broadcast <- models.WSMessage{
+					Type:    "error",
+					RoomID:  roomID,
+					UserID:  "system_omnigateway",
+					Payload: map[string]interface{}{"code": "AI_UPSTREAM_ERROR", "message": "智能体服务暂时不可用", "status": status},
+				}
+				continue
+			}
 
 			// ==========================================
 			// 🚨 核心改造 2：流式读取 Python 响应，并实时广播！
 			// ==========================================
 			reader := bufio.NewReader(resp.Body)
+			streamBytes := 0
 			for {
 				line, err := reader.ReadBytes('\n')
 				if err != nil {
@@ -217,6 +352,10 @@ func HandleWebSocket(c *gin.Context) {
 				}
 
 				line = bytes.TrimSpace(line)
+				streamBytes += len(line)
+				if streamBytes > 16<<20 {
+					break
+				}
 				if len(line) == 0 {
 					continue
 				}
@@ -260,6 +399,7 @@ func HandleWebSocket(c *gin.Context) {
 				}
 			}
 			resp.Body.Close() // 读取完毕后关闭连接
+			releaseNegotiation(roomID)
 			log.Printf("🏆 拓扑路书流式传输完毕，房间: %s", roomID)
 		}
 	}

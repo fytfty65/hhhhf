@@ -1,2 +1,775 @@
 @import "tailwindcss";
+
+/* Tailwind v4 暗色模式：基于 .dark 类的自定义变体 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 语义主题变量（供暗色覆盖与身体背景使用） */
+:root {
+  --bg-body: #f1f5f9;
+  --bg-card: #ffffff;
+  --text-primary: #0f172a;
+  /* 3D 雷达 HUD 字体：展示数字用科幻字体，中文回退系统字体 */
+  --font-radar-display: 'Orbitron', 'Rajdhani', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-radar-data: 'Rajdhani', 'JetBrains Mono', 'SF Mono', Consolas, 'PingFang SC', monospace;
+}
+
+.dark {
+  --bg-body: #0b1220;
+  --bg-card: #1e293b;
+  --text-primary: #e2e8f0;
+}
+
 .custom-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Map surfaces and controls ------------------------------------------------
+   Keep controls in their own layout context so the map, visualizer actions,
+   and back button never compete for the same corner. */
+.map-visualizer-shell {
+  isolation: isolate;
+}
+
+.map-empty-surface {
+  z-index: 0;
+  background-color: #dbe7f2;
+  background-image:
+    linear-gradient(rgba(255,255,255,.52), rgba(255,255,255,.52)),
+    linear-gradient(90deg, rgba(71,85,105,.08) 1px, transparent 1px),
+    linear-gradient(rgba(71,85,105,.08) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
+}
+
+.map-control-dock {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+  width: fit-content;
+  max-width: min(42rem, calc(100vw - 2rem));
+}
+
+@media (min-width: 641px) {
+  /* FullRouteVisualizer owns the right-side action dock. Reserve the back-arrow
+     lane (~4.75rem from the left) and the action-dock lane (~27rem from the
+     right) so the two toolbars share the same top baseline without painting
+     over one another when either side wraps. */
+  .map-control-dock {
+    right: auto !important;
+    width: min(42rem, calc(100% - 32rem));
+    max-width: min(42rem, calc(100% - 32rem));
+  }
+}
+
+.map-control-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+  min-width: 0;
+}
+
+.map-control-dock > * {
+  flex-shrink: 0;
+}
+
+.map-control-group-primary {
+  flex: 0 1 auto;
+}
+
+.map-control-group-secondary {
+  flex: 0 1 auto;
+}
+
+.map-control-dock > button,
+.map-control-dock .map-control-group > button {
+  min-height: 2.5rem;
+  white-space: nowrap;
+}
+
+.map-tile-status {
+  max-width: min(30rem, calc(100% - 2rem));
+}
+
+.visualizer-action-dock {
+  max-width: min(100%, 42rem);
+  width: fit-content;
+  pointer-events: none;
+}
+
+.visualizer-action-dock > * {
+  pointer-events: auto;
+}
+
+.visualizer-action-button {
+  min-height: 2.5rem;
+  white-space: nowrap;
+}
+
+.map-visualizer-shell .maplibregl-ctrl-bottom-left {
+  bottom: 4.25rem;
+  left: .75rem;
+}
+
+.map-visualizer-shell .maplibregl-ctrl-group {
+  overflow: hidden;
+  border-radius: .75rem;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, .18);
+}
+
+.destination-map-shell .maplibregl-ctrl-bottom-right {
+  right: 1rem;
+  bottom: 4.5rem;
+}
+
+.destination-map-shell .maplibregl-ctrl-group {
+  overflow: hidden;
+  border-radius: .75rem;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, .2);
+}
+
+/* 3D radar layout primitives. Keep the canvas behind an explicit HUD layer;
+   panels use bounded heights so they cannot cover the close/action controls. */
+.radar-globe-stage {
+  overflow: hidden;
+  contain: layout paint;
+}
+
+/* The radar is portaled to body, so keep it an explicit top-level interaction
+   surface. This also prevents mobile browsers from treating the canvas/HUD as
+   a passive layer while an underlying workspace is still mounted. */
+.radar-modal-root {
+  isolation: isolate;
+  touch-action: manipulation;
+  pointer-events: auto;
+  overscroll-behavior: contain;
+}
+
+.radar-modal-root button,
+.radar-modal-root [role='button'] {
+  touch-action: manipulation;
+}
+
+.radar-globe-stage canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.radar-hud-top {
+  isolation: isolate;
+}
+
+.radar-hud-brand,
+.radar-hud-actions {
+  min-height: 2.5rem;
+}
+
+.radar-hud-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.radar-hud-action {
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  white-space: nowrap;
+}
+
+.radar-main-panel {
+  max-height: min(46rem, calc(100vh - 5.5rem));
+}
+
+.radar-network-panel {
+  max-height: min(22rem, calc(100vh - 5.5rem));
+}
+
+.radar-render-status {
+  max-width: calc(100% - 2rem);
+}
+
+@media (max-width: 640px) {
+  .radar-hud-top {
+    align-items: stretch;
+    padding: .75rem;
+    gap: .5rem;
+  }
+
+  .radar-hud-brand {
+    width: 100%;
+    gap: .625rem;
+  }
+
+  .radar-hud-brand > div:last-child {
+    min-width: 0;
+  }
+
+  .radar-hud-title {
+    gap: .5rem;
+  }
+
+  .radar-hud-title h2 {
+    font-size: 1rem;
+    letter-spacing: .12em;
+  }
+
+  .radar-hud-badge {
+    max-width: 8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .radar-hud-meta {
+    gap: .5rem;
+    max-width: 100%;
+  }
+
+  .radar-hud-actions {
+    width: 100%;
+    justify-content: flex-end;
+    gap: .375rem;
+    padding-bottom: env(safe-area-inset-top);
+  }
+
+  .radar-hud-action {
+    width: 2.75rem;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    padding-inline: .5rem;
+    justify-content: center;
+  }
+
+  .radar-action-label {
+    display: none;
+  }
+
+  .radar-main-panel {
+    left: .75rem;
+    right: .75rem;
+    bottom: 2.5rem;
+    max-height: min(44vh, 22rem);
+  }
+
+  .radar-main-panel > div:last-child {
+    height: min(34vh, 17rem) !important;
+  }
+
+  .radar-render-status {
+    top: 8.5rem;
+  }
+
+  .radar-ticker {
+    height: 2.25rem;
+  }
+
+  .map-control-dock {
+    align-items: stretch;
+    max-height: 9.5rem;
+    overflow-y: auto;
+    padding-bottom: .25rem;
+    width: calc(100vw - 2rem);
+    max-width: calc(100vw - 2rem);
+  }
+
+  .visualizer-action-dock {
+    left: .75rem;
+    right: .75rem;
+    max-width: none;
+    gap: .375rem;
+  }
+
+  .visualizer-action-button {
+    flex: 1 1 calc(50% - .25rem);
+    justify-content: center;
+    min-width: 0;
+    padding-inline: .625rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .map-control-group-primary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .map-control-group-primary > button {
+    width: 100%;
+    justify-content: center;
+    min-width: 0;
+  }
+
+  .map-control-group-secondary {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .map-control-group-secondary > button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* 移动端左下角为全局主题切换按钮（fixed bottom-5 left-5，高 44px），
+     把地图缩放控件抬到它上方，避免两个控件重叠 */
+  .map-visualizer-shell .maplibregl-ctrl-bottom-left {
+    bottom: 5.25rem;
+    left: .75rem;
+  }
+
+  .destination-map-shell .maplibregl-ctrl-bottom-right {
+    right: .75rem;
+    bottom: .75rem;
+  }
+
+  .destination-map-list {
+    left: .75rem;
+    right: .75rem;
+    top: 5.25rem;
+    bottom: auto;
+    width: auto;
+    height: 38vh;
+    max-height: none;
+  }
+
+  .destination-map-detail {
+    left: .75rem;
+    right: .75rem;
+    top: auto;
+    bottom: .75rem;
+    width: auto;
+    height: 44vh;
+    max-height: none;
+  }
+
+  .destination-map-guide {
+    display: none;
+  }
+}
+
+/* Intermediate widths (small tablets / split-screen desktops) need a second
+   HUD row. Keeping the brand and actions in separate rows prevents the close
+   control from being pushed under the globe canvas. */
+@media (min-width: 641px) and (max-width: 900px) {
+  .radar-hud-top {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .radar-hud-brand {
+    flex: 1 1 100%;
+  }
+
+  .radar-hud-actions {
+    margin-left: auto;
+  }
+}
+
+@media (min-width: 641px) and (max-width: 1024px) {
+  .destination-map-list {
+    width: 240px;
+  }
+
+  .destination-map-detail {
+    width: 300px;
+  }
+}
+
+/* 移动端触控体验优化 */
+html, body {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+/* ================= 暗色模式覆盖 =================
+   项目大量使用 slate/stone 浅色工具类，这里以非分层规则
+   （优先级高于 Tailwind utilities）统一映射到深色，作为基础暗色主题。 */
+
+.dark body {
+  background-color: #0b1220;
+  color: #e2e8f0;
+}
+
+/* —— 背景 —— */
+.dark .bg-slate-50 { background-color: #0f172a; }
+.dark .bg-slate-100 { background-color: #1e293b; }
+.dark .bg-slate-200 { background-color: #334155; }
+.dark .bg-white { background-color: #1e293b; }
+.dark .bg-white\/90 { background-color: rgba(30, 41, 59, 0.9); }
+.dark .bg-white\/80 { background-color: rgba(30, 41, 59, 0.8); }
+.dark .bg-white\/70 { background-color: rgba(30, 41, 59, 0.7); }
+.dark .bg-white\/60 { background-color: rgba(30, 41, 59, 0.6); }
+.dark .bg-white\/50 { background-color: rgba(30, 41, 59, 0.5); }
+.dark .bg-stone-50 { background-color: #1c1917; }
+.dark .bg-amber-50\/60 { background-color: rgba(69, 46, 26, 0.6); }
+
+/* —— 文字 —— */
+.dark .text-slate-900 { color: #f1f5f9; }
+.dark .text-slate-800 { color: #e2e8f0; }
+.dark .text-slate-700 { color: #cbd5e1; }
+.dark .text-slate-600 { color: #cbd5e1; }
+.dark .text-slate-500 { color: #94a3b8; }
+.dark .text-slate-400 { color: #7c8aa0; }
+.dark .text-stone-700 { color: #e7e5e4; }
+.dark .text-stone-600 { color: #d6d3d1; }
+.dark .text-stone-500 { color: #a8a29e; }
+
+/* —— 边框 —— */
+.dark .border-slate-200 { border-color: #334155; }
+.dark .border-slate-100 { border-color: #1e293b; }
+.dark .border-stone-200 { border-color: #44403c; }
+.dark .border-white { border-color: #334155; }
+
+/* ================= 无障碍：减少动态效果 =================
+   尊重系统「减少动态效果」偏好，全局降级动画与过渡，
+   避免对前庭敏感用户造成不适（P7）。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Profile and community portals -----------------------------------------
+   These surfaces are intentionally quieter than the planning canvas. Their
+   job is scanning and returning to the next useful action, so controls keep
+   their own lanes and repeated content stays aligned. */
+.profile-page,
+.community-page {
+  background-color: #f8f5ef;
+  background-image: linear-gradient(rgba(120, 83, 45, .025) 1px, transparent 1px), linear-gradient(90deg, rgba(120, 83, 45, .025) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.portal-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.profile-hero {
+  position: relative;
+  isolation: isolate;
+}
+
+.profile-page .profile-panel,
+.community-page .community-panel {
+  background: rgba(255, 253, 248, .94);
+  border-color: rgba(120, 83, 45, .14);
+  box-shadow: 0 14px 34px rgba(120, 83, 45, .07);
+}
+
+.profile-page .profile-hero {
+  border-radius: 1.25rem;
+  border-color: rgba(120, 83, 45, .16);
+}
+
+.profile-page .profile-trip-browser {
+  overflow: hidden;
+}
+
+.profile-page article > div:has(> button[title="导出 JSON"]),
+.community-page article > div:has(button[title="导出 JSON"]) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .45rem;
+}
+
+.profile-page article > div:has(> button[title="导出 JSON"]) > button,
+.community-page article > div:has(button[title="导出 JSON"]) > button {
+  flex: 0 0 auto;
+}
+
+.profile-page article > div:has(> button[title="导出 JSON"]) > div,
+.community-page article > div:has(button[title="导出 JSON"]) > div {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: .35rem;
+}
+
+.profile-page input,
+.profile-page textarea,
+.community-page input,
+.community-page textarea {
+  border-radius: .6rem;
+}
+
+.profile-page button,
+.community-page button {
+  touch-action: manipulation;
+}
+
+.profile-hero::after {
+  content: '';
+  position: absolute;
+  width: 18rem;
+  height: 18rem;
+  right: -7rem;
+  top: -10rem;
+  border-radius: 999px;
+  background: rgba(251, 146, 60, .08);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.profile-stats {
+  border-radius: .85rem;
+}
+
+.profile-stats > div {
+  min-height: 5.25rem;
+  display: grid;
+  place-content: center;
+}
+
+.profile-next-step {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid rgba(251, 146, 60, .24);
+  border-left: 3px solid #f97316;
+  background: linear-gradient(110deg, rgba(255, 247, 237, .96), rgba(255, 255, 255, .96));
+  box-shadow: 0 12px 28px rgba(15, 23, 42, .05);
+}
+
+.profile-next-step-copy {
+  min-width: 0;
+}
+
+.profile-kicker,
+.community-kicker {
+  color: #ea580c;
+  font-size: .66rem;
+  font-weight: 900;
+  letter-spacing: .16em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.profile-next-step-copy h2 {
+  margin-top: .25rem;
+  color: #0f172a;
+  font-size: .98rem;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.profile-next-step-copy p {
+  margin-top: .2rem;
+  color: #64748b;
+  font-size: .75rem;
+  line-height: 1.5;
+}
+
+.profile-next-step-progress {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  color: #64748b;
+  font-size: .68rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.profile-progress-ring {
+  display: grid;
+  width: 3rem;
+  height: 3rem;
+  place-items: center;
+  border-radius: 999px;
+  background: conic-gradient(#f97316 var(--profile-progress, 72%), #fed7aa 0);
+  position: relative;
+}
+
+.profile-progress-ring::before {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border-radius: inherit;
+  background: #fff7ed;
+}
+
+.profile-progress-ring span {
+  position: relative;
+  color: #c2410c;
+  font-size: .78rem;
+  font-weight: 900;
+}
+
+.profile-progress-ring small {
+  font-size: .55rem;
+}
+
+.profile-next-step-action {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  gap: .45rem;
+  padding: .65rem .9rem;
+  border: 1px solid #f97316;
+  background: #f97316;
+  color: white;
+  font-size: .73rem;
+  font-weight: 900;
+  white-space: nowrap;
+  transition: background .2s ease, transform .2s ease;
+}
+
+.profile-next-step-action:hover {
+  background: #ea580c;
+  transform: translateY(-1px);
+}
+
+.community-hero {
+  padding: .15rem 0 .25rem;
+}
+
+.community-hero-metrics {
+  display: flex;
+  align-items: center;
+  gap: .85rem;
+  color: #64748b;
+}
+
+.community-hero-metrics > div:not(.community-live) {
+  min-width: 4.6rem;
+  padding-left: .85rem;
+  border-left: 1px solid #e2e8f0;
+}
+
+.community-hero-metrics strong,
+.community-hero-metrics span {
+  display: block;
+}
+
+.community-hero-metrics strong {
+  color: #0f172a;
+  font-size: 1.1rem;
+  font-weight: 900;
+  line-height: 1.1;
+}
+
+.community-hero-metrics span {
+  margin-top: .2rem;
+  font-size: .64rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.community-live {
+  display: inline-flex !important;
+  align-items: center;
+  gap: .4rem;
+  padding-left: .85rem;
+  border-left: 1px solid #e2e8f0;
+}
+
+.community-panel {
+  border-radius: .85rem;
+}
+
+.community-page article.community-panel {
+  transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
+}
+
+.community-page article.community-panel:hover {
+  border-color: rgba(251, 146, 60, .42);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, .08);
+  transform: translateY(-1px);
+}
+
+.dark .profile-page,
+.dark .community-page {
+  background-color: #0b1220;
+  background-image: linear-gradient(rgba(148, 163, 184, .035) 1px, transparent 1px), linear-gradient(90deg, rgba(148, 163, 184, .035) 1px, transparent 1px);
+}
+
+.dark .profile-page .profile-panel,
+.dark .community-page .community-panel {
+  background: rgba(30, 41, 59, .92);
+  border-color: rgba(148, 163, 184, .18);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, .22);
+}
+
+.dark .profile-next-step {
+  background: linear-gradient(110deg, rgba(67, 38, 18, .72), rgba(30, 41, 59, .92));
+  border-color: rgba(251, 146, 60, .38);
+}
+
+.dark .profile-next-step-copy h2,
+.dark .community-hero-metrics strong {
+  color: #f1f5f9;
+}
+
+.dark .profile-progress-ring::before {
+  background: #3a271b;
+}
+
+.dark .profile-hero::after {
+  background: rgba(251, 146, 60, .12);
+}
+
+@media (max-width: 700px) {
+  .profile-next-step {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: .8rem;
+  }
+
+  .profile-next-step-progress {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .profile-next-step-action {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .community-hero-metrics {
+    width: 100%;
+    justify-content: space-between;
+    gap: .5rem;
+  }
+
+  .community-hero-metrics > div:not(.community-live),
+  .community-live {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-left: .6rem;
+  }
+
+  .community-hero-metrics span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* Planning workspace toolbar: quiet, document-like controls instead of a
+   rainbow of AI-style pills. Accent colour is reserved for hover/focus. */
+.workspace-toolbar > button {
+  border-radius: 8px !important;
+  background: #fff !important;
+  border-color: #e2e8f0 !important;
+  color: #475569 !important;
+  box-shadow: none !important;
+  min-height: 34px;
+}
+.workspace-toolbar > button:hover {
+  background: #fff7ed !important;
+  border-color: #fdba74 !important;
+  color: #c2410c !important;
+}
+.workspace-toolbar > button:focus-visible {
+  outline: 2px solid #fb923c;
+  outline-offset: 2px;
+}

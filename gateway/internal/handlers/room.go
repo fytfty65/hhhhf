@@ -3,8 +3,10 @@ package handlers
 import (
 	"log"
 	"net/http"
-	
-	"gateway/internal/models"  // 🚨 必须导入 models
+	"strings"
+
+	"gateway/internal/database"
+	"gateway/internal/models"
 	"gateway/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -12,7 +14,7 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: websocketOriginAllowed,
 }
 
 // GlobalHub 全局的房间管理器
@@ -21,23 +23,40 @@ var GlobalHub *service.Hub
 // RoomWebSocketHandler 处理前端的 WS 连接请求
 func RoomWebSocketHandler(c *gin.Context) {
 	roomID := c.Param("id")
-	
-	// 🚨 修复点：尝试从 URL 参数获取 userID，如果没有则给个默认值
-	// 测试脚本连接时可以写成：ws://localhost:8080/api/v1/room/test-room-001/ws?userId=test_user
-	userID := c.DefaultQuery("userId", "anonymous_user")
+
+	userID := CurrentUserID(c)
+	if userID == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未登录", "code": "AUTH_REQUIRED"})
+		return
+	}
+	var member models.RoomMember
+	if err := database.DB.Where("room_id = ? AND user_id = ?", roomID, userID).First(&member).Error; err != nil {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "不是该房间成员", "code": "ROOM_MEMBERSHIP_REQUIRED"})
+		return
+	}
+	nickname := c.DefaultQuery("nickname", userID)
+	role := c.DefaultQuery("role", "成员")
+	avatarUrl := c.Query("avatar_url")
+	nickname = truncateRunes(strings.TrimSpace(nickname), 80)
+	role = truncateRunes(strings.TrimSpace(role), 40)
+	avatarUrl = truncateRunes(strings.TrimSpace(avatarUrl), 1024)
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("升级 WS 失败: %v", err)
 		return
 	}
+	conn.SetReadLimit(1 << 20)
 
 	client := &service.Client{
-		Hub:    GlobalHub,
-		Conn:   conn,
-		Send:   make(chan models.WSMessage, 256),
-		RoomID: roomID,
-		UserID: userID, // 此时 userID 已经有定义了
+		Hub:       GlobalHub,
+		Conn:      conn,
+		Send:      make(chan models.WSMessage, 256),
+		RoomID:    roomID,
+		UserID:    userID,
+		Nickname:  nickname,
+		Role:      role,
+		AvatarUrl: avatarUrl,
 	}
 
 	client.Hub.Register <- client
@@ -45,6 +64,6 @@ func RoomWebSocketHandler(c *gin.Context) {
 	// 启动读写协程
 	go client.WritePump()
 	go client.ReadPump()
-	
+
 	log.Printf("用户 %s 已进入房间 %s", userID, roomID)
 }

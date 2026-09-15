@@ -10,10 +10,13 @@ import (
 
 const (
 	// 🚨 核心修复：定义缺失的常量
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 512
+	writeWait  = 10 * time.Second
+	pongWait   = 60 * time.Second
+	pingPeriod = (pongWait * 9) / 10
+	// Planning payloads include member profiles and the current route. 512
+	// bytes silently disconnected legitimate clients before the JSON reached
+	// the handler; keep a bounded 1 MiB frame limit instead.
+	maxMessageSize = 1 << 20
 )
 
 // ReadPump 负责从 WebSocket 连接中不断读取消息
@@ -51,7 +54,7 @@ func (c *Client) WritePump() {
 		c.Conn.Close()
 	}()
 
-for {
+	for {
 		select {
 		case message, ok := <-c.Send:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))

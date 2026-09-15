@@ -23,6 +23,8 @@ type TripPlan struct {
 	Title     string // 例如 "洛阳 3 日游"
 	DestCity  string `gorm:"index"` // 目的地城市
 	Content   string // 规划的完整 JSON 内容（路线节点等）
+	Days      int    `gorm:"default:0"` // 行程天数（供人均日消费折算；0 表示未填写，回退标题解析）
+	Travelers int    `gorm:"default:0"` // 同行人数（含本人；供人均日消费折算，<1 视为 1）
 	CreatedAt time.Time
 }
 
@@ -33,7 +35,16 @@ type CommunityPost struct {
 	Title     string
 	Content   string // 行程 JSON 或文字描述
 	DestCity  string `gorm:"index"`
+	Tags      string // 话题标签 JSON 数组字符串，如 ["亲子","美食"]
 	Likes     int    `gorm:"default:0"`
+	CreatedAt time.Time
+}
+
+// PostFavorite 社区帖子收藏（一人一藏，重复收藏幂等）。
+type PostFavorite struct {
+	ID        uint   `gorm:"primaryKey;autoIncrement"`
+	PostID    string `gorm:"uniqueIndex:ux_post_favorite"`
+	UserID    string `gorm:"uniqueIndex:ux_post_favorite"`
 	CreatedAt time.Time
 }
 
@@ -130,33 +141,149 @@ type RecommendationEvent struct {
 	CreatedAt time.Time
 }
 
+// PlanningEvent is the canonical event stream for joint-planning learning.
+// Payload stores provider/model metadata while event_type remains indexed for
+// cheap funnel and quality aggregation.
+type PlanningEvent struct {
+	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID    string    `gorm:"index" json:"user_id"`
+	TripID    string    `gorm:"index" json:"trip_id"`
+	RoomID    string    `gorm:"index" json:"room_id"`
+	EventType string    `gorm:"index" json:"event_type"`
+	PlanID    string    `json:"plan_id"`
+	Value     float64   `json:"value"`
+	Payload   string    `gorm:"type:text" json:"payload"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TripExecutionState stores the durable, user-confirmed progress of a trip
+// node. It is intentionally separate from the generated plan so execution
+// updates never mutate the original recommendation.
+type TripExecutionState struct {
+	ID           string    `gorm:"primaryKey" json:"id"`
+	UserID       string    `gorm:"index" json:"user_id"`
+	TripID       string    `gorm:"uniqueIndex:ux_execution_trip_node" json:"trip_id"`
+	PlanID       string    `json:"plan_id,omitempty"`
+	NodeKey      string    `gorm:"uniqueIndex:ux_execution_trip_node" json:"node_key"`
+	Status       string    `gorm:"index" json:"status"` // planned/in_progress/visited/skipped/delayed
+	DelayMinutes int       `json:"delay_minutes,omitempty"`
+	Note         string    `json:"note,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type ModelDeployment struct {
+	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name      string    `gorm:"index" json:"name"`
+	Version   string    `gorm:"uniqueIndex:ux_model_version" json:"version"`
+	Status    string    `gorm:"index" json:"status"` // shadow / canary / active / rolled_back
+	Traffic   int       `json:"traffic_percent"`
+	Endpoint  string    `json:"endpoint,omitempty"`
+	Metrics   string    `gorm:"type:text" json:"metrics"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// PlanningRun pins attribution and pre-feedback features to the actual executor.
+type PlanningRun struct {
+	ID           string    `gorm:"primaryKey" json:"plan_id"`
+	UserID       string    `gorm:"index" json:"-"`
+	TripID       string    `gorm:"index" json:"-"`
+	ModelVersion string    `gorm:"index" json:"model_version"`
+	Features     string    `json:"-"`
+	Estimated    bool      `json:"estimated"`
+	CreatedAt    time.Time `gorm:"index" json:"created_at"`
+}
+
 // NodeAnnotationVote 批注投票（支持团队成员对具体行程节点即时反馈）
 type NodeAnnotationVote struct {
 	ID           uint   `gorm:"primaryKey;autoIncrement"`
-	AnnotationID string `gorm:"index"`
-	UserID       string `gorm:"index"`
+	AnnotationID string `gorm:"uniqueIndex:ux_annotation_vote"`
+	UserID       string `gorm:"uniqueIndex:ux_annotation_vote"`
 	Value        int    // +1 赞成，-1 反对
 	CreatedAt    time.Time
 }
 
 // BudgetPlan 行程预算设置（智能预算管家）
 type BudgetPlan struct {
-	ID           string `gorm:"primaryKey"` // UUID
-	UserID       string `gorm:"index"`      // 归属用户
-	TripID       string `gorm:"index"`      // 关联行程
-	TotalBudget  float64 // 总预算金额
-	Currency     string `gorm:"default:'CNY'"` // 币种
-	CreatedAt    time.Time
+	ID          string    `gorm:"primaryKey" json:"id"`                      // UUID
+	UserID      string    `gorm:"uniqueIndex:ux_budget_trip" json:"user_id"` // 归属用户
+	TripID      string    `gorm:"uniqueIndex:ux_budget_trip" json:"trip_id"` // 关联行程
+	TotalBudget float64   `json:"total_budget"`                              // 总预算金额
+	Currency    string    `gorm:"default:'CNY'" json:"currency"`             // 币种
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// SafetyAlert 安全告警信息
+type SafetyAlert struct {
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
 }
 
 // ExpenseRecord 实际消费记录（预算管家与行程复盘数据源）
 type ExpenseRecord struct {
+	ID        string    `gorm:"primaryKey" json:"id"`          // UUID
+	UserID    string    `gorm:"index" json:"user_id"`          // 归属用户
+	TripID    string    `gorm:"index" json:"trip_id"`          // 关联行程
+	Category  string    `json:"category"`                      // 分类：餐饮/住宿/交通/门票/购物/其他
+	Amount    float64   `json:"amount"`                        // 金额（原始币种）
+	Currency  string    `gorm:"default:'CNY'" json:"currency"` // 币种
+	Note      string    `json:"note"`                          // 备注
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// PlanVariant 多方案投票：同一房间可保存多套不同风格的行程方案，供成员投票。
+type PlanVariant struct {
 	ID        string `gorm:"primaryKey"` // UUID
-	UserID    string `gorm:"index"`      // 归属用户
-	TripID    string `gorm:"index"`      // 关联行程
-	Category  string // 分类：餐饮/住宿/交通/门票/购物/其他
-	Amount    float64 // 金额（原始币种）
-	Currency  string `gorm:"default:'CNY'"` // 币种
-	Note      string // 备注
+	RoomID    string `gorm:"index"`      // 所属房间（投票范围）
+	Name      string // 方案名，如 "特种兵暴走 A" / "慵懒度假 B"
+	Style     string // 风格标签：intense / relaxed / niche（供前端分组显示）
+	Route     string // 路线节点完整 JSON（与 TripPlan.Content 同构）
+	CreatedBy string // 创建人 userID
 	CreatedAt time.Time
+}
+
+// PlanVariantVote 方案投票（同一房间内一人一票，后票覆盖前票）。
+type PlanVariantVote struct {
+	ID        uint   `gorm:"primaryKey;autoIncrement"`
+	VariantID string `gorm:"uniqueIndex:ux_variant_vote"`
+	UserID    string `gorm:"uniqueIndex:ux_variant_vote"`
+	CreatedAt time.Time
+}
+
+// TripSatisfaction 行程完成后的满意度问卷（1-5 星），推荐闭环的显式反馈来源。
+type TripSatisfaction struct {
+	ID        uint   `gorm:"primaryKey;autoIncrement"`
+	UserID    string `gorm:"index;uniqueIndex:ux_satisfaction_user_trip"`
+	TripID    string `gorm:"uniqueIndex:ux_satisfaction_user_trip"`
+	Score     int    // 1~5 星
+	Comment   string
+	CreatedAt time.Time
+}
+
+// RiskSubscription 目的地风险订阅（P5）：用户订阅关注城市，事件流驱动风险等级变化通知。
+type RiskSubscription struct {
+	ID         string `gorm:"primaryKey"` // UUID
+	UserID     string `gorm:"index"`      // 归属用户
+	City       string `gorm:"index"`      // 订阅城市
+	Coordinate string // 订阅时坐标 "lng,lat"（旅中路况重取用，可空）
+	Baseline   string // 订阅时风险基线快照 JSON（用于旅中变更对比）
+	CreatedAt  time.Time
+}
+
+// TravelOrder is the gateway-owned execution record. Provider payloads are
+// intentionally not persisted; only the auditable identifiers and lifecycle
+// state are retained.
+type TravelOrder struct {
+	ID               string    `gorm:"primaryKey" json:"order_id"`
+	Provider         string    `gorm:"index" json:"provider"`
+	ProviderOrderID  string    `gorm:"index" json:"provider_order_id"`
+	UserID           string    `gorm:"index" json:"-"`
+	TripID           string    `gorm:"index" json:"trip_id"`
+	OrderType        string    `json:"order_type"`
+	Status           string    `gorm:"index" json:"status"`
+	IdempotencyKey   string    `gorm:"uniqueIndex" json:"-"`
+	CancellationNote string    `json:"cancellation_note,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }

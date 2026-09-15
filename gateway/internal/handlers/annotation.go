@@ -24,6 +24,11 @@ func CreateAnnotationHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "批注参数不完整"})
 		return
 	}
+	userID, ok := requireRoomMember(c, req.RoomID)
+	if !ok {
+		return
+	}
+	req.UserID = userID
 
 	ann := models.NodeAnnotation{
 		ID:       uuid.New().String(),
@@ -64,11 +69,24 @@ func ListAnnotationsHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 room_id 或 node_key"})
 		return
 	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	if roomID != "" {
+		if _, ok := requireRoomMember(c, roomID); !ok {
+			return
+		}
+	}
 
 	var anns []models.NodeAnnotation
 	q := database.DB.Order("created_at asc")
 	if roomID != "" {
 		q = q.Where("room_id = ?", roomID)
+	} else {
+		// A node key is not globally unique. When room_id is omitted, scope the
+		// query to rooms in which the authenticated user is a member.
+		q = q.Where("room_id IN (?)", database.DB.Model(&models.RoomMember{}).Select("room_id").Where("user_id = ?", userID))
 	}
 	if nodeKey != "" {
 		q = q.Where("node_key = ?", nodeKey)
@@ -119,6 +137,9 @@ func ResolveAnnotationHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "批注不存在"})
 		return
 	}
+	if _, ok := requireRoomMember(c, ann.RoomID); !ok {
+		return
+	}
 	ann.Status = req.Status
 	if err := database.DB.Save(&ann).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "状态更新失败"})
@@ -131,9 +152,9 @@ func ResolveAnnotationHandler(c *gin.Context) {
 			RoomID: ann.RoomID,
 			UserID: "system",
 			Payload: gin.H{
-				"action":       "resolve",
+				"action":        "resolve",
 				"annotation_id": ann.ID,
-				"status":       ann.Status,
+				"status":        ann.Status,
 			},
 		}
 	}
@@ -152,6 +173,10 @@ func VoteAnnotationHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整"})
 		return
 	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
 	if req.Value != 1 && req.Value != -1 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "投票值仅支持 1 / -1"})
 		return
@@ -162,6 +187,10 @@ func VoteAnnotationHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "批注不存在"})
 		return
 	}
+	if _, ok := requireRoomMember(c, ann.RoomID); !ok {
+		return
+	}
+	req.UserID = userID
 
 	// 一人一票：先清除该用户此前的投票，再写入新票
 	database.DB.Where("annotation_id = ? AND user_id = ?", req.AnnotationID, req.UserID).Delete(&models.NodeAnnotationVote{})
@@ -197,11 +226,22 @@ func AnnotationHistoryHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少查询条件"})
 		return
 	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	if roomID != "" {
+		if _, ok := requireRoomMember(c, roomID); !ok {
+			return
+		}
+	}
 
 	var anns []models.NodeAnnotation
 	q := database.DB.Order("created_at asc")
 	if roomID != "" {
 		q = q.Where("room_id = ?", roomID)
+	} else {
+		q = q.Where("room_id IN (?)", database.DB.Model(&models.RoomMember{}).Select("room_id").Where("user_id = ?", userID))
 	}
 	if nodeKey != "" {
 		q = q.Where("node_key = ?", nodeKey)

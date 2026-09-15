@@ -45,6 +45,66 @@ var foodKeywords = []string{
 	"夜市", "小吃街", "咖啡", "甜品", "奶茶", "肉", "串", "汤", "饼", "餐厅", "菜馆",
 }
 
+// —— 细粒度偏好标签：在 nature/culture/food 三大粗维度下再分细标签 ——
+// 用于把「自然风光/人文历史/地道美食」进一步细化为可展示、可注入 Prompt 的具体偏好，
+// 例如「山岳/湖海水系/宗教古迹/火锅串串」，在不改变顶部三大比例口径的前提下提升推荐粒度。
+type fineTag struct {
+	tag      string
+	dim      string
+	keywords []string
+}
+
+var fineTags = []fineTag{
+	// —— nature 自然风光细分 ——
+	{"山岳", "nature", []string{"山", "峰", "岭", "雪山", "冰川", "天池", "峡", "谷", "瀑布"}},
+	{"湖海水系", "nature", []string{"湖", "洱海", "北海", "什刹海", "黄河", "秦淮河", "珠江", "漓江", "钱塘江", "海滨", "海滩", "海湾", "海域", "海洋", "河流", "河畔", "河边", "河谷", "运河", "长江", "江河", "江畔", "海南岛", "涠洲岛", "海岛", "岛屿", "小岛", "群岛", "滩", "湾", "湿地", "泉"}},
+	{"草原沙漠", "nature", []string{"草原", "沙漠", "戈壁", "绿洲"}},
+	{"园林花木", "nature", []string{"公园", "植物园", "园林", "花园", "花海", "竹林", "竹海"}},
+	// —— culture 人文历史细分 ——
+	{"博物馆", "culture", []string{"博物", "科技馆", "美术馆", "陈列", "展览"}},
+	{"古迹遗址", "culture", []string{"古城", "遗址", "陵", "城墙", "故城", "古都"}},
+	{"宗教古迹", "culture", []string{"寺", "庙", "石窟", "清真寺", "祠", "道观", "宫观", "寺观", "白云观", "青羊观", "教堂", "塔"}},
+	{"名人故居", "culture", []string{"故居", "书院", "文庙", "纪念馆", "名人"}},
+	{"老街坊", "culture", []string{"老街", "古镇", "街区", "胡同", "里弄"}},
+	// —— food 美食细分 ——
+	{"火锅串串", "food", []string{"火锅", "串串", "关东煮"}},
+	{"烧烤", "food", []string{"烧烤", "串烧", "烤"}},
+	{"面食", "food", []string{"面", "拌面", "拉面", "馕", "饼", "包子", "饺子", "饭"}},
+	{"地方菜", "food", []string{"餐厅", "菜馆", "饭馆", "川菜", "粤菜", "湘菜", "本帮菜"}},
+	{"小吃夜市", "food", []string{"小吃", "夜市", "小吃街", "美食街", "摊"}},
+	{"甜饮咖啡", "food", []string{"甜品", "奶茶", "咖啡", "茶饮", "冰淇淋"}},
+}
+
+// fineTagDims 细标签 -> 所属粗维度（由 fineTags 派生，供 CuisinePrefs 提取等反查）。
+var fineTagDims = buildFineTagDims()
+
+func buildFineTagDims() map[string]string {
+	m := map[string]string{}
+	for _, ft := range fineTags {
+		m[ft.tag] = ft.dim
+	}
+	return m
+}
+
+// fineTagsOf 返回地点名命中的细粒度偏好标签（去重、排序）。
+func fineTagsOf(target string) []string {
+	set := map[string]bool{}
+	for _, ft := range fineTags {
+		for _, kw := range ft.keywords {
+			if strings.Contains(target, kw) {
+				set[ft.tag] = true
+				break
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // dimOf 返回地点名称所属的偏好维度（nature/culture/food，可能多标签）
 func dimOf(target string) []string {
 	dimSet := map[string]bool{}
@@ -98,21 +158,33 @@ func BuildProfile(userID string, samples []FeedbackSample) Profile {
 	dimLike := map[string]int{"nature": 0, "culture": 0, "food": 0}
 
 	lowBudgetSignals := 0
+	highBudgetSignals := 0
 
 	for _, s := range samples {
+		// 粗维度仅用于三大比例归一化；偏好标签/Dislike 改用细标签，表达更精确的偏好。
 		dims := dimOf(s.Target)
 		for _, d := range dims {
 			if s.Score >= 1 {
 				dimLike[d]++
-				likedTags[d]++
-			} else {
-				dislikedTags[d]++
+			}
+		}
+		fine := fineTagsOf(s.Target)
+		if s.Score >= 1 {
+			for _, t := range fine {
+				likedTags[t]++
+			}
+		} else {
+			for _, t := range fine {
+				dislikedTags[t]++
 			}
 		}
 
 		// 消费习惯推断（启发式）
 		if s.Score >= 1 && (strings.Contains(s.Reason, "免费") || strings.Contains(s.Reason, "划算") || strings.Contains(s.Reason, "性价比")) {
 			lowBudgetSignals++
+		}
+		if s.Score >= 1 && (strings.Contains(s.Reason, "高档") || strings.Contains(s.Reason, "豪华") || strings.Contains(s.Reason, "五星") || strings.Contains(s.Reason, "奢华") || strings.Contains(s.Reason, "品质") || strings.Contains(s.Reason, "高端")) {
+			highBudgetSignals++
 		}
 		if s.Score < 0 && (strings.Contains(s.Reason, "太贵") || strings.Contains(s.Reason, "贵")) {
 			lowBudgetSignals++
@@ -131,7 +203,11 @@ func BuildProfile(userID string, samples []FeedbackSample) Profile {
 		profile.FoodRatio = 0.34
 	}
 
-	if lowBudgetSignals >= 1 {
+	// 品质/高消费信号优先于省钱信号：当用户出现明确「高档/豪华/五星」正向反馈时，
+	// 即使历史中存在省钱倾向，也应按当前更强诉求判定为高预算（避免 high 分支成为死代码）。
+	if highBudgetSignals >= 1 {
+		profile.BudgetTendency = "high"
+	} else if lowBudgetSignals >= 1 {
 		profile.BudgetTendency = "low"
 	}
 
@@ -152,9 +228,12 @@ func BuildProfile(userID string, samples []FeedbackSample) Profile {
 
 func foodTags(liked map[string]int) []string {
 	out := []string{}
-	if liked["food"] > 0 {
-		out = append(out, "美食")
+	for tag, cnt := range liked {
+		if cnt > 0 && fineTagDims[tag] == "food" {
+			out = append(out, tag)
+		}
 	}
+	sort.Strings(out)
 	return out
 }
 

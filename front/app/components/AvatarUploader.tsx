@@ -2,9 +2,9 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ImagePlus, X, Check, AlertCircle, Upload, ZoomIn, ZoomOut } from 'lucide-react';
+import { ImagePlus, X, Check, AlertCircle, Upload, ZoomIn, ZoomOut, RefreshCw } from 'lucide-react';
+import { API_BASE } from '../lib/utils';
 
-const API_BASE = 'http://localhost:8080';
 const CROP_SIZE = 288; // 裁剪视窗边长（px）
 const OUTPUT_SIZE = 512; // 输出头像边长（px）
 const MAX_SIZE = 5 * 1024 * 1024; // 5MB
@@ -142,42 +142,91 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
     }, mime, 0.92);
   };
 
-  const uploadBlob = (blob: Blob, mime: string) => {
+  const uploadBlob = async (blob: Blob, mime: string) => {
     setStage('uploading');
     setProgress(0);
     setError('');
+
+    // 👑 前置诊断：先确认后端是否可达
+    try {
+      const pingRes = await fetch(`${API_BASE}/ping`, { method: 'GET', signal: AbortSignal.timeout(5000) });
+      if (!pingRes.ok) {
+        setError(`后端服务响应异常 (HTTP ${pingRes.status})，请检查服务状态后重试`);
+        setStage('crop');
+        return;
+      }
+    } catch (pingErr: any) {
+      const msg = pingErr.name === 'TimeoutError' || pingErr.name === 'AbortError'
+        ? '连接后端超时（5秒），请确认网关服务已启动'
+        : '无法连接到后端服务，请确认网关已启动、API_BASE 配置正确且防火墙未拦截';
+      setError(msg);
+      setStage('crop');
+      return;
+    }
 
     const ext = mime === 'image/png' ? 'png' : 'jpg';
     const form = new FormData();
     form.append('user_id', userId);
     form.append('file', blob, `avatar.${ext}`);
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE}/api/user/avatar/upload`);
-    xhr.upload.onprogress = (ev) => {
-      if (ev.lengthComputable) setProgress(Math.round((ev.loaded / ev.total) * 100));
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          const url = data.avatar_url || '';
-          setDoneUrl(url);
-          setStage('done');
-          onSuccess(url);
-        } catch {
-          setError('上传响应异常');
+    // 👑 使用 fetch 替代 XHR：fetch 的 CORS 处理更现代，与前面 /ping 一致
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      setProgress(30); // 开始上传，给个初始进度
+      const res = await fetch(`${API_BASE}/api/user/avatar/upload`, {
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      setProgress(90);
+
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const url = data.avatar_url || '';
+        if (!url) {
+          setError('服务器未返回头像地址，请重试');
           setStage('crop');
+          return;
         }
+        setProgress(100);
+        setDoneUrl(url);
+        setStage('done');
+        onSuccess(url);
       } else {
-        let msg = '上传失败，请稍后重试';
-        try { const d = JSON.parse(xhr.responseText); msg = d.error || msg; } catch {}
+        // 👑 详细的 HTTP 状态码错误提示
+        const d = await res.json().catch(() => ({}));
+        let msg = d.error || d.message || '';
+        if (!msg) {
+          switch (res.status) {
+            case 400: msg = '请求参数错误，请检查图片格式与大小'; break;
+            case 401: msg = '登录已过期，请重新登录后再试'; break;
+            case 403: msg = '没有权限上传头像，请联系管理员'; break;
+            case 404: msg = '上传接口不存在，请检查服务器地址'; break;
+            case 413: msg = '图片文件过大，请压缩后重试'; break;
+            case 415: msg = '图片格式不支持，仅支持 JPG/PNG'; break;
+            case 429: msg = '请求过于频繁，请稍后再试'; break;
+            case 500: msg = '服务器内部错误，请稍后重试'; break;
+            case 502: msg = '网关错误，服务暂时不可用'; break;
+            case 503: msg = '服务正在维护中，请稍后重试'; break;
+            default: msg = `上传失败 (HTTP ${res.status})，请稍后重试`;
+          }
+        }
         setError(msg);
         setStage('crop');
       }
-    };
-    xhr.onerror = () => { setError('网络异常，上传失败'); setStage('crop'); };
-    xhr.send(form);
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      console.error('[AvatarUpload] fetch 上传失败:', err);
+      if (err.name === 'AbortError') {
+        setError('上传超时（30秒），请检查网络后重试');
+      } else {
+        setError(`上传请求失败：${err.message || '网络异常'}。请确认后端服务已重启并重新尝试。`);
+      }
+      setStage('crop');
+    }
   };
 
   return (
@@ -278,8 +327,37 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
           )}
 
           {error && (
-            <div className="mt-4 flex items-center gap-2 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-600 font-bold">
-              <AlertCircle className="w-4 h-4 shrink-0" /> {error}
+            <div className="mt-4 space-y-2">
+              <div className="flex items-start gap-2 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-600 font-bold">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span className="leading-relaxed">{error}</span>
+              </div>
+              {stage === 'crop' && (
+                <div className="flex gap-2">
+                  <button onClick={cropAndUpload} className="flex-1 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5">
+                    <RefreshCw className="w-3.5 h-3.5" /> 重新上传
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setError('正在诊断连接...');
+                      try {
+                        const r = await fetch(`${API_BASE}/ping`, { method: 'GET', signal: AbortSignal.timeout(5000) });
+                        if (r.ok) {
+                          const d = await r.json().catch(() => ({}));
+                          setError(`✅ 后端连接正常！(${d.service || 'OmniRoute'}) 请重新点击「裁剪并上传」尝试。`);
+                        } else {
+                          setError(`❌ 后端响应异常 (HTTP ${r.status})，服务可能未完全启动。`);
+                        }
+                      } catch (e: any) {
+                        setError('无法连接到网关，请确认服务已启动、API_BASE 配置正确且防火墙未拦截');
+                      }
+                    }}
+                    className="flex-1 py-2 rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50 text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> 诊断连接
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

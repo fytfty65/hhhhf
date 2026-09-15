@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { API_BASE, apiJson } from '../lib/utils';
 
-const BASE = 'http://localhost:8080/api/v1';
+const BASE = `${API_BASE}/api/v1`;
 
 interface Summary {
   total_budget: number;
@@ -27,43 +28,51 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
   const [note, setNote] = useState('');
   const [summary, setSummary] = useState<Summary | null>(null);
   const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
   const reload = useCallback(async () => {
+    if (!tripId) return;
+    setLoading(true);
+    setError('');
     try {
-      const r = await fetch(`${BASE}/budget/summary?user_id=${userId}&trip_id=${tripId}`);
-      const j = await r.json();
-      setSummary(j.summary as Summary);
+      const j = await apiJson<{ summary?: Summary }>(`${BASE}/budget/summary?trip_id=${encodeURIComponent(tripId)}`);
+      setSummary(j.summary || null);
     } catch (e) {
-      console.error(e);
+      setError(e instanceof Error ? e.message : '预算数据暂时不可用');
+    } finally {
+      setLoading(false);
     }
-  }, [userId, tripId]);
+  }, [tripId]);
 
   useEffect(() => {
     reload();
   }, [reload]);
 
   const setBudgetPlan = async () => {
-    const r = await fetch(`${BASE}/budget`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId, trip_id: tripId, total_budget: Number(budget), currency }),
-    });
-    const j = await r.json();
-    setMessage(j.message || '预算已保存');
-    reload();
+    const value = Number(budget);
+    if (!tripId || !Number.isFinite(value) || value <= 0) { setMessage('请输入大于 0 的预算金额'); return; }
+    setBusy(true); setError('');
+    try {
+      const j = await apiJson<{ message?: string }>(`${BASE}/budget`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, trip_id: tripId, total_budget: value, currency }) });
+      setMessage(j.message || '预算已保存');
+      await reload();
+    } catch (e) { setError(e instanceof Error ? e.message : '预算保存失败'); }
+    finally { setBusy(false); }
   };
 
   const addExpense = async () => {
-    const r = await fetch(`${BASE}/expense`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId, trip_id: tripId, category, amount: Number(amount), currency: expCurrency, note }),
-    });
-    const j = await r.json();
-    setMessage(j.summary?.level === 'over' ? '⚠️ 已超出预算，请注意控制消费！' : '消费已记录');
-    setAmount('');
-    setNote('');
-    reload();
+    const value = Number(amount);
+    if (!tripId || !Number.isFinite(value) || value <= 0) { setMessage('请输入大于 0 的消费金额'); return; }
+    setBusy(true); setError('');
+    try {
+      const j = await apiJson<{ message?: string; summary?: Summary }>(`${BASE}/expense`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, trip_id: tripId, category, amount: value, currency: expCurrency, note }) });
+      setMessage(j.summary?.level === 'over' ? '已超出预算，请注意控制消费节奏' : (j.message || '消费已记录'));
+      setAmount(''); setNote('');
+      await reload();
+    } catch (e) { setError(e instanceof Error ? e.message : '消费记录失败'); }
+    finally { setBusy(false); }
   };
 
   const levelMeta: Record<string, { label: string; cls: string }> = {
@@ -75,6 +84,8 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <h3 className="mb-4 text-lg font-semibold text-slate-800">智能预算管家</h3>
+      {!tripId && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">加入协作房间后即可记录这次行程的预算。</p>}
+      {error && <div className="mb-3 flex items-center justify-between gap-3 rounded-lg bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700"><span>{error}</span><button type="button" onClick={() => void reload()} className="shrink-0 underline">重试</button></div>}
 
       {/* 预算设置 */}
       <div className="mb-4 grid grid-cols-2 gap-2">
@@ -84,7 +95,7 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
             <option key={c} value={c}>{c}</option>
           ))}
         </select>
-        <button onClick={setBudgetPlan} className="col-span-2 rounded-lg bg-indigo-600 py-2 text-sm text-white hover:bg-indigo-700">设置预算</button>
+        <button onClick={() => void setBudgetPlan()} disabled={busy || !tripId} className="col-span-2 rounded-lg bg-indigo-600 py-2 text-sm text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{busy ? '处理中…' : '设置预算'}</button>
       </div>
 
       {/* 消费记录 */}
@@ -97,12 +108,13 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
         </select>
         <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="消费金额" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
         <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="备注（可选）" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-        <button onClick={addExpense} className="col-span-2 rounded-lg bg-slate-800 py-2 text-sm text-white hover:bg-slate-900">记一笔</button>
+        <button onClick={() => void addExpense()} disabled={busy || !tripId} className="col-span-2 rounded-lg bg-slate-800 py-2 text-sm text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50">记一笔</button>
       </div>
 
       {message && <p className="mb-3 text-xs font-medium text-indigo-600">{message}</p>}
 
       {/* 汇总 */}
+      {loading && <p className="mb-3 text-xs font-bold text-slate-400">正在同步预算…</p>}
       {summary && (
         <div className="rounded-xl bg-slate-50 p-4">
           <div className="flex items-end justify-between">

@@ -1,5 +1,6 @@
 // front/hooks/useOmniRouteWs.ts
 import { useState, useEffect, useRef } from 'react';
+import { WS_BASE, getAuthToken } from '../app/lib/utils';
 
 export interface AgentLog {
   role: string;
@@ -29,7 +30,7 @@ export function useOmniRouteWs(roomId: string) {
 
   useEffect(() => {
     // 连接到 Go 网关
-    const ws = new WebSocket(`ws://localhost:8080/api/v1/room/${roomId}/ws`);
+    const ws = new WebSocket(`${WS_BASE}/api/v1/room/${roomId}/ws?access_token=${encodeURIComponent(getAuthToken())}`);
     wsRef.current = ws;
 
     ws.onopen = () => setIsConnected(true);

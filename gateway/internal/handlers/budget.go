@@ -14,13 +14,26 @@ import (
 // SetBudgetHandler 创建或更新某行程的预算（支持多币种）。
 func SetBudgetHandler(c *gin.Context) {
 	var req struct {
-		UserID      string  `json:"user_id" binding:"required"`
+		UserID      string  `json:"user_id"` // legacy field; authenticated principal is authoritative
 		TripID      string  `json:"trip_id" binding:"required"`
 		TotalBudget float64 `json:"total_budget" binding:"required"`
 		Currency    string  `json:"currency"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整"})
+		return
+	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	if _, ok := requireTripOrRoomAccess(c, req.TripID); !ok {
+		return
+	}
+	// The authenticated principal, never the body, owns the budget record.
+	req.UserID = userID
+	if req.TotalBudget <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "预算必须大于 0"})
 		return
 	}
 	if req.Currency == "" {
@@ -56,7 +69,7 @@ func SetBudgetHandler(c *gin.Context) {
 // AddExpenseHandler 记录一笔实际消费（支持多币种，自动换算）。
 func AddExpenseHandler(c *gin.Context) {
 	var req struct {
-		UserID   string  `json:"user_id" binding:"required"`
+		UserID   string  `json:"user_id"` // legacy field; authenticated principal is authoritative
 		TripID   string  `json:"trip_id" binding:"required"`
 		Category string  `json:"category"`
 		Amount   float64 `json:"amount" binding:"required"`
@@ -65,6 +78,18 @@ func AddExpenseHandler(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整"})
+		return
+	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	if _, ok := requireTripOrRoomAccess(c, req.TripID); !ok {
+		return
+	}
+	req.UserID = userID
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "消费金额必须大于 0"})
 		return
 	}
 	if req.Category == "" {
@@ -101,12 +126,66 @@ func AddExpenseHandler(c *gin.Context) {
 	})
 }
 
+// OCRExpenseHandler 拍照记账：接收小票 OCR 文本，自动识别金额与分类并记一笔。
+// 该端点与具体 OCR 引擎解耦（前端/第三方负责产出 ocr_text），金额识别逻辑集中在 service.ParseReceipt。
+func OCRExpenseHandler(c *gin.Context) {
+	var req struct {
+		UserID   string `json:"user_id"` // legacy field; authenticated principal is authoritative
+		TripID   string `json:"trip_id" binding:"required"`
+		OCRText  string `json:"ocr_text" binding:"required"`
+		Currency string `json:"currency"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整"})
+		return
+	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	if _, ok := requireTripOrRoomAccess(c, req.TripID); !ok {
+		return
+	}
+	req.UserID = userID
+
+	receipt, ok := service.ParseReceipt(req.OCRText)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未能从小票中识别出金额，请手动录入"})
+		return
+	}
+
+	if req.Currency == "" || !service.IsKnownCurrency(req.Currency) {
+		req.Currency = receipt.Currency
+	}
+
+	exp := models.ExpenseRecord{
+		ID:       uuid.New().String(),
+		UserID:   req.UserID,
+		TripID:   req.TripID,
+		Category: receipt.Category,
+		Amount:   receipt.Amount,
+		Currency: req.Currency,
+		Note:     "拍照记账（OCR 自动识别）",
+	}
+	if err := database.DB.Create(&exp).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "消费记录失败"})
+		return
+	}
+
+	summary := service.BudgetSummaryFor(req.UserID, req.TripID)
+	c.JSON(http.StatusOK, gin.H{
+		"message": "拍照记账成功",
+		"expense": exp,
+		"receipt": receipt,
+		"summary": summary,
+	})
+}
+
 // ListExpensesHandler 列出某行程的全部消费记录（供前端复盘展示）。
 func ListExpensesHandler(c *gin.Context) {
-	userID := c.Query("user_id")
 	tripID := c.Query("trip_id")
-	if userID == "" || tripID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 user_id / trip_id"})
+	userID, ok := requireTripOrRoomAccess(c, tripID)
+	if !ok {
 		return
 	}
 
@@ -118,10 +197,9 @@ func ListExpensesHandler(c *gin.Context) {
 
 // BudgetSummaryHandler 获取预算汇总与超支预警（预算管家核心）。
 func BudgetSummaryHandler(c *gin.Context) {
-	userID := c.Query("user_id")
 	tripID := c.Query("trip_id")
-	if userID == "" || tripID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 user_id / trip_id"})
+	userID, ok := requireTripOrRoomAccess(c, tripID)
+	if !ok {
 		return
 	}
 
@@ -131,10 +209,9 @@ func BudgetSummaryHandler(c *gin.Context) {
 
 // BudgetReviewHandler 行程结束后的消费复盘报告（分类明细 + 可视化数据）。
 func BudgetReviewHandler(c *gin.Context) {
-	userID := c.Query("user_id")
 	tripID := c.Query("trip_id")
-	if userID == "" || tripID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 user_id / trip_id"})
+	userID, ok := requireTripOrRoomAccess(c, tripID)
+	if !ok {
 		return
 	}
 

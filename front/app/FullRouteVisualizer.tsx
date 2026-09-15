@@ -1,73 +1,92 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import dynamic from 'next/dynamic';
 import { 
-  Globe2, 
   Map as MapIcon, 
-  ShieldCheck, 
-  AlertTriangle, 
   Activity, 
   ArrowLeft,
   CheckCircle2,
-  AlertCircle,
   X,
   Scale,
   MapPin,
-  Car,
-  Hotel,
-  RotateCw
+  TrendingUp,
+  BarChart3,
 } from 'lucide-react';
+import {
+  RADAR_FONT,
+  parseCostNumber,
+  useRadarTheme,
+  radarPalette,
+  radarBackground,
+  radarSharedCss,
+} from './lib/radarTheme';
+import DraggablePanel from './components/DraggablePanel';
+import TripMacroDashboard from './components/TripMacroDashboard';
 import InteractiveAmapComponent, { RoutePoint, SafetyInfo } from './InteractiveAmapComponent';
 
-// 👑 SSR 安全导入：动态加载 3D 地球组件
-const Globe = dynamic(() => import('react-globe.gl'), {
-  ssr: false,
-  loading: () => (
-    <div className="absolute inset-0 z-[120] bg-slate-950/90 backdrop-blur-md text-white flex flex-col items-center justify-center gap-3">
-      <div className="w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
-      <span className="text-xs font-bold text-slate-300">正在载入 WorldMonitor 3D 全息态势雷达...</span>
-    </div>
-  )
-}) as any;
+function routeDay(point: any): number {
+  const structured = Number(point?.day);
+  if (Number.isFinite(structured) && structured > 0) return structured;
+  const text = `${point?.time || ''} ${point?.desc || ''}`;
+  const match = text.match(/Day\s*(\d+)/i);
+  return match ? Number(match[1]) : 1;
+}
 
-// 👑 智能实景图片渲染组件：彻底解决张冠李戴与破图问题
-export function RealPoiImage({ photoUrl, poiName, className = '' }: { photoUrl?: string; poiName: string; className?: string }) {
+// 👑 智能实景图片渲染组件：HTTPS 统一 + Referer 防盗链绕过 + 精美渐变兜底卡片（永不灰色占位）
+export function RealPoiImage({ photoUrl, poiName, className = '', type }: { photoUrl?: string; poiName: string; className?: string; type?: string }) {
+  const [loaded, setLoaded] = useState(false);
   const [imgError, setImgError] = useState(false);
 
-  // 统一升级 https + 兼容协议相对 `//`，禁用 Referer 绕过 CDN 防盗链
-  const normalizedUrl = (photoUrl && typeof photoUrl === 'string')
-    ? (photoUrl.startsWith('//') ? 'https:' + photoUrl : photoUrl.startsWith('http://') ? 'https://' + photoUrl.slice(7) : photoUrl)
-    : '';
-  const isValidUrl = Boolean(normalizedUrl.startsWith('https://'));
+  const normalizedUrl = (() => {
+    if (!photoUrl || typeof photoUrl !== 'string') return '';
+    let u = photoUrl.trim();
+    if (u.startsWith('//')) u = 'https:' + u;
+    else if (u.startsWith('http://')) u = 'https://' + u.slice(7);
+    return u.startsWith('https://') ? u : '';
+  })();
+  const showReal = Boolean(normalizedUrl) && !imgError;
 
-  const showReal = isValidUrl && !imgError;
+  if (!showReal) {
+    const typeLabel = type || '目的地';
+    const typeColor =
+      type?.includes('餐') || type?.includes('食') ? 'from-orange-500 to-rose-500'
+      : type?.includes('酒店') || type?.includes('住宿') ? 'from-indigo-500 to-purple-600'
+      : 'from-emerald-500 to-teal-600';
+    return (
+      <div className={`relative overflow-hidden rounded-xl ${className}`}>
+        <div className={`absolute inset-0 bg-gradient-to-br ${typeColor}`} />
+        <div className="absolute inset-0 opacity-20" style={{
+          backgroundImage: 'radial-gradient(circle at 2px 2px, rgba(255,255,255,0.3) 1px, transparent 0)',
+          backgroundSize: '16px 16px',
+        }} />
+        <div className="relative h-full w-full flex flex-col items-center justify-center gap-2 p-4">
+          <div className="w-12 h-12 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center">
+            <MapPin className="w-6 h-6 text-white" strokeWidth={2} />
+          </div>
+          <div className="text-center">
+            <p className="text-white font-bold text-sm leading-tight px-2 line-clamp-2 drop-shadow-md">{poiName}</p>
+            <p className="text-white/80 text-[10px] font-bold mt-1 tracking-wide">{typeLabel}·地图预览</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`relative overflow-hidden bg-slate-100 dark:bg-slate-800 rounded-xl ${className}`}>
-      {showReal ? (
-        <img
-          src={normalizedUrl}
-          alt={poiName}
-          onError={() => setImgError(true)}
-          className="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
-          loading="lazy"
-          referrerPolicy="no-referrer"
-        />
-      ) : (
-        <div className="flex flex-col items-center justify-center gap-1 w-full h-full">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-8 h-8 text-slate-300 dark:text-slate-600">
-            <rect x="3" y="5" width="18" height="14" rx="2" />
-            <circle cx="8.5" cy="10" r="1.5" />
-            <path d="m21 15-5-5L5 21" />
-          </svg>
-          <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 text-center px-2">{poiName}·实景暂不可用</span>
-        </div>
+      {!loaded && (
+        <div className="absolute inset-0 bg-gradient-to-br from-slate-200 to-slate-300 dark:from-slate-700 dark:to-slate-800 animate-pulse" />
       )}
-      <div className="absolute top-1.5 right-1.5 bg-slate-900/80 backdrop-blur text-[10px] text-orange-300 font-bold px-2 py-0.5 rounded-full border border-orange-500/30 pointer-events-none">
-        {showReal ? '📷 高德实景' : '实景暂不可用'}
-      </div>
+      <img
+        src={normalizedUrl}
+        alt={poiName}
+        onLoad={() => setLoaded(true)}
+        onError={() => setImgError(true)}
+        className={`w-full h-full object-cover transition-opacity duration-500 ${loaded ? 'opacity-100' : 'opacity-0'}`}
+        loading="lazy"
+        referrerPolicy="no-referrer"
+      />
     </div>
   );
 }
@@ -86,13 +105,6 @@ export function getNaviSteps(naviObj: any): string[] {
       .filter((s: string) => Boolean(s && s.length > 0));
   }
   return [];
-}
-
-// 从"门票 ¥45/人"、"人均餐饮 ¥65"、"住宿预留 ¥380/晚"等成本文本中解析出数字金额
-function parseCostNumber(cost?: string): number {
-  if (!cost) return 0;
-  const m = String(cost).match(/¥\s*([\d.]+)/);
-  return m ? parseFloat(m[1]) : 0;
 }
 
 interface FullRouteVisualizerProps {
@@ -125,126 +137,46 @@ export default function FullRouteVisualizer({
   trafficInfo,
   budgetData
 }: FullRouteVisualizerProps) {
-  // 控制 2D 地图 (MICRO) 与 3D 态势雷达 (MACRO)
+  const mode = useRadarTheme();
+  const COLORS = radarPalette(mode);
+
+  // 控制 2D 地图 (MICRO) 与 行程数据看板 (MACRO)
   const [viewState, setViewState] = useState<'MACRO' | 'MICRO'>('MICRO');
   const [windowReady, setWindowReady] = useState(false);
   const [showArbitrationModal, setShowArbitrationModal] = useState(false);
   const [activeArbitrationTab, setActiveArbitrationTab] = useState<'replacement' | 'original'>('replacement');
+  // 👑 记录「从看板节点点击跳回 2D」的原节点 idx，用于在 2D 提供「返回看板 + 定位原节点」快捷入口
+  const [returnDashboardNode, setReturnDashboardNode] = useState<number | null>(null);
 
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [globeDimensions, setGlobeDimensions] = useState({ width: 800, height: 600 });
-  const globeEl = useRef<any>(null);
-  const [macroAutoRotate, setMacroAutoRotate] = useState(true);
+  // 👑 时间轴状态：按天回放路线
+  const [timelineDay, setTimelineDay] = useState(1);
+  const timelineDays = useMemo(() => {
+    const days = new Set<number>(routes.map(routeDay));
+    return Array.from(days).sort((a, b) => a - b);
+  }, [routes]);
+
+  // 👑 按时间轴天过滤路线节点
+  const filteredRoutes = useMemo(() => {
+    return routes.filter((r: any) => routeDay(r) === timelineDay);
+  }, [routes, timelineDay]);
 
   useEffect(() => {
     setWindowReady(true);
   }, []);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
-    
-    const updateDimensions = () => {
-      if (containerRef.current) {
-        setGlobeDimensions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight
-        });
-      }
-    };
-
-    updateDimensions();
-    const observer = new ResizeObserver(() => updateDimensions());
-    observer.observe(containerRef.current);
-
-    return () => observer.disconnect();
-  }, [windowReady, viewState]);
-
-  useEffect(() => {
-    if (targetCityInfo && globeEl.current && viewState === 'MACRO') {
-      globeEl.current.pointOfView({ 
-        lat: targetCityInfo.lnglat[1], 
-        lng: targetCityInfo.lnglat[0], 
-        altitude: 1.6
-      }, 2000);
-    }
-  }, [targetCityInfo, viewState]);
-
-  // 地球自动巡航：默认缓慢自转，支持手动拖拽探索（带阻尼）
-  useEffect(() => {
-    if (globeEl.current && globeEl.current.controls) {
-      const ctrl = globeEl.current.controls();
-      if (ctrl) {
-        ctrl.autoRotate = macroAutoRotate;
-        ctrl.autoRotateSpeed = 0.85;
-        ctrl.enableDamping = true;
-        ctrl.dampingFactor = 0.08;
-      }
-    }
-  }, [macroAutoRotate, globeDimensions, viewState]);
-
-  const destLng = routes.length > 0 ? routes[0].lnglat[0] : (targetCityInfo?.lnglat[0] || 110.34);
-  const destLat = routes.length > 0 ? routes[0].lnglat[1] : (targetCityInfo?.lnglat[1] || 20.03);
   const cityName = targetCityInfo?.name || (routes.length > 0 ? routes[0].name : '目标城市');
-  
-  const hasRealCii = typeof safetyInfo?.cii_score === 'number';
-  const ciiScore = hasRealCii ? (safetyInfo?.cii_score as number) : 0;
-  const isHighRisk = hasRealCii && ciiScore > 30;
 
-  const macroArcs: any[] = [
-    { startLat: 39.90, startLng: 116.40, endLat: destLat, endLng: destLng, color: ['#ffffff', '#f97316'] },
-    { startLat: 31.23, startLng: 121.47, endLat: destLat, endLng: destLng, color: ['#f97316', '#eab308'] } 
-  ];
-
-  if (routes.length > 1) {
-    for (let i = 0; i < routes.length - 1; i++) {
-      macroArcs.push({
-        startLat: routes[i].lnglat[1],
-        startLng: routes[i].lnglat[0],
-        endLat: routes[i + 1].lnglat[1],
-        endLng: routes[i + 1].lnglat[0],
-        color: ['#f97316', '#38bdf8']
-      });
-    }
-  }
-
-  const elementsData = routes.length > 0 
-    ? routes.map((pt, idx) => ({
-        name: pt.name,
-        desc: pt.desc || '全域雷达正在扫描当地时空拓扑，监控路况与气象...',
-        lat: pt.lnglat[1],
-        lng: pt.lnglat[0],
-        index: idx + 1,
-        isMain: idx === 0,
-        cii: ciiScore
-      }))
-    : (targetCityInfo ? [{
-        name: targetCityInfo.name,
-        desc: '目标城市核心中枢拓扑已接入...',
-        lat: targetCityInfo.lnglat[1],
-        lng: targetCityInfo.lnglat[0],
-        index: 1,
-        isMain: true,
-        cii: ciiScore
-      }] : []);
-
-  const ringsData = [
-    {
-      lat: destLat,
-      lng: destLng,
-      maxR: ciiScore / 3 + 4,
-      propagationSpeed: 2,
-      repeatPeriod: 1000,
-      color: isHighRisk ? 'rgba(244, 63, 94, 0.8)' : 'rgba(245, 158, 11, 0.8)'
-    }
-  ];
+  // ⚠️ 职责分离：行程数据看板聚焦「成本分布 / 时间轴 / 预算」，风险维度（CII/五维/告警/天气路况）统一归属 WorldSafetyGlobe 3D 态势感知雷达
 
   const realReplacementNode = routes.find(r => r.tags?.includes('住宿') || r.name.includes('酒店') || r.name.includes('民宿')) 
     || (routes.length > 0 ? routes[routes.length - 1] : { name: '精选品质宿所/特色体验点' });
 
-  // 👑 基于真实节点成本计算博弈裁决数据（替代硬编码的"预算偏离红线"话术）
-  const dayNodes = (routes || []).filter((r: any) => r && typeof r.name === 'string');
+  // 👑 基于「当前时间轴天」的真实节点成本计算博弈裁决数据（修复：此前误用全程 nodes，导致"今日"口径=全程总消费）
+  const dayNodes = (filteredRoutes || []).filter((r: any) => r && typeof r.name === 'string');
   const dayTotal = dayNodes.reduce((sum: number, r: any) => sum + parseCostNumber(r.cost), 0);
   const dailyBudget = Number(budgetData?.daily_avg || budgetData?.total_budget || 0);
+  // 👑 人均估算 = 当日总消费 ÷ 出行人数（后端下发 member_count；缺省按 1 人，避免误除导致数值失真）
+  const memberCount = Math.max(1, Number(budgetData?.member_count || 1));
   const highestCostNode = dayNodes.length > 0
     ? dayNodes.reduce((max: any, r: any) => (parseCostNumber(r.cost) > parseCostNumber(max.cost) ? r : max), dayNodes[0])
     : null;
@@ -253,16 +185,31 @@ export default function FullRouteVisualizer({
     : null;
   const overrun = dailyBudget > 0 ? dayTotal - dailyBudget : 0;
   const hasOverrun = overrun > 0;
-  const avgCost = dayNodes.length > 0 ? Math.round(dayTotal / dayNodes.length) : 0;
+  const avgCost = dayNodes.length > 0 ? Math.round(dayTotal / memberCount) : 0;
   const overrunPercent = dailyBudget > 0 ? Math.max(0, Math.round((overrun / dailyBudget) * 100)) : 0;
   // 按成本降序排列的节点，用于决策看板成本条形图
   const costSortedNodes = [...dayNodes].sort((a, b) => parseCostNumber(b.cost) - parseCostNumber(a.cost)).slice(0, 6);
   const maxNodeCost = costSortedNodes.length > 0 ? Math.max(1, parseCostNumber(costSortedNodes[0].cost)) : 1;
 
+  // 👑 多日预算滚动预测：逐日累计花费 vs 累计预算，提前预警后期超支
+  const dailyForecast = useMemo(() => {
+    const days = timelineDays;
+    const perDay = days.map((d) => {
+      const nodes = routes.filter((r: any) => {
+        return routeDay(r) === d;
+      });
+      const cost = nodes.reduce((s: number, r: any) => s + parseCostNumber(r.cost), 0);
+      return { day: d, cost, over: dailyBudget > 0 && cost > dailyBudget };
+    });
+    const totalSpent = perDay.reduce((s, d) => s + d.cost, 0);
+    const totalBudget = Number(budgetData?.total_budget || dailyBudget * days.length || 0);
+    return { perDay, totalSpent, totalBudget, remaining: totalBudget - totalSpent };
+  }, [routes, timelineDays, dailyBudget, budgetData]);
+
   if (!windowReady) return null;
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-slate-900 overflow-hidden flex select-none">
+    <div className="relative w-full h-full bg-slate-900 overflow-hidden flex select-none">
       
       {/* 主地图视图 */}
       <div className="relative flex-1 h-full w-full">
@@ -280,10 +227,10 @@ export default function FullRouteVisualizer({
         />
 
         {/* 👑 彻底解决遮挡问题：动作条置于右上角，图层优先级升至 z-50，高亮“返回大厅”按钮 */}
-        <div className="absolute top-6 right-6 z-50 flex items-center gap-2.5 pointer-events-auto flex-wrap justify-end">
+        <div className="visualizer-action-dock absolute top-4 right-4 sm:top-6 sm:right-6 z-50 flex items-center gap-2.5 pointer-events-auto flex-wrap justify-end">
           <button
             onClick={() => setShowArbitrationModal(true)}
-            className="bg-slate-900/90 hover:bg-slate-800 text-amber-400 border border-amber-500/40 px-3.5 py-2 rounded-2xl shadow-2xl flex items-center gap-2 text-xs font-bold transition-all hover:scale-105 cursor-pointer backdrop-blur-md"
+            className="visualizer-action-button bg-slate-900/90 hover:bg-slate-800 text-amber-400 border border-amber-500/40 px-3.5 py-2 rounded-2xl shadow-2xl flex items-center gap-2 text-xs font-bold transition-all cursor-pointer backdrop-blur-md"
           >
             <Scale className="w-4 h-4 text-amber-400" />
             <span>博弈裁决看板</span>
@@ -291,7 +238,9 @@ export default function FullRouteVisualizer({
 
           <button
             onClick={() => setViewState(prev => prev === 'MACRO' ? 'MICRO' : 'MACRO')}
-            className="bg-slate-900/90 hover:bg-slate-800 text-white px-3.5 py-2 rounded-2xl border border-slate-700 shadow-2xl flex items-center gap-2 text-xs font-bold transition-all hover:scale-105 cursor-pointer backdrop-blur-md"
+            aria-pressed={viewState === 'MACRO'}
+            aria-label={viewState === 'MACRO' ? '返回 2D 导航' : '切换到行程数据看板'}
+            className="visualizer-action-button bg-slate-900/90 hover:bg-slate-800 text-white px-3.5 py-2 rounded-2xl border border-slate-700 shadow-2xl flex items-center gap-2 text-xs font-bold transition-all cursor-pointer backdrop-blur-md"
           >
             {viewState === 'MACRO' ? (
               <>
@@ -300,8 +249,8 @@ export default function FullRouteVisualizer({
               </>
             ) : (
               <>
-                <Globe2 className="w-4 h-4 text-cyan-400 animate-spin-slow" />
-                <span>3D 风控雷达</span>
+                <BarChart3 className="w-4 h-4 text-cyan-400" />
+                <span>行程数据看板</span>
               </>
             )}
           </button>
@@ -310,7 +259,7 @@ export default function FullRouteVisualizer({
           {onExit && (
             <button 
               onClick={onExit} 
-              className="bg-orange-500 hover:bg-orange-600 text-white backdrop-blur-md px-4 py-2 rounded-2xl border border-orange-400 shadow-2xl flex items-center gap-1.5 text-xs font-bold transition-all hover:scale-105 cursor-pointer"
+              className="visualizer-action-button bg-orange-500 hover:bg-orange-600 text-white backdrop-blur-md px-4 py-2 rounded-2xl border border-orange-400 shadow-2xl flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer"
               title="返回大厅"
             >
               <ArrowLeft className="w-4 h-4" />
@@ -318,6 +267,42 @@ export default function FullRouteVisualizer({
             </button>
           )}
         </div>
+
+        {/* 👑 从看板节点点击跳回 2D 后：返回看板快捷入口 + 定位原节点悬停态 */}
+        {viewState === 'MICRO' && returnDashboardNode !== null && (
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 pointer-events-auto">
+            <div className="group relative flex items-center gap-1.5 rounded-2xl bg-slate-900/90 backdrop-blur-md border border-cyan-500/40 shadow-2xl pl-1.5 pr-1 py-1.5">
+              <button
+                onClick={() => onPoiSelect(returnDashboardNode)}
+                title={`定位节点：${routes[returnDashboardNode]?.name || '—'}`}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-cyan-300 hover:bg-cyan-500/10 text-xs font-bold transition-all cursor-pointer"
+              >
+                <MapPin className="w-3.5 h-3.5" />
+                定位
+              </button>
+              <button
+                onClick={() => setViewState('MACRO')}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-orange-500/15 border border-orange-500/40 text-orange-300 hover:bg-orange-500/25 text-xs font-bold transition-all cursor-pointer"
+              >
+                <BarChart3 className="w-4 h-4" />
+                返回看板
+              </button>
+              <button
+                onClick={() => setReturnDashboardNode(null)}
+                aria-label="关闭快捷入口"
+                className="px-1.5 py-1.5 rounded-lg text-slate-500 hover:text-slate-300 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+              {/* 悬停提示：原节点信息 */}
+              <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-200 whitespace-nowrap">
+                <div className="bg-slate-900/95 border border-cyan-500/30 text-white rounded-xl px-3 py-2 text-xs shadow-xl">
+                  已定位节点 <span className="text-cyan-300 font-bold">#{returnDashboardNode + 1} {routes[returnDashboardNode]?.name || '—'}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* 多智能体动态博弈裁决看板 Modal */}
         <AnimatePresence>
@@ -348,7 +333,7 @@ export default function FullRouteVisualizer({
 
                 <div className="grid grid-cols-4 gap-2 my-4">
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
-                    <div className="text-[10px] text-slate-400 font-bold">今日总消费</div>
+                    <div className="text-[10px] text-slate-400 font-bold">Day {timelineDay} 消费</div>
                     <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{dayTotal}</div>
                   </div>
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
@@ -362,8 +347,8 @@ export default function FullRouteVisualizer({
                     </div>
                   </div>
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
-                    <div className="text-[10px] text-slate-400 font-bold">人均估算</div>
-                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{avgCost}</div>
+                    <div className="text-[10px] text-slate-400 font-bold">人均估计</div>
+                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{avgCost}<span className="text-[9px] text-slate-400 font-normal">/{memberCount}人</span></div>
                   </div>
                 </div>
 
@@ -407,6 +392,32 @@ export default function FullRouteVisualizer({
                         );
                       })}
                     </div>
+                  </div>
+                )}
+
+                {/* 👑 多日预算滚动预测 */}
+                {dailyForecast.perDay.length > 1 && (
+                  <div className="mb-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl p-3.5">
+                    <div className="text-[11px] font-bold text-slate-500 mb-2.5 flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-emerald-500" /> 多日预算滚动预测
+                      <span className="ml-auto font-mono text-[10px] text-slate-400">
+                        累计 ¥{dailyForecast.totalSpent} / ¥{dailyForecast.totalBudget || '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-end gap-2 h-20">
+                      {dailyForecast.perDay.map((d) => {
+                        const barH = Math.max(3, Math.round((d.cost / (dailyBudget > 0 ? dailyBudget : 1)) * 100));
+                        return (
+                          <div key={d.day} className="flex-1 flex flex-col items-center gap-1" title={`Day ${d.day}: ¥${d.cost}`}>
+                            <div className={`w-full rounded-t ${d.over ? 'bg-rose-500' : 'bg-emerald-500/80'}`} style={{ height: `${Math.min(100, barH)}%` }} />
+                            <span className={`text-[9px] font-bold ${d.over ? 'text-rose-500' : 'text-slate-500'}`}>D{d.day}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {dailyForecast.remaining < 0 && (
+                      <div className="text-[10px] text-rose-500 font-bold mt-2">⚠ 预计超总预算 ¥{Math.abs(Math.round(dailyForecast.remaining))}，建议调低后续天数成本节点。</div>
+                    )}
                   </div>
                 )}
 
@@ -460,194 +471,110 @@ export default function FullRouteVisualizer({
           )}
         </AnimatePresence>
 
-        {/* 全屏 3D 风控雷达 View */}
+        {/* 全屏 行程数据看板 View */}
         <AnimatePresence>
           {viewState === 'MACRO' && (
             <motion.div 
-              key="macro-view-globe"
+              key="macro-view-dashboard"
               initial={{ opacity: 0 }} 
               animate={{ opacity: 1 }} 
               exit={{ opacity: 0, scale: 1.2 }}
               transition={{ duration: 0.5 }}
-              className="absolute inset-0 w-full h-full z-20 bg-slate-950 flex items-center justify-center cursor-grab active:cursor-grabbing"
+              className="absolute inset-0 w-full h-full z-20 overflow-hidden"
+              style={{ background: radarBackground(mode) }}
             >
-              <Globe
-                ref={globeEl}
-                globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
-                bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
-                backgroundImageUrl="//unpkg.com/three-globe/example/img/night-sky.png"
-                
-                width={globeDimensions.width}
-                height={globeDimensions.height}
-                
-                showAtmosphere={true}
-                atmosphereColor="#3b82f6"
-                atmosphereAltitude={0.2}
+              {/* 星空背景层 */}
+              <div className="absolute inset-0 pointer-events-none overflow-hidden">
+                <div className="absolute inset-0" style={{
+                  background: 'radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.6), transparent), radial-gradient(1px 1px at 60% 70%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 80% 20%, rgba(255,255,255,0.7), transparent), radial-gradient(2px 2px at 40% 80%, rgba(180,200,255,0.4), transparent), radial-gradient(1px 1px at 10% 60%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 90% 50%, rgba(255,255,255,0.6), transparent), radial-gradient(1px 1px at 50% 10%, rgba(200,220,255,0.5), transparent), radial-gradient(2px 2px at 70% 90%, rgba(255,255,255,0.3), transparent), radial-gradient(1px 1px at 30% 90%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 15% 15%, rgba(255,255,255,0.4), transparent)',
+                }} />
+                <div className="absolute inset-0 opacity-20" style={{
+                  background: 'radial-gradient(ellipse 80% 20% at 70% 30%, rgba(56,189,248,0.15), transparent), radial-gradient(ellipse 60% 15% at 20% 70%, rgba(139,92,246,0.1), transparent)'
+                }} />
+              </div>
+              {/* 网格背景 */}
+              <div className="absolute inset-0 opacity-[0.04] pointer-events-none" style={{
+                backgroundImage: 'linear-gradient(rgba(56,189,248,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(56,189,248,0.5) 1px, transparent 1px)',
+                backgroundSize: '80px 80px'
+              }} />
 
-                arcsData={macroArcs}
-                arcStartLat="startLat" arcStartLng="startLng" 
-                arcEndLat="endLat" arcEndLng="endLng"
-                arcColor="color" 
-                arcDashLength={0.4} arcDashGap={0.2} arcDashAnimateTime={1800}
-                arcStroke={1.3}
+              {/* 扫描线 / 暗角 */}
+              <div className="absolute inset-0 pointer-events-none radar-scanlines opacity-70" />
+              <div className="absolute inset-0 pointer-events-none radar-vignette" />
 
-                ringsData={ringsData}
-                ringColor="color"
-                ringMaxRadius="maxR"
-                ringPropagationSpeed="propagationSpeed"
-                ringRepeatPeriod="repeatPeriod"
-                
-                htmlElementsData={elementsData}
-                htmlElement={(d: any) => {
-                   const el = document.createElement('div');
-                   el.style.pointerEvents = 'auto';
-                   el.style.cursor = 'pointer';
-                   // 👑 态势节点可交互：点击聚焦到 2D 地图对应节点
-                   el.onclick = () => {
-                     if (d.index) onPoiSelect(d.index - 1);
-                     setViewState('MICRO');
-                   };
-                   el.innerHTML = `
-                    <div class="flex flex-col items-center group cursor-pointer">
-                      <div class="bg-slate-900/90 text-white p-3 rounded-2xl shadow-[0_10px_35px_rgba(249,115,22,0.4)] border border-orange-500/50 max-w-xs transform transition-all duration-300 hover:scale-110 backdrop-blur">
-                        <div class="flex items-center justify-between gap-2 mb-1">
-                          <span class="text-[10px] font-black text-white bg-orange-500 px-2 py-0.5 rounded-full">
-                            打卡点 ${d.index}
-                          </span>
-                          <span class="text-[10px] text-slate-400 font-mono">${d.isMain ? '起点/核心' : '全息节点'}</span>
-                        </div>
-                        <h3 class="text-sm font-black text-orange-400 tracking-tight">${d.name}</h3>
-                        <p class="text-[11px] text-slate-300 line-clamp-2 mt-1 leading-relaxed">${d.desc}</p>
-                        <div class="text-[9px] text-orange-400/70 mt-1.5 text-center">点击聚焦 2D 导航定位</div>
-                      </div>
-                      <div class="w-0.5 h-6 bg-gradient-to-b from-orange-500 to-transparent opacity-80"></div>
-                      <div class="w-3.5 h-3.5 bg-orange-500 rounded-full ring-4 ring-orange-300/80 shadow-[0_0_20px_#f97316] animate-ping"></div>
+              {/* 顶部HUD */}
+              <div className="absolute top-0 left-0 right-0 z-50 px-6 py-4 flex items-center justify-between pointer-events-none">
+                <div className="flex items-center gap-4 pointer-events-auto">
+                  <div className="relative">
+                    <div className="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center">
+                      <BarChart3 className="w-5 h-5 text-sky-600 dark:text-sky-400" />
                     </div>
-                   `;
-                   return el;
-                }}
-              />
-              
-              <div className="absolute top-8 left-8 z-10 pointer-events-none">
-                <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 shadow-2xl p-5 rounded-3xl max-w-sm text-white">
-                  <h2 className="text-xl font-black text-white tracking-tight flex items-center gap-2.5">
-                    <div className={`w-3 h-3 rounded-full ${phase === 'deduction' ? 'bg-rose-500 animate-pulse' : 'bg-rose-500'}`} />
-                    <span>OmniRoute 3D 风控雷达</span>
-                    <span className="text-[10px] bg-rose-500/20 text-rose-300 border border-rose-400/40 px-2 py-0.5 rounded-full font-mono font-bold">
-                      风控 RISK CONTROL
-                    </span>
-                  </h2>
-                  <p className="text-slate-400 mt-1.5 text-xs font-medium leading-relaxed">
-                    {phase === 'deduction' 
-                      ? `多智能体正在评估【${cityName}】CII 风险与安全隐患，计算最优时空拓扑...` 
-                      : `已评估【${cityName}】综合风险，覆盖 ${routes.length} 个节点的 CII 风险与安全隐患链路。`}
-                  </p>
-                </div>
-              </div>
-
-              {/* 自动巡航开关 */}
-              <div className="absolute top-24 left-8 z-10 pointer-events-auto">
-                <button
-                  onClick={() => setMacroAutoRotate(v => !v)}
-                  className={`backdrop-blur-md px-3.5 py-2 rounded-2xl border shadow-2xl transition-all hover:scale-105 cursor-pointer flex items-center gap-2 text-xs font-bold ${
-                    macroAutoRotate
-                      ? 'bg-sky-500/20 text-sky-300 border-sky-400/40'
-                      : 'bg-slate-900/80 text-slate-300 border-slate-700'
-                  }`}
-                >
-                  <RotateCw className={`w-4 h-4 ${macroAutoRotate ? 'animate-spin-slow' : ''}`} />
-                  <span>{macroAutoRotate ? '自动巡航 开' : '自动巡航 关'}</span>
-                </button>
-              </div>
-
-              {/* WorldMonitor 全息安全简报 */}
-              <div className="absolute bottom-8 left-8 z-10 w-96 bg-slate-900/90 backdrop-blur-md border border-slate-800 p-5 rounded-3xl text-white shadow-2xl space-y-3 pointer-events-auto">
-                <div className="flex items-center justify-between pb-2.5 border-b border-slate-800">
-                  <div className="flex items-center gap-2">
-                    <Activity className="w-4 h-4 text-orange-400" />
-                    <span className="font-bold text-sm text-orange-400">WorldMonitor 安全风控简报</span>
+                    <div className="absolute inset-0 w-10 h-10 rounded-xl bg-sky-400/20 animate-ping" />
                   </div>
-                  <span className="text-xs font-mono bg-orange-500/20 text-orange-300 border border-orange-500/30 px-2.5 py-0.5 rounded-full">
-                    CII: {hasRealCii ? ciiScore.toFixed(1) : '待评估'}
-                  </span>
-                </div>
-
-                {/* CII 综合风险仪表盘 */}
-                {hasRealCii && (
-                  <div className="bg-slate-800/50 p-3 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between text-[11px] font-bold">
-                      <span className="text-slate-300">综合风险指数</span>
-                      <span className={ciiScore > 40 ? 'text-rose-400' : ciiScore > 20 ? 'text-amber-400' : 'text-emerald-400'}>
-                        {ciiScore > 40 ? '高危' : ciiScore > 20 ? '预警' : '安全'}
+                  <div>
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-slate-900 dark:text-white font-black text-xl tracking-[0.25em]" style={{ fontFamily: RADAR_FONT.display, textShadow: '0 0 20px rgba(56,189,248,0.45)' }}>OMNIROUTE</h2>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded border border-orange-500/30 text-orange-600 dark:text-orange-300 bg-orange-500/10 tracking-wider">
+                        行程数据看板
+                      </span>
+                      <span className="text-[10px] text-slate-500" style={{ fontFamily: RADAR_FONT.data }}>v3.0</span>
+                    </div>
+                    <div className="flex items-center gap-4 mt-0.5">
+                      <p className="text-[11px] text-slate-700 dark:text-slate-300 tracking-wide" style={{ fontFamily: RADAR_FONT.data }}>
+                        {cityName} <span className="text-slate-500">·</span> {routes.length} 节点 <span className="text-slate-500">·</span> 今日 <span className="text-amber-600 dark:text-amber-300">¥{dayTotal}</span>
+                      </p>
+                      <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${hasOverrun ? 'bg-rose-500/10 text-rose-500' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'}`}>
+                        {hasOverrun ? '超支预警' : dailyBudget > 0 ? '预算健康' : '未设预算'}
                       </span>
                     </div>
-                    <div className="relative h-2.5 w-full rounded-full bg-slate-700/70 overflow-hidden">
-                      <div
-                        className="h-full rounded-full transition-all duration-700"
-                        style={{ width: `${Math.max(0, Math.min(100, ciiScore))}%`, background: 'linear-gradient(90deg, #10b981, #f59e0b, #f43f5e)' }}
-                      />
-                    </div>
-                    <div className="flex justify-between text-[9px] font-mono text-slate-500">
-                      <span>0</span><span>20</span><span>40</span><span>100</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* 实时气象 + 路况：来自高德/心知真实数据，非写死占位 */}
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="bg-slate-800/60 p-2.5 rounded-xl">
-                    <div className="text-[10px] text-slate-400 font-bold mb-1">实时气象</div>
-                    <div className="text-xs font-bold text-slate-200">
-                      {weatherInfo?.condition ? String(weatherInfo.condition) : '获取中'}
-                    </div>
-                  </div>
-                  <div className="bg-slate-800/60 p-2.5 rounded-xl">
-                    <div className="text-[10px] text-slate-400 font-bold mb-1">实时路况</div>
-                    <div className="text-xs font-bold text-slate-200">
-                      {(trafficInfo?.description || trafficInfo?.advice) ? String(trafficInfo.description || trafficInfo.advice) : '数据获取中'}
-                    </div>
                   </div>
                 </div>
-
-                <div className="space-y-2 text-xs text-slate-300 max-h-40 overflow-y-auto pr-1">
-                  {safetyInfo?.active_alerts && safetyInfo.active_alerts.length > 0 ? (
-                    safetyInfo.active_alerts.map((alert, idx) => (
-                      <div key={idx} className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/80">
-                        <div className="font-bold text-amber-400 mb-1 flex items-center gap-1.5">
-                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                          <span>{alert.title}</span>
-                        </div>
-                        <div className="text-[11px] text-slate-300 leading-relaxed">{alert.detail}</div>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="space-y-2">
-                      <div className="bg-slate-800/60 p-2.5 rounded-xl border border-slate-700/60">
-                        <div className="font-bold text-slate-300 mb-1 flex items-center gap-1">
-                          <ShieldCheck className="w-3.5 h-3.5" /> 实时风控状态
-                        </div>
-                        <p className="text-[11px] text-slate-400 leading-relaxed">
-                          {hasRealCii
-                            ? `【${cityName}】综合风险指数 CII ${ciiScore.toFixed(1)}（${safetyInfo?.risk_level || 'LOW'}），当前无中高风险预警。`
-                            : `【${cityName}】暂未接入第三方实时风控数据，风险评级待评估；安全数据源就绪后将自动刷新。`}
-                        </p>
-                      </div>
-                    </div>
-                  )}
+                <div className="flex items-center gap-2 pointer-events-auto">
+                  <button onClick={() => setShowArbitrationModal(true)} className="h-8 px-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-300 hover:bg-amber-500/20 transition-all flex items-center gap-1.5 text-[10px] font-bold cursor-pointer">
+                    <Scale className="w-3 h-3" /> 裁决看板
+                  </button>
+                  <button onClick={() => setViewState('MICRO')} className="h-8 px-3 rounded-lg bg-slate-900/5 dark:bg-white/5 border border-slate-300/70 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:bg-slate-900/10 dark:hover:bg-white/10 transition-all flex items-center gap-1.5 text-[10px] font-bold cursor-pointer">
+                    <MapIcon className="w-3 h-3" /> 2D地图
+                  </button>
                 </div>
-
-                {safetyInfo?.safety_advice && (
-                  <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-300 leading-relaxed">
-                    <span className="text-orange-400 font-bold">智能体避险建议：</span>
-                    {safetyInfo.safety_advice}
-                  </div>
-                )}
               </div>
+
+              {/* 行程数据看板 */}
+              <TripMacroDashboard
+                mode={mode}
+                timelineDay={timelineDay}
+                timelineDays={timelineDays}
+                routes={routes}
+                dayTotal={dayTotal}
+                dailyBudget={dailyBudget}
+                memberCount={memberCount}
+                avgCost={avgCost}
+                overrun={overrun}
+                hasOverrun={hasOverrun}
+                costSortedNodes={costSortedNodes}
+                maxNodeCost={maxNodeCost}
+                dailyForecast={dailyForecast}
+                onDayChange={setTimelineDay}
+                onPoiSelect={(idx: number) => { onPoiSelect(idx); setReturnDashboardNode(idx); setViewState('MICRO'); }}
+              />
             </motion.div>
           )}
         </AnimatePresence>
       </div>
 
+      {/* 全局动画样式（统一共享动画与滚动条 CSS） */}
+      <style>{`
+        ${radarSharedCss(mode)}
+        .animate-marquee { animation-duration: 25s; }
+        @keyframes risk-pulse-halo {
+          0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.7); }
+          70% { box-shadow: 0 0 0 18px rgba(244, 63, 94, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
+        }
+        .risk-pulse-halo {
+          animation: risk-pulse-halo 2s ease-out infinite;
+        }
+      `}</style>
     </div>
   );
 }

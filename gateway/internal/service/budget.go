@@ -1,6 +1,11 @@
 package service
 
 import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+
 	"gateway/internal/database"
 	"gateway/internal/models"
 )
@@ -160,4 +165,41 @@ func BudgetSummaryFor(userID, tripID string) ExpenseSummary {
 		currency = "CNY"
 	}
 	return SummarizeBudget(plan.TotalBudget, currency, expenses)
+}
+
+// routeCostRe 从路线节点的 cost / cost_estimate 字段提取首个金额数字（支持 ¥/￥/元 前缀、千分位逗号与小数）。
+var routeCostRe = regexp.MustCompile(`(\d[\d,]*(?:[.,]\d{1,2})?)`)
+
+// routeNodeCost 解析单个路线节点的费用字段，无法识别时返回 0。
+func routeNodeCost(node map[string]interface{}) float64 {
+	for _, key := range []string{"cost", "cost_estimate"} {
+		raw, ok := node[key]
+		if !ok {
+			continue
+		}
+		s := strings.TrimSpace(fmt.Sprint(raw))
+		if s == "" {
+			continue
+		}
+		if m := routeCostRe.FindStringSubmatch(s); m != nil {
+			if v, ok := parseAmountString(m[1]); ok {
+				return v
+			}
+		}
+	}
+	return 0
+}
+
+// EstimateRouteBudget 从方案路线 JSON 估算总预算（累加各节点人均费用），
+// 供「采纳→费用追踪」闭环建立预算基线。无法解析时返回 0（调用方可选兜底）。
+func EstimateRouteBudget(routeJSON string) float64 {
+	var nodes []map[string]interface{}
+	if err := json.Unmarshal([]byte(routeJSON), &nodes); err != nil {
+		return 0
+	}
+	total := 0.0
+	for _, n := range nodes {
+		total += routeNodeCost(n)
+	}
+	return round2(total)
 }
