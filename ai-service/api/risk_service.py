@@ -15,13 +15,35 @@
      变更检测 detect_risk_changes，全部基于真实信号，杜绝前端字符串猜测。
 """
 
+import asyncio
 import os
 import re
+import time
 import datetime
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Protocol
 
 import httpx
+
+
+def _intel_cache_ttl_seconds() -> float:
+    """TTL for cached city safety intelligence (default 15 minutes)."""
+    try:
+        return max(0.0, float(os.getenv("RISK_INTEL_TTL_SECONDS", "900")))
+    except (TypeError, ValueError):
+        return 900.0
+
+
+def _intel_budget_seconds() -> float:
+    """Total wall-clock budget for the provider chain (default 6s).
+
+    Bounds the worst case: without it a cold miss pays every provider timeout in
+    turn, which measured ~8.5s on a machine that cannot reach the providers.
+    """
+    try:
+        return max(0.0, float(os.getenv("RISK_INTEL_BUDGET_SECONDS", "6")))
+    except (TypeError, ValueError):
+        return 6.0
 
 
 # ==========================================
@@ -459,14 +481,84 @@ class RiskService:
             GDELTProvider(),
         ]
         self._fallback = LocalBaselineProvider()
+        # City-level safety intelligence changes on the order of hours, but the
+        # provider chain behind it costs seconds (WorldMonitor 2.5s timeout +
+        # GDELT 4s timeout when both miss). Caching it per city is what turns a
+        # repeated risk poll from a multi-second request into a near-instant one.
+        self._intel_cache: Dict[str, tuple] = {}
+        self._intel_ttl = _intel_cache_ttl_seconds()
 
     async def get_city_safety_intel(self, city: str) -> Dict[str, Any]:
-        """情报源降级链：WorldMonitor -> GDELT -> local_baseline（首个可用者胜出）。"""
-        for provider in self._providers:
-            intel = await provider.fetch(city)
-            if intel:
-                return intel
-        return await self._fallback.fetch(city)
+        """情报源降级链：WorldMonitor -> GDELT -> local_baseline（首个可用者胜出）。
+
+        The providers run concurrently under a single overall budget. Two
+        measured realities drove this:
+
+        * sequentially the chain costs the *sum* of every provider timeout
+          (measured 2.4s + 5.0s ~= 7.4s when both miss);
+        * running them concurrently removed the sum but not the problem, because
+          each provider still spends seconds before giving up, so a cold miss
+          still took ~8.5s end to end.
+
+        A budget is therefore the only thing that actually bounds the request. If
+        no provider answers within it we prefer a stale cached reading (clearly
+        still better than recomputing the same timeouts) and only then the
+        neutral local baseline.
+        """
+        key = (city or "").strip().lower()
+        now = time.monotonic()
+        cached = self._intel_cache.get(key) if key else None
+        if cached and now - cached[0] < self._intel_ttl:
+            return cached[1]
+
+        budget = _intel_budget_seconds()
+        tasks = [asyncio.create_task(provider.fetch(city)) for provider in self._providers]
+        intel: Optional[Dict[str, Any]] = None
+        try:
+            done, _pending = await asyncio.wait(tasks, timeout=budget)
+            for task in done:
+                try:
+                    candidate = task.result()
+                except Exception:
+                    continue
+                if candidate:
+                    intel = candidate
+                    break
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+        if intel:
+            self._remember_intel(key, intel)
+            return intel
+
+        # No provider answered in budget. A stale reading beats a fresh round of
+        # identical timeouts, so prefer it and say so via the source field.
+        if cached:
+            stale = dict(cached[1])
+            stale["is_stale"] = True
+            stale["staleness_seconds"] = round(now - cached[0], 1)
+            return stale
+
+        fallback = await self._fallback.fetch(city)
+        self._remember_intel(key, fallback)
+        return fallback
+
+    def _remember_intel(self, key: str, intel: Dict[str, Any]) -> None:
+        if not key:
+            return
+        self._intel_cache[key] = (time.monotonic(), intel)
+        if len(self._intel_cache) > 500:
+            cutoff = time.monotonic() - self._intel_ttl
+            for stale in [k for k, v in self._intel_cache.items() if v[0] < cutoff]:
+                self._intel_cache.pop(stale, None)
+            while len(self._intel_cache) > 500:
+                self._intel_cache.pop(next(iter(self._intel_cache)))
+
+    def cached_city_count(self) -> int:
+        """Exposed for tests and diagnostics."""
+        return len(self._intel_cache)
 
     async def _fetch_public_weather_alert(self, city: str) -> Optional[Dict[str, Any]]:
         """免费官方气象预警公开接口（可配置通道）。

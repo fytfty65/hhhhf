@@ -38,6 +38,11 @@ type CommunityPost struct {
 	Tags      string // 话题标签 JSON 数组字符串，如 ["亲子","美食"]
 	Likes     int    `gorm:"default:0"`
 	CreatedAt time.Time
+
+	// Author is a read-only association used to load post authors in the same
+	// query as the feed. Without it the list endpoint issued one extra user
+	// lookup per post.
+	Author *User `gorm:"foreignKey:UserID;references:ID" json:"-"`
 }
 
 // PostFavorite 社区帖子收藏（一人一藏，重复收藏幂等）。

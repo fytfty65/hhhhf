@@ -1,8 +1,36 @@
-fastapi>=0.109.2
-uvicorn[standard]>=0.27.1
-pydantic>=2.6.1
-requests>=2.31.0
-openai>=2.0.0
-httpx>=0.28.0
-python-dotenv>=1.0.0
-duckduckgo-search>=8.0.0
+# AI service runtime dependencies.
+#
+# Every entry is pinned to the version the code is developed and tested against.
+# Four packages the code actually imports (numpy, networkx, scikit-learn, redis)
+# were previously missing entirely, so `pip install -r requirements.txt` on a
+# clean machine produced a service that failed at `import agent`. The floating
+# `>=` bounds also meant two CI runs a week apart could install different code.
+#
+# Bump deliberately, then re-run `python -m unittest discover -s tests` and the
+# planner smoke test.
+
+# --- web framework ---
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+pydantic==2.13.3
+
+# --- provider / model clients ---
+openai==2.33.0
+httpx==0.28.1
+requests==2.34.2
+duckduckgo-search==8.1.1
+
+# --- configuration ---
+python-dotenv==1.2.2
+
+# --- algorithmic core ---
+# numpy:            vectorised scoring in optimization/constraints
+# networkx:         TSP approximation in GraphRouteOptimizer
+# scikit-learn:     DBSCAN geo-clustering in GraphRouteOptimizer
+numpy==2.4.6
+networkx==3.6.1
+scikit-learn==1.8.0
+
+# --- shared infrastructure ---
+# redis: semantic itinerary cache, event stream, bandit state sharing
+redis==8.0.0

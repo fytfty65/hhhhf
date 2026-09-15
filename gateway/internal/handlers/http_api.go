@@ -522,8 +522,58 @@ func ListPostsHandler(c *gin.Context) {
 	if tag != "" {
 		q = q.Where("tags LIKE ?", "%\""+tag+"\"%")
 	}
+	// Author is preloaded via a join so the feed does not issue one user lookup
+	// per post. Previously this endpoint ran 3 COUNT queries plus a userBrief
+	// lookup for every row, i.e. up to ~2000 queries for a 500-row page, which
+	// serialises badly against the single-writer SQLite store.
 	var posts []models.CommunityPost
-	q.Find(&posts)
+	q.Preload("Author").Find(&posts)
+
+	type countRow struct {
+		PostID string
+		N      int64
+	}
+	commentCounts := map[string]int64{}
+	favoriteCounts := map[string]int64{}
+	viewerFavorites := map[string]bool{}
+
+	if len(posts) > 0 {
+		ids := make([]string, 0, len(posts))
+		for _, p := range posts {
+			ids = append(ids, p.ID)
+		}
+
+		// Each lookup is aggregated over the whole page in a single query.
+		var commentRows []countRow
+		database.DB.Model(&models.Comment{}).
+			Select("post_id, COUNT(*) AS n").
+			Where("post_id IN ?", ids).
+			Group("post_id").
+			Scan(&commentRows)
+		for _, row := range commentRows {
+			commentCounts[row.PostID] = row.N
+		}
+
+		var favoriteRows []countRow
+		database.DB.Model(&models.PostFavorite{}).
+			Select("post_id, COUNT(*) AS n").
+			Where("post_id IN ?", ids).
+			Group("post_id").
+			Scan(&favoriteRows)
+		for _, row := range favoriteRows {
+			favoriteCounts[row.PostID] = row.N
+		}
+
+		if viewerID != "" {
+			var ownedIDs []string
+			database.DB.Model(&models.PostFavorite{}).
+				Where("post_id IN ? AND user_id = ?", ids, viewerID).
+				Pluck("post_id", &ownedIDs)
+			for _, id := range ownedIDs {
+				viewerFavorites[id] = true
+			}
+		}
+	}
 
 	type item struct {
 		post      models.CommunityPost
@@ -535,14 +585,10 @@ func ListPostsHandler(c *gin.Context) {
 	items := make([]item, 0, len(posts))
 	now := time.Now()
 	for _, p := range posts {
-		var cc, fc, ownFavorite int64
-		database.DB.Model(&models.Comment{}).Where("post_id = ?", p.ID).Count(&cc)
-		database.DB.Model(&models.PostFavorite{}).Where("post_id = ?", p.ID).Count(&fc)
-		if viewerID != "" {
-			database.DB.Model(&models.PostFavorite{}).Where("post_id = ? AND user_id = ?", p.ID, viewerID).Count(&ownFavorite)
-		}
+		cc := commentCounts[p.ID]
+		fc := favoriteCounts[p.ID]
 		heat := service.HotScore(p.Likes, int(cc), int(fc), now.Sub(p.CreatedAt).Hours())
-		items = append(items, item{post: p, heat: heat, comments: cc, favorites: fc, favorited: ownFavorite > 0})
+		items = append(items, item{post: p, heat: heat, comments: cc, favorites: fc, favorited: viewerFavorites[p.ID]})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].heat != items[j].heat {
@@ -554,7 +600,21 @@ func ListPostsHandler(c *gin.Context) {
 	result := make([]gin.H, 0, len(items))
 	for _, it := range items {
 		p := it.post
-		author, avatar, avatarURL := userBrief(p.UserID)
+		// Author comes from the preloaded association; fall back to the same
+		// defaults userBrief() used so the response shape is unchanged for a
+		// post whose author row is missing.
+		author, avatar, avatarURL := "旅行者", p.UserID, ""
+		if p.Author != nil {
+			author = p.Author.Nickname
+			if author == "" {
+				author = p.Author.Username
+			}
+			avatar = p.Author.AvatarSeed
+			if avatar == "" {
+				avatar = p.Author.ID
+			}
+			avatarURL = p.Author.AvatarURL
+		}
 		result = append(result, gin.H{
 			"id":                p.ID,
 			"user_id":           p.UserID,

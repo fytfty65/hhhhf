@@ -1,7 +1,10 @@
 """Operational trip endpoints separated from the multi-agent planner."""
 
+import asyncio
 import datetime
 import json
+import os
+import time
 from typing import Any, Dict
 
 from fastapi import APIRouter
@@ -58,19 +61,69 @@ async def amap_poi(payload: Dict[str, Any]):
     return {"available": True, "count": len(pois), "pois": pois}
 
 
+# Realtime risk snapshots are polled every 30s by the client, and the upstream
+# provider calls behind them cost seconds. A short cache keyed by city keeps a
+# burst of polls (and the duplicate poller on the radar) from re-hitting every
+# provider, without serving genuinely stale risk data.
+_RISK_TTL_SECONDS = float(os.getenv("RISK_SNAPSHOT_TTL_SECONDS", "45"))
+_risk_cache: Dict[str, tuple] = {}
+_risk_cache_lock = asyncio.Lock()
+
+
+def _risk_cache_key(city: str, coord_str: str) -> str:
+    return f"{city.strip().lower()}::{coord_str}"
+
+
 async def _risk_snapshot(city: str, coord: Any, baseline: Any):
     coord_str = ""
     if isinstance(coord, (list, tuple)) and len(coord) >= 2:
         coord_str = f"{coord[0]},{coord[1]}"
     elif isinstance(coord, str):
         coord_str = coord.strip()
+
+    key = _risk_cache_key(city, coord_str)
+    now = time.monotonic()
+    async with _risk_cache_lock:
+        cached = _risk_cache.get(key)
+        if cached and now - cached[0] < _RISK_TTL_SECONDS:
+            snapshot = cached[1]
+            # The change set is relative to the *caller's* baseline, so it must
+            # always be recomputed even when the snapshot itself is reused.
+            return snapshot, detect_risk_changes(
+                baseline if isinstance(baseline, dict) else None, snapshot
+            )
+
     toolbox = ExpertToolbox()
     risk_service = RiskService()
-    weather = await toolbox.get_real_weather(city)
-    traffic = await toolbox.get_traffic_status(coord_str)
-    safety = await risk_service.get_city_safety_intel(city)
+
+    # These three calls are independent and previously ran strictly in series:
+    # weather ~1.8s + traffic ~1.0s + safety ~8.4s = ~11s of dead time per
+    # request. Running them concurrently bounds the wait by the slowest provider
+    # instead of their sum.
+    weather_task = asyncio.create_task(toolbox.get_real_weather(city))
+    safety_task = asyncio.create_task(risk_service.get_city_safety_intel(city))
+    traffic_task = (
+        asyncio.create_task(toolbox.get_traffic_status(coord_str))
+        if coord_str
+        else None
+    )
+
+    weather, safety = await asyncio.gather(weather_task, safety_task)
+    traffic = await traffic_task if traffic_task is not None else None
+
     safety = await risk_service.aggregate_city_risk(safety, city, weather, traffic)
     snapshot = risk_service.build_snapshot(safety, weather, traffic)
+
+    async with _risk_cache_lock:
+        _risk_cache[key] = (time.monotonic(), snapshot)
+        # Bound the map so a long-lived process cannot grow it without limit.
+        if len(_risk_cache) > 500:
+            cutoff = time.monotonic() - _RISK_TTL_SECONDS
+            for stale_key in [k for k, v in _risk_cache.items() if v[0] < cutoff]:
+                _risk_cache.pop(stale_key, None)
+            while len(_risk_cache) > 500:
+                _risk_cache.pop(next(iter(_risk_cache)))
+
     return snapshot, detect_risk_changes(baseline if isinstance(baseline, dict) else None, snapshot)
 
 

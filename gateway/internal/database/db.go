@@ -20,7 +20,7 @@ var DB *gorm.DB
 // Increment this value when a schema change needs an explicit, auditable
 // migration step. Migrations are applied one version at a time so a partially
 // upgraded deployment can resume safely on the next start.
-const schemaVersion = 7
+const schemaVersion = 8
 
 func migrateSchema(tx *gorm.DB, version int) error {
 	switch version {
@@ -56,6 +56,19 @@ func migrateSchema(tx *gorm.DB, version int) error {
 		return tx.AutoMigrate(&models.TravelOrder{})
 	case 7:
 		return tx.AutoMigrate(&models.TripExecutionState{})
+	case 8:
+		// Community feed reads aggregate comments and favourites per post. Both
+		// child tables only carried the composite unique index on
+		// (post_id, user_id), whose leading column does serve a lookup by
+		// post_id, but the feed also filters favourites by user across a page of
+		// posts, so add a purpose-built index for that direction.
+		if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id)").Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_post_favorites_post_id ON post_favorites(post_id)").Error; err != nil {
+			return err
+		}
+		return tx.Exec("CREATE INDEX IF NOT EXISTS idx_post_favorites_user_id ON post_favorites(user_id)").Error
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}
