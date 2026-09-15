@@ -208,6 +208,76 @@ verdict=insufficient_evidence  (exit code 2)
 
 ---
 
+## 第四轮实施记录：代码入库 + 阶段二性能与依赖治理（2026-05-19 追加）
+
+### 4.1 代码入库（此前 73% 源码无版本保护）
+
+| 项 | 结果 |
+|---|---|
+| 入库前 | 工作树源码 162 个文件，git 仅跟踪 44 个（27%）；104 个未跟踪条目 |
+| 安全审阅 | 提交前逐项核查：无 `.env`、无密钥、无二进制、无数据库、无日志、无 pid、无缓存、无学习状态文件（仅 3 个 `.env.example` 模板，安全） |
+| 补充忽略 | `.gitignore` 增加 `.gocache/`、`gateway/gateway.pid`、`front/resource_monitor.csv`、`bandit_state.json` |
+| 入库后 | **2 个提交**，工作树干净；`9ebf3dd`（源码补齐 + 安全加固 + 学习闭环）、`a389b53`（性能与依赖） |
+
+### 4.2 风控接口性能（`/api/v1/risk/realtime`）
+
+原实现三次网络调用**严格串行**（天气 1.8s + 路况 1.0s + 安全情报 8.4s），且零缓存。
+
+| 优化 | 措施 | 实测 |
+|---|---|---|
+| 并发化 | 三次调用改用 `asyncio` 并发 | 冷路径不再累加三次等待 |
+| 快照缓存 | 按 `city+coord`，TTL 45s（`RISK_SNAPSHOT_TTL_SECONDS`） | 重复轮询 **10,563ms → 26–34ms**（约 350×） |
+| 城市级情报缓存 | 按 city，TTL 900s（`RISK_INTEL_TTL_SECONDS`） | 同城换坐标 **→ 29ms** |
+| 情报链总预算 | `asyncio.wait(timeout)` 上限 6s（`RISK_INTEL_BUDGET_SECONDS`）；超预算时优先复用过期快照并标注 `is_stale` | 避免每次请求都付满 provider 超时 |
+
+**变更检测正确性**：`changes` 始终按**调用方传入的 baseline** 实时重算，即使快照命中缓存——风险变更语义不受缓存影响。
+
+**无回归验证**（provider 可达的模拟场景，这是关键——本机无法访问外部 provider，冷路径测到的是超时而非真实延迟）：
+
+| 场景 | 串行 | 并发+缓存 |
+|---|---|---|
+| 冷（首个 provider 0.6s 响应） | ~1,500ms | **915ms** |
+| 热（同城重复） | ~600ms | **0ms**（`same_object=True`） |
+| provider 全失败但有过期快照 | 重付超时 | **62ms，`is_stale=True`** |
+
+### 4.3 社区列表 N+1
+
+`ListPostsHandler` 原本**每帖 3 次 COUNT + 1 次作者查询**，500 条分页最坏约 **2,000 次查询**。
+
+- 改为：作者 `Preload` + 评论/收藏各一次 `GROUP BY` 聚合 + 查看者收藏一次 `IN` 查询 → **常数级查询**
+- `CommunityPost` 新增只读 `Author` 关联；响应字段与「作者缺失」兜底值（`旅行者`/`user_id`/空头像）与原先完全一致
+- 迁移 8 新增 `idx_comments_post_id`、`idx_post_favorites_post_id`、`idx_post_favorites_user_id`（已在全新库验证应用至 version 8）
+- **实测**：300 帖 + 900 评论 + 300 收藏场景，接口中位 **192ms**，15 个响应字段结构不变
+
+### 4.4 依赖治理
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| Python 未声明依赖 | `numpy`/`networkx`/`scikit-learn`/`redis` 均被 import 但未声明（全新环境 `import agent` 直接失败） | 全部补齐并**精确锁定**（numpy 2.4.6 / networkx 3.6.1 / scikit-learn 1.8.0 / redis 8.0.0） |
+| Python 版本浮动 | 全部 `>=`，两次 CI 可能装到不同代码 | 13 项全部 `==` 锁定，`pip install --dry-run` 校验通过 |
+| 前端浮动版本 | 5 个依赖写 `"latest"`（react/react-dom/tailwindcss/postcss/autoprefixer） | 锁定为 lockfile 实际版本，`npm ci --dry-run` 通过 |
+| CI Go 工具链 | 写死 `1.24.x`，与 `gateway/go.mod` 的 `go 1.26.2` 冲突 | 改为 `go-version-file: gateway/go.mod`，并补上此前缺失的 `go build` 步骤 |
+
+### 第四轮验证总览（全部实测）
+
+| 套件 | 结果 |
+|---|---|
+| `go build` / `go vet` | exit 0 / exit 0 |
+| `go test ./...` | 4 个包全部 ok |
+| Python `unittest` | Ran 78 tests — OK |
+| 前端 `tsc` | 0 error |
+| 前端单测 | 79 passed / 0 fail |
+| 前端 lint | passed |
+| 生产构建 | 成功 |
+| **E2E** | **PASS** |
+| 迁移 8 | 全新库应用至 version 8，索引就位 |
+
+### 关于本轮的一个诚实说明
+
+风控接口的**冷路径**在**本机**仍约 7–11 秒，但这不是代码问题：本机无法访问高德/心知/GDELT 等外部 provider，测到的是**超时值**而非真实延迟。为确认改动不会在正常环境下变慢，我用可控延迟的 provider 做了对照实验（见 4.2 表格），并发+缓存方案**严格优于**原串行实现。真实环境下的冷路径表现需要在能访问 provider 的机器上复测。
+
+---
+
 ## 0. 执行摘要
 
 ### 0.1 一句话结论
