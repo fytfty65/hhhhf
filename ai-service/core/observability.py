@@ -15,9 +15,21 @@ from typing import Dict, Any
 
 SERVICE_NAME = "ai-service"
 
+# Histogram bucket upper bounds in milliseconds. They straddle the ranges this
+# service actually exhibits: pure computation (<10ms), local LLM/cache hits
+# (<100ms), and upstream provider calls (seconds). Without a bucket above the
+# slowest observed value every slow request collapses into +Inf, which destroys
+# exactly the tail information a latency histogram exists to provide.
+LATENCY_BUCKETS_MS = (5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0)
+
 
 def _new_request_id() -> str:
     return uuid.uuid4().hex[:16]
+
+
+def _escape_label(value: str) -> str:
+    """Escape a Prometheus label value (backslash, quote, newline)."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 def log_event(event: str, **fields: Any) -> None:
@@ -35,7 +47,11 @@ def log_event(event: str, **fields: Any) -> None:
 
 
 class MetricsRegistry:
-    """进程内指标统计（线程安全），供 /metrics 端点与日志消费。"""
+    """进程内指标统计（线程安全），供 /metrics 端点与日志消费。
+
+    除了 JSON 快照所需的累计平均延迟外，另维护分桶直方图：平均值会掩盖长尾，
+    且它是进程生命周期均值、随运行时间越来越钝，无法支撑 SLO 告警。
+    """
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -45,6 +61,11 @@ class MetricsRegistry:
         self.requests_by_status: Dict[str, int] = defaultdict(int)
         self.latency_by_path: Dict[str, float] = defaultdict(float)
         self.latency_count_by_path: Dict[str, int] = defaultdict(int)
+        # Per-path histogram: cumulative bucket counts (one extra entry for +Inf),
+        # plus sum and count so the scraper can compute quantiles.
+        self._bucket_counts: Dict[str, list] = {}
+        self._bucket_sum: Dict[str, float] = defaultdict(float)
+        self._bucket_total: Dict[str, int] = defaultdict(int)
 
     def observe(self, method: str, path: str, status: int, latency_ms: float) -> None:
         key = f"{method} {path}"
@@ -54,6 +75,19 @@ class MetricsRegistry:
             self.requests_by_status[str(status)] += 1
             self.latency_by_path[key] += latency_ms
             self.latency_count_by_path[key] += 1
+
+            counts = self._bucket_counts.get(key)
+            if counts is None:
+                counts = [0] * (len(LATENCY_BUCKETS_MS) + 1)
+                self._bucket_counts[key] = counts
+            for index, bound in enumerate(LATENCY_BUCKETS_MS):
+                if latency_ms <= bound:
+                    counts[index] += 1
+                    break
+            else:
+                counts[len(LATENCY_BUCKETS_MS)] += 1
+            self._bucket_sum[key] += latency_ms
+            self._bucket_total[key] += 1
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -72,6 +106,76 @@ class MetricsRegistry:
                 "requests_by_status": dict(self.requests_by_status),
                 "requests_by_path": paths,
             }
+
+    def prometheus(self, extra: Dict[str, Any] | None = None) -> str:
+        """Render Prometheus text exposition format (version 0.0.4).
+
+        `extra` holds optional gauge-like values contributed by other modules
+        (for example the planning bandit's state); each value is rendered as
+        `omniroute_ai_<name> <value>`.
+        """
+        with self._lock:
+            total = self.requests_total
+            uptime = round(time.time() - self._start, 1)
+            by_status = dict(self.requests_by_status)
+            buckets = {k: list(v) for k, v in self._bucket_counts.items()}
+            bucket_sum = dict(self._bucket_sum)
+            bucket_total = dict(self._bucket_total)
+
+        lines = [
+            "# HELP omniroute_ai_up Whether the AI service is serving.",
+            "# TYPE omniroute_ai_up gauge",
+            "omniroute_ai_up 1",
+            "# HELP omniroute_ai_uptime_seconds Seconds since process start.",
+            "# TYPE omniroute_ai_uptime_seconds gauge",
+            f"omniroute_ai_uptime_seconds {uptime}",
+            "# HELP omniroute_ai_requests_total Total HTTP requests handled.",
+            "# TYPE omniroute_ai_requests_total counter",
+            f"omniroute_ai_requests_total {total}",
+            "# HELP omniroute_ai_responses_total HTTP responses by status code.",
+            "# TYPE omniroute_ai_responses_total counter",
+        ]
+        for code in sorted(by_status):
+            lines.append(
+                f'omniroute_ai_responses_total{{status="{_escape_label(code)}"}} {by_status[code]}'
+            )
+
+        if extra:
+            lines.append("# HELP omniroute_ai_gauge Operator-supplied gauge values.")
+            lines.append("# TYPE omniroute_ai_gauge gauge")
+            for name in sorted(extra):
+                value = extra[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                lines.append(f'omniroute_ai_gauge{{name="{_escape_label(name)}"}} {value}')
+
+        lines.append(
+            "# HELP omniroute_ai_request_duration_milliseconds HTTP request latency."
+        )
+        lines.append("# TYPE omniroute_ai_request_duration_milliseconds histogram")
+        for key in sorted(buckets):
+            method, _, path = key.partition(" ")
+            labels = f'method="{_escape_label(method)}",path="{_escape_label(path)}"'
+            cumulative = 0
+            for index, bound in enumerate(LATENCY_BUCKETS_MS):
+                cumulative += buckets[key][index]
+                lines.append(
+                    f"omniroute_ai_request_duration_milliseconds_bucket"
+                    f'{{{labels},le="{bound:g}"}} {cumulative}'
+                )
+            cumulative += buckets[key][len(LATENCY_BUCKETS_MS)]
+            lines.append(
+                f"omniroute_ai_request_duration_milliseconds_bucket"
+                f'{{{labels},le="+Inf"}} {cumulative}'
+            )
+            lines.append(
+                f"omniroute_ai_request_duration_milliseconds_sum{{{labels}}} {bucket_sum[key]}"
+            )
+            lines.append(
+                f"omniroute_ai_request_duration_milliseconds_count{{{labels}}} {bucket_total[key]}"
+            )
+
+        return "\n".join(lines) + "\n"
 
 
 METRICS = MetricsRegistry()

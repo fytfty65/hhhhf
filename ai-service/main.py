@@ -9,8 +9,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from api import conflict, agent, carbon_service, operations
+from api.agent import planning_bandit
 from core.observability import ObservabilityMiddleware, METRICS  # P3 可观测性
 
 app = FastAPI(
@@ -64,6 +65,24 @@ async def health_check():
 @app.get("/metrics")
 async def metrics():
     return METRICS.snapshot()
+
+
+# Prometheus 文本格式（含延迟直方图，可算分位数），供抓取器使用。
+# 与 JSON 端点并存：JSON 保持既有消费方兼容，本端点服务监控系统。
+@app.get("/metrics/prometheus")
+async def metrics_prometheus():
+    bandit = planning_bandit.snapshot()
+    extra = {
+        "bandit_decisions": bandit.get("decisions", 0),
+        "bandit_explorations": bandit.get("explorations", 0),
+        "bandit_rewards_recorded": bandit.get("rewards_recorded", 0),
+        "bandit_arm_count": bandit.get("arm_count", 0),
+        "bandit_observed_non_greedy_rate": bandit.get("observed_non_greedy_rate", 0.0),
+    }
+    return Response(
+        content=METRICS.prometheus(extra=extra),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 # 注册子路由 (加上 v1 前缀)
 app.include_router(conflict.router, prefix="/api/v1", tags=["Conflict Detection"])

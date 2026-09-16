@@ -39,7 +39,13 @@ def analyze_weather_for_planning(condition: str) -> Dict[str, Any]:
 
 
 def estimate_crowdedness(rating: float, traffic_status: str, is_weekend: bool = False) -> Dict[str, Any]:
-    """景点拥挤度启发式评估：综合口碑热度 + 实时路况 + 是否周末，输出直观人流量分级。"""
+    """景点拥挤度启发式评估：综合口碑热度 + 实时路况 + 是否周末，输出直观人流量分级。
+
+    `percent` 由 `score` 单调映射得出，而不是按分级写死。原实现把 82/58/35 三个
+    常数直接绑在分级上，导致 score=123 与 score=88 都对外报告 82% —— 一个用两位
+    有效数字呈现、却不随自身输入变化的"精确"数字，比区间估计更容易误导用户。
+    现在 percent 与 score 一一对应，并额外给出区间以体现不确定性。
+    """
     rating_available = rating not in (None, "", "暂无供应商数据", "暂无评分")
     traffic_available = traffic_status not in (None, "", "unknown", "暂无供应商数据")
     try:
@@ -54,14 +60,33 @@ def estimate_crowdedness(rating: float, traffic_status: str, is_weekend: bool = 
     if not rating_available and not traffic_available:
         return {"level": "unknown", "percent": None, "label": "暂无供应商数据", "score": None, "source": "unavailable", "estimated": True}
 
-    score = r * 15 + (t - 1) * 12 + (12 if is_weekend else 0)
+    # Rating is on a 0-5 scale; clamp before scaling so an out-of-range supplier
+    # value cannot push the score (and therefore the percentage) out of 0-100.
+    r = max(0.0, min(5.0, r))
+    t = max(1, min(4, t))
+    score = max(0.0, min(100.0, r * 15 + (t - 1) * 12 + (12 if is_weekend else 0)))
+
+    percent = int(round(score))
     if score >= 88:
-        level, percent, label = "high", 82, "拥挤"
+        level, label = "high", "拥挤"
     elif score >= 70:
-        level, percent, label = "medium", 58, "适中"
+        level, label = "medium", "适中"
     else:
-        level, percent, label = "low", 35, "宽松"
-    return {"level": level, "percent": percent, "label": label, "score": round(score, 1), "source": "heuristic", "estimated": not (rating_available and traffic_available)}
+        level, label = "low", "宽松"
+
+    # Heuristic uncertainty: the inputs are a rating and a coarse traffic code,
+    # so an exact figure overstates precision. The band widens when either input
+    # is missing.
+    margin = 6 if (rating_available and traffic_available) else 15
+    return {
+        "level": level,
+        "percent": percent,
+        "percent_range": [max(0, percent - margin), min(100, percent + margin)],
+        "label": label,
+        "score": round(score, 1),
+        "source": "heuristic",
+        "estimated": not (rating_available and traffic_available),
+    }
 
 
 # 手选偏好定位 -> 偏好维度提示映射。用户在前端四选一（寻味/视觉/休闲/深度）显式声明，

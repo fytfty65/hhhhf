@@ -1449,6 +1449,16 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
 
   // 动态团队满意度矩阵
   const [teamSatisfaction, setTeamSatisfaction] = useState<Record<string, number>>({});
+  // 概率化数字孪生结果（P50/P90 时长、超预算概率、成员满意度分布）。
+  // 这些是采样得到的分布，而不是单点估计，因此可用于表达不确定度。
+  const [simulation, setSimulation] = useState<{
+    total_minutes?: { p50?: number; p90?: number; mean?: number };
+    cost?: { known_p50?: number; known_p90?: number; complete_probability?: number };
+    budget_overrun_probability?: number | null;
+    per_day_minutes_p90?: Record<string, number>;
+    member_satisfaction?: Record<string, { satisfaction_p50?: number; satisfaction_floor_p10?: number }>;
+    assumptions?: { unpriced_nodes?: number; defaulted_dwell?: number; defaulted_travel?: number; sample_count?: number };
+  } | null>(null);
   const [arbitrationRecords, setArbitrationRecords] = useState<string[]>([
     "针对【餐饮与预算诉求】: 精选特色老字号正餐，全程无重复排布",
     "针对【节奏分歧】: 午后采取分合流调度，傍晚在统一地点汇合用餐"
@@ -1660,6 +1670,12 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   setDynamicRoutes(mappedRoutes);
                   if (finalData.negotiation_summary) setConsensusSummary(finalData.negotiation_summary);
                   if (finalData.team_satisfaction) setTeamSatisfaction(finalData.team_satisfaction);
+                  // 概率化仿真的分布结果（P50/P90 与超预算概率）
+                  if (finalData.simulation && typeof finalData.simulation === 'object') {
+                    setSimulation(finalData.simulation);
+                  } else {
+                    setSimulation(null);
+                  }
                   if (finalData.arbitration_records) setArbitrationRecords(finalData.arbitration_records);
                   // Capture the bandit arm the planner actually used. Without
                   // this the satisfaction form posts an empty bandit_arm_id, the
@@ -2268,6 +2284,34 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                 </span>
               )}
               <span className="inline-flex items-center gap-1 text-emerald-600"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />团队实时同步</span>
+              {/* Probabilistic digital twin: show the sampled spread rather than a
+                  single point estimate, so the user can see how much slack a day
+                  actually has. */}
+              {simulation?.total_minutes?.p50 ? (
+                <span
+                  className="text-indigo-600"
+                  title={`基于 ${simulation.assumptions?.sample_count ?? 0} 次蒙特卡洛采样；P90 表示 10% 的情形会超过该时长`}
+                >
+                  时长 P50 <strong>{Math.round((simulation.total_minutes.p50 ?? 0) / 60)}</strong>h
+                  {' / '}P90 <strong>{Math.round((simulation.total_minutes.p90 ?? 0) / 60)}</strong>h
+                </span>
+              ) : null}
+              {typeof simulation?.budget_overrun_probability === 'number' ? (
+                <span
+                  className={simulation.budget_overrun_probability > 0.3 ? 'text-rose-600' : 'text-slate-500'}
+                  title="按采样得到的费用分布，超出预算的概率"
+                >
+                  超预算概率 <strong>{Math.round(simulation.budget_overrun_probability * 100)}%</strong>
+                </span>
+              ) : null}
+              {simulation?.assumptions && (simulation.assumptions.unpriced_nodes ?? 0) > 0 ? (
+                <span
+                  className="text-amber-600"
+                  title="这些节点缺少供应商报价，费用分布未包含它们"
+                >
+                  {simulation.assumptions.unpriced_nodes} 个节点未计价
+                </span>
+              ) : null}
               {planQuality.dailyCounts.length > 0 && <span className="text-slate-400">白天节点 {planQuality.dailyCounts.map((item: any) => `D${item.day}:${item.count}`).join(' · ')}</span>}
             </div>
           )}

@@ -84,6 +84,7 @@ func LoggingMiddleware() gin.HandlerFunc {
 		rid, _ := c.Get(requestIDKey)
 
 		recordRequest(c.Request.Method, c.Request.URL.Path, status, latencyMs)
+		recordPrometheusLatency(c.Request.Method, c.Request.URL.Path, latencyMs)
 
 		entry := map[string]interface{}{
 			"ts":         time.Now().UnixMilli(),

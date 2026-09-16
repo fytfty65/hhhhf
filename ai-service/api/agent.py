@@ -25,6 +25,67 @@ from core.time_intelligence import analyze_pace, monday_closure_notes
 from core.optimization import fairness_report, pareto_frontier, repair_route, select_fair_route, validate_candidate, validate_route
 from core.constraints import resolve_conflicts
 from core.contextual_bandit import ContextualThompsonBandit, derive_reward, stable_arm_id
+from core.simulation import member_utilities_for, simulate_plan
+
+
+def _simulate_final_plan(
+    final_data: Dict[str, Any],
+    *,
+    room_members: Any = None,
+    budget: Any = None,
+    weather: Any = None,
+) -> Dict[str, Any]:
+    """Run the Monte-Carlo digital twin over the finished route.
+
+    Returns an empty dict on any failure: the plan is still valid without its
+    uncertainty report, and a simulation problem must never break planning.
+    """
+    try:
+        route = final_data.get("route")
+        if not isinstance(route, list) or not route:
+            return {}
+        condition = ""
+        if isinstance(weather, dict):
+            condition = str(weather.get("condition") or "")
+        budget_value = None
+        try:
+            if budget is not None and str(budget).strip() != "":
+                budget_value = float(budget)
+        except (TypeError, ValueError):
+            budget_value = None
+        result = simulate_plan(
+            route,
+            members=room_members if isinstance(room_members, list) else None,
+            weather_condition=condition,
+            budget=budget_value,
+        )
+        return result.to_dict()
+    except Exception as exc:  # 仿真失败不得影响行程下发
+        print(f"⚠️ [仿真] 生成不确定度报告失败，已跳过: {exc}", flush=True)
+        return {}
+
+
+def _satisfaction_from_simulation(simulation: Any) -> Dict[str, int]:
+    """Convert simulated member satisfaction into the legacy 0-100 display shape.
+
+    The previous value was a hardcoded constant echoed from the prompt template.
+    This derives it from each member's modelled utility on the actual route, so
+    the number now has a traceable basis. Returns {} when there is nothing to
+    compute, letting the caller leave the field absent rather than inventing one.
+    """
+    if not isinstance(simulation, dict):
+        return {}
+    members = simulation.get("member_satisfaction")
+    if not isinstance(members, dict) or not members:
+        return {}
+    scores: Dict[str, int] = {}
+    for name, stats in members.items():
+        if not isinstance(stats, dict):
+            continue
+        value = stats.get("satisfaction_p50")
+        if isinstance(value, (int, float)):
+            scores[str(name)] = int(round(max(0.0, min(1.0, float(value))) * 100))
+    return scores
 from duckduckgo_search import DDGS
 import redis.asyncio as redis
 from api.risk_service import RiskService, compute_node_risk, detect_risk_changes
@@ -2117,15 +2178,6 @@ async def run_negotiate(msg: GatewayMessage):
 {{
   "status": "consensus_reached",
   "negotiation_summary": "{summary_desc}",
-  "team_satisfaction": {{
-    "Felix (主控)": 96,
-    "Alice (出片)": 94,
-    "Bob (休闲)": 93
-  }},
-  "arbitration_records": [
-    "针对【餐饮与预算诉求】: 精选特色老字号正餐，全程无重复排布",
-    "针对【节奏分歧】: 午后采取分合流调度，傍晚在统一地点汇合用餐"
-  ],
   "route": [
     {{
       "day": 1,
@@ -2375,15 +2427,23 @@ async def run_negotiate(msg: GatewayMessage):
                 final_data = {
                     "status": "degraded_fallback",
                     "negotiation_summary": syn_summary,
-                    "team_satisfaction": {str(m.get("name","")): 88 for m in room_members if isinstance(m, dict)},
-                    "arbitration_records": [
-                        "针对【大模型服务暂不可用】: 已自动切换至高德候选池保底合成模式",
-                        "针对【体验连续】: 路线节点、图片、导航与花费全部保证可用，可随时换一换重试"
-                    ],
+                    # team_satisfaction is filled in from the Monte-Carlo simulation
+                    # below. It used to be a flat literal 88 for every member,
+                    # which is a fabricated score rather than an estimate.
                     "route": syn_routes,
                     "optimization_audit": optimization_audit,
                     "fairness": fairness_report(syn_routes, room_members),
                 }
+                # 保底路线同样给出不确定度报告，而不是让前端在降级时丢失该信息
+                final_data["simulation"] = _simulate_final_plan(
+                    final_data,
+                    room_members=room_members,
+                    budget=total_calc_budget,
+                    weather=weather_info,
+                )
+                computed_satisfaction = _satisfaction_from_simulation(final_data["simulation"])
+                if computed_satisfaction:
+                    final_data["team_satisfaction"] = computed_satisfaction
                 # 直接发送 final_route，跳过 Post-Route 中依赖 LLM 输出的回填逻辑（保底路线已经带齐所有字段）
                 yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                 print(f"🏆 [兜底完成] 已下发 {len(syn_routes)} 个合成节点", flush=True)
@@ -3175,6 +3235,18 @@ async def run_negotiate(msg: GatewayMessage):
                     if isinstance(final_data.get("route"), list):
                         final_data["pace_profile"] = analyze_pace(trip_days, len(final_data["route"]), intent_str)
                         final_data["monday_closure_notes"] = monday_closure_notes(final_data["route"])
+                        # 概率化数字孪生：用蒙特卡洛仿真替换点估计与伪造指标。
+                        # 原先 team_satisfaction 是写死在 prompt 模板里的 96/94/93，
+                        # 由模型原样回显；现在改为按成员在真实路线上的效用分布计算。
+                        final_data["simulation"] = _simulate_final_plan(
+                            final_data,
+                            room_members=fairness_members or room_members,
+                            budget=total_calc_budget,
+                            weather=final_data.get("weather_info") or weather_info,
+                        )
+                        computed = _satisfaction_from_simulation(final_data["simulation"])
+                        if computed:
+                            final_data["team_satisfaction"] = computed
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
                     await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {

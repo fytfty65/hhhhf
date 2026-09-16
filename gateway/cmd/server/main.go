@@ -82,6 +82,8 @@ func main() {
 
 	// 指标端点：需要访问令牌，无令牌时仅允许本机回环访问
 	r.GET("/metrics", api.MetricsGuardMiddleware(), api.MetricsHandler)
+	// Prometheus 文本格式（含延迟直方图），同样的守卫，供抓取器使用
+	r.GET("/metrics/prometheus", api.MetricsGuardMiddleware(), api.PrometheusHandler)
 
 	// 4. 注册 API 路由 (非常好的工程规范)
 	api.RegisterRoutes(r)
