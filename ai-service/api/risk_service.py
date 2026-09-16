@@ -372,12 +372,23 @@ def compute_node_risk(node: Dict[str, Any], city_crime: float, crowd_hint: str =
     score = float(city_crime or 10.0) * 0.5
     if bool(node.get("is_hotel")):
         score -= 8  # 住宿节点相对安全，略降
-    t = str(node.get("time") or "")
-    if re.search(r"(2[0-3]|0?[0-6]):\d{2}", t):
+    if _is_night_hour(str(node.get("time") or "")):
         score += 6  # 夜间/凌晨时段略升
     if crowd_hint and any(k in crowd_hint for k in ["拥挤", "高峰", "爆满", "密集", "排队"]):
         score += 20
     return max(0.0, min(100.0, round(score, 1)))
+
+
+# 夜间时段：20:00-23:59 与 00:00-06:59。
+# 必须锚定到「时间字符串的小时字段」，否则 "0?[0-6]" 分支会在 "12:30" 的第 2 个
+# 字符处匹配到 "2:30"、在 "16:45" 匹配到 "6:45"，把白天误判为夜间并错误加 6 分。
+# 原实现未加锚点，实测 12:30 与 16:45 均被加了夜间惩罚。
+_NIGHT_HOUR_PATTERN = re.compile(r"(?:^|[^\d])(2[0-3]|0?[0-6]):\d{2}")
+
+
+def _is_night_hour(time_text: str) -> bool:
+    """判断 'HH:MM'（可带前缀如 'Day 1 | '）是否落在夜间时段。"""
+    return bool(_NIGHT_HOUR_PATTERN.search(time_text))
 
 
 def detect_risk_changes(baseline: Optional[Dict[str, Any]], current: Dict[str, Any]) -> List[Dict[str, Any]]:

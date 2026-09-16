@@ -146,10 +146,14 @@ class TestGreenRatio(unittest.TestCase):
         self.assertAlmostEqual(result["green_ratio"], 0.429, places=9)
 
     def test_all_green_ratio_is_one(self):
+        # GREEN_MODES 含地铁/公交/高铁等低碳机动方式，全部绿色时 green_ratio=1.0，
+        # 但总排放不为 0（只有步行/骑行因子为 0）。
         result = compute_footprint([{"mode": m, "distance_km": 10.0} for m in sorted(GREEN_MODES)])
         self.assertEqual(result["green_ratio"], 1.0)
-        self.assertAlmostEqual(result["green_km"], 50.0, places=9)
-        self.assertEqual(result["total_kg"], 0.0)
+        self.assertAlmostEqual(result["green_km"], 50.0, places=9)  # 5 种方式 × 10km
+        expected = round(sum(round(10.0 * EMISSION_FACTORS[m], 3) for m in sorted(GREEN_MODES)), 2)
+        self.assertAlmostEqual(result["total_kg"], expected, places=9)
+        self.assertAlmostEqual(result["total_kg"], 1.03, places=9)  # 10*(0.028+0.035+0.04)
 
     def test_non_green_trip_ratio_is_zero(self):
         result = compute_footprint([{"mode": "driving", "distance_km": 10.0}])
