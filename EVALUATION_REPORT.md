@@ -350,24 +350,39 @@ crowdedness 对照：
 
 ### 5.3 算法模块单测（阶段二剩余项）
 
-此前 `core/constraints.py`（470 行）等纯算法模块零覆盖。
+此前 `core/constraints.py`（470 行）、`api/carbon_service.py`（198 行）、`api/risk_service.py`（631 行）等纯算法模块零覆盖。
 
 | 新增测试文件 | 数量 | 覆盖 |
 |---|---|---|
 | `tests/test_simulation.py` | 33 | 仿真：确定性、P90≥P50、成本解析（空/免费/未知三态）、天气与方差灵敏度、预算三态、成员满意度分布、序列化 |
+| `tests/test_risk_service.py` | 44 | CII 加权复合与权重归一、本地基线不得升级为 MEDIUM/HIGH、天气关键词与路况码单调、节点风险（酒店折扣/夜间加成/边界小时/拥挤加成/0-100 截断）、变更检测、同城缓存只调用一次 provider |
 | `tests/test_constraints.py` | 30 | 四级约束层级、hard/negotiable 分列、违规码、放宽策略（含拒绝未知码）、缺失输入不是违规 |
+| `tests/test_carbon_service.py` | 28 | 排放因子表、距离×因子算术、绿色替代方案与节省量、树木当量、零距离边界、未知方式回落、provenance 字段 |
 | `tests/test_prometheus_metrics.py` | 9 | 直方图与暴露格式 |
 
-**Python 测试总数 78 → 150。**
+**Python 测试总数 78 → 222。**
 
-写测试过程中修正了我自己的两处错误断言（`context()` 缺 `risk_tolerance`；误把 `checked["unique_locations"]` 当作检测结果，实际它是输入开关，重复项通过 `duplicate_location` 违规体现）——已在测试中注明该语义。
+### 5.4 新测试发现并修复的一个真实缺陷（夜间时段误判）
+
+`risk_service.compute_node_risk` 的夜间判定正则 `r"(2[0-3]|0?[0-6]):\d{2}"` **未锚定小时起点**：`"0?[0-6]"` 分支会在 `"12:30"` 的第 2 个字符处匹配到 `"2:30"`、在 `"16:45"` 匹配到 `"6:45"`，把白天误判为夜间并错误加 6 分。
+
+```
+修复前：time=12:30 → 26.0     time=16:45 → 26.0
+修复后：time=12:30 → 20.0     time=16:45 → 20.0
+边界（修复后）：19:59→20.0  20:00→26.0  06:59→26.0  07:00→20.0
+带前缀：Day 1 | 12:30 → 20.0     Day 1 | 21:30 → 26.0
+```
+
+该缺陷直接影响 3D 风控雷达的逐点着色——白天景点被错误标为夜间风险。修复方式是改用锚定的 `_NIGHT_HOUR_PATTERN`，要求小时字段前为串首或非数字，从而兼容规划器产出的 `"Day 1 | 21:30"` 形式。
+
+这个用例最初由子代理以 `@unittest.expectedFailure` 记录（保持断言正确而非删除测试），缺陷修复后已移除标记并补充边界与带前缀时间的用例。**当前 222 项测试中已无 expected failure。**
 
 ### 第五轮验证总览（全部实测）
 
 | 套件 | 结果 |
 |---|---|
 | `go build` / `go vet` / `go test` | 全部通过 |
-| Python `unittest` | **Ran 150 tests — OK** |
+| Python `unittest` | **Ran 222 tests — OK**（无 expected failure） |
 | 前端 `tsc` | 0 error |
 | 前端单测 | 79 passed / 0 fail |
 | 生产构建 | 成功 |
@@ -376,9 +391,10 @@ crowdedness 对照：
 
 ### 仍未完成
 
-- **碳足迹与风险服务单测**：`api/carbon_service.py`（198 行）与 `api/risk_service.py`（631 行）仍无覆盖，已委派但尚未产出。
-- 阶段二剩余：前端巨型组件拆分（首屏仍 1,098KB）、真 ESLint 替换 38 行自制 lint。
+- **前端巨型组件拆分**：`ContextualLobby.tsx` 仍约 3,900 行、首屏仍约 1,098KB。这是纯结构性重构，需把 25 个本地组件按域抽出并逐一验证无回归，风险与工作量都明显高于本轮其他项，**本轮未做**。
+- **真 ESLint 替换 38 行自制 lint**（`scripts/lint.mjs` 仅检查 `debugger;` 与 localhost 硬编码）。
 - 阶段三其余建议（CRDT 协同、LLM 成本治理、凭证中心、订单闭环）与第四步真多智能体。
+- 只有你本人能做的两项：轮换 4 个真实密钥、git 历史清理（含 bcrypt 哈希与 53.9MB 二进制）。
 
 ---
 
