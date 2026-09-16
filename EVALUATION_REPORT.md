@@ -278,6 +278,110 @@ verdict=insufficient_evidence  (exit code 2)
 
 ---
 
+## 第五轮实施记录：Prometheus 指标 + 概率化数字孪生仿真 + 算法单测（2026-05-19 追加）
+
+### 5.1 Prometheus 指标（阶段二剩余项）
+
+原实现只有 JSON `/metrics`，且只报告**进程生命周期平均延迟**——平均值掩盖长尾，且随运行时间越来越钝，无法支撑 SLO 告警，也不能被 Prometheus 抓取。
+
+| 服务 | 新增端点 | 内容 |
+|---|---|---|
+| Gateway | `GET /metrics/prometheus` | `up`/`uptime`/`requests_total`/`responses_total`/`bandit_feedback_total` + 按 `method+path` 的延迟直方图 |
+| AI Service | `GET /metrics/prometheus` | 同样的直方图 + bandit `decisions`/`explorations`/`rewards_recorded`/`arm_count` gauge |
+
+**分桶设计说明**：边界取 5ms–30s。原因是本服务实测存在约 9s 的代理 provider 调用；若最高桶低于观测最大值，所有慢请求都会塌进 `+Inf`，恰好丢掉直方图存在的意义（长尾信息）。
+
+JSON `/metrics` 端点**保留不变**，避免破坏既有消费方。Gateway 侧新端点同样受 `MetricsGuardMiddleware` 保护。
+
+**实测抓取结果**
+
+```
+Gateway: HTTP 200, Content-Type: text/plain; version=0.0.4
+  omniroute_gateway_up 1 / requests_total 5
+  omniroute_gateway_bandit_feedback_total{outcome="missing_arm"} 0
+  /ping 直方图 13 个 le 桶 + +Inf=4 + sum + count（累积正确）
+AI Service: HTTP 200, 26 个 bucket 行
+  omniroute_ai_gauge{name="bandit_rewards_recorded"} 3
+  omniroute_ai_request_duration_milliseconds_count{...carbon/factors} 3
+```
+
+新增 **15 个测试**（Gateway 6 + AI 9），覆盖累积桶单调、`+Inf` 等于样本数、sum/count 与观测一致、标签转义、度量行格式，以及「分位数能看出长尾而平均值看不出」这一核心属性。
+
+### 5.2 概率化数字孪生仿真（建议三）
+
+新增 `core/simulation.py`：对**停留时长、排队、交通、天气**做蒙特卡洛采样，输出分布而非点估计。
+
+| 输出 | 含义 |
+|---|---|
+| `total_minutes` P50 / P90 / mean | P90 表示 10% 的情形会超过该时长 |
+| `per_day_minutes_p90` | 逐日压力，用于识别哪天最容易超时 |
+| `budget_overrun_probability` | 按费用分布计算的超预算概率 |
+| `member_satisfaction` | 每名成员的 `satisfaction_p50` 与 `satisfaction_floor_p10` |
+| `assumptions` | 明示哪些输入是默认值（未知停留时长、无报价节点、采样次数） |
+
+**替换掉两处伪造/无效指标**
+
+| 位置 | 修复前 | 修复后 |
+|---|---|---|
+| `agent.py` LLM 输出模板 | `team_satisfaction` 写死 **96/94/93** 让模型回显 | **删除模板中的数字**，改由仿真按成员在真实路线上的效用计算 |
+| `agent.py` 降级路径 | 所有成员一律写死 **88** | 与正常路径一致地由仿真填充 |
+| `travel_utils.estimate_crowdedness` | `percent` 按分级写死 **82/58/35**，与自身 `score` 无关（`score=123` 仍报 82%） | 由 `score` **单调映射**，并给出 `percent_range` 区间；同时修正 `score` 无上限的问题 |
+
+**实测对照（同一条 4 节点洛阳路线）**
+
+```
+修复前：team_satisfaction = {Felix: 96, Alice: 94, Bob: 93}   ← 写死
+修复后：{Felix: 60, Alice: 48, Bob: 50}                        ← 由路线效用分布算出
+
+时长分布：P50=532.6min  P90=614.5min  mean=536.7min
+逐日 P90：{Day1: 171.7, Day2: 176.3}
+超预算概率：0.0（预算 1200，已知费用 630）
+
+crowdedness 对照：
+  rating=5 traffic=1 weekend=False → score=75  percent=75  [69,81]
+  rating=5 traffic=3 weekend=True  → score=100 percent=100 [94,100]
+  rating=1 traffic=1 weekend=False → score=15  percent=15  [9,21]
+（原实现这三例分别恒为 58 / 82 / 35）
+```
+
+前端质量摘要新增「时长 P50/P90」「超预算概率」「N 个节点未计价」展示；正常与降级两条路径都注入仿真结果，降级时不再丢失不确定度信息。
+
+**一处诚实的校准修正**：满意度公式初版为 `0.35 + 0.55×coverage`，在 4 节点路线上一个兴趣被完整满足的成员只得到 0.49（"不满意"），明显偏低。已改为 `0.45 + 0.45×coverage + 角色加成`，并在代码中记录了这次校准的理由。
+
+### 5.3 算法模块单测（阶段二剩余项）
+
+此前 `core/constraints.py`（470 行）等纯算法模块零覆盖。
+
+| 新增测试文件 | 数量 | 覆盖 |
+|---|---|---|
+| `tests/test_simulation.py` | 33 | 仿真：确定性、P90≥P50、成本解析（空/免费/未知三态）、天气与方差灵敏度、预算三态、成员满意度分布、序列化 |
+| `tests/test_constraints.py` | 30 | 四级约束层级、hard/negotiable 分列、违规码、放宽策略（含拒绝未知码）、缺失输入不是违规 |
+| `tests/test_prometheus_metrics.py` | 9 | 直方图与暴露格式 |
+
+**Python 测试总数 78 → 150。**
+
+写测试过程中修正了我自己的两处错误断言（`context()` 缺 `risk_tolerance`；误把 `checked["unique_locations"]` 当作检测结果，实际它是输入开关，重复项通过 `duplicate_location` 违规体现）——已在测试中注明该语义。
+
+### 第五轮验证总览（全部实测）
+
+| 套件 | 结果 |
+|---|---|
+| `go build` / `go vet` / `go test` | 全部通过 |
+| Python `unittest` | **Ran 150 tests — OK** |
+| 前端 `tsc` | 0 error |
+| 前端单测 | 79 passed / 0 fail |
+| 生产构建 | 成功 |
+| **E2E** | **PASS** |
+| 两个 `/metrics/prometheus` 端点 | 实测 HTTP 200，直方图累积正确 |
+
+### 仍未完成
+
+- **碳足迹与风险服务单测**：`api/carbon_service.py`（198 行）与 `api/risk_service.py`（631 行）仍无覆盖，已委派但尚未产出。
+- 阶段二剩余：前端巨型组件拆分（首屏仍 1,098KB）、真 ESLint 替换 38 行自制 lint。
+- 阶段三其余建议（CRDT 协同、LLM 成本治理、凭证中心、订单闭环）与第四步真多智能体。
+
+---
+
 ## 0. 执行摘要
 
 ### 0.1 一句话结论
