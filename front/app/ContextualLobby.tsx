@@ -16,7 +16,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { API_BASE, WS_BASE, apiFetch, getAuthToken, installApiFetchInterceptor } from './lib/utils';
 import { shortenRegionName, tryExtractJson, normalizeLnglat, extractStreamingRoutes } from './lib/lobbyUtils';
-import type { CommunityComment, Phase, ProfileTrip, RoomMember, UserProfile } from './types';
+import type { Phase, RoomMember, UserProfile } from './types';
 
 // 底部行程节点横向卡片条（自 ContextualLobby 拆分出来的展示型组件）
 import BottomMapCarousel from './components/BottomMapCarousel';
@@ -109,23 +109,6 @@ const FullRouteVisualizer = dynamic(
     )
   }
 );
-
-// =========================================================================
-// 社区：用户分享行程/智能体规划，他人点赞、评论、回复
-// =========================================================================
-interface CommunityPostItem {
-  id: string;
-  user_id: string;
-  author: string;
-  author_avatar: string;
-  author_avatar_url: string;
-  title: string;
-  content: string;
-  dest_city: string;
-  likes: number;
-  comments: number;
-  created_at: string;
-}
 
 // =========================================================================
 // 主入口：认证判断 -> 大厅界面 -> 多智能体决策工作区

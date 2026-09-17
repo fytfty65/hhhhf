@@ -1,22 +1,15 @@
 'use client';
 
 /**
- * DeductionPanel — 多智能体推演进行中/失败面板（含 DeductionPanelProps 类型定义）
+ * DeductionPanel — 多智能体推演进行中/失败面板（props 类型来自 ../types）
  *
  * Extracted verbatim from ContextualLobby.tsx during the file split (批 3)。
  * 仅搬运：props 签名、类名与文案逐字保留，未做任何行为改动。
  */
 
 import { motion } from 'framer-motion';
+import type { DeductionPanelProps } from '../types';
 import { AlertCircle, RefreshCw, RotateCw, ArrowLeft } from 'lucide-react';
-
-interface DeductionPanelProps {
-  latestLog?: string;
-  error?: string | null;
-  timedOut?: boolean;
-  onRetry?: () => void;
-  onBack?: () => void;
-}
 
 export default function DeductionPanel({ latestLog, error, timedOut, onRetry, onBack }: DeductionPanelProps) {
   const hasError = Boolean(error || timedOut);
