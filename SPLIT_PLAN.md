@@ -30,7 +30,7 @@
 |---|---|---|
 | — | 行为基线 + 安全网 `front/e2e/refactor-regression.spec.ts` | ✅ 提交 `ebd2d90` |
 | 1 | `TravelModeCard` + `PreferenceCard` → `components/SelectCards.tsx`（38 行） | ✅ 提交 `65c554c`（tsc / 79 单测 / build / 8 E2E 全绿） |
-| 2 | `BottomMapCarousel`(96) + `ExpandableConnectorNav`(166) | ⬜ 待做 |
+| 2 | `BottomMapCarousel`(96) → `components/BottomMapCarousel.tsx`；`ExpandableConnectorNav`(165) → `components/ExpandableConnectorNav.tsx` | ✅ 提交 `4671f07` + `90d4a50`（**单组件一提交**，两次门禁全绿） |
 | 3 | `DynamicBudgetCard`(54) + `DeductionPanel`(75) + `EditIntentModal`(38) | ⬜ 待做 |
 | 4 | `TeamPresenceBar`(233，依赖 `data`/`API_BASE`) + `DraftingPanel`(164) | ⬜ 待做 |
 | 5 | `MafengwoStylePanel`(~404) | ⬜ 待做 |
@@ -39,6 +39,7 @@
 | 收尾 | 体积/行数对比 + 全门禁复跑 | ⬜ 待做 |
 
 （行号为拆分前行号，每次抽取后会漂移；以组件名/函数名定位为准。）
+**当前进度**：`ContextualLobby.tsx` = **3,712 行 / 203,556 B**（拆分前 3,991 行 / 218,225 B）；首屏 JS 始终 1,104.6 KB / 13 chunk、CSS 140.2 KB（批 1、批 2 均无劣化）。
 
 其余顶层定义参考：`shortenRegionName`(57)、`OmniLogo`(105)、`tryExtractJson`(127)、`normalizeLnglat`(157)、`extractStreamingRoutes`(181)、`getCleanPhotoUrl`(228)、`PoiImage`(248)、`AuthPortalScreen`(367)、`ContextualLobby`(640，根)、`EditIntentModal`(1370)、`UnifiedWorkspace`(1408)。
 
