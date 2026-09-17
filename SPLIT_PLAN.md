@@ -35,18 +35,33 @@
 | 4 | `DraftingPanel`(168，含仅它使用的 `TRAVEL_MODES`/`USER_ROLES`) → `components/DraftingPanel.tsx`；`TeamPresenceBar`(234，含仅它使用的 `ActivityEvt`) → `components/TeamPresenceBar.tsx` | ✅ 提交 `9130450`（门禁全绿） |
 | 5 | `getCleanPhotoUrl` → `lib/lobbyUtils.ts`（具名导出）；`PoiImage`+`PoiImageProps`(123) → `components/PoiImage.tsx` | ✅ 提交 `9b22dee`（门禁全绿；**顺序已调整**，见下） |
 | 6 | `MafengwoStylePanel`(403) → `components/MafengwoStylePanel.tsx`；宿主随之清理 10 个失效 import | ✅ 提交 `6cadefd`（门禁全绿） |
-| 7 | `OmniLogo` + `AuthPortalScreen`(273) → `components/`；其余纯函数工具（`shortenRegionName`/`tryExtractJson`/`normalizeLnglat`/`extractStreamingRoutes`）→ `lib/lobbyUtils.ts` | ⬜ 待做（**下一个**） |
-| 8 | `UnifiedWorkspace`（1,354 行）按面板继续拆 | ⬜ **未决，需用户确认后再动** |
-| 收尾 | 体积/行数对比 + 全门禁复跑 | ⬜ 待做 |
+| 7 | `shortenRegionName`/`tryExtractJson`/`normalizeLnglat`/`extractStreamingRoutes` → `lib/lobbyUtils.ts`（具名导出）；`OmniLogo`(21，纯 SVG) → `components/OmniLogo.tsx`；`AuthPortalScreen`(232) → `components/AuthPortalScreen.tsx` | ✅ 提交 `1977fe3`（门禁全绿） |
+| 8 | `UnifiedWorkspace`（1,357 行，占宿主 60%）按面板继续拆 | ⬜ **未决，需用户确认后再动** |
+| 收尾 | 体积/行数对比 + 全门禁复跑 | ✅ 见下（批 7 后已完成一次） |
 
 **顺序调整说明**：原计划批 5 是 `MafengwoStylePanel`。依赖分析发现它引用了仍在宿主里的 `PoiImage` 与 `getCleanPhotoUrl`，先抽它会形成 `ContextualLobby ⇄ MafengwoStylePanel` 循环导入，故改为先抽叶子（PoiImage + 工具函数），再抽 `MafengwoStylePanel`。
 
 （行号为拆分前行号，每次抽取后会漂移；以组件名/函数名定位为准。）
-**当前进度**：`ContextualLobby.tsx` = **2,619 行 / 141,824 B**（拆分前 3,991 行 / 218,225 B，已减少 34%）；首屏 JS 始终 1,104.5–1,104.6 KB / 13 chunk、CSS 140.2 KB（批 1–6 均无劣化）。已抽出 10 个组件文件 + 1 个工具模块。
+
+### 收尾对比（批 1–7 完成后，2026-09-17 实测）
+
+| 指标 | 拆分前 | 现在 | 结论 |
+|---|---|---|---|
+| `ContextualLobby.tsx` | 3,991 行 / 218,225 B | **2,264 行 / 124,948 B** | -43% 行数 |
+| ├ 根组件 `ContextualLobby` | （混在一起） | 730 行 | 仅状态与编排 |
+| └ `UnifiedWorkspace` | 1,354 行 | 1,357 行 | **尚未拆（待确认）** |
+| 首屏 JS | 1,104.6 KB / 13 chunk | 1,104.5 KB / 13 chunk | 无劣化 |
+| 首屏 CSS | 140.2 KB | 140.2 KB | 无劣化 |
+| 单测 | 79 | 79 passed / 0 failed | 无损失 |
+| E2E | 8 passed | 8 passed（含 core-flow 真实注册/登录） | 无损失 |
+| 生产构建 | exit 0 | exit 0 | 无损失 |
+
+已抽出：**12 个组件文件**（`SelectCards`/`BottomMapCarousel`/`ExpandableConnectorNav`/`EditIntentModal`/`DeductionPanel`/`DynamicBudgetCard`/`DraftingPanel`/`TeamPresenceBar`/`PoiImage`/`MafengwoStylePanel`/`OmniLogo`/`AuthPortalScreen`）+ **`lib/lobbyUtils.ts`（5 个纯函数）**。
 
 **已知待办（不要混进机械搬运批次）**
 1. `app/types/index.ts` 已规范定义 `Phase`/`UserProfile`/`RoomMember`（`CommunityPanel`、`ProfileScreen` 即从那里导入），而 `ContextualLobby.tsx` 内还有一份同名重复定义（批 5 中它曾被误卷入新文件，已原样退回）。去重应作为一次独立提交单独处理。
 2. `AvatarUploader` 在拆分前（`ebd2d90`）就已是从未使用的 import，属既有死代码；本次刻意保留未动，可另开一次清理提交。
+3. `work/` 下的抽取脚本（`extract-split2.ps1`、`move-to-lib.ps1`、`cleanup-imports.ps1`、`fix-imports7.ps1`、`extract-auth.ps1`）是本次拆分的工具，`work/` 已被 gitignore，不会进仓库；续做时可复用（注意 `move-to-lib.ps1` 里 `$Target`/`$target` 大小写冲突只影响日志输出，不影响结果）。
 
 其余顶层定义参考：`shortenRegionName`(57)、`OmniLogo`(105)、`tryExtractJson`(127)、`normalizeLnglat`(157)、`extractStreamingRoutes`(181)、`getCleanPhotoUrl`(228)、`PoiImage`(248)、`AuthPortalScreen`(367)、`ContextualLobby`(640，根)、`EditIntentModal`(1370)、`UnifiedWorkspace`(1408)。
 
