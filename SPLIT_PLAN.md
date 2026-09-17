@@ -34,17 +34,19 @@
 | 3 | `DynamicBudgetCard`(53) → `components/DynamicBudgetCard.tsx`；`DeductionPanel`(79，含 `DeductionPanelProps`) → `components/DeductionPanel.tsx`；`EditIntentModal`(37) → `components/EditIntentModal.tsx` | ✅ 提交 `2795e34`（三个叶子组件一次提交，门禁全绿） |
 | 4 | `DraftingPanel`(168，含仅它使用的 `TRAVEL_MODES`/`USER_ROLES`) → `components/DraftingPanel.tsx`；`TeamPresenceBar`(234，含仅它使用的 `ActivityEvt`) → `components/TeamPresenceBar.tsx` | ✅ 提交 `9130450`（门禁全绿） |
 | 5 | `getCleanPhotoUrl` → `lib/lobbyUtils.ts`（具名导出）；`PoiImage`+`PoiImageProps`(123) → `components/PoiImage.tsx` | ✅ 提交 `9b22dee`（门禁全绿；**顺序已调整**，见下） |
-| 6 | `MafengwoStylePanel`(~403) → `components/MafengwoStylePanel.tsx` | ⬜ 待做（**下一个**） |
-| 7 | `AuthPortalScreen`(273) + `OmniLogo` + 其余纯函数工具（`shortenRegionName`/`tryExtractJson`/`normalizeLnglat`/`extractStreamingRoutes`）→ `components/` 与 `lib/lobbyUtils.ts` | ⬜ 待做 |
+| 6 | `MafengwoStylePanel`(403) → `components/MafengwoStylePanel.tsx`；宿主随之清理 10 个失效 import | ✅ 提交 `6cadefd`（门禁全绿） |
+| 7 | `OmniLogo` + `AuthPortalScreen`(273) → `components/`；其余纯函数工具（`shortenRegionName`/`tryExtractJson`/`normalizeLnglat`/`extractStreamingRoutes`）→ `lib/lobbyUtils.ts` | ⬜ 待做（**下一个**） |
 | 8 | `UnifiedWorkspace`（1,354 行）按面板继续拆 | ⬜ **未决，需用户确认后再动** |
 | 收尾 | 体积/行数对比 + 全门禁复跑 | ⬜ 待做 |
 
 **顺序调整说明**：原计划批 5 是 `MafengwoStylePanel`。依赖分析发现它引用了仍在宿主里的 `PoiImage` 与 `getCleanPhotoUrl`，先抽它会形成 `ContextualLobby ⇄ MafengwoStylePanel` 循环导入，故改为先抽叶子（PoiImage + 工具函数），再抽 `MafengwoStylePanel`。
 
 （行号为拆分前行号，每次抽取后会漂移；以组件名/函数名定位为准。）
-**当前进度**：`ContextualLobby.tsx` = **3,041 行 / 167,067 B**（拆分前 3,991 行 / 218,225 B）；首屏 JS 始终 1,104.5–1,104.6 KB / 13 chunk、CSS 140.2 KB（批 1–5 均无劣化）。
+**当前进度**：`ContextualLobby.tsx` = **2,619 行 / 141,824 B**（拆分前 3,991 行 / 218,225 B，已减少 34%）；首屏 JS 始终 1,104.5–1,104.6 KB / 13 chunk、CSS 140.2 KB（批 1–6 均无劣化）。已抽出 10 个组件文件 + 1 个工具模块。
 
-**已知待办（不要混进机械搬运批次）**：`app/types/index.ts` 已规范定义 `Phase`/`UserProfile`/`RoomMember`（`CommunityPanel`、`ProfileScreen` 即从那里导入），而 `ContextualLobby.tsx` 内还有一份同名重复定义（批 5 中它曾被误卷入新文件，已原样退回）。去重应作为一次独立提交单独处理。
+**已知待办（不要混进机械搬运批次）**
+1. `app/types/index.ts` 已规范定义 `Phase`/`UserProfile`/`RoomMember`（`CommunityPanel`、`ProfileScreen` 即从那里导入），而 `ContextualLobby.tsx` 内还有一份同名重复定义（批 5 中它曾被误卷入新文件，已原样退回）。去重应作为一次独立提交单独处理。
+2. `AvatarUploader` 在拆分前（`ebd2d90`）就已是从未使用的 import，属既有死代码；本次刻意保留未动，可另开一次清理提交。
 
 其余顶层定义参考：`shortenRegionName`(57)、`OmniLogo`(105)、`tryExtractJson`(127)、`normalizeLnglat`(157)、`extractStreamingRoutes`(181)、`getCleanPhotoUrl`(228)、`PoiImage`(248)、`AuthPortalScreen`(367)、`ContextualLobby`(640，根)、`EditIntentModal`(1370)、`UnifiedWorkspace`(1408)。
 
