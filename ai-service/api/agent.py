@@ -3247,6 +3247,29 @@ async def run_negotiate(msg: GatewayMessage):
                         computed = _satisfaction_from_simulation(final_data["simulation"])
                         if computed:
                             final_data["team_satisfaction"] = computed
+
+                        # 👑 阶段 1：规划质量门禁 + 预算可行性 + 兜底方案（纯确定性，零网络）
+                        # 业务逻辑在 core/plan_quality.plan_quality_snapshot 里（可单测），
+                        # 这里只做薄接线；任何异常都不得阻断规划主流程。
+                        try:
+                            from core.plan_quality import plan_quality_snapshot
+
+                            _quality_signals = pref_signals if isinstance(pref_signals, dict) else None
+                            _quality_context = {
+                                "days": trip_days,
+                                "budget": total_calc_budget,
+                                "preferences": {
+                                    "pace": intent_str,
+                                    "interest": (_quality_signals or {}).get("interest"),
+                                },
+                            }
+                            _snapshot = plan_quality_snapshot(_quality_context, final_data, signals=_quality_signals)
+                            final_data["quality"] = _snapshot["quality"]
+                            final_data["budget_report"] = _snapshot["budget"]
+                            if _snapshot.get("fallback"):
+                                final_data["fallback"] = _snapshot["fallback"]
+                        except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案
+                            final_data["quality"] = {"error": str(_quality_exc)[:200]}
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
                     await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {

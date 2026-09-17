@@ -52,7 +52,22 @@
 
 | 步 | 内容 | 状态 |
 |---|---|---|
-| 1 | 骨架 + 预算分配器（三级价格模型）+ 两个新硬门禁 | 进行中 |
-| 2 | 平替库 + fallback 输出 + `fallback_quality` | 待做 |
-| 3 | 增量 delta + 配额 + `increment_responsiveness` | 待做 |
-| 4 | Critic/Repair 闭环（LLM 只当候选生成器） | 待做 |
+| 1 | 骨架 + 预算分配器（三级价格模型）+ 两个新硬门禁 | ✅ 完成（提交 `7ff3fb8`）：`core/itinerary_skeleton.py`、`core/budget_planner.py`、门禁接入 + 27 项单测 |
+| 1.5 | **接线到真实管线**：`agent.py` 在 `final_route` 下发前调用 `plan_quality_snapshot()`，随 payload 附 `quality` / `budget_report` / `fallback`（受 try/except 保护，失败不影响出方案） | ✅ 完成：业务逻辑在 core（可单测），agent.py 只做薄接线；已通过 `py_compile`、应用导入检查、5 项 snapshot 单测 |
+| 2 | 平替库（真实候选池按意图归档）+ `fallback_quality` 维度 + 前端展示 disclosure | ⬜ 待做（当前无候选池时只能"删/降"，不能"换同类"） |
+| 3 | 增量 delta + 配额 + `increment_responsiveness`（服务里已有 `is_refinement` 分支可复用） | ⬜ 待做 |
+| 4 | Critic/Repair 闭环（LLM 只当候选生成器） | ⬜ 待做 |
+
+### 已下发给前端的字段（步 1.5）
+
+`final_route.payload` 新增：
+- `quality`：`{score, verdict, gate_passed, gate_failures[], unverifiable_count, dimensions{}}`
+- `budget_report`：`{budget, verified_cost, estimated_cost, unknown_count, status, shortfall, confidence, note}`
+- `fallback`（仅预算 `over`/`at_risk` 时）：`{trigger, shortfall, remaining_shortfall, actions[], substitutions[], dropped[], preserved_intents[], preserved_ratio, needs_confirmation, disclosure}`
+
+> 注意：`verdict=fail` 且 `score` 仍可能很高 —— 硬门禁失败与加权得分是两回事，前端展示时要把 `gate_passed` 放在显眼位置（例如"预算超出 ¥X，已给你平替方案"）。
+
+### 离线可行 / 需联网的验证边界
+
+- 可离线验证：骨架、预算三级模型、兜底动作序、门禁、snapshot 组装 —— 已全部单测覆盖。
+- **尚需真实 LLM+数据源验证**：接线后在真实 run 里的字段落地情况（`final_route` payload 是否正常下发、前端渲染、真实候选下的平替质量）。

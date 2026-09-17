@@ -605,6 +605,46 @@ def stability_score(plans: Sequence[Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 # 汇总
 # --------------------------------------------------------------------------
+def plan_quality_snapshot(
+    context: Mapping[str, Any],
+    plan: Any,
+    expectations: Optional[Mapping[str, Any]] = None,
+    signals: Optional[Mapping[str, Any]] = None,
+    candidates_by_intent: Optional[Mapping[str, Any]] = None,
+    include_fallback: bool = True,
+) -> Dict[str, Any]:
+    """给调用方（`api/agent.py`、CLI）一个"一次调用拿到全部结论"的入口。
+
+    返回 `{quality, budget, skeleton, fallback}`：
+    - `quality`：分数 / verdict / 门禁失败明细 / 未核实计数 / 各维度分值（精简，便于直接下发前端）；
+    - `budget`：三级价格模型报告（verified / estimated / unknown + status + confidence）；
+    - `skeleton`：一体化槽位摘要（住宿夜数 / 餐数 / 玩点数 vs 要求）；
+    - `fallback`：仅当预算 `over` / `at_risk` 时给出兜底提案（含人话 `disclosure`），否则为 None。
+
+    纯确定性、零网络；**不修改传入的 plan**。业务逻辑放在 core 里，`agent.py` 只做薄接线，
+    这样接线本身不需要跑 LLM 就能单测。
+    """
+    report = evaluate_plan(context, plan, expectations=expectations, signals=signals)
+    snapshot: Dict[str, Any] = {
+        "quality": {
+            "score": report["score"],
+            "verdict": report["verdict"],
+            "gate_passed": report["gate"]["passed"],
+            "gate_failures": report["gate"]["failures"],
+            "unverifiable_count": report["gate"]["unverifiable_count"],
+            "dimensions": {key: value["value"] for key, value in report["dimensions"].items()},
+        },
+        "budget": report["budget"],
+        "skeleton": report["skeleton"],
+        "fallback": None,
+    }
+    if include_fallback and report["budget"]["status"] in {"over", "at_risk"}:
+        from .budget_planner import propose_fallback  # 延迟导入（见模块头说明）
+
+        snapshot["fallback"] = propose_fallback(context, plan, candidates_by_intent=candidates_by_intent)
+    return snapshot
+
+
 def evaluate_plan(
     context: Mapping[str, Any],
     plan: Any,

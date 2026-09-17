@@ -20,6 +20,7 @@ from core.plan_quality import (  # noqa: E402
     haversine_km,
     parse_clock,
     parse_open_window,
+    plan_quality_snapshot,
     score_diversity,
     score_pacing,
     score_preference_coverage,
@@ -312,6 +313,59 @@ class TestGoldenCases(unittest.TestCase):
                                        expectations=case["expectations"], signals=case.get("signals"))
                 self.assertIn("score", report)
                 self.assertFalse(report["gate"]["passed"])  # 空方案必然不过门禁
+
+
+class TestQualitySnapshot(unittest.TestCase):
+    """`plan_quality_snapshot` 是 agent.py 薄接线的入口，必须稳定、不改动传入 plan。"""
+
+    def _context(self):
+        return {"days": 2, "budget": 2000, "preferences": {"pace": "relaxed", "interest": ["博物馆", "美食"]}}
+
+    def test_snapshot_shape(self):
+        snapshot = plan_quality_snapshot(self._context(), good_plan())
+        for key in ("quality", "budget", "skeleton", "fallback"):
+            self.assertIn(key, snapshot)
+        self.assertTrue(snapshot["quality"]["gate_passed"])
+        self.assertEqual(snapshot["quality"]["verdict"], "pass")
+        self.assertEqual(snapshot["skeleton"]["lodging_nights"], 1)
+        self.assertIsNone(snapshot["fallback"])
+
+    def test_snapshot_gives_fallback_when_over_budget(self):
+        plan = {"route": [
+            node("钟楼酒店", 1, "09:00", node_type="住宿", cost="¥1800", open_time="00:00-23:59"),
+            node("博物馆", 1, "10:30", node_type="博物馆", cost="¥400"),
+            node("回民街小吃", 1, "12:30", node_type="餐饮", cost="¥200"),
+            node("城墙南门", 2, "09:30", node_type="文化", cost="¥200"),
+            node("面馆", 2, "12:30", node_type="餐饮", cost="¥200"),
+        ]}
+        snapshot = plan_quality_snapshot(self._context(), plan)
+        self.assertEqual(snapshot["budget"]["status"], "over")
+        self.assertIsNotNone(snapshot["fallback"])
+        self.assertIn("disclosure", snapshot["fallback"])
+        self.assertFalse(snapshot["quality"]["gate_passed"])  # 预算硬门禁不过
+
+    def test_snapshot_no_fallback_when_ok(self):
+        snapshot = plan_quality_snapshot(self._context(), good_plan())
+        self.assertIsNone(snapshot["fallback"])
+
+    def test_snapshot_does_not_mutate_plan(self):
+        plan = good_plan()
+        before = json.dumps(plan, ensure_ascii=False, sort_keys=True)
+        plan_quality_snapshot(self._context(), plan)
+        self.assertEqual(before, json.dumps(plan, ensure_ascii=False, sort_keys=True))
+
+    def test_snapshot_marks_unverified_budget(self):
+        plan = {"route": [
+            node("钟楼酒店", 1, "09:00", node_type="住宿", cost="暂无供应商数据", open_time="00:00-23:59"),
+            node("博物馆", 1, "10:30", node_type="博物馆", cost="暂无供应商数据"),
+            node("回民街小吃", 1, "12:30", node_type="餐饮", cost="暂无供应商数据"),
+            node("城墙南门", 2, "09:30", node_type="文化", cost="暂无供应商数据"),
+            node("面馆", 2, "12:30", node_type="餐饮", cost="暂无供应商数据"),
+        ]}
+        snapshot = plan_quality_snapshot(self._context(), plan)
+        self.assertEqual(snapshot["budget"]["status"], "unverifiable")
+        self.assertEqual(snapshot["budget"]["confidence"], "low")
+        self.assertIsNone(snapshot["fallback"])  # 未核实不该触发"降级"，而是提示补数据
 
 
 if __name__ == "__main__":

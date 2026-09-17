@@ -296,7 +296,7 @@ def propose_fallback(
                 "kind": "transport_downgrade",
                 "node": "-",
                 "saving": None,
-                "reason": "建议把跨城段改为普速/公交或错峰出行（只给建议，不自动改）",
+                "reason": "把跨城段改为普速/公交或错峰出行（只给建议，不自动改）",
             }
         )
 

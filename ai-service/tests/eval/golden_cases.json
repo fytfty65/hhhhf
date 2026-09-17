@@ -6,7 +6,8 @@
     "每条包含：request（用户原话）、context（天数/预算/人数/偏好/季节天气）、signals（偏好信号，等价于 extract_preference_signals 的输出）、expectations、notes（为什么这条重要）。",
     "机器会自动检查：天数覆盖、预算（未知价格记为『未核实』而非 0）、must_have、时间窗与单日时序、开放时间冲突（缺数据记『未核实』）。",
     "must_not 目前是**人工评审参考**（例如『博物馆排在周一闭馆日』），不参与自动判定；等阶段 1 把闭馆日数据接进来后再自动化。",
-    "口径：非供应商字段一律『未核实』，评分不奖励无法核实的内容——宁可分低，也不把编造当丰富。"
+    "expect_fallback=true 表示这条用例应当触发兜底（平替）方案：机器判定由阶段 1 步 2 的 fallback_quality 维度消费；现在只作为人工评审与后续实现的依据。",
+    "口径：非供应商字段一律『未核实』，评分不奖励无法核实的内容——宁可分低，也不把编造当丰富；预算判定分三级（verified 才算硬结论，estimated 必须标明，unknown 不得声称满足）。"
   ],
   "cases": [
     {
@@ -422,6 +423,60 @@
         "min_nodes_per_day": 2, "max_nodes_per_day": 4
       },
       "notes": "与『夜景/晚出』案例呼应：作息个性化目前完全没有建模。"
+    },
+    {
+      "id": "budget-shortfall-family-xian-3d",
+      "title": "预算明显不足 · 西安亲子三天（1200 元 / 3 人）",
+      "request": "带 6 岁孩子去西安玩 3 天，我们一共只有 1200 块，实在不行景点少一点也行，但必须能住下、每天有正餐",
+      "context": {
+        "city": "西安", "days": 3, "budget": 1200, "members": 3,
+        "preferences": { "pace": "relaxed", "interest": ["亲子", "美食"], "budget": "low" },
+        "season": "夏", "weather": "晴"
+      },
+      "signals": { "wants_food": true, "budget": true, "interest": ["亲子"] },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": ["为了压预算把住宿或正餐整段删掉", "把天数改成 2 天（未经确认）"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "expect_fallback": true,
+      "notes": "机制级用例：预算不足时必须给兜底方案，且兜底后仍要'有吃有玩有住'。当前评分器只自动判门禁，expect_fallback 由阶段 1 步 2 的 fallback_quality 维度消费。"
+    },
+    {
+      "id": "budget-shortfall-keep-streetfood-2d",
+      "title": "预算不足但必须保留当地小吃 · 成都两天（600 元 / 2 人）",
+      "request": "重庆人第一次来成都 2 天，只有 600 块，一定要吃到地道小吃和苍蝇馆子，住宿随便住便宜点没关系",
+      "context": {
+        "city": "成都", "days": 2, "budget": 600, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["小吃", "苍蝇馆子", "夜市"], "budget": "low", "accommodation_style": "便宜" },
+        "season": "秋", "weather": "阴"
+      },
+      "signals": { "wants_food": true, "budget": true, "interest": ["小吃", "夜市"] },
+      "expectations": {
+        "must_have": ["餐"],
+        "must_not": ["为了省预算削减餐饮节点的数量", "把小吃换成高价正餐"],
+        "min_nodes_per_day": 3, "max_nodes_per_day": 6
+      },
+      "expect_fallback": true,
+      "notes": "检验兜底优先级：应先降住宿档位与次要玩点，**餐饮存在性最后才动**；这也是用户明确提的诉求。"
+    },
+    {
+      "id": "budget-tight-solo-luoyang-4d",
+      "title": "穷游四天 · 洛阳（800 元 / 1 人，公交+免费景点）",
+      "request": "学生一个人去洛阳 4 天，只有 800 块，能走路坐公交就不打车，尽量去免费的",
+      "context": {
+        "city": "洛阳", "days": 4, "budget": 800, "members": 1,
+        "preferences": { "pace": "normal", "interest": ["免费景点", "历史", "小吃"], "budget": "low", "transport_preference": "公交" },
+        "season": "春", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "budget": true, "transport_preference": "公交" },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": ["每天打车跨城", "大量高门票项目"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 5
+      },
+      "expect_fallback": true,
+      "notes": "与既有 budget-student-luoyang-5d 的区别：这条预算更紧且明确要求'免费优先/公交优先'，用来检验兜底动作是否真的按预算选择档位。"
     }
   ]
 }
