@@ -9,9 +9,8 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { API_BASE } from '../lib/utils';
+import type { ActivityEvt } from '../types';
 import { Activity, Check, Copy, Radio, Scale, Users } from 'lucide-react';
-
-type ActivityEvt = { id: string; ts: number; type: 'vote' | 'join' | 'consensus' | 'typing' | 'split'; text: string };
 
 export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, roomCode, arbitrationRecords = [], wsConnected = true, currentUser = null }: any) {
   const [liveSat, setLiveSat] = useState<Record<string, number>>({});

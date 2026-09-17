@@ -21,14 +21,14 @@ export interface RoomMember {
 }
 
 export interface PoiImageProps {
-  photos?: string[];
-  mapImage?: string;
-  amapUrl?: string;
-  name: string;
-  type?: string;
+  photos?: string[];          // 实景照片URL数组（自动轮询）
+  mapImage?: string;          // 高德静态地图兜底
+  amapUrl?: string;           // 高德地图跳转链接（用于兜底卡片）
+  name: string;               // 地点名称
+  type?: string;              // 地点类型（风景/餐饮/住宿等）
   className?: string;
-  index?: number;
-  onPhotoClick?: () => void;
+  index?: number;             // 序号
+  onPhotoClick?: () => void;  // 点击兜底卡片时触发（打开实景照片搜索）
 }
 
 export interface ProfileTrip {

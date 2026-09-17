@@ -10,19 +10,11 @@
 import React, { useState } from 'react';
 import { Camera, ExternalLink } from 'lucide-react';
 import { getCleanPhotoUrl } from '../lib/lobbyUtils';
+import type { PoiImageProps } from '../types';
 
 // 👑 智能POI图片组件：5级兜底链保证100%视觉覆盖，永不空白
 // 实景图轮询[0→1→2] → 静态坐标地图 → 精美地图预览卡片（带跳转）
-interface PoiImageProps {
-  photos?: string[];       // 实景照片URL数组（自动轮询）
-  mapImage?: string;       // 高德静态地图兜底
-  amapUrl?: string;        // 高德地图跳转链接（用于兜底卡片）
-  name: string;            // 地点名称
-  type?: string;           // 地点类型（风景/餐饮/住宿等）
-  className?: string;
-  index?: number;          // 序号
-  onPhotoClick?: () => void; // 点击兜底卡片时触发（打开实景照片搜索）
-}
+
 export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', name, type = '', className = '', index, onPhotoClick }: PoiImageProps) {
   // 👑 只使用真实实景照片，绝不用高德静态地图充数（静态地图≠实景照片，用户无法了解地点实况）
   const queue = React.useMemo(() => {

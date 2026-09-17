@@ -16,7 +16,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { API_BASE, WS_BASE, apiFetch, getAuthToken, installApiFetchInterceptor } from './lib/utils';
 import { shortenRegionName, tryExtractJson, normalizeLnglat, extractStreamingRoutes } from './lib/lobbyUtils';
-import type { Phase, RoomMember, UserProfile } from './types';
+import type { CommunityComment, Phase, ProfileTrip, RoomMember, UserProfile } from './types';
 
 // 底部行程节点横向卡片条（自 ContextualLobby 拆分出来的展示型组件）
 import BottomMapCarousel from './components/BottomMapCarousel';
@@ -111,18 +111,6 @@ const FullRouteVisualizer = dynamic(
 );
 
 // =========================================================================
-// 个人主页：展示用户资料、个性头像与历史行程安排表
-// =========================================================================
-interface ProfileTrip {
-  ID: string;
-  UserID: string;
-  Title: string;
-  DestCity: string;
-  Content: string;
-  CreatedAt: string;
-}
-
-// =========================================================================
 // 社区：用户分享行程/智能体规划，他人点赞、评论、回复
 // =========================================================================
 interface CommunityPostItem {
@@ -136,17 +124,6 @@ interface CommunityPostItem {
   dest_city: string;
   likes: number;
   comments: number;
-  created_at: string;
-}
-interface CommunityComment {
-  id: string;
-  post_id: string;
-  user_id: string;
-  author: string;
-  author_avatar: string;
-  author_avatar_url: string;
-  content: string;
-  parent_id: string;
   created_at: string;
 }
 
