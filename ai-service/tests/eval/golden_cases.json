@@ -1,0 +1,427 @@
+{
+  "version": 1,
+  "updated": "2026-09-17",
+  "how_to_use": [
+    "本文件是『阶段 0：规划质量评测』的需求样本集，用于给规划结果打分（core/plan_quality.py + tools/eval_plan_quality.py）。",
+    "每条包含：request（用户原话）、context（天数/预算/人数/偏好/季节天气）、signals（偏好信号，等价于 extract_preference_signals 的输出）、expectations、notes（为什么这条重要）。",
+    "机器会自动检查：天数覆盖、预算（未知价格记为『未核实』而非 0）、must_have、时间窗与单日时序、开放时间冲突（缺数据记『未核实』）。",
+    "must_not 目前是**人工评审参考**（例如『博物馆排在周一闭馆日』），不参与自动判定；等阶段 1 把闭馆日数据接进来后再自动化。",
+    "口径：非供应商字段一律『未核实』，评分不奖励无法核实的内容——宁可分低，也不把编造当丰富。"
+  ],
+  "cases": [
+    {
+      "id": "family-kids-xian-3d",
+      "title": "亲子三天 · 西安（低强度、有午休）",
+      "request": "带 6 岁孩子去西安玩 3 天，节奏别太赶，中午要能回去休息，孩子喜欢动物和恐龙",
+      "context": {
+        "city": "西安", "days": 3, "budget": 3500, "members": 3,
+        "preferences": { "pace": "relaxed", "interest": ["亲子", "动物", "博物馆", "美食"], "dietary": "不吃辣" },
+        "season": "夏", "weather": "晴"
+      },
+      "signals": { "wants_food": true, "wants_scenic": true, "wants_cultural": true, "interest": ["亲子", "动物"] },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "should_have": ["博物馆", "动物", "公园"],
+        "must_not": ["单日超过 4 个节点", "单日行程超过 10 小时", "连续三天都排满"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验『低强度 + 午休』是否真的落到排程上，而不是只在文案里说。"
+    },
+    {
+      "id": "elders-suzhou-4d",
+      "title": "长辈同行四天 · 苏州（少走路、避开台阶）",
+      "request": "带 70 岁父母去苏州 4 天，走路要少一点，园林看看就好，别安排爬山",
+      "context": {
+        "city": "苏州", "days": 4, "budget": 5000, "members": 3,
+        "preferences": { "pace": "relaxed", "interest": ["园林", "文化", "评弹"], "accessibility": "老人同行，少台阶" },
+        "season": "春", "weather": "多云"
+      },
+      "signals": { "wants_scenic": true, "wants_cultural": true, "pace": "relaxed" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["园林", "博物馆", "古街"],
+        "must_not": ["单日步行超过 8 公里", "安排登山/索道", "单日 5 个以上节点"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验无障碍/体力约束是否被尊重（当前系统只有 pace 软约束，没有体力模型）。"
+    },
+    {
+      "id": "food-chengdu-2d",
+      "title": "美食两天 · 成都（少走景点、多吃）",
+      "request": "去成都 2 天，主要想吃，景点去一两个就行，晚上要有夜市",
+      "context": {
+        "city": "成都", "days": 2, "budget": 1800, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["美食", "夜市", "小吃"], "dietary": "能吃辣" },
+        "season": "秋", "weather": "阴"
+      },
+      "signals": { "wants_food": true, "interest": ["小吃", "夜市", "老字号"] },
+      "expectations": {
+        "must_have": ["餐"],
+        "should_have": ["夜市", "小吃", "老字号", "茶馆"],
+        "must_not": ["两天全是景点没有餐饮节点"],
+        "min_nodes_per_day": 3, "max_nodes_per_day": 6
+      },
+      "notes": "检验『美食为主』的偏好是否真的主导选点（现在 provider 分数仍主导，偏好只 +0.05）。"
+    },
+    {
+      "id": "photo-sunrise-guilin-3d",
+      "title": "摄影三天 · 桂林阳朔（日出日落机位）",
+      "request": "摄影党，去桂林阳朔 3 天，想拍日出和日落，愿意早起，机位要靠谱",
+      "context": {
+        "city": "桂林", "days": 3, "budget": 4000, "members": 1,
+        "preferences": { "pace": "intense", "interest": ["摄影", "日出", "日落", "山水"], "wake_early": true },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "interest": ["摄影", "日出", "日落"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["漓江", "观景", "日落", "日出"],
+        "must_not": ["把日出机位排在中午", "单日跨城折返超过 2 次"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 5
+      },
+      "notes": "检验时间与『光线窗口』的匹配；当前系统完全没有摄影时段概念。"
+    },
+    {
+      "id": "budget-student-luoyang-5d",
+      "title": "穷游五天 · 洛阳（人均 1000）",
+      "request": "学生党，洛阳 5 天，总共 2000 块两个人，尽量便宜，能坐公交就不打车",
+      "context": {
+        "city": "洛阳", "days": 5, "budget": 2000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["历史", "博物馆", "免费景点"], "budget": "low", "transport_preference": "公交" },
+        "season": "春", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "budget": true, "transport_preference": "公交" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["龙门", "博物馆", "古城", "免费"],
+        "must_not": ["大量高价门票项目", "每天打车跨城"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 5
+      },
+      "notes": "检验预算约束是否真的约束（现在未知价格被算作 unverifiable，不能当 0）。"
+    },
+    {
+      "id": "rainy-indoor-hangzhou-2d",
+      "title": "雨天备选两天 · 杭州（室内为主）",
+      "request": "杭州 2 天，预报下雨，尽量安排室内的，别让我淋雨",
+      "context": {
+        "city": "杭州", "days": 2, "budget": 2000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["博物馆", "室内", "茶"], "weather_sensitive": true },
+        "season": "夏", "weather": "中雨"
+      },
+      "signals": { "wants_cultural": true, "interest": ["室内", "博物馆"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["博物馆", "美术馆", "室内", "茶馆"],
+        "must_not": ["两天主要安排户外徒步/湖上项目"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 5
+      },
+      "notes": "检验天气是否影响选点（现在 simulation 只用天气调整『停留时长』，不影响选点）。"
+    },
+    {
+      "id": "museum-beijing-2d",
+      "title": "博物馆两天 · 北京（预约与闭馆日）",
+      "request": "北京 2 天，想看国博和故宫，另外安排一天博物馆，别撞上闭馆",
+      "context": {
+        "city": "北京", "days": 2, "budget": 3000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["博物馆", "历史", "建筑"] },
+        "season": "冬", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "interest": ["博物馆", "故宫"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["国家博物馆", "故宫", "博物馆"],
+        "must_not": ["把博物馆排在周一（多数闭馆）", "一天塞三个博物馆"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "典型的『周全』考题：闭馆日 + 预约 + 单馆耗时 3 小时。"
+    },
+    {
+      "id": "hiking-huangshan-3d",
+      "title": "徒步三天 · 黄山（体力与索道）",
+      "request": "想爬黄山 3 天，强度大点没关系，但不想一天走废，住宿要山上",
+      "context": {
+        "city": "黄山", "days": 3, "budget": 4000, "members": 2,
+        "preferences": { "pace": "intense", "interest": ["徒步", "日出", "云海"], "accommodation_style": "山上" },
+        "season": "秋", "weather": "多云"
+      },
+      "signals": { "wants_scenic": true, "interest": ["徒步", "日出"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["索道", "日出", "云海", "步道"],
+        "must_not": ["同一天既上下山又赶高铁", "忽略索道运营时间"],
+        "min_nodes_per_day": 1, "max_nodes_per_day": 4
+      },
+      "notes": "检验高强度场景下的节奏上限与住宿位置假设。"
+    },
+    {
+      "id": "nightlife-chongqing-2d",
+      "title": "夜景两天 · 重庆（晚出晚归）",
+      "request": "重庆 2 天，主要想拍夜景、吃火锅，白天可以睡到中午，晚上玩到很晚",
+      "context": {
+        "city": "重庆", "days": 2, "budget": 2500, "members": 2,
+        "preferences": { "pace": "night", "interest": ["夜景", "火锅", "轻轨"], "wake_late": true },
+        "season": "秋", "weather": "多云"
+      },
+      "signals": { "wants_food": true, "interest": ["夜景", "火锅"] },
+      "expectations": {
+        "must_have": ["餐"],
+        "should_have": ["夜景", "火锅", "洪崖洞", "观景台"],
+        "must_not": ["把夜景机位排在早上", "早上 7 点强制早出"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 5
+      },
+      "notes": "检验『作息偏好』与时间段匹配（现在 DAY_START 固定 06:00，没有作息的个人化）。"
+    },
+    {
+      "id": "hotspring-nanjing-3d",
+      "title": "温泉放松三天 · 南京",
+      "request": "想放松一下，南京 3 天，安排一天泡温泉，别太累",
+      "context": {
+        "city": "南京", "days": 3, "budget": 3500, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["温泉", "园林", "博物馆"] },
+        "season": "冬", "weather": "阴"
+      },
+      "signals": { "wants_scenic": true, "interest": ["温泉"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["温泉", "汤山", "园林", "博物馆"],
+        "must_not": ["三天全部塞满", "温泉当天又安排 4 个景点"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验『一天一个主题』这类结构是否会被识别（现在是逐点评分，无主题聚合）。"
+    },
+    {
+      "id": "solo-slow-xiamen-4d",
+      "title": "一个人慢游四天 · 厦门",
+      "request": "一个人去厦门 4 天，想慢慢逛，咖啡店和海边，别安排团队项目",
+      "context": {
+        "city": "厦门", "days": 4, "budget": 3000, "members": 1,
+        "preferences": { "pace": "relaxed", "interest": ["咖啡", "海边", "文艺", "市集"] },
+        "season": "春", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "interest": ["咖啡", "海边", "文艺"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["咖啡", "海", "市集", "沙坡尾"],
+        "must_not": ["单人行程里安排团队/包车项目", "每天 6 个节点"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验独行场景下『同伴结构=1』是否影响推荐（现在成员结构主要影响博弈）。"
+    },
+    {
+      "id": "couple-anniversary-sanya-3d",
+      "title": "纪念日三天 · 三亚（品质优先）",
+      "request": "和伴侣过纪念日，三亚 3 天，想住海景、吃一次好的，别太折腾",
+      "context": {
+        "city": "三亚", "days": 3, "budget": 9000, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["海景", "海鲜", "浪漫"], "accommodation_style": "海景", "budget": "high" },
+        "season": "冬", "weather": "晴"
+      },
+      "signals": { "wants_food": true, "wants_scenic": true, "accommodation_style": "海景" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["海景", "海鲜", "日落", "沙滩"],
+        "must_not": ["把海景住宿安排在市区无海景处", "单日 5 个节点以上"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验高预算偏好是否真的换来『品质型』选择（现在价格只在低预算方向加分）。"
+    },
+    {
+      "id": "winter-ice-harbin-3d",
+      "title": "冰雪三天 · 哈尔滨（严寒防护）",
+      "request": "哈尔滨 3 天看冰雕，怕冷，希望室内外交替，别一直在外面冻着",
+      "context": {
+        "city": "哈尔滨", "days": 3, "budget": 4500, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["冰雪", "冰雕", "俄式建筑"], "weather_sensitive": true },
+        "season": "冬", "weather": "严寒"
+      },
+      "signals": { "wants_scenic": true, "interest": ["冰雪", "冰雕"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["冰雪大世界", "中央大街", "室内", "温泉"],
+        "must_not": ["连续 6 小时户外无室内休息点"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验『室内外交替』这种健康的节奏约束（现在完全没有该维度）。"
+    },
+    {
+      "id": "streetfood-changsha-2d",
+      "title": "小吃街两天 · 长沙",
+      "request": "长沙 2 天，就想去小吃街和夜市，顺便看看橘子洲",
+      "context": {
+        "city": "长沙", "days": 2, "budget": 1500, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["小吃", "夜市", "臭豆腐"], "dietary": "能吃辣" },
+        "season": "夏", "weather": "晴"
+      },
+      "signals": { "wants_food": true, "interest": ["小吃", "夜市"] },
+      "expectations": {
+        "must_have": ["餐"],
+        "should_have": ["小吃", "夜市", "橘子洲", "坡子街"],
+        "must_not": ["小吃偏好下仍以高价正餐为主"],
+        "min_nodes_per_day": 3, "max_nodes_per_day": 6
+      },
+      "notes": "检验『小吃街』这类低成本高体验场景（价格 nudge 目前只对低预算加分）。"
+    },
+    {
+      "id": "accessibility-shanghai-2d",
+      "title": "无障碍两天 · 上海（轮椅同行）",
+      "request": "陪坐轮椅的家人去上海 2 天，要无障碍通道，尽量少换乘",
+      "context": {
+        "city": "上海", "days": 2, "budget": 3000, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["博物馆", "江景", "无障碍"], "accessibility": "轮椅" },
+        "season": "秋", "weather": "多云"
+      },
+      "signals": { "wants_cultural": true, "accessibility": "轮椅" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["无障碍", "博物馆", "江景"],
+        "must_not": ["安排大量台阶/爬山/长距离步行", "一天三次以上地铁换乘"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "无障碍是硬需求，但目前系统没有任何无障碍字段（数据缺口需在阶段 3 补 OSM）。"
+    },
+    {
+      "id": "photo-architecture-tianjin-2d",
+      "title": "建筑摄影两天 · 天津",
+      "request": "天津 2 天拍洋楼和桥，早上光线好的时候多拍，中午休息",
+      "context": {
+        "city": "天津", "days": 2, "budget": 1800, "members": 1,
+        "preferences": { "pace": "normal", "interest": ["摄影", "建筑", "桥", "洋楼"], "wake_early": true },
+        "season": "春", "weather": "晴"
+      },
+      "signals": { "interest": ["摄影", "建筑"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["洋楼", "桥", "五大道", "意式风情"],
+        "must_not": ["把建筑机位排在正午强光时段"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 5
+      },
+      "notes": "与桂林日出案例互补，检验『光线/时段』是否影响排序。"
+    },
+    {
+      "id": "multi-city-yangtze-5d",
+      "title": "多城五天 · 上海-苏州-杭州（高铁串联）",
+      "request": "5 天想走上海苏州杭州，高铁往返，别太赶，每城至少住一晚",
+      "context": {
+        "city": "上海", "days": 5, "budget": 8000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["园林", "博物馆", "城市漫步"], "transport_preference": "高铁" },
+        "season": "秋", "weather": "多云"
+      },
+      "signals": { "wants_cultural": true, "wants_scenic": true, "transport_preference": "高铁" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["苏州", "杭州", "园林", "高铁"],
+        "must_not": ["单日跨两城且各排 3 个以上景点", "出现『当天往返 400 公里』"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 5
+      },
+      "notes": "检验跨城线路的通勤预算与『每城至少一晚』这类结构约束（当前没有住宿夜数约束）。"
+    },
+    {
+      "id": "autumn-beijing-3d",
+      "title": "秋色三天 · 北京（香山红叶）",
+      "request": "10 月底去北京 3 天，想看红叶，也想去长城，人少一点最好",
+      "context": {
+        "city": "北京", "days": 3, "budget": 4000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["红叶", "长城", "人少"], "season": "秋" },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "interest": ["红叶", "长城"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["香山", "长城", "红叶", "公园"],
+        "must_not": ["长城安排在周末正午高峰", "忽略往返长城 3 小时车程"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验季节性 + 客流敏感（系统有 seasonalCalibration，但没有客流数据源）。"
+    },
+    {
+      "id": "avoid-crowds-pingyao-2d",
+      "title": "避开人流两天 · 平遥",
+      "request": "平遥 2 天，讨厌排队，想早上去人少的地方，晚上看古城夜景",
+      "context": {
+        "city": "平遥", "days": 2, "budget": 1600, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["古城", "夜景", "人少"], "crowd_averse": true },
+        "season": "春", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "interest": ["古城", "夜景"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["古城", "夜景", "镖局", "城墙"],
+        "must_not": ["把热门点全排在上午 10 点后的人流高峰"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验『避开人流』偏好——系统有 CROWD_PROVIDER_URL 但未配置，属数据缺口。"
+    },
+    {
+      "id": "vegetarian-guangzhou-2d",
+      "title": "素食两天 · 广州",
+      "request": "广州 2 天，我吃素，帮我找素食餐厅和早茶（素的）",
+      "context": {
+        "city": "广州", "days": 2, "budget": 2000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["素食", "早茶", "老字号"], "dietary": "素" },
+        "season": "冬", "weather": "多云"
+      },
+      "signals": { "wants_food": true, "dietary": "素", "interest": ["素食", "早茶"] },
+      "expectations": {
+        "must_have": ["餐"],
+        "should_have": ["素食", "早茶", "老字号"],
+        "must_not": ["推荐以肉食为主的餐厅", "忽略忌口"],
+        "min_nodes_per_day": 3, "max_nodes_per_day": 5
+      },
+      "notes": "忌口是强偏好，当前只在关键词层面命中，没有『必须排除』机制。"
+    },
+    {
+      "id": "kids-science-shanghai-2d",
+      "title": "亲子科普两天 · 上海",
+      "request": "带孩子去上海 2 天，科技馆和海洋馆，孩子 8 岁，别排太满",
+      "context": {
+        "city": "上海", "days": 2, "budget": 2800, "members": 3,
+        "preferences": { "pace": "relaxed", "interest": ["科技馆", "海洋馆", "亲子"] },
+        "season": "夏", "weather": "晴"
+      },
+      "signals": { "interest": ["亲子", "科技馆", "海洋馆"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["科技馆", "海洋馆", "亲子", "公园"],
+        "must_not": ["单日超过 4 个节点", "把两个大馆排在同一个半天"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验大馆耗时估计（科技馆/海洋馆通常 3-4 小时）。"
+    },
+    {
+      "id": "history-luoyang-4d",
+      "title": "历史深度四天 · 洛阳（龙门+博物馆）",
+      "request": "历史爱好者，洛阳 4 天，龙门石窟要留一整天，博物馆也要去，讲解要靠谱",
+      "context": {
+        "city": "洛阳", "days": 4, "budget": 3600, "members": 1,
+        "preferences": { "pace": "normal", "interest": ["历史", "石窟", "博物馆"], "depth": "high" },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "interest": ["石窟", "博物馆"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["龙门", "博物馆", "古城", "白马寺"],
+        "must_not": ["龙门石窟当天再塞 3 个远距离景点"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "检验『单点留足时间』的诉求（停留时长的默认值需按类型调整）。"
+    },
+    {
+      "id": "late-start-lijiang-2d",
+      "title": "睡到自然醒两天 · 丽江",
+      "request": "丽江 2 天，不想早起，11 点出门就行，逛逛古城喝咖啡",
+      "context": {
+        "city": "丽江", "days": 2, "budget": 2200, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["古城", "咖啡", "慢生活"], "wake_late": true },
+        "season": "春", "weather": "晴"
+      },
+      "signals": { "interest": ["古城", "咖啡"] },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["古城", "咖啡", "市集"],
+        "must_not": ["把主要行程排在 09:00 之前", "早出晚归式排法"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "与『夜景/晚出』案例呼应：作息个性化目前完全没有建模。"
+    }
+  ]
+}
