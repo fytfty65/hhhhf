@@ -201,25 +201,41 @@ def check_hard_constraints(
                 {"code": "day_too_thin", "detail": f"第 {day} 天仅 {count} 个节点，少于要求 {min_nodes}"}
             )
 
-    # 2) 预算（未知花费记 unverifiable，不得当作 0）
-    budget = _as_float(ctx.get("budget") or ctx.get("total_budget"), 0.0)
-    if budget > 0:
-        known, unknown_count = 0.0, 0
-        for node in nodes:
-            price = cost_of(node)
-            if price is None:
-                unknown_count += 1
-            else:
-                known += price
-        if known > budget:
+    # 2) 预算：三级价格模型（verified / estimated / unknown）——能取证就取证，不能取证就估算但必须标明
+    from .budget_planner import budget_report  # 延迟导入，避免与 budget_planner 形成模块级循环
+
+    money = budget_report(ctx, plan)
+    if money["budget"] > 0:
+        if money["status"] == "over":
             failures.append(
-                {"code": "budget_exceeded", "detail": f"已知花费合计 {known:.0f} 超出预算 {budget:.0f}"}
+                {
+                    "code": "budget_exceeded",
+                    "detail": f"已验证花费 ¥{money['verified_cost']:.0f} 超出预算 ¥{money['budget']:.0f}（缺口约 ¥{money['shortfall']:.0f}）",
+                }
             )
-        if unknown_count:
+        elif money["status"] == "at_risk":
+            unverifiable.append(
+                {
+                    "code": "budget_at_risk",
+                    "detail": (
+                        f"已验证 ¥{money['verified_cost']:.0f} 在预算内，但含估算后最高约 "
+                        f"¥{money['verified_cost'] + money['estimated_cost']:.0f}，可能超支约 ¥{money['shortfall']:.0f}"
+                        "（估算部分已标明，不作为已验证结论）"
+                    ),
+                }
+            )
+        elif money["status"] == "unverifiable":
+            unverifiable.append(
+                {"code": "budget_unverifiable", "detail": "所有价格都取不到来源，预算无法核实（不视为满足）"}
+            )
+        if money["unknown_count"]:
             unverifiable.append(
                 {
                     "code": "budget_partial",
-                    "detail": f"{unknown_count} 个节点无价格来源，预算仅部分可核实（已知 {known:.0f}/{budget:.0f}）",
+                    "detail": (
+                        f"{money['unknown_count']} 个节点取不到价格，预算仅部分可核实"
+                        f"（已验证 ¥{money['verified_cost']:.0f} / 预算 ¥{money['budget']:.0f}）"
+                    ),
                 }
             )
 
@@ -283,6 +299,12 @@ def check_hard_constraints(
                     "detail": f"「{node_name(node)}」安排在 {node.get('time')}，但开放时间为 {raw}",
                 }
             )
+
+    # 6) 一体化骨架：吃/玩/住的存在性（不允许"只有景点、没有酒店或正餐"）
+    from .itinerary_skeleton import validate_skeleton  # 延迟导入，避免模块级循环
+
+    skeleton = validate_skeleton(plan, ctx, expectations)
+    failures.extend(skeleton["failures"])
 
     return {"failures": failures, "unverifiable": unverifiable}
 
@@ -613,6 +635,12 @@ def evaluate_plan(
     else:
         verdict = "pass"
 
+    from .budget_planner import budget_report  # 延迟导入（见文件头说明）
+    from .itinerary_skeleton import skeleton_summary
+
+    money = budget_report(context, plan)
+    skeleton = skeleton_summary(plan, context, expectations)
+
     return {
         "score": round(score, 1),
         "verdict": verdict,
@@ -621,6 +649,13 @@ def evaluate_plan(
             "failures": hard["failures"],
             "unverifiable": hard["unverifiable"],
             "unverifiable_count": len(hard["unverifiable"]),
+        },
+        "budget": money,
+        "skeleton": {
+            "lodging_nights": skeleton["lodging_nights"],
+            "meals": skeleton["meals"],
+            "plays": skeleton["plays"],
+            "requirements": skeleton["requirements"],
         },
         "dimensions": {
             key: {"value": round(value["value"], 3), **{k: v for k, v in value.items() if k != "value"}}

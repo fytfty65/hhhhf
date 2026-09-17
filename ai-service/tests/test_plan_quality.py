@@ -243,10 +243,11 @@ class TestEvaluatePlan(unittest.TestCase):
         self.assertGreater(passed["score"], 60)
 
         unverified = {"route": [
-            node("酒店", 1, "09:00", node_type="住宿", open_time="暂无供应商数据"),
-            node("博物馆", 1, "10:30", node_type="博物馆", open_time="暂无供应商数据"),
-            node("回民街", 2, "12:00", node_type="餐饮", open_time="暂无供应商数据"),
-            node("城墙", 2, "15:00", node_type="文化", open_time="暂无供应商数据"),
+            node("钟楼酒店", 1, "09:00", node_type="住宿", open_time="暂无供应商数据"),
+            node("陕西历史博物馆", 1, "10:30", node_type="博物馆", open_time="暂无供应商数据"),
+            node("回民街小吃", 1, "12:30", node_type="餐饮", open_time="暂无供应商数据"),
+            node("城墙南门", 2, "09:30", node_type="文化", open_time="暂无供应商数据"),
+            node("永兴坊面馆", 2, "12:30", node_type="餐饮", open_time="暂无供应商数据"),
         ]}
         report = evaluate_plan(BASE_CONTEXT, unverified, BASE_EXPECTATIONS)
         self.assertTrue(report["gate"]["passed"])
