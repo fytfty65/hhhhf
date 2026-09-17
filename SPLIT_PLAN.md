@@ -47,7 +47,7 @@
 
 | 指标 | 拆分前 | 现在 | 结论 |
 |---|---|---|---|
-| `ContextualLobby.tsx` | 3,991 行 / 218,225 B | **2,264 行 / 124,948 B** | -43% 行数 |
+| `ContextualLobby.tsx` | 3,991 行 / 218,225 B | **2,242 行 / 124,533 B** | -44% 行数 |
 | ├ 根组件 `ContextualLobby` | （混在一起） | 730 行 | 仅状态与编排 |
 | └ `UnifiedWorkspace` | 1,354 行 | 1,357 行 | **尚未拆（待确认）** |
 | 首屏 JS | 1,104.6 KB / 13 chunk | 1,104.5 KB / 13 chunk | 无劣化 |
@@ -58,10 +58,14 @@
 
 已抽出：**12 个组件文件**（`SelectCards`/`BottomMapCarousel`/`ExpandableConnectorNav`/`EditIntentModal`/`DeductionPanel`/`DynamicBudgetCard`/`DraftingPanel`/`TeamPresenceBar`/`PoiImage`/`MafengwoStylePanel`/`OmniLogo`/`AuthPortalScreen`）+ **`lib/lobbyUtils.ts`（5 个纯函数）**。
 
-**已知待办（不要混进机械搬运批次）**
-1. `app/types/index.ts` 已规范定义 `Phase`/`UserProfile`/`RoomMember`（`CommunityPanel`、`ProfileScreen` 即从那里导入），而 `ContextualLobby.tsx` 内还有一份同名重复定义（批 5 中它曾被误卷入新文件，已原样退回）。去重应作为一次独立提交单独处理。
-2. `AvatarUploader` 在拆分前（`ebd2d90`）就已是从未使用的 import，属既有死代码；本次刻意保留未动，可另开一次清理提交。
-3. `work/` 下的抽取脚本（`extract-split2.ps1`、`move-to-lib.ps1`、`cleanup-imports.ps1`、`fix-imports7.ps1`、`extract-auth.ps1`）是本次拆分的工具，`work/` 已被 gitignore，不会进仓库；续做时可复用（注意 `move-to-lib.ps1` 里 `$Target`/`$target` 大小写冲突只影响日志输出，不影响结果）。
+**已知待办 / 清理记录**
+1. ✅ 已完成（提交 `137a924`）：宿主内重复的 `Phase`/`UserProfile`/`RoomMember` 已删除，改为 `import type { ... } from './types'`（与 `app/types/index.ts` 逐字一致；已确认没有任何文件从 ContextualLobby 导入这些类型）。宿主 2,264 → 2,242 行。
+2. ✅ 已完成（提交 `137a924`）：移除宿主里既有的死 import `AvatarUploader`（`ebd2d90` 版本核对确认拆分前即未使用）。**组件本身仍被 `components/ProfileScreen.tsx` 使用**，不是死代码，未删文件。
+3. **仍未处理的类型重复候选**（需逐个判断，不要盲dedupe）：
+   - 宿主内 `interface ProfileTrip`、`interface CommunityComment` 与 `app/types/index.ts` **逐字一致** → 可安全去重。
+   - 宿主内 `interface CommunityPostItem` 是 `app/types/index.ts` 版本的**子集**（缺 `tags?`/`favorites?`/`favorited?`/`heat?`）→ 去重等于把类型放宽，需确认宿主代码不依赖“字段不存在”这一现状。
+   - 组件内副本：`components/PoiImage.tsx` 的 `PoiImageProps`、`components/TeamPresenceBar.tsx` 的 `ActivityEvt` 与规范定义**逐字一致**；`components/DeductionPanel.tsx` 的 `DeductionPanelProps` **缺少**规范版里的可选字段 `reasoningSteps?`。
+4. `work/` 下的抽取脚本（`extract-split2.ps1`、`move-to-lib.ps1`、`cleanup-imports.ps1`、`fix-imports7.ps1`、`extract-auth.ps1`）是本次拆分的工具，`work/` 已被 gitignore，不会进仓库；续做时可复用（注意 `move-to-lib.ps1` 里 `$Target`/`$target` 大小写冲突只影响日志输出，不影响结果）。
 
 其余顶层定义参考：`shortenRegionName`(57)、`OmniLogo`(105)、`tryExtractJson`(127)、`normalizeLnglat`(157)、`extractStreamingRoutes`(181)、`getCleanPhotoUrl`(228)、`PoiImage`(248)、`AuthPortalScreen`(367)、`ContextualLobby`(640，根)、`EditIntentModal`(1370)、`UnifiedWorkspace`(1408)。
 
