@@ -16,6 +16,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { API_BASE, WS_BASE, apiFetch, getAuthToken, installApiFetchInterceptor } from './lib/utils';
 import { shortenRegionName, tryExtractJson, normalizeLnglat, extractStreamingRoutes } from './lib/lobbyUtils';
+import type { Phase, RoomMember, UserProfile } from './types';
 
 // 底部行程节点横向卡片条（自 ContextualLobby 拆分出来的展示型组件）
 import BottomMapCarousel from './components/BottomMapCarousel';
@@ -36,8 +37,7 @@ import MafengwoStylePanel from './components/MafengwoStylePanel';
 import OmniLogo from './components/OmniLogo';
 import AuthPortalScreen from './components/AuthPortalScreen';
 
-// 自定义头像上传与裁剪组件
-import AvatarUploader from './components/AvatarUploader';
+// 个人主页与社区组件
 import ModernProfileScreen from './components/ProfileScreen';
 import CommunityPanel from './components/CommunityPanel';
 
@@ -109,28 +109,6 @@ const FullRouteVisualizer = dynamic(
     )
   }
 );
-
-type Phase = 'drafting' | 'deduction' | 'decision';
-
-export interface UserProfile {
-  id: string;
-  username: string;
-  nickname: string;
-  avatarSeed: string;
-  avatarUrl?: string;
-  signature?: string;
-  token?: string;
-  isLoggedIn: boolean;
-}
-
-export interface RoomMember {
-  id: string;
-  name: string;
-  role: string;
-  intent: string;
-  avatarSeed: string;
-  avatarUrl?: string;
-}
 
 // =========================================================================
 // 个人主页：展示用户资料、个性头像与历史行程安排表
