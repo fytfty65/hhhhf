@@ -3595,6 +3595,16 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案
                             final_data["quality"] = {"error": str(_quality_exc)[:200]}
+                        # 👑 数据降级登记：哪个数据源没取到、用户损失了什么，统一在这里说一次
+                        # （文案只在 core/degradation.DATA_SOURCES 里定义，前端照抄渲染）。
+                        # 放在最后：前面所有 payload 字段都已经定稿，推导才准确。
+                        try:
+                            from core.degradation import collect_degradations
+
+                            final_data["degradations"] = collect_degradations(final_data)
+                        except Exception as _degrade_exc:  # 登记失败绝不影响出方案
+                            final_data["degradations"] = {"error": str(_degrade_exc)[:200]}
+
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
                     await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {

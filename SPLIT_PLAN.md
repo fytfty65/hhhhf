@@ -17,12 +17,12 @@
 | 指标 | 基线值 |
 |---|---|
 | `ContextualLobby.tsx` | 3,991 行 / 218,225 B |
-| 首屏 JS | **1,105.4 KB（13 个 chunk）**（2026-09-17 经用户确认由 1,104.6 → 1,105.0 KB；2026-09-18 二次更新到 1,105.4 KB：核对面板陆续加了「本次调整 / 价格核对 / 跨城怎么走 / 长途分段 / 自动复核」与流式 JSON 解析修复，面板本体走 dynamic 按需加载，差额来自宿主接线） |
+| 首屏 JS | **1,105.5 KB（13 个 chunk）**（2026-09-17 经用户确认由 1,104.6 → 1,105.0 KB；2026-09-18 更新到 1,105.5 KB：核对面板陆续加了「本次调整 / 价格核对 / 跨城怎么走 / 长途分段 / 自动复核 / 诉求核对 / 数据降级」与流式 JSON 解析修复，面板本体走 dynamic 按需加载，差额来自宿主接线） |
 | 首屏 CSS | 141.1 KB（同上：面板用到的 Tailwind 类进全局样式） |
 | 单测 | 79 个（`app/lib/*.test.ts`，9 个文件） |
 | E2E | `refactor-regression.spec.ts` 7 个 + `core-flow.spec.ts` 1 个 + `plan-governance.spec.ts` 1 个 = **9 个** |
 
-**验收**：拆分后首屏 JS ≤ **1,105.4 KB**，9 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
+**验收**：拆分后首屏 JS ≤ **1,105.5 KB**，9 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
 
 ## 3. 进度
 
@@ -88,7 +88,8 @@
 | F14 | **Critic/Repair 闭环**（`core/plan_review.review_plan`：propose→critique→repair→rescore，≤3 轮，掉门禁/掉分即回滚，无改动即停）+ 面板「自动复核」 | `d73c3d5` |
 | F15 | **诉求逐条核对**（`core/constraint_coverage`：稳定 id + 五态 applied/partial/unverified/advisory/missing，含"说改但没改"机械检测）+ 面板「诉求核对」端到端渲染 | `29b7978` |
 | F16 | 评测报告新增 **`g_no_invention`** 节（逐条点名"写了数值却没有来源"的字段）+ `--max-unsourced` 可选门禁 + **离线夹具进仓库**（`tests/eval/fixtures/`，无 Key 无网络可复现） | `e17c358` |
-| F17 | **候选池接进 Repair 闭环**（空天/缺玩点/缺餐/住宿夜数/必去项都能用真实候选补上；无池不编造）+ 复核与治理**共用一份候选池**（一次取数、`POOL_FETCH_TIMEOUT_SECONDS=12s`） | 本批 |
+| F17 | **候选池接进 Repair 闭环**（空天/缺玩点/缺餐/住宿夜数/必去项都能用真实候选补上；无池不编造）+ 复核与治理**共用一份候选池**（一次取数、`POOL_FETCH_TIMEOUT_SECONDS=12s`） | `ae81033` |
+| F18 | **数据降级登记处**（`core/degradation`：数据源注册表 + 从 payload 推导 `{source,label,status,reason,impact}`）+ 面板「数据降级」统一渲染（文案只在后端一处定义） | 本批 |
 
 **F11 附带修掉一个真 bug**：宿主流式累积时用 `replace(/null/g, "")` 清洗 token，会把**合法 JSON 里的 null**（票价未核实就是 `price:null`）删成 `"price":`，导致整段 `[FINAL_JSON]` 解析失败——后果是 `quality`/`budget_report`/四块新数据全部丢失、核对面板整块不显示。现在改为**先按原文解析**（我们下发的 JSON 一定合法），解析不出来才退回"删 null"的兜底（那是给模型吐字夹带的 null 准备的）；展示用的清洗仍在 `humanReadableLogs`。E2E mock 里刻意保留 `price: null` 作为回归哨兵。同时 `final_route` 消息路径也接入同一份 payload（重连/回放只收到它时面板同样有数据）。
 
@@ -120,3 +121,4 @@
 - **内存紧张**（本机实测可用内存约 6–7 GB、提交内存已用 37/64 GB）：跑构建/E2E 时**不要同时**跑 DSH 自身的 `pnpm build`/`dev:web`；必要时 `$env:NODE_OPTIONS='--max-old-space-size=4096'`。
 - **崩溃恢复**：因为每批一提交，崩溃最多损失当前一批；`work/split-gate.log` 保留上一次门禁结果。
 - 历史背景：2026-09-16 期间 DSH 侧出现过一次 `[ELIFECYCLE] Command failed with exit code 3221226505`（= `0xC0000409`，node 侧硬终止，与项目代码无关），当时正卡在批 1 未提交状态，所以本计划强制「一批准一提交」。
+- **`0xC0000409` 也会打到我们自己的 E2E**：2026-09-18 有一次 `playwright test` 以 exit `-1073740791`（同一个 `0xC0000409` fail-fast）整段崩掉，**没有任何测试输出**；单独重跑 `npx playwright test` 就 9/9 全过。判别法：**exit 码是 `-1073740791`/`3221226505` 且完全没有测试行 → 环境级崩溃，直接重跑，不要当代码失败去改代码**；只有"有测试行 + 断言失败"才是真失败。

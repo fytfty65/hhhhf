@@ -164,6 +164,17 @@ const GOVERNANCE_PAYLOAD = {
       { id: 'quota', category: 'change', text: '增加：美食 +2', status: 'partially_applied', polarity: 'require', source: 'user_explicit', detail: '要 2 个，只加上 1 个' },
     ],
   },
+  // 数据降级登记（core/degradation.collect_degradations）：文案与"用户损失"都由后端注册表给出
+  degradations: {
+    total: 2,
+    sources: ['hotel_price', 'candidate_pool'],
+    counts: { missing: 1, degraded: 1 },
+    summary: '2 项数据不完整或没拿到：住宿价格、候选地点池',
+    items: [
+      { source: 'hotel_price', label: '住宿价格', status: 'missing', reason: '2 个住宿节点都没拿到报价', impact: '住宿花费无法核实（高德对酒店普遍不返回价格），预算结论只能按缺价处理' },
+      { source: 'candidate_pool', label: '候选地点池', status: 'degraded', reason: '候选池里没有更多可用的同类地点', impact: '缺玩点/缺餐/住宿夜数不够时无法自动补，只能如实告诉你' },
+    ],
+  },
 };
 
 async function installMocks(page: Page) {
@@ -227,6 +238,7 @@ async function installMocks(page: Page) {
                     long_trip: payload.governance.long_trip,
                     review: payload.governance.review,
                     constraints: payload.governance.constraints,
+                    degradations: payload.governance.degradations,
                   }),
               }),
             });
@@ -341,6 +353,13 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByText('还需要你留意')).toBeVisible();
     await expect(panel.getByText('某一天没有游玩安排', { exact: true })).toBeVisible();
     await expect(panel.getByText('营业时间未核实', { exact: true })).toBeVisible();
+
+    // 数据降级：哪个数据源没拿到、用户损失什么（"没拿到"≠"已满足"）
+    await expect(panel.getByText('数据降级')).toBeVisible();
+    await expect(panel.getByText('住宿价格')).toBeVisible();
+    await expect(panel.getByText(/2 个住宿节点都没拿到报价/)).toBeVisible();
+    await expect(panel.getByText(/住宿花费无法核实/)).toBeVisible();
+    await expect(panel.getByText('候选地点池')).toBeVisible();
 
     // 去 AI 化检查：面板内不得出现这类措辞
     const text = (await panel.innerText()).toLowerCase();

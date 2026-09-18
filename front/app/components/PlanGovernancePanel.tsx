@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
@@ -109,6 +109,15 @@ export type PlanGovernance = {
     summary?: string;
     unverified_ids?: string[];
     missing_ids?: string[];
+    error?: string;
+  };
+  /** 数据降级登记：哪个数据源没取到、用户损失了什么（文案由后端注册表给出） */
+  degradations?: {
+    items?: { source?: string; label?: string; impact?: string; status?: string; reason?: string }[];
+    total?: number;
+    counts?: Record<string, number>;
+    sources?: string[];
+    summary?: string;
     error?: string;
   };
   /** 自动复核（critic + 确定性修补）的结果：改了什么、还剩几处门禁问题、缺哪些数据 */
@@ -245,7 +254,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip, review, constraints } = data;
+  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -272,10 +281,13 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
         (review.initial_hard_failures ?? 0) > (review.remaining_hard ?? 0)),
   );
   const hasConstraintBlock = Boolean(constraints && ((constraints.items?.length ?? 0) > 0 || constraints.error));
+  const hasDegradationBlock = Boolean(
+    degradations && ((degradations.items?.length ?? 0) > 0 || degradations.error),
+  );
   if (
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
-    !hasReviewBlock && !hasConstraintBlock
+    !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock
   ) {
     return null;
   }
@@ -614,6 +626,50 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
               </li>
             ))}
           </ul>
+        </div>
+      )}
+      {hasDegradationBlock && (
+        <div
+          className={
+            hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock || hasPriceBlock ||
+            hasTransportBlock || hasLongTripBlock || hasReviewBlock || hasConstraintBlock || hasFailureBlock
+              ? 'mt-3 border-t border-slate-200 pt-2.5'
+              : ''
+          }
+        >
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<AlertTriangle className="h-3 w-3" />}>数据降级</SectionLabel>
+            {typeof degradations?.total === 'number' && (
+              <span className="font-mono text-[11px] font-bold tabular-nums text-amber-600">
+                {degradations.total} 项
+              </span>
+            )}
+          </div>
+          {degradations?.error ? (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+              这次没能统计数据降级（{degradations.error}）。
+            </p>
+          ) : (
+            <>
+              <ul className="mt-1.5 space-y-1">
+                {(degradations?.items || []).slice(0, 5).map((item, index) => (
+                  <li key={`${item.source}-${index}`} className="text-[11px] leading-relaxed">
+                    <span className={`font-bold ${item.status === 'missing' ? 'text-rose-600' : 'text-amber-600'}`}>
+                      {item.status === 'missing' ? '没拿到' : '不完整'}
+                    </span>
+                    <span className="ml-1 font-bold text-slate-700">{item.label}</span>
+                    <span className="ml-1 text-slate-500">{item.reason}</span>
+                    {item.impact && <span className="ml-1 text-slate-400">（{item.impact}）</span>}
+                  </li>
+                ))}
+              </ul>
+              {(degradations?.items?.length ?? 0) > 5 && (
+                <p className="mt-1.5 text-[11px] text-slate-400">
+                  还有 {(degradations?.items?.length ?? 0) - 5} 项没列出来
+                </p>
+              )}
+            </>
+          )}
         </div>
       )}
     </section>
