@@ -17,7 +17,7 @@ import React from 'react';
 import { ReceiptText, SlidersHorizontal, CalendarRange } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
-type Substitution = { from?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
+type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
 type Segment = { start?: number; end?: number; days?: number };
 
 export type PlanGovernance = {
@@ -162,21 +162,24 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           )}
           {substitutions.length > 0 && (
             <ul className="mt-1.5 space-y-1">
-              {substitutions.slice(0, 5).map((item, index) => (
-                <li key={`${item.from || item.kind}-${index}`} className="flex items-baseline gap-2 text-[11px] text-slate-600">
-                  <span className="text-slate-400">·</span>
-                  {item.from && item.to ? (
-                    <span>
-                      把「{item.from}」换成「{item.to}」
-                      {typeof item.saving === 'number' && item.saving > 0 && (
-                        <span className="ml-1 font-mono font-bold tabular-nums text-emerald-600">省 {money(item.saving)}</span>
-                      )}
-                    </span>
-                  ) : (
-                    <span>{item.reason}</span>
-                  )}
-                </li>
-              ))}
+              {substitutions.slice(0, 5).map((item, index) => {
+                const from = item.from || item.node;
+                return (
+                  <li key={`${from || item.kind}-${index}`} className="flex items-baseline gap-2 text-[11px] text-slate-600">
+                    <span className="text-slate-400">·</span>
+                    {from && item.to ? (
+                      <span>
+                        把「{from}」换成「{item.to}」
+                        {typeof item.saving === 'number' && item.saving > 0 && (
+                          <span className="ml-1 font-mono font-bold tabular-nums text-emerald-600">省 {money(item.saving)}</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span>{item.reason}</span>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
           {fallback?.needs_confirmation && (

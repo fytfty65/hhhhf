@@ -3252,7 +3252,7 @@ async def run_negotiate(msg: GatewayMessage):
                         # 业务逻辑在 core/plan_quality.plan_quality_snapshot 里（可单测），
                         # 这里只做薄接线；任何异常都不得阻断规划主流程。
                         try:
-                            from core.plan_quality import plan_quality_snapshot
+                            from core.planning_governance import prepare_governance
 
                             _quality_signals = pref_signals if isinstance(pref_signals, dict) else None
                             _quality_context = {
@@ -3263,9 +3263,22 @@ async def run_negotiate(msg: GatewayMessage):
                                     "interest": (_quality_signals or {}).get("interest"),
                                 },
                             }
-                            _snapshot = plan_quality_snapshot(_quality_context, final_data, signals=_quality_signals)
+                            # 候选池只在"需要平替或需要换点"时才去取（预算可能超支 / 用户提到不想去·换掉），
+                            # 避免每次推演都多打一次 POI 数据源；数据源失败也绝不影响出方案。
+                            _governance = await prepare_governance(
+                                _quality_context,
+                                final_data,
+                                signals=_quality_signals,
+                                city=target_city,
+                                fetch=getattr(toolbox, "get_dynamic_pois", None),
+                                request_text=intent_str,
+                            )
+                            _snapshot = _governance["snapshot"]
                             final_data["quality"] = _snapshot["quality"]
                             final_data["budget_report"] = _snapshot["budget"]
+                            final_data["horizon"] = _snapshot["horizon"]
+                            if _governance.get("pool_sizes"):
+                                final_data["candidate_pool"] = _governance["pool_sizes"]
                             if _snapshot.get("fallback"):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案

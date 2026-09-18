@@ -183,6 +183,7 @@ def propose_fallback(
     substitutions: List[Dict[str, Any]] = []
     dropped: List[str] = []
     remaining = gap
+    used_replacements: List[str] = []  # 已用过的替代不再复用（否则两个点会换成同一个地方）
 
     if gap > 0:
         # ① / ② / ⑤ 降档：同意图候选里找更便宜的
@@ -204,16 +205,19 @@ def propose_fallback(
                     if c.get("price") is not None
                     and float(c.get("price") or 0) < float(current["value"])
                     and str(c.get("name")) != node_name(node)
+                    and str(c.get("name")) not in used_replacements
                 ),
                 None,
             )
             if not cheaper:
                 continue
+            used_replacements.append(str(cheaper.get("name")))
             saving = float(current["value"]) - float(cheaper["price"])
             tier = "lodging_downgrade" if intent == "hotel" else ("tier_down_food" if intent == "food" else "tier_down_play")
             action = {
                 "kind": tier,
                 "node": node_name(node),
+                "from": node_name(node),  # 与 candidate_index.apply_exclusions 保持同一形状
                 "to": str(cheaper.get("name")),
                 "saving": round(saving, 2),
                 "reason": f"把「{node_name(node)}」换成同类的「{cheaper.get('name')}」(约省 ¥{saving:.0f})",
@@ -265,10 +269,13 @@ def propose_fallback(
                     there = candidate.get("lnglat")
                     if not isinstance(there, (list, tuple)) or len(there) < 2:
                         continue
+                    if str(candidate.get("name")) in used_replacements:
+                        continue  # 已经被用作平替的地方，不再作为"更近的点"重复推荐
                     distance = haversine_km(here, (float(there[0]), float(there[1])))
                     if best is None or distance < best:
                         best, nearer = distance, candidate
                 if nearer and best is not None and best > 0:
+                    used_replacements.append(str(nearer.get("name")))
                     actions.append(
                         {
                             "kind": "swap_nearer",

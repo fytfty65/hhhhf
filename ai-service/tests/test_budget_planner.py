@@ -115,6 +115,24 @@ class TestFallback(unittest.TestCase):
         self.assertIn(result["dropped"][0], {"次要景点A", "次要景点C"})
         self.assertEqual(result["remaining_shortfall"], 0.0)
 
+    def test_never_reuses_the_same_replacement_twice(self):
+        """实测发现的真实缺陷：两个点被换成同一个地方（会重复景点）。"""
+        plan = {"route": [
+            node("贵餐厅A", "¥300", kind="餐饮", day=1),
+            node("贵餐厅B", "¥280", kind="餐饮", day=2),
+            node("酒店", "¥200", kind="住宿", day=1),
+            node("景点", "¥50", kind="文化", day=1),
+        ]}
+        candidates = {"food": [
+            {"name": "便宜小吃一号", "price": 30, "price_tier": "economy"},
+            {"name": "便宜小吃二号", "price": 40, "price_tier": "economy"},
+        ]}
+        result = propose_fallback(CONTEXT, plan, shortfall=200, candidates_by_intent=candidates)
+        targets = [item.get("to") for item in result["substitutions"]]
+        self.assertGreaterEqual(len(targets), 1)
+        self.assertEqual(len(targets), len(set(targets)), f"同一替代被重复使用: {targets}")
+        self.assertNotIn("便宜小吃一号", result.get("dropped", []))
+
     def test_preserved_ratio_reports_dropped_intents(self):
         plan = {"route": [node("博物馆", "¥100", kind="博物馆"), node("面馆", "¥50", kind="餐饮")]}
         result = propose_fallback(CONTEXT, plan, shortfall=0)
