@@ -45,6 +45,11 @@ work/
 gateway/gateway.pid
 front/resource_monitor.csv
 
+# Playwright per-run artifacts (traces, failure screenshots, .last-run.json).
+# The last-run marker got committed once by accident in ebd2d90; keep them out.
+front/test-results/
+front/playwright-report/
+
 # Bandit learning state is a runtime artifact derived from user feedback. It is
 # machine-local and encodes behavioural data, so it must never be committed.
 bandit_state.json

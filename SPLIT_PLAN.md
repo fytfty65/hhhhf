@@ -82,8 +82,11 @@
 | F9 | 出行方式比较层（合适 + 便宜，票价没有来源就标未核实） | `f062fee` |
 | F10 | 跨城腿识别 + 出行审计随 payload 下发 | `8942499` |
 | F11 | 前端渲染四块新 payload（本次调整 / 价格核对 / 跨城怎么走 / 长途分段） | `a1021ac` |
+| F11b | 面板从「不可滚的 header」挪进滚动区（否则 8 段内容把正文挤成 0 高、后几段滚不到）+ E2E 加版面守卫 | 见下 |
 
 **F11 附带修掉一个真 bug**：宿主流式累积时用 `replace(/null/g, "")` 清洗 token，会把**合法 JSON 里的 null**（票价未核实就是 `price:null`）删成 `"price":`，导致整段 `[FINAL_JSON]` 解析失败——后果是 `quality`/`budget_report`/四块新数据全部丢失、核对面板整块不显示。现在改为**先按原文解析**（我们下发的 JSON 一定合法），解析不出来才退回"删 null"的兜底（那是给模型吐字夹带的 null 准备的）；展示用的清洗仍在 `humanReadableLogs`。E2E mock 里刻意保留 `price: null` 作为回归哨兵。同时 `final_route` 消息路径也接入同一份 payload（重连/回放只收到它时面板同样有数据）。
+
+**F11b 版面修复**：核对面板原来挂在左侧栏的 `header` 里，而 header 是 auto 高度 + 不可滚动；8 段内容把整列顶到 1210px（1440×900 实测：header scrollHeight=clientHeight=1210、正文区 `flex-1 overflow-y-auto` 的 clientHeight=**0**、文档不可滚），结果①行程正文完全看不见②面板最后几段滚不到。修法：面板移进滚动区顶部（`px-5 pt-2 sm:px-8` 包一层，紧跟 `<header>` 之后），与行程正文一起滚。E2E 加了版面守卫（找元素真正所在的可滚动祖先 → `scrollIntoView({block:'center'})` → 断言滚得进视口 + 滚动区 clientHeight > 200），这个 bug 再也回不来。
 
 其余顶层定义参考：`shortenRegionName`(57)、`OmniLogo`(105)、`tryExtractJson`(127)、`normalizeLnglat`(157)、`extractStreamingRoutes`(181)、`getCleanPhotoUrl`(228)、`PoiImage`(248)、`AuthPortalScreen`(367)、`ContextualLobby`(640，根)、`EditIntentModal`(1370)、`UnifiedWorkspace`(1408)。
 
@@ -99,6 +102,14 @@
 ## 5. 环境注意（本机 Windows）
 
 - **DSH 沙箱**：受限模式下 `npm run test` / `next build` 会 `Error: spawn EPERM`（沙箱禁止带管道 stdio 的子进程），是**假失败**。解法：在独立终端跑本脚本，或确认 DSH 文件策略为 `danger-full-access`。
+- **`.ps1` 必须带 UTF-8 BOM（血的教训）**：本机默认是 Windows PowerShell 5.1，它读 `.ps1` 时按系统 ANSI 码页解码；文件一旦丢掉 BOM，脚本里的中文串会被解成乱码并连带把引号解析坏，报错却指向毫不相干的行（实测：`[regex]::Matches($html, 'src="([^"]+\.js)"')` 报 `Unexpected token '('`）。DSH 的 `edit`/`write` 工具会把 BOM 去掉，所以**每次用工具改完 `front/scripts/split-gate.ps1`，都要把 BOM 补回去**：
+  ```powershell
+  $p='front/scripts/split-gate.ps1'
+  $t=[System.IO.File]::ReadAllText($p,(New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($p,$t,(New-Object System.Text.UTF8Encoding($true)))   # 需 danger-full-access
+  ```
+  校验：`[void][System.Management.Automation.Language.Parser]::ParseFile($p,[ref]$null,[ref]$errs)` 应无错。
+
 - **Playwright**：浏览器在 `work/ms-playwright`（脚本已内置 `PLAYWRIGHT_BROWSERS_PATH`），无需联网下载。
 - **内存紧张**（本机实测可用内存约 6–7 GB、提交内存已用 37/64 GB）：跑构建/E2E 时**不要同时**跑 DSH 自身的 `pnpm build`/`dev:web`；必要时 `$env:NODE_OPTIONS='--max-old-space-size=4096'`。
 - **崩溃恢复**：因为每批一提交，崩溃最多损失当前一批；`work/split-gate.log` 保留上一次门禁结果。

@@ -283,6 +283,51 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
       expect(text.includes(banned), `面板不应出现「${banned}」`).toBeFalsy();
     }
 
+    // 版面回归（血的教训）：面板曾经挂在 header 里，而 header 是 auto 高度、不可滚动，
+    // 8 段内容把整列顶到 1200px+，于是①正文区被压成 0 高、行程完全看不见②面板最后几段
+    // 滚不到（1440×900 实测：header 1210px、正文 clientHeight 0、文档不可滚）。
+    // 现在面板在滚动区里：这里直接找它**真正所在的可滚动祖先**，把它 scrollIntoView 到
+    // 视口中央，再验证「确实滚进来了」——如果容器不可滚（旧 bug），这段就会留在视口外。
+    const layout = await page.evaluate(() => {
+      const scrollerOf = (el: HTMLElement) => {
+        let node: HTMLElement | null = el.parentElement;
+        while (node && node !== document.body) {
+          const style = getComputedStyle(node);
+          if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 4) return node;
+          node = node.parentElement;
+        }
+        return null;
+      };
+      const probe = (el: HTMLElement | null) => {
+        if (!el) return { found: false, inView: false };
+        const scroller = scrollerOf(el);
+        if (!scroller) return { found: true, scroller: false, inView: false };
+        el.scrollIntoView({ block: 'center' });
+        const rect = el.getBoundingClientRect();
+        return {
+          found: true,
+          scroller: true,
+          inView: rect.top >= 0 && rect.bottom <= window.innerHeight,
+          top: Math.round(rect.top),
+          bottom: Math.round(rect.bottom),
+          clientHeight: scroller.clientHeight,
+          scrollHeight: scroller.scrollHeight,
+        };
+      };
+      const all = Array.from(document.querySelectorAll<HTMLElement>('*'));
+      const lastGovernanceSection = all.filter((el) => el.textContent === '还需要你留意').pop() || null;
+      const dayHeading = all.find((el) => /^第 \d+ 天 行程安排$/.test(el.textContent || '')) || null;
+      return { governance: probe(lastGovernanceSection), day: probe(dayHeading) };
+    });
+
+    expect(layout.governance.inView, `面板最后一段必须能滚进视口：${JSON.stringify(layout.governance)}`).toBe(true);
+    expect(layout.governance.clientHeight || 0, '滚动区必须有实际高度').toBeGreaterThan(200);
+    expect(layout.day.found, '行程正文（第 N 天 行程安排）必须存在').toBe(true);
+    expect(layout.day.inView, `行程正文必须能滚进视口：${JSON.stringify(layout.day)}`).toBe(true);
+
+    // 回到面板顶部再截图：基线要稳定，不能受上一段滚动位置影响
+    await panel.evaluate((el) => el.scrollIntoView({ block: 'start' }));
+
     // 截图时禁用动画：页面里的 framer-motion / 3D 画布会一直动，
     // 不禁用的话 Playwright 会等"字体加载 + 动画稳定"直到超时。
     await page.screenshot({ path: '../work/plan-governance.png', animations: 'disabled', fullPage: false });

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   ContextualLobby.tsx 拆分门禁（拆分任务的唯一验证入口）。
 

@@ -1797,10 +1797,19 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               {planQuality.dailyCounts.length > 0 && <span className="text-slate-400">白天节点 {planQuality.dailyCounts.map((item: any) => `D${item.day}:${item.count}`).join(' · ')}</span>}
             </div>
           )}
-          {phase === 'decision' && <PlanGovernancePanel data={planGovernance} />}
         </header>
 
         <div className="flex-1 overflow-y-auto bg-white custom-scrollbar relative">
+          {/* 核对说明是"要读的内容"，不是工具栏：放进滚动区最上面，跟行程正文一起滚。
+              以前它挂在 header 里，而 header 是 auto 高度、不可滚动，所以面板一长
+              （预算核对/已作调整/行程规模/本次调整/价格核对/跨城怎么走/长途分段/还需要你留意
+              共 8 段）就把整列顶到 1200px 以上：正文区被压成 0 高、面板最后几段滚不到
+              （1440×900 实测 header 1210px、正文 clientHeight 0、文档不可滚）。 */}
+          {phase === 'decision' && (
+            <div className="px-5 pt-2 sm:px-8">
+              <PlanGovernancePanel data={planGovernance} />
+            </div>
+          )}
           <AnimatePresence mode="wait">
             {phase === 'drafting' && (
               <DraftingPanel 
