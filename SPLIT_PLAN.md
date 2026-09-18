@@ -17,12 +17,12 @@
 | 指标 | 基线值 |
 |---|---|
 | `ContextualLobby.tsx` | 3,991 行 / 218,225 B |
-| 首屏 JS | **1,105.0 KB（13 个 chunk）**（2026-09-17 经用户确认由 1,104.6 KB 更新：新增"行程核对面板"已按需加载，差额 +0.4 KB 来自 dynamic 包装与状态接线） |
-| 首屏 CSS | 140.9 KB（同上：面板用到的 Tailwind 类进全局样式） |
+| 首屏 JS | **1,105.3 KB（13 个 chunk）**（2026-09-17 经用户确认由 1,104.6 → 1,105.0 KB；同日二次更新到 1,105.3 KB：核对面板新增「本次调整 / 价格核对 / 跨城怎么走 / 长途分段」四段 + 流式 JSON 解析修复，面板本体走 dynamic 按需加载，差额来自宿主接线） |
+| 首屏 CSS | 141.1 KB（同上：面板用到的 Tailwind 类进全局样式） |
 | 单测 | 79 个（`app/lib/*.test.ts`，9 个文件） |
 | E2E | `refactor-regression.spec.ts` 7 个 + `core-flow.spec.ts` 1 个 + `plan-governance.spec.ts` 1 个 = **9 个** |
 
-**验收**：拆分后首屏 JS ≤ **1,105.0 KB**，9 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
+**验收**：拆分后首屏 JS ≤ **1,105.3 KB**，9 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
 
 ## 3. 进度
 
@@ -66,6 +66,24 @@
 5. `work/` 下的抽取脚本（`extract-split2.ps1`、`move-to-lib.ps1`、`cleanup-imports.ps1`、`fix-imports7.ps1`、`extract-auth.ps1`、`dedupe-types*.ps1`、`cleanup-types-final.ps1`）是本次拆分的工具，`work/` 已被 gitignore，不会进仓库；续做时可复用。**脚本编写注意**：插入换行必须写 `${eol}`（写 `$eolxxx` 会被当成变量名），多行字面量要同时兼容 LF/CRLF，`git commit -m` 传多行消息在本机 PowerShell 下会被解析坏，改用 `git commit -F 消息文件`。
 
 > **清理项已全部完成。剩余唯一工作 = `UnifiedWorkspace`（1,357 行）的拆分，按约定需用户先确认（选项：① 停 ② 只抽无状态展示子块 ③ 按相位彻底拆）。**
+
+### 功能批次（拆分任务之后，同一门禁协议）
+
+| 批 | 内容 | 提交 |
+|---|---|---|
+| F1 | 评测集先行：`ai-service/tests/eval/golden_cases.json`（29 例）+ `tools/eval_plan_quality.py` | `ef83c39` |
+| F2 | 行程骨架/餐饮住宿下限 + 三级预算模型（已核实/估算/未核实） | `7ff3fb8` |
+| F3 | 候选池（高德 POI → 候选，含价格来源与 tier） | `e103633` |
+| F4 | 二次增量解析（排他/配额/升降档）+ 响应度度量 | `7abc5e3` |
+| F5 | 长途（≥14 天）分段：只重生成失败段 | `a4035fa` |
+| F6 | 升/降档排序策略 + 基线更新 | `e87b78b` |
+| F7 | 价格来源分级与合并（弱来源不覆盖强来源 + TTL 过期不采用） | `39db2a0` |
+| F8 | 分段修补接进管线 | `97ce685` |
+| F9 | 出行方式比较层（合适 + 便宜，票价没有来源就标未核实） | `f062fee` |
+| F10 | 跨城腿识别 + 出行审计随 payload 下发 | `8942499` |
+| F11 | 前端渲染四块新 payload（本次调整 / 价格核对 / 跨城怎么走 / 长途分段） | 本批 |
+
+**F11 附带修掉一个真 bug**：宿主流式累积时用 `replace(/null/g, "")` 清洗 token，会把**合法 JSON 里的 null**（票价未核实就是 `price:null`）删成 `"price":`，导致整段 `[FINAL_JSON]` 解析失败——后果是 `quality`/`budget_report`/四块新数据全部丢失、核对面板整块不显示。现在改为**先按原文解析**（我们下发的 JSON 一定合法），解析不出来才退回"删 null"的兜底（那是给模型吐字夹带的 null 准备的）；展示用的清洗仍在 `humanReadableLogs`。E2E mock 里刻意保留 `price: null` 作为回归哨兵。同时 `final_route` 消息路径也接入同一份 payload（重连/回放只收到它时面板同样有数据）。
 
 其余顶层定义参考：`shortenRegionName`(57)、`OmniLogo`(105)、`tryExtractJson`(127)、`normalizeLnglat`(157)、`extractStreamingRoutes`(181)、`getCleanPhotoUrl`(228)、`PoiImage`(248)、`AuthPortalScreen`(367)、`ContextualLobby`(640，根)、`EditIntentModal`(1370)、`UnifiedWorkspace`(1408)。
 

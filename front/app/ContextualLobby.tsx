@@ -1043,6 +1043,30 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let isMounted = true;
 
+    // 规划核对面板的数据来源只有一个：后端 final_route.payload。
+    // `stream_token` 里的 [FINAL_JSON] 与 `final_route` 消息带的是同一份 payload，
+    // 两条路径都要写，缺一条就会出现"方案出来了但核对面板是空的"。
+    const applyPlanGovernance = (fd: any) => {
+      if (!fd || typeof fd !== 'object') return;
+      setPlanGovernance(
+        fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
+          fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip
+          ? {
+              quality: fd.quality,
+              budget: fd.budget_report,
+              fallback: fd.fallback,
+              horizon: fd.horizon,
+              // 二次增量（这次到底改成了什么）、价格核对、跨城出行比较、长途分段：
+              // 四块都是**后端说了才显示**，缺字段时面板不渲染空壳。
+              increment: fd.increment,
+              priceAudit: fd.price_audit,
+              transportAudit: fd.transport_audit,
+              longTrip: fd.long_trip,
+            }
+          : null,
+      );
+    };
+
     const connect = () => {
       if (!isMounted) return;
       ws = new WebSocket(`${WS_BASE}/ws?room_id=${encodeURIComponent(roomCode || 'OMNI-88')}&access_token=${encodeURIComponent(getAuthToken())}&user_id=${encodeURIComponent(currentUser.id)}`);
@@ -1079,11 +1103,14 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               setDeductionError(null);
               setStreamedText(prev => {
                 const rawToken = msg.payload ? String(msg.payload) : "";
-                const cleanToken = rawToken.replace(/null/g, "");
-                const cleanPrev = (prev || "").replace(/null/g, "");
-                const newText = cleanPrev + cleanToken;
-                
-                const finalData = tryExtractJson(newText);
+                // 👑 流式原文**原样累积**：以前在累积阶段就把 "null" 全部删掉，而合法 JSON 里的
+                // null（例如票价未核实时 price:null）会被删成 "price":，整段 JSON 直接解析失败
+                // —— 后果是 final_route 里的 quality / budget_report 全部丢失，核对面板不出现。
+                // 现在先按原文解析（我们自己下发的 JSON 一定合法），解析不出来才退回"删 null"的
+                // 兜底（那是为模型吐字里夹带的 null 准备的）。展示用的清洗在 humanReadableLogs。
+                const newText = (prev || "") + rawToken;
+
+                const finalData = tryExtractJson(newText) || tryExtractJson(newText.replace(/null/g, ""));
                 if (finalData && finalData.route && Array.isArray(finalData.route) && finalData.route.length > 0) {
                   const mappedRoutes = finalData.route.map((r: any) => ({
                     day: r.day || 1,
@@ -1123,16 +1150,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   }
                   // 规划核对：预算三级模型 + 兜底调整说明 + 超长行程建议 + 门禁问题。
                   // 后端可能只给其中一部分（例如未超预算时没有 fallback），缺什么就渲染什么。
-                  setPlanGovernance(
-                    finalData.quality || finalData.budget_report || finalData.fallback || finalData.horizon
-                      ? {
-                          quality: finalData.quality,
-                          budget: finalData.budget_report,
-                          fallback: finalData.fallback,
-                          horizon: finalData.horizon,
-                        }
-                      : null,
-                  );
+                  applyPlanGovernance(finalData);
                   if (finalData.arbitration_records) setArbitrationRecords(finalData.arbitration_records);
                   // Capture the bandit arm the planner actually used. Without
                   // this the satisfaction form posts an empty bandit_arm_id, the
@@ -1225,6 +1243,9 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               if (fd.negotiation_summary) setConsensusSummary(fd.negotiation_summary);
               if (fd.team_satisfaction) setTeamSatisfaction(fd.team_satisfaction);
               if (fd.arbitration_records) setArbitrationRecords(fd.arbitration_records);
+              // final_route 是权威 payload：只收到它（重连、回放、流式 token 丢了）时
+              // 核对面板同样要有数据。
+              applyPlanGovernance(fd);
             }
           }
         } catch (err) {}

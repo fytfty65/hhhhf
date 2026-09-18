@@ -14,11 +14,31 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
 type Segment = { start?: number; end?: number; days?: number };
+type TransportLeg = {
+  from?: string;
+  to?: string;
+  distance_km?: number;
+  after_day?: number;
+  before_day?: number;
+  advice?: string;
+  alternatives?: string[];
+  unverified_fares?: { mode?: string; code?: string; reason?: string }[];
+  options?: { mode?: string; duration_minutes?: number; transfers?: number | null; price?: number | null; fare_verified?: boolean }[];
+};
+type LongTripSegment = {
+  index?: number;
+  start_day?: number;
+  end_day?: number;
+  days?: number;
+  nodes?: number;
+  rest_days?: number;
+  needs_repair?: boolean;
+};
 
 export type PlanGovernance = {
   quality?: {
@@ -51,6 +71,35 @@ export type PlanGovernance = {
     days?: number;
     segments?: Segment[];
     advisories?: string[];
+  };
+  /** 二次增量的执行结果（达成了几项、对其它安排扰动多大） */
+  increment?: {
+    requested?: number;
+    achieved?: number;
+    target_gain?: number | null;
+    disturbance?: number;
+    responsiveness?: number | null;
+    disclosure?: string;
+  };
+  /** 价格覆盖情况（可核实比例 / 还需补价的节点） */
+  priceAudit?: {
+    total?: number;
+    verified_ratio?: number;
+    unknown_ratio?: number;
+    unknown?: string[];
+    still_unknown?: string[];
+    updated?: number;
+    summary?: string;
+  };
+  /** 跨城腿的出行建议（含"票价未核实"清单） */
+  transportAudit?: { legs?: TransportLeg[]; note?: string; error?: string };
+  /** 长途分段摘要（哪段被重生成过、哪段还没补上） */
+  longTrip?: {
+    segments?: LongTripSegment[];
+    ok?: boolean;
+    repaired?: { segment?: number; days?: string; added?: number; dropped_out_of_range?: number[]; reasons?: string[] }[];
+    repair_failed_segments?: number[];
+    error?: string;
   };
 };
 
@@ -108,7 +157,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon } = data;
+  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -122,7 +171,18 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
   const hasFallbackBlock = Boolean(fallback && (fallback.disclosure || substitutions.length));
   const hasHorizonBlock = advisories.length > 0;
   const hasFailureBlock = failures.length > 0;
-  if (!hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock) return null;
+  const hasIncrementBlock = Boolean(increment && (increment.disclosure || (increment.requested ?? 0) > 0));
+  const hasPriceBlock = Boolean(
+    priceAudit && ((priceAudit.total ?? 0) > 0 || priceAudit.summary || (priceAudit.unknown?.length ?? 0) > 0),
+  );
+  const hasTransportBlock = Boolean(transportAudit && (transportAudit.legs?.length || transportAudit.error));
+  const hasLongTripBlock = Boolean(longTrip && (longTrip.segments?.length || longTrip.error));
+  if (
+    !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
+    !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock
+  ) {
+    return null;
+  }
 
   return (
     <section
@@ -207,6 +267,133 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {hasIncrementBlock && (
+        <div className="mt-3 border-t border-slate-200 pt-2.5">
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<SlidersHorizontal className="h-3 w-3" />}>本次调整</SectionLabel>
+            {typeof increment?.responsiveness === 'number' && (
+              <span className="font-mono text-[11px] font-bold tabular-nums text-slate-600">
+                响应度 {Math.round(increment.responsiveness * 100)}%
+              </span>
+            )}
+          </div>
+          {(increment?.requested ?? 0) > 0 && (
+            <div className="mt-1.5">
+              <Row label="你要的调整" value={`${increment?.requested} 项`} />
+              <Row
+                label="实际达成"
+                value={`${increment?.achieved ?? 0} 项`}
+                tone={(increment?.achieved ?? 0) >= (increment?.requested ?? 0) ? 'text-emerald-600' : 'text-amber-600'}
+              />
+              {typeof increment?.disturbance === 'number' && (
+                <Row
+                  label="对其余安排的影响"
+                  value={`${Math.round(increment.disturbance * 100)}%`}
+                  tone="text-slate-500"
+                  hint="其余内容被改动的比例，越低说明只动了该动的地方"
+                />
+              )}
+            </div>
+          )}
+          {increment?.disclosure && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">{increment.disclosure}</p>
+          )}
+        </div>
+      )}
+
+      {hasPriceBlock && (
+        <div className="mt-3 border-t border-slate-200 pt-2.5">
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<ReceiptText className="h-3 w-3" />}>价格核对</SectionLabel>
+            <span className="font-mono text-[11px] font-bold tabular-nums text-slate-600">
+              可核实 {Math.round((priceAudit?.verified_ratio ?? 0) * 100)}% · 未取到{' '}
+              {Math.round((priceAudit?.unknown_ratio ?? 0) * 100)}%
+            </span>
+          </div>
+          {(() => {
+            const missing = (priceAudit?.still_unknown?.length ? priceAudit?.still_unknown : priceAudit?.unknown) || [];
+            return missing.length > 0 ? (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+                还需补价：{missing.slice(0, 5).join('、')}
+                {missing.length > 5 ? ` 等 ${missing.length} 个` : ''}
+              </p>
+            ) : null;
+          })()}
+          {priceAudit?.summary && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">{priceAudit.summary}</p>
+          )}
+        </div>
+      )}
+
+      {hasTransportBlock && (
+        <div className="mt-3 border-t border-slate-200 pt-2.5">
+          <SectionLabel icon={<Route className="h-3 w-3" />}>跨城怎么走</SectionLabel>
+          <ul className="mt-1.5 space-y-1.5">
+            {(transportAudit?.legs || []).slice(0, 2).map((leg, index) => (
+              <li key={`${leg.from}-${leg.to}-${index}`} className="text-[11px] leading-relaxed text-slate-600">
+                <span className="font-bold text-slate-700">
+                  {leg.from} → {leg.to}
+                </span>
+                {typeof leg.distance_km === 'number' && (
+                  <span className="ml-1 font-mono tabular-nums text-slate-500">约 {leg.distance_km} km</span>
+                )}
+                {leg.advice && <div>{leg.advice}</div>}
+                {leg.alternatives && leg.alternatives.length > 0 && (
+                  <div className="text-slate-500">备选：{leg.alternatives.slice(0, 2).join('；')}</div>
+                )}
+              </li>
+            ))}
+          </ul>
+          {transportAudit?.error && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+              这一段没能比出行方式（{transportAudit.error}），票价与班次未核实。
+            </p>
+          )}
+          {transportAudit?.note && <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{transportAudit.note}</p>}
+        </div>
+      )}
+
+      {hasLongTripBlock && (
+        <div className="mt-3 border-t border-slate-200 pt-2.5">
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<CalendarRange className="h-3 w-3" />}>长途分段</SectionLabel>
+            {typeof longTrip?.ok === 'boolean' && (
+              <span className={`text-[11px] font-bold ${longTrip.ok ? 'text-emerald-600' : 'text-amber-600'}`}>
+                {longTrip.ok ? '衔接正常' : '有待修补'}
+              </span>
+            )}
+          </div>
+          <div className="mt-1.5 space-y-0.5">
+            {(longTrip?.segments || []).map((item) => (
+              <div key={item.index} className="flex items-baseline justify-between gap-3 text-[11px] text-slate-600">
+                <span>
+                  第 {item.index} 段 · 第 {item.start_day}-{item.end_day} 天
+                </span>
+                <span className="font-mono tabular-nums">
+                  {item.nodes ?? 0} 个节点 · 休整 {item.rest_days ?? 0} 天
+                  {item.needs_repair ? <span className="ml-1 font-bold text-amber-600">待修补</span> : null}
+                </span>
+              </div>
+            ))}
+          </div>
+          {(longTrip?.repaired?.length || longTrip?.repair_failed_segments?.length) ? (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+              {longTrip?.repaired?.length
+                ? `已重新生成 ${longTrip.repaired.length} 段（第 ${longTrip.repaired.map((item) => item.days).join('、')} 天）`
+                : ''}
+              {longTrip?.repair_failed_segments?.length
+                ? `${longTrip?.repaired?.length ? '；' : ''}未补上 ${longTrip.repair_failed_segments.length} 段（从第 ${longTrip.repair_failed_segments.join('、')} 天起）`
+                : ''}
+            </p>
+          ) : null}
+          {longTrip?.error && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+              这次没能做分段核对（{longTrip.error}），长途日程的长短是否合适未核实。
+            </p>
+          )}
         </div>
       )}
 

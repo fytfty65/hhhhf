@@ -1,11 +1,14 @@
 import { test, expect, Page } from '@playwright/test';
 
 /**
- * 行程核对面板（预算核对 / 已作调整 / 行程规模 / 还需要你留意）的渲染与视觉回归。
+ * 行程核对面板（预算核对 / 已作调整 / 行程规模 / 本次调整 / 价格核对 / 跨城怎么走 / 长途分段 /
+ * 还需要你留意）的渲染与视觉回归。
  *
- * 数据来自后端 final_route.payload 的 quality / budget_report / fallback / horizon；
- * 这里用 WebSocket mock 造出一份"预算可能超支 + 已给平替 + 超长行程 + 有遗留问题"的
- * 真实形状 payload，既做断言（文案必须出现），也存一张截图供人工审阅排版。
+ * 数据来自后端 final_route.payload 的 quality / budget_report / fallback / horizon /
+ * increment / price_audit / transport_audit / long_trip；
+ * 这里用 WebSocket mock 造出一份"预算可能超支 + 已给平替 + 超长行程 + 有遗留问题 + 二次增量已执行
+ * + 价格补全 + 跨城比较 + 分段修补"的真实形状 payload，既做断言（文案必须出现），也存一张截图供
+ * 人工审阅排版。
  */
 
 const user = {
@@ -67,6 +70,57 @@ const GOVERNANCE_PAYLOAD = {
       '长行程必须设置中途休整日（建议每 7 天至少 1 天低强度）',
     ],
   },
+  // 二次增量：这次新说的话到底落实了几项、对其它安排扰动多大（core/increment.measure_increment）
+  increment: {
+    requested: 2,
+    achieved: 2,
+    target_gain: 1,
+    disturbance: 0.286,
+    responsiveness: 0.714,
+    disclosure: '这次你要的 2 项调整都已落实（多吃地道美食 2 处、不去城墙南门），其余安排保留约 71%。',
+  },
+  // 价格核对：可核实比例 / 未取到比例 / 还需补价的节点（core/price_sources.price_coverage）
+  price_audit: {
+    total: 5,
+    verified: ['钟楼酒店', '陕西历史博物馆'],
+    estimated: ['回民街小吃'],
+    unknown: ['城墙南门门票', '永兴坊美食'],
+    verified_ratio: 0.4,
+    unknown_ratio: 0.4,
+    updated: 1,
+    still_unknown: ['城墙南门门票', '永兴坊美食'],
+    summary: '补上 1 个价格；1 个查了没查到（保持未核实）；价格覆盖：可核实 40% / 未取到 40%',
+  },
+  // 跨城腿比较：票价没有可核实来源时只比时长，并明确标注未核实（core/transport_options）
+  // 注意 `price: null` 是**故意**的：真实后端在票价未核实时就会下发 null，
+  // 而前端曾经在流式累积阶段把 "null" 全部删掉，把整段 JSON 弄坏、核对面板整块消失。
+  transport_audit: {
+    legs: [
+      {
+        from: '西安',
+        to: '成都',
+        distance_km: 658.3,
+        after_day: 7,
+        before_day: 8,
+        advice: '建议高铁：约 4 小时 10 分，二等座票价未核实',
+        alternatives: ['飞机 约 1 小时 30 分（票价未核实）'],
+        unverified_fares: [{ mode: '高铁', code: 'G1701', reason: '无票务来源' }],
+        options: [{ mode: '高铁', duration_minutes: 250, transfers: 0, price: null, fare_verified: false }],
+      },
+    ],
+    note: '跨城段的票价需要可核实的票务来源；缺来源时只比较时长，并明确标注未核实。',
+  },
+  // 长途分段摘要：哪段需要修补、哪段被重新生成、哪段没补上（core/long_trip.summarize_segments）
+  long_trip: {
+    segments: [
+      { index: 1, start_day: 1, end_day: 7, days: 7, nodes: 21, rest_days: 2, needs_repair: false },
+      { index: 2, start_day: 8, end_day: 14, days: 7, nodes: 18, rest_days: 1, needs_repair: true },
+      { index: 3, start_day: 15, end_day: 16, days: 2, nodes: 5, rest_days: 0, needs_repair: false },
+    ],
+    ok: false,
+    repaired: [{ segment: 2, days: '8-14', added: 3, dropped_out_of_range: [17], reasons: ['long_trip_day_gap'] }],
+    repair_failed_segments: [15],
+  },
 };
 
 async function installMocks(page: Page) {
@@ -124,6 +178,10 @@ async function installMocks(page: Page) {
                     budget_report: payload.governance.budget_report,
                     fallback: payload.governance.fallback,
                     horizon: payload.governance.horizon,
+                    increment: payload.governance.increment,
+                    price_audit: payload.governance.price_audit,
+                    transport_audit: payload.governance.transport_audit,
+                    long_trip: payload.governance.long_trip,
                   }),
               }),
             });
@@ -186,6 +244,33 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // 行程规模：超长行程分段
     await expect(panel.getByText('行程规模')).toBeVisible();
     await expect(panel.getByText('16 天 · 3 段（7/7/2）')).toBeVisible();
+
+    // 本次调整：达成几项 + 对其它安排的影响（说"响应度"，不说"AI 已优化"）
+    await expect(panel.getByText('本次调整')).toBeVisible();
+    await expect(panel.getByText('响应度 71%')).toBeVisible();
+    await expect(panel.getByText('你要的调整', { exact: true })).toBeVisible();
+    await expect(panel.getByText('实际达成', { exact: true })).toBeVisible();
+    await expect(panel.getByText('对其余安排的影响', { exact: true })).toBeVisible();
+    await expect(panel.getByText(/这次你要的 2 项调整都已落实/)).toBeVisible();
+
+    // 价格核对：比例 + 还需补价的节点（未核实必须写明，不得当成 0 元）
+    await expect(panel.getByText('价格核对')).toBeVisible();
+    await expect(panel.getByText('可核实 40% · 未取到 40%')).toBeVisible();
+    await expect(panel.getByText(/还需补价：城墙南门门票、永兴坊美食/)).toBeVisible();
+    await expect(panel.getByText(/补上 1 个价格/)).toBeVisible();
+
+    // 跨城怎么走：出行建议 + 备选 + 票价未核实
+    await expect(panel.getByText('跨城怎么走')).toBeVisible();
+    await expect(panel.getByText(/西安 → 成都/)).toBeVisible();
+    await expect(panel.getByText(/建议高铁：约 4 小时 10 分，二等座票价未核实/)).toBeVisible();
+    await expect(panel.getByText(/备选：飞机 约 1 小时 30 分（票价未核实）/)).toBeVisible();
+
+    // 长途分段：段级节点数/休整日 + 哪段重生成过、哪段没补上
+    await expect(panel.getByText('长途分段')).toBeVisible();
+    await expect(panel.getByText('有待修补')).toBeVisible();
+    await expect(panel.getByText(/第 2 段 · 第 8-14 天/)).toBeVisible();
+    await expect(panel.getByText(/18 个节点 · 休整 1 天/)).toBeVisible();
+    await expect(panel.getByText(/已重新生成 1 段（第 8-14 天）；未补上 1 段（从第 15 天起）/)).toBeVisible();
 
     // 遗留问题：说人话的标签而不是错误码
     await expect(panel.getByText('还需要你留意')).toBeVisible();
