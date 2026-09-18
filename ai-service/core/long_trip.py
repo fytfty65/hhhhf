@@ -233,3 +233,155 @@ def continuity_report(plan: Any, context: Mapping[str, Any], chunk_days: int = C
         "is_long_trip": days >= LONG_TRIP_DAYS,
         "budgets": budgets,
     }
+
+
+def segment_repair_targets(plan: Any, context: Mapping[str, Any], chunk_days: int = CHUNK_DAYS) -> List[Dict[str, Any]]:
+    """找出**需要重生成**的段（空天 / 住宿夜数不足 / 缺休整日）。
+
+    这是"只重生成失败段"的输入 —— 不必整段重来。返回按严重度排序：
+    `[{index, start_day, end_day, days, reasons[], brief}]`。
+    """
+    days = max(1, int(context.get("days") or context.get("trip_days") or 1))
+    if days < LONG_TRIP_DAYS:
+        return []
+    segments = segment_days(days, chunk_days)
+    structure = build_long_trip_plan(context, chunk_days)
+    nodes = nodes_of(plan)
+    by_day: Dict[int, List[Dict[str, Any]]] = {}
+    for index, node in enumerate(nodes, start=1):
+        by_day.setdefault(node_day(node, index), []).append(node)
+    play_counts = _play_count_by_day(plan)
+
+    targets: List[Dict[str, Any]] = []
+    for segment in segments:
+        start, end = int(segment["start"]), int(segment["end"])
+        reasons: List[str] = []
+        empty_days = [day for day in range(start, end + 1) if not by_day.get(day)]
+        if empty_days:
+            reasons.append("第 " + "、".join(str(day) for day in empty_days) + " 天没有安排")
+        hotels = [
+            node
+            for day in range(start, end + 1)
+            for node in by_day.get(day, [])
+            if intent_of(node) == "hotel"
+        ]
+        expected_nights = max(0, int(segment["days"]) - 1)
+        if len(hotels) < expected_nights:
+            reasons.append(f"住宿仅 {len(hotels)} 夜（至少 {expected_nights} 夜）")
+        if int(segment["days"]) >= REST_EVERY_DAYS and not any(
+            play_counts.get(day, 0) <= 1 for day in range(start, end + 1)
+        ):
+            reasons.append("这一段没有休整日（每 7 天至少 1 天低强度）")
+        if not reasons:
+            continue
+        state = next((item for item in structure["segments"] if item["start_day"] == start), None) or {
+            "index": (start - 1) // chunk_days + 1,
+            "start_day": start,
+            "end_day": end,
+            "days": int(segment["days"]),
+            "budget": 0,
+            "rest_days_required": required_rest_days(int(segment["days"])),
+        }
+        targets.append(
+            {
+                "index": int(state["index"]),
+                "start_day": start,
+                "end_day": end,
+                "days": int(segment["days"]),
+                "reasons": reasons,
+                "brief": segment_brief(state, plan),
+            }
+        )
+    targets.sort(key=lambda item: (-len(item["reasons"]), item["start_day"]))
+    return targets
+
+
+def segment_prompt(target: Mapping[str, Any]) -> str:
+    """把"段修补目标"变成给 LLM 的指令（要求只输出该段的节点数组）。"""
+    brief = target.get("brief") or {}
+    carry = brief.get("carry_in") or {}
+    lines = [
+        f"只生成第 {target['start_day']}-{target['end_day']} 天（共 {target['days']} 天）的行程节点，不要输出其它天数。",
+        "这一段当前的问题：" + "；".join(str(item) for item in (target.get("reasons") or [])),
+    ]
+    if carry.get("last_node"):
+        lines.append(f"上一段最后停在第 {carry.get('after_day')} 天的「{carry['last_node']}」，请从这里自然衔接。")
+    if brief.get("rest_days_required"):
+        lines.append(f"这一段至少安排 {brief['rest_days_required']} 个低强度休整日（当天只 1 个玩点）。")
+    lines.extend(
+        [
+            "每天必须包含：至少 1 个玩点、至少 1 个餐饮节点；跨夜需住宿节点；时间按先后递增，不要同一时间两个节点。",
+            "每个节点必须含字段：day（全局天数）、name、location、time、type、cost_estimate、lnglat；"
+            "价格与开放时间没有可核实来源就写「暂无供应商数据」并标 estimated=true，严禁编造。",
+            "直接输出 JSON 数组（元素为节点对象），不要附加解释文字。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def merge_segment_nodes(plan: Any, start_day: int, end_day: int, nodes: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """用新生成的节点替换某一段（不修改传入 plan）。
+
+    - 只接受 `day` 落在该段范围内的节点，范围外的**丢弃并上报**（防止 LLM 顺手改了别的天）；
+    - 该段原有节点被整体替换（避免残留空天）；
+    - 结果按 (day, time) 排序，保证前端按天渲染正常。
+    """
+    kept: List[Dict[str, Any]] = []
+    for index, node in enumerate(nodes_of(plan), start=1):
+        day = node_day(node, index)
+        if start_day <= day <= end_day:
+            continue
+        kept.append(dict(node))
+
+    incoming: List[Dict[str, Any]] = []
+    out_of_range: List[int] = []
+    for node in nodes or []:
+        if not isinstance(node, Mapping):
+            continue
+        candidate = dict(node)
+        try:
+            day_int = int(candidate.get("day"))
+        except (TypeError, ValueError):
+            day_int = start_day
+        if day_int < start_day or day_int > end_day:
+            out_of_range.append(day_int)
+            continue
+        candidate["day"] = day_int
+        incoming.append(candidate)
+
+    merged = kept + incoming
+    merged.sort(key=lambda item: (int(item.get("day") or 1), str(item.get("time") or "")))
+    new_plan: Any = dict(plan) if isinstance(plan, Mapping) else {}
+    new_plan["route"] = merged
+    return {"plan": new_plan, "added": len(incoming), "out_of_range": out_of_range}
+
+
+def summarize_segments(plan: Any, context: Mapping[str, Any], chunk_days: int = CHUNK_DAYS) -> Dict[str, Any]:
+    """给前端/报告的段级摘要：每段天数、节点数、休整日、是否需要修补。"""
+    days = max(1, int(context.get("days") or context.get("trip_days") or 1))
+    segments = segment_days(days, chunk_days)
+    by_day: Dict[int, int] = {}
+    for index, node in enumerate(nodes_of(plan), start=1):
+        by_day[node_day(node, index)] = by_day.get(node_day(node, index), 0) + 1
+    play_counts = _play_count_by_day(plan)
+    report = continuity_report(plan, context, chunk_days)
+    failing = {item["start_day"] for item in segment_repair_targets(plan, context, chunk_days)}
+    return {
+        "segments": [
+            {
+                "index": index + 1,
+                "start_day": int(segment["start"]),
+                "end_day": int(segment["end"]),
+                "days": int(segment["days"]),
+                "nodes": sum(by_day.get(day, 0) for day in range(int(segment["start"]), int(segment["end"]) + 1)),
+                "rest_days": sum(
+                    1 for day in range(int(segment["start"]), int(segment["end"]) + 1) if play_counts.get(day, 0) <= 1
+                ),
+                "needs_repair": int(segment["start"]) in failing,
+            }
+            for index, segment in enumerate(segments)
+        ],
+        "ok": report["ok"],
+        "failures": report["failures"],
+        "advisories": report["advisories"],
+    }

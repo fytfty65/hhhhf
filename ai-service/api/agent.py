@@ -3251,6 +3251,62 @@ async def run_negotiate(msg: GatewayMessage):
                         # 👑 阶段 1：规划质量门禁 + 预算可行性 + 兜底方案（纯确定性，零网络）
                         # 业务逻辑在 core/plan_quality.plan_quality_snapshot 里（可单测），
                         # 这里只做薄接线；任何异常都不得阻断规划主流程。
+                        # 👑 长途（≥14 天）分段修补：**只重生成失败的段**（有界：最多 2 段/次）
+                        # 30 天 × 每天多节点靠单次生成不可靠；这里按段校验（空天/住宿夜数/休整日），
+                        # 只对失败段落再调一次 LLM，并丢弃越界天数，避免"顺手改了别的天"。
+                        if trip_days >= 14:
+                            try:
+                                from core.long_trip import (
+                                    merge_segment_nodes,
+                                    segment_prompt,
+                                    segment_repair_targets,
+                                    summarize_segments,
+                                )
+
+                                _long_context = {"days": trip_days, "budget": total_calc_budget}
+                                _segment_targets = segment_repair_targets(final_data, _long_context)
+                                _repaired: List[Dict[str, Any]] = []
+                                _repair_failed: List[int] = []
+                                for _target in _segment_targets[:2]:
+                                    try:
+                                        _seg_resp = await client.chat.completions.create(
+                                            model=MODEL_NAME,
+                                            messages=[
+                                                {"role": "system", "content": system_prompt},
+                                                {"role": "user", "content": segment_prompt(_target)},
+                                            ],
+                                            temperature=0.2,
+                                            max_tokens=4096,
+                                        )
+                                        _seg_content = (_seg_resp.choices[0].message.content if _seg_resp.choices else "") or ""
+                                        _seg_match = re.search(r"\[[\s\S]*\]", _seg_content)
+                                        _seg_nodes = json.loads(_seg_match.group(0)) if _seg_match else []
+                                        if not isinstance(_seg_nodes, list) or not _seg_nodes:
+                                            _repair_failed.append(int(_target["start_day"]))
+                                            continue
+                                        _seg_merged = merge_segment_nodes(
+                                            final_data, int(_target["start_day"]), int(_target["end_day"]), _seg_nodes
+                                        )
+                                        final_data["route"] = _seg_merged["plan"]["route"]
+                                        _repaired.append(
+                                            {
+                                                "segment": _target["index"],
+                                                "days": f"{_target['start_day']}-{_target['end_day']}",
+                                                "added": _seg_merged["added"],
+                                                "dropped_out_of_range": _seg_merged["out_of_range"][:5],
+                                                "reasons": _target["reasons"],
+                                            }
+                                        )
+                                    except Exception:
+                                        _repair_failed.append(int(_target["start_day"]))
+                                final_data["long_trip"] = {
+                                    **summarize_segments(final_data, _long_context),
+                                    "repaired": _repaired,
+                                    "repair_failed_segments": _repair_failed,
+                                }
+                            except Exception as _long_exc:  # 分段修补失败绝不影响出方案
+                                final_data["long_trip"] = {"error": str(_long_exc)[:200]}
+
                         try:
                             from core.increment import parse_increment
                             from core.planning_governance import prepare_governance
