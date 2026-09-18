@@ -3314,6 +3314,54 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["tier_policy"] = _governance["tier_policy"]
                             if _governance.get("ranking_preferences"):
                                 final_data["ranking_preferences"] = _governance["ranking_preferences"]
+
+                            # 👑 价格补全（有界）：只查**缺价**节点、并发执行、整体超时保护；
+                            # 来源标为 web → 结构上仍是"估算"，必须标明，不会冒充已验证价格。
+                            try:
+                                from core.price_sources import (
+                                    merge_observations,
+                                    parse_price_from_text,
+                                    pending_price_targets,
+                                    price_coverage,
+                                    summarize_merge,
+                                )
+
+                                _targets = pending_price_targets(final_data, limit=3)
+                                _fetcher = getattr(toolbox, "get_real_time_web_price", None)
+                                if _targets and _fetcher:
+                                    async def _lookup(_item: Dict[str, Any]) -> Dict[str, Any]:
+                                        try:
+                                            _text = await _fetcher(target_city, str(_item.get("name") or ""))
+                                        except Exception:
+                                            _text = ""
+                                        return {
+                                            "name": _item.get("name"),
+                                            "value": parse_price_from_text(_text),
+                                            "source": "web",
+                                        }
+
+                                    _observations = await asyncio.wait_for(
+                                        asyncio.gather(*[_lookup(item) for item in _targets]),
+                                        timeout=5.0,
+                                    )
+                                    _merged = merge_observations(final_data, list(_observations))
+                                    if _merged["updated"]:
+                                        final_data["route"] = _merged["plan"]["route"]
+                                    final_data["price_audit"] = {
+                                        **_merged["coverage"],
+                                        "updated": len(_merged["updated"]),
+                                        "still_unknown": _merged["coverage"]["unknown"][:5],
+                                        "summary": summarize_merge(_merged),
+                                    }
+                                else:
+                                    final_data["price_audit"] = price_coverage(final_data)
+                            except Exception as _price_exc:  # 价格补全失败绝不能影响出方案
+                                try:
+                                    from core.price_sources import price_coverage as _coverage
+
+                                    final_data["price_audit"] = _coverage(final_data)
+                                except Exception:
+                                    pass
                             if _snapshot.get("fallback"):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案
