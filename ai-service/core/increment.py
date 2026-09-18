@@ -181,6 +181,22 @@ def parse_increment(
 
 TIER_POLICY_SYNONYMS: Dict[str, int] = {"economy": -1, "cheap": -1, "budget": -1, "quality": 1, "premium": 1, "luxury": 2}
 
+# 意图 → 中文类别（写进节点的 type，便于前端展示与"必去项"中文匹配）
+INTENT_TYPE_LABELS: Dict[str, str] = {
+    "food": "餐饮",
+    "hotel": "住宿",
+    "cultural": "文化",
+    "scenic": "自然风光",
+    "landmark": "地标",
+    "outdoor": "户外",
+    "family": "亲子",
+    "photo": "摄影",
+    "market": "市集",
+    "nightlife": "夜生活",
+    "shopping": "购物",
+    "hotspring": "温泉",
+}
+
 
 def tier_policy(delta: Mapping[str, Any]) -> Dict[str, int]:
     """把 upgrade/downgrade 解析结果翻译成**档位策略**：正=升档（偏好更高档/更高分），负=降档（偏好更便宜）。
@@ -236,23 +252,32 @@ def _next_slot_time(plan: Any, day: int, intent: str) -> str:
 
 
 def build_node_from_candidate(candidate: Mapping[str, Any], day: int, time: str, intent: str) -> Dict[str, Any]:
-    """候选 → 前端可用的路线节点（字段对齐 AMap POI 形状，缺什么就标注未核实）。"""
+    """候选 → 前端可用的路线节点（字段对齐 AMap POI 形状，缺什么就标注未核实）。
+
+    `type` 落成**中文类别**（餐饮/住宿/文化/自然风光…）：意图标签（food/hotel）是内部口径，
+    直接写进 type 会让前端显示英文、也会让"必须包含餐/酒店"这类中文必去项匹配不上。
+    意图本身仍然通过 `tags` + `added_by_increment` 保留，`intent_of` 照旧能识别。
+    """
     name = str(candidate.get("name") or "")
     price = candidate.get("price")
     source = str(candidate.get("price_source") or candidate.get("source") or "unavailable")
+    raw_type = str(candidate.get("type") or "").strip()
+    # 候选自带的中文类型（高德的"餐饮服务;中餐厅"）优先；只有英文意图名或空值时用我们的中文标签
+    has_cjk = any("\u4e00" <= char <= "\u9fff" for char in raw_type)
+    type_label = raw_type if has_cjk else INTENT_TYPE_LABELS.get(intent, intent)
     return {
         "day": day,
         "name": name,
         "location": name,
         "time": time,
-        "type": candidate.get("type") or intent,
+        "type": type_label,
         "lnglat": candidate.get("lnglat"),
         "cost_estimate": f"¥{float(price):g}" if price is not None else "暂无供应商数据",
         "rating": candidate.get("rating") or "暂无供应商数据",
         "open_time": candidate.get("open_time") or "暂无供应商数据",
         "data_sources": {"cost_estimate": source if price is not None else "unavailable", "rating": "amap", "open_time": "amap"},
         "estimated": bool(candidate.get("estimated", price is None)),
-        "tags": [intent, "按你的追加要求补充"],
+        "tags": [intent, type_label, "按你的追加要求补充"],
         "photos": list(candidate.get("photos") or [])[:3],
         "amap_url": candidate.get("amap_url"),
         "map_image": candidate.get("map_image"),

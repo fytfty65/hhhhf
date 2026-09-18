@@ -136,6 +136,115 @@ class TestRepairPlan(unittest.TestCase):
         self.assertEqual(plan, snapshot)
 
 
+def candidate(name, price=None, intent="cultural", open_time="09:00-18:00", source="amap"):
+    return {
+        "name": name, "type": intent, "intent": intent, "price": price,
+        "price_source": source if price is not None else "unavailable",
+        "rating": "4.6", "open_time": open_time, "estimated": price is None,
+        "lnglat": [104.06, 30.67], "source": "amap",
+    }
+
+
+def full_pool():
+    return {
+        "cultural": [candidate("博物馆候选", 50), candidate("古迹候选", 40)],
+        "scenic": [candidate("山水候选", 0, "scenic")],
+        "food": [candidate("小吃候选", 30, "food"), candidate("老字号候选", 60, "food")],
+        "hotel": [candidate("酒店候选", 300, "hotel", "00:00-23:59")],
+    }
+
+
+class TestPoolRepair(unittest.TestCase):
+    """候选池修补：只能从**真实候选**补点，补不动就如实说（绝不编造节点）。"""
+
+    CONTEXT = {"days": 2, "budget": 2000}
+    EXPECTATIONS = {"min_nodes_per_day": 2, "max_nodes_per_day": 4, "must_have": ["酒店", "餐"]}
+
+    def _gap_plan(self):
+        """第 1 天只有一个玩点、没有餐和住宿；第 2 天完全是空的。"""
+        return {"route": [node(1, "某某景点", "文化", "10:00")]}
+
+    def test_gaps_are_filled_from_the_pool_only(self):
+        result = review_plan(self.CONTEXT, self._gap_plan(), self.EXPECTATIONS, pool=full_pool())
+        names = [n["name"] for n in result["plan"]["route"]]
+        pool_names = {c["name"] for group in full_pool().values() for c in group}
+        added = [name for name in names if name != "某某景点"]
+        self.assertTrue(added)
+        self.assertTrue(set(added).issubset(pool_names), added)
+        self.assertEqual(result["remaining_hard"], 0, result["stopped_reason"])
+        self.assertEqual(result["stopped_reason"], "clean")
+
+    def test_action_codes_are_explicit(self):
+        result = review_plan(self.CONTEXT, self._gap_plan(), self.EXPECTATIONS, pool=full_pool())
+        codes = [action["code"] for action in result["actions"]]
+        self.assertIn("add_meal", codes)
+        self.assertIn("fill_day", codes)
+        self.assertIn("add_lodging", codes)
+
+    def test_without_pool_nothing_is_invented(self):
+        result = review_plan(self.CONTEXT, self._gap_plan(), self.EXPECTATIONS)
+        self.assertEqual([n["name"] for n in result["plan"]["route"]], ["某某景点"])
+        self.assertEqual(result["stopped_reason"], "needs_data")
+        self.assertIn("needs_candidates", result["needs_data"])
+
+    def test_candidates_are_never_reused(self):
+        pool = full_pool()
+        result = review_plan(self.CONTEXT, self._gap_plan(), self.EXPECTATIONS, pool=pool)
+        names = [n["name"] for n in result["plan"]["route"]]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_added_nodes_keep_honest_sources(self):
+        result = review_plan(self.CONTEXT, self._gap_plan(), self.EXPECTATIONS, pool=full_pool())
+        meal = next(n for n in result["plan"]["route"] if n["name"] == "小吃候选")
+        self.assertEqual(meal["cost_estimate"], "¥30")
+        self.assertFalse(meal["estimated"])
+        self.assertEqual(meal["data_sources"]["cost_estimate"], "amap")
+        self.assertEqual(meal["type"], "餐饮")  # 中文类别，便于前端展示与"必去项"匹配
+
+    def test_candidate_without_price_is_marked_unverified(self):
+        pool = {"food": [candidate("没有报价的小吃", None, "food")], "hotel": [candidate("酒店候选", 300, "hotel", "00:00-23:59")]}
+        result = review_plan({"days": 1, "budget": 500}, {"route": [node(1, "景点A", "文化")]}, {"min_nodes_per_day": 2}, pool=pool)
+        added = next(n for n in result["plan"]["route"] if n["name"] == "没有报价的小吃")
+        self.assertEqual(added["cost_estimate"], "暂无供应商数据")
+        self.assertTrue(added["estimated"])
+        self.assertEqual(added["data_sources"]["cost_estimate"], "unavailable")
+
+    def test_exhausted_pool_is_reported_as_such(self):
+        """两个白天要两顿饭，但池子里只有一顿 → 如实说"候选池里没有更多可用的"。"""
+        pool = {"food": [candidate("唯一小吃", 30, "food")], "cultural": [candidate("博物馆候选", 50)],
+                "hotel": [candidate("酒店候选", 300, "hotel", "00:00-23:59")]}
+        result = review_plan(self.CONTEXT, self._gap_plan(), self.EXPECTATIONS, pool=pool)
+        self.assertEqual(result["stopped_reason"], "candidates_exhausted")
+        self.assertGreater(result["remaining_hard"], 0)
+
+    def test_must_have_is_matched_from_the_pool(self):
+        pool = full_pool()
+        expectations = {"min_nodes_per_day": 2, "must_have": ["博物馆"]}
+        result = review_plan({"days": 1, "budget": 1000}, {"route": [node(1, "某某景点", "文化")]}, expectations, pool=pool)
+        codes = [action["code"] for action in result["actions"]]
+        self.assertIn("add_must_have", codes)
+        self.assertIn("博物馆候选", [n["name"] for n in result["plan"]["route"]])
+
+    def test_hotel_candidate_prefers_evening_open_window(self):
+        """20:00 入住，就不要挑一个写着 18:00 关门的候选。"""
+        pool = {
+            "hotel": [candidate("早关门酒店", 200, "hotel", "08:00-18:00"), candidate("通宵酒店", 300, "hotel", "00:00-23:59")],
+            "food": [candidate("小吃候选", 30, "food")],
+            "cultural": [candidate("博物馆候选", 50)],
+        }
+        plan = {"route": [node(1, "景点A", "文化", "10:00"), node(2, "景点B", "文化", "10:00")]}
+        result = review_plan({"days": 2, "budget": 1000}, plan, {"min_nodes_per_day": 1}, pool=pool)
+        names = [n["name"] for n in result["plan"]["route"]]
+        self.assertIn("通宵酒店", names)
+        self.assertNotIn("早关门酒店", names)
+
+    def test_input_plan_is_not_mutated_by_pool_repair(self):
+        plan = self._gap_plan()
+        snapshot = copy.deepcopy(plan)
+        review_plan(self.CONTEXT, plan, self.EXPECTATIONS, pool=full_pool())
+        self.assertEqual(plan, snapshot)
+
+
 class TestReviewLoop(unittest.TestCase):
     def test_fixes_hard_failures_and_reports_actions(self):
         result = review_plan(CONTEXT, broken_plan(), EXPECTATIONS)

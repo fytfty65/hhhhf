@@ -47,6 +47,7 @@ async def prepare_governance(
     limit_per_intent: int = 6,
     request_text: str = "",
     increment: Optional[Mapping[str, Any]] = None,
+    pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """返回 `{snapshot, pool_sizes, exclusions, quota, increment, plan, used_pool}`；任何数据源失败都不抛异常。
 
@@ -54,6 +55,9 @@ async def prepare_governance(
     - `exclude` → 剔除+同类替换；
     - `quota` → 从候选池补/减节点（真的改变选点）；
     - 结果方案放在返回值的 `plan` 里，调用方据此替换路线（`measure_increment` 给出"改了多少/扰动多少"）。
+
+    `pool` 是**调用方已经取好的候选池**（例如方案复核为了补结构缺口先取过一次）：
+    给了就直接复用，不再重复打数据源。
     """
     increment = increment or {}
     exclude_terms = list(exclude_terms) + list(increment.get("exclude") or [])
@@ -69,8 +73,8 @@ async def prepare_governance(
         or bool(quota)
         or mentions_exclusion(request_text)
     )
-    pool: Dict[str, List[Dict[str, Any]]] = {}
-    if needs_pool and fetch and city:
+    pool: Dict[str, List[Dict[str, Any]]] = dict(pool or {})
+    if not pool and needs_pool and fetch and city:
         intents = intents_for_plan(plan, extra=[str(item) for item in exclude_terms])
         for intent in quota:
             if intent not in intents:

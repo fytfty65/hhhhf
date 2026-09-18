@@ -175,6 +175,11 @@ const REVIEW_ACTION_LABELS: Record<string, string> = {
   dedupe: '去掉重复',
   drop_out_of_range: '丢弃越界天数',
   trim_day: '单日限流',
+  fill_day: '补空天',
+  add_play: '补玩点',
+  add_meal: '补餐饮',
+  add_lodging: '补住宿',
+  add_must_have: '补必去项',
 };
 
 // 复核改不动、需要补数据的部分（不编造，只能去数据源取或问用户）

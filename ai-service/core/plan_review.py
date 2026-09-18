@@ -82,6 +82,15 @@ FIX_BY_CODE: Dict[str, str] = {
 # 这些码属于"信息性"，不参与"要不要修"的判断（缺数据永远修不了，别因此卡住）
 ADVISORY_CODES = {"budget_at_risk", "budget_unverifiable", "budget_partial", "open_time_missing"}
 
+# "补点"用得到的玩点意图（候选池按意图分组）
+PLAY_INTENTS: tuple = (
+    "cultural", "scenic", "landmark", "outdoor", "family", "photo", "market", "nightlife", "shopping",
+)
+# 确定性修补（不需要新数据）
+DETERMINISTIC_FIXES = {"reschedule", "dedupe", "trim_day", "drop_out_of_range"}
+# 候选池修补（需要真实候选，绝不编造节点）
+POOL_FIXES = {"needs_candidates"}
+
 
 def _issue(code: str, detail: str, severity: str) -> Dict[str, Any]:
     return {
@@ -97,8 +106,13 @@ def critique_plan(
     plan: Any,
     expectations: Optional[Mapping[str, Any]] = None,
     signals: Optional[Mapping[str, Any]] = None,
+    pool_available: bool = False,
 ) -> Dict[str, Any]:
-    """给方案挑毛病：硬失败 + 未核实，并把每条标成"能修/要数据/只能人工"。"""
+    """给方案挑毛病：硬失败 + 未核实，并把每条标成"能修/要数据/只能人工"。
+
+    `pool_available=True`（调用方已经拿到真实候选池）时，"缺玩点/缺餐/缺住宿夜数"这类
+    问题才被算成**可修补** —— 没有候选池时它们只能如实上报，绝不能凭空造节点。
+    """
     report = evaluate_plan(context, plan, expectations=expectations, signals=signals)
     gate = report.get("gate") or {}
     issues: List[Dict[str, Any]] = [_issue(str(item.get("code")), str(item.get("detail") or ""), "hard")
@@ -106,8 +120,11 @@ def critique_plan(
     issues.extend(_issue(str(item.get("code")), str(item.get("detail") or ""), "unverifiable")
                   for item in gate.get("unverifiable") or [])
 
-    fixable = sorted({item["fix"] for item in issues if item["severity"] == "hard" and item["fix"] in {"reschedule", "dedupe", "trim_day", "drop_out_of_range"}})
-    needs_data = sorted({item["fix"] for item in issues if item["fix"] in {"needs_candidates", "needs_data"}})
+    allowed = DETERMINISTIC_FIXES | (POOL_FIXES if pool_available else set())
+    fixable = sorted({item["fix"] for item in issues if item["severity"] == "hard" and item["fix"] in allowed})
+    needs_data = sorted(
+        {item["fix"] for item in issues if item["fix"] in {"needs_candidates", "needs_data"} and item["fix"] not in allowed}
+    )
     return {
         "score": report.get("score"),
         "verdict": report.get("verdict"),
@@ -208,13 +225,183 @@ def _reschedule_day(day: int, day_nodes: Sequence[Mapping[str, Any]], context: M
     return output, actions
 
 
+def _intent_of_node(node: Mapping[str, Any]) -> str:
+    from .candidate_index import intent_of
+
+    return intent_of(node)
+
+
+def _pool_pick(
+    pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]],
+    intent: str,
+    used: set,
+    prefer_evening: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """从候选池里挑一个**还没用过**的真实候选；没有就返回 None（绝不编造）。
+
+    `prefer_evening=True`（住宿）时优先挑"开放时间缺失或覆盖到晚上"的候选 —— 否则会出现
+    "酒店 20:00 入住、但数据写着 18:00 关门"这种自相矛盾的安排。
+    """
+    if not pool:
+        return None
+    candidates = [dict(item) for item in (pool.get(intent) or []) if str(item.get("name") or "").strip()]
+    if prefer_evening:
+        def evening_ok(item: Mapping[str, Any]) -> bool:
+            window = parse_open_window(item.get("open_time"))
+            if window is None:
+                return True  # 没有开放时间数据：不算冲突（后面记"未核实"）
+            _, close = window
+            return close >= LODGING_SLOT_MIN or close < 6 * 60  # 覆盖到深夜或跨零点营业
+
+        candidates.sort(key=lambda item: 0 if evening_ok(item) else 1)
+    for candidate in candidates:
+        name = str(candidate.get("name") or "").strip()
+        if name in used:
+            continue
+        used.add(name)
+        return candidate
+    return None
+
+
+def fill_structural_gaps(
+    context: Mapping[str, Any],
+    plan: Any,
+    expectations: Optional[Mapping[str, Any]] = None,
+    pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """用**真实候选池**补结构缺口：空天/缺玩点、缺餐、住宿夜数不够、必去项缺失。
+
+    三条硬规矩：
+    - 没有候选池 → 什么都不做（返回 `changed=False`），交给上层如实上报；
+    - 只从候选池取节点，经 `build_node_from_candidate` 生成（价格/评分/开放时间缺就是"未核实"）；
+    - 同一个候选只用一次，且绝不与方案里已有的名字重复。
+    """
+    from .increment import build_node_from_candidate
+
+    if not pool:
+        return {"plan": plan, "actions": [], "changed": False}
+
+    expectations = expectations or {}
+    days = int(context.get("days") or context.get("trip_days") or 0) or 0
+    cap = expectations.get("max_nodes_per_day")
+    cap = int(cap) if isinstance(cap, (int, float)) and cap > 0 else None
+
+    nodes = [dict(node) for node in nodes_of(plan)]
+    used = {str(node.get("name") or "").strip() for node in nodes}
+    actions: List[Dict[str, Any]] = []
+    additions: List[Dict[str, Any]] = []
+
+    def add(day: int, intent: str, code: str, time_hint: str, detail: str = "") -> bool:
+        candidate = _pool_pick(pool, intent, used, prefer_evening=(intent == "hotel"))
+        if not candidate:
+            return False
+        additions.append(build_node_from_candidate(candidate, day, time_hint, intent))
+        actions.append(
+            {
+                "code": code,
+                "day": day,
+                "node": candidate.get("name"),
+                "intent": intent,
+                "source": candidate.get("price_source") or candidate.get("source") or "unavailable",
+                "from": None,
+                "to": None,
+                "detail": detail,
+            }
+        )
+        return True
+
+    if days:
+        by_day: Dict[int, List[Dict[str, Any]]] = {}
+        for node in nodes:
+            by_day.setdefault(node_day(node, 1), []).append(node)
+
+        for day in range(1, days + 1):
+            day_nodes = by_day.get(day, [])
+            intents = {_intent_of_node(node) for node in day_nodes}
+            plays = [node for node in day_nodes if _intent_of_node(node) not in {"food", "hotel"}]
+            room = None if cap is None else max(0, cap - len(day_nodes))
+
+            if not day_nodes:
+                if (cap is None or room >= 1) and any(_pool_pick(pool, intent, set()) for intent in PLAY_INTENTS):
+                    if add(day, _first_play_intent(pool, used), "fill_day", "10:00", "这一天原本是空的"):
+                        room = None if cap is None else max(0, cap - 1)
+            elif not plays:
+                if (cap is None or room >= 1) and any(_pool_pick(pool, intent, set()) for intent in PLAY_INTENTS):
+                    if add(day, _first_play_intent(pool, used), "add_play", "10:00", "这一天只有吃住、没有玩点"):
+                        room = None if cap is None else max(0, room - 1)
+
+            if "food" not in intents and (cap is None or (room or 0) >= 1):
+                add(day, "food", "add_meal", "12:30", "这一天没有餐饮节点")
+
+        # 住宿夜数：第 1..days-1 天每夜至少一个住宿节点
+        expected_nights = max(0, days - 1)
+        current_nights = sum(1 for node in nodes if _intent_of_node(node) == "hotel")
+        if current_nights < expected_nights:
+            for day in range(1, days):
+                if current_nights >= expected_nights:
+                    break
+                day_intents = {_intent_of_node(node) for node in by_day.get(day, [])}
+                if "hotel" in day_intents:
+                    continue
+                if add(day, "hotel", "add_lodging", "20:00", f"第 {day} 晚原本没有住宿节点"):
+                    current_nights += 1
+
+    # 必去项：池子里真有对应候选才补
+    haystack = " ".join(_node_text(node) for node in nodes + additions)
+    for wanted in expectations.get("must_have") or []:
+        target = _norm_text(wanted)
+        if not target or target in haystack:
+            continue
+        matched_intent = None
+        for intent in PLAY_INTENTS + ("food", "hotel"):
+            candidate = _pool_pick(pool, intent, set())
+            if candidate and target in _norm_text(f"{candidate.get('name')} {candidate.get('type')}"):
+                matched_intent = intent
+                break
+        if not matched_intent:
+            continue
+        day = min(range(1, max(2, days + 1)), key=lambda value: len([n for n in nodes + additions if node_day(n, 1) == value]))
+        add(day, matched_intent, "add_must_have", "10:00", f"补上你要求的「{wanted}」")
+
+    if not additions:
+        return {"plan": plan, "actions": [], "changed": False}
+
+    merged = dict(plan) if isinstance(plan, Mapping) else {}
+    merged["route"] = nodes + additions
+    return {"plan": merged, "actions": actions, "changed": True}
+
+
+def _node_text(node: Mapping[str, Any]) -> str:
+    tags = node.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    return _norm_text(" ".join([node_name(node), str(node.get("type") or ""), " ".join(str(tag) for tag in tags)]))
+
+
+def _norm_text(text: Any) -> str:
+    return str(text or "").strip().lower().replace(" ", "")
+
+
+def _first_play_intent(pool: Mapping[str, Sequence[Mapping[str, Any]]], used: set) -> str:
+    """挑一个有可用候选的玩点意图（按固定顺序，保证确定性）。"""
+    for intent in PLAY_INTENTS:
+        if any(str(c.get("name") or "").strip() and str(c.get("name") or "").strip() not in used for c in pool.get(intent) or []):
+            return intent
+    return PLAY_INTENTS[0]
+
+
 def repair_plan(
     context: Mapping[str, Any],
     plan: Any,
     expectations: Optional[Mapping[str, Any]] = None,
     max_nodes_per_day: Optional[int] = None,
+    pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
 ) -> Dict[str, Any]:
-    """只做确定性修补；**绝不新增编造的节点**（缺的玩点/餐/住宿留给候选池）。"""
+    """修补方案：先用**真实候选池**补结构缺口，再做确定性整理；**绝不新增编造节点**。"""
+    filled = fill_structural_gaps(context, plan, expectations, pool)
+    working: Any = filled["plan"]
+    actions: List[Dict[str, Any]] = list(filled["actions"])
+
     days = int(context.get("days") or context.get("trip_days") or 0) or 0
     limit = max_nodes_per_day
     if limit is None and expectations:
@@ -223,11 +410,11 @@ def repair_plan(
             limit = int(raw_limit)
 
     original = [dict(node) for node in nodes_of(plan) if isinstance(node, Mapping)]
-    actions: List[Dict[str, Any]] = []
 
-    # 0) 先按天分组（保留原有顺序）
+    # 0) 先按天分组（保留原有顺序；补进来的新节点也一起进）
+    working_nodes = [dict(node) for node in nodes_of(working) if isinstance(node, Mapping)]
     grouped: Dict[int, List[Dict[str, Any]]] = {}
-    for index, node in enumerate(original, start=1):
+    for index, node in enumerate(working_nodes, start=1):
         grouped.setdefault(node_day(node, index), []).append(node)
 
     # 1) 越界天数直接丢弃并上报（改天数/长途残留时会出现）
@@ -261,7 +448,7 @@ def repair_plan(
         actions.extend(day_actions)
         rebuilt.extend(scheduled)
 
-    new_plan: Any = dict(plan) if isinstance(plan, Mapping) else {}
+    new_plan: Any = dict(working) if isinstance(working, Mapping) else {}
     new_plan["route"] = rebuilt
     changed = [dict(node) for node in rebuilt] != original
     return {"plan": new_plan, "actions": actions, "changed": changed}
@@ -274,16 +461,21 @@ def review_plan(
     signals: Optional[Mapping[str, Any]] = None,
     max_rounds: int = 3,
     repair: Optional[Callable[..., Dict[str, Any]]] = None,
+    pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """propose → critique → repair → rescore，最多 `max_rounds` 轮；掉分/掉门禁即回滚。
 
     接受标准是"**硬失败更少**，或者硬失败一样多而分数更高" —— 只看分数会犯这种错：
     重排时间修掉了"时间倒流"，但节奏维度分略降，于是"修好了却回滚"，用户拿到的
     还是那份时间倒流的方案。硬约束永远优先于加权分。
+
+    给了 `pool`（真实候选池）时，"缺玩点/缺餐/缺住宿夜数/必去项"才算可修补；
+    没给就只能如实上报（`needs_data`），绝不凭空补节点。
     """
-    repair_fn = repair or (lambda ctx, current, exp=None: repair_plan(ctx, current, exp))
+    repair_fn = repair or (lambda ctx, current, exp=None: repair_plan(ctx, current, exp, pool=pool))
+    has_pool = bool(pool)
     current = plan
-    initial_critique = critique_plan(context, plan, expectations, signals)
+    initial_critique = critique_plan(context, plan, expectations, signals, pool_available=has_pool)
     best = plan
     best_critique = initial_critique
     best_score = float(initial_critique.get("score") or 0.0)
@@ -292,7 +484,7 @@ def review_plan(
     stopped_reason = "clean"
 
     for index in range(max(0, int(max_rounds))):
-        critique = critique_plan(context, current, expectations, signals)
+        critique = critique_plan(context, current, expectations, signals, pool_available=has_pool)
         fixable = list(critique["fixable"])
         if not critique["hard_failures"]:
             stopped_reason = "clean"
@@ -303,6 +495,9 @@ def review_plan(
         outcome = repair_fn(context, current, expectations)
         actions = outcome.get("actions") or []
         if not outcome.get("changed"):
+            # 有候选池、也确实有"该补"的问题，但补不动了 → 说清是"候选池里没有更多可用的"
+            exhausted = has_pool and "needs_candidates" in (critique.get("fixable") or [])
+            stopped_reason = "candidates_exhausted" if exhausted else "no_change"
             rounds.append(
                 {
                     "round": index + 1,
@@ -314,9 +509,8 @@ def review_plan(
                     "accepted": False,
                 }
             )
-            stopped_reason = "no_change"
             break
-        rescored = critique_plan(context, outcome["plan"], expectations, signals)
+        rescored = critique_plan(context, outcome["plan"], expectations, signals, pool_available=has_pool)
         new_score = float(rescored.get("score") or 0.0)
         new_hard = len(rescored.get("hard_failures") or [])
         accepted = new_hard < best_hard or (new_hard == best_hard and new_score > best_score)

@@ -107,6 +107,8 @@ HEARTBEAT_INTERVAL_SEC = 8
 # 长途（≥14 天）首轮分段生成的**总时间预算**（秒）：超预算的段不再调用 LLM，
 # 如实记为"这一段没生成出来"，由前端核对面板提示，而不是让用户无限等。
 LONG_TRIP_GENERATION_SECONDS = 240.0
+# 候选池取数超时（秒）：复核/治理共用一份池子，取不到就如实报"要数据"，不拖住出方案
+POOL_FETCH_TIMEOUT_SECONDS = 12.0
 
 # Production bandit is opt-in. Keeping the singleton at module scope preserves
 # posterior state across requests while the disabled path is a no-op.
@@ -3379,40 +3381,10 @@ async def run_negotiate(msg: GatewayMessage):
                                     "interest": (_quality_signals or {}).get("interest"),
                                 },
                             }
-                            # 👑 方案复核 + 确定性修补（propose → critique → repair → rescore，≤3 轮）
-                            # 只修**确定性就能修好**的问题：时间倒序/越界、重复地点、越界天数；
-                            # 修不动的（缺玩点/缺餐/缺住宿夜数、预算超支）留给候选池与用户确认，
-                            # **绝不编造**。掉门禁或掉分即回滚到最好的一版；修补毫无改动就停
-                            # （不空转烧预算）。跑在治理快照之前，保证面板上的分数与门禁都基于修好的方案。
-                            try:
-                                from core.plan_review import review_plan
-
-                                _review = review_plan(
-                                    _quality_context,
-                                    final_data,
-                                    signals=_quality_signals,
-                                    max_rounds=3,
-                                )
-                                _reviewed_plan = _review.get("plan")
-                                if isinstance(_reviewed_plan, dict) and isinstance(_reviewed_plan.get("route"), list):
-                                    final_data["route"] = _reviewed_plan["route"]
-                                _review_actions = list(_review.get("actions") or [])
-                                final_data["review"] = {
-                                    "stopped_reason": _review.get("stopped_reason"),
-                                    "rounds": len(_review.get("rounds") or []),
-                                    "actions": _review_actions[:8],
-                                    "action_count": len(_review_actions),
-                                    "initial_score": _review.get("initial_score"),
-                                    "final_score": _review.get("final_score"),
-                                    "initial_hard_failures": _review.get("initial_hard_failures"),
-                                    "remaining_hard": _review.get("remaining_hard"),
-                                    "needs_data": _review.get("needs_data") or [],
-                                }
-                            except Exception as _review_exc:  # 复核失败绝不影响出方案
-                                final_data["review"] = {"error": str(_review_exc)[:200]}
-
                             # 二次增量：把"这次新说的话"解析成结构化 delta（排他 / 配额 / 天数预算）。
                             # 只有 refine（已有历史 + 既有路线）时才解析，首次生成不会是增量。
+                            # 放在复核之前：排他词要用来剔除候选池，复核补点时不能把用户点名不要的
+                            # 地方又补回来。
                             _refinement_delta = None
                             if is_refinement:
                                 _known_names: List[str] = []
@@ -3432,6 +3404,76 @@ async def run_negotiate(msg: GatewayMessage):
                                     previous_plan=final_data,
                                     known_names=_known_names,
                                 )
+
+                            # 👑 候选池：只有"复核发现结构缺口、或预算吃紧、或有排他/配额"时才去取，
+                            # 一次取好、复核与治理共用（避免同一请求打两遍数据源）。
+                            _pool: Dict[str, Any] = {}
+                            try:
+                                from core.poi_pool import build_candidate_pool, intents_for_plan
+                                from core.plan_review import critique_plan as _critique_plan
+
+                                _pre = _critique_plan(
+                                    _quality_context, final_data, signals=_quality_signals, pool_available=True
+                                )
+                                _exclude_terms = [str(item) for item in ((_refinement_delta or {}).get("exclude") or [])]
+                                # 只在"确实需要新候选"时取池子：结构缺口（缺玩点/餐/住宿/必去项）
+                                # 或这次是排他/配额类增量。纯时间顺序问题用确定性修补就够了，
+                                # 没必要为它多打几次数据源。
+                                _need_pool = bool(
+                                    "needs_candidates" in (_pre.get("fixable") or [])
+                                    or _exclude_terms
+                                    or (_refinement_delta or {}).get("quota")
+                                )
+                                _fetch_pois = getattr(toolbox, "get_dynamic_pois", None)
+                                if _need_pool and _fetch_pois and target_city:
+                                    _pool = await asyncio.wait_for(
+                                        build_candidate_pool(
+                                            target_city,
+                                            intents_for_plan(final_data, extra=_exclude_terms),
+                                            _fetch_pois,
+                                            limit_per_intent=6,
+                                            exclude_names=_exclude_terms,
+                                        ),
+                                        timeout=POOL_FETCH_TIMEOUT_SECONDS,
+                                    ) or {}
+                            except Exception:  # 取不到候选池不影响出方案，复核会如实报"要数据"
+                                _pool = {}
+
+                            # 👑 方案复核 + 修补（propose → critique → repair → rescore，≤3 轮）：
+                            # 先做确定性修补（时间倒序/越界、重复、越界天数），有候选池时再补结构
+                            # 缺口（空天/缺餐/住宿夜数/必去项）——**一律只从真实候选里取，绝不编造**；
+                            # 修不动的（价格不可核实、结构性改动）留给用户确认。掉门禁或掉分即回滚，
+                            # 修补毫无改动就停（不空转烧预算）。跑在治理快照之前，保证面板上的分数
+                            # 与门禁都基于修好的方案。
+                            try:
+                                from core.plan_review import review_plan
+
+                                _review = review_plan(
+                                    _quality_context,
+                                    final_data,
+                                    signals=_quality_signals,
+                                    max_rounds=3,
+                                    pool=_pool or None,
+                                )
+                                _reviewed_plan = _review.get("plan")
+                                if isinstance(_reviewed_plan, dict) and isinstance(_reviewed_plan.get("route"), list):
+                                    final_data["route"] = _reviewed_plan["route"]
+                                _review_actions = list(_review.get("actions") or [])
+                                final_data["review"] = {
+                                    "stopped_reason": _review.get("stopped_reason"),
+                                    "rounds": len(_review.get("rounds") or []),
+                                    "actions": _review_actions[:8],
+                                    "action_count": len(_review_actions),
+                                    "initial_score": _review.get("initial_score"),
+                                    "final_score": _review.get("final_score"),
+                                    "initial_hard_failures": _review.get("initial_hard_failures"),
+                                    "remaining_hard": _review.get("remaining_hard"),
+                                    "needs_data": _review.get("needs_data") or [],
+                                    "used_pool": bool(_pool),
+                                }
+                            except Exception as _review_exc:  # 复核失败绝不影响出方案
+                                final_data["review"] = {"error": str(_review_exc)[:200]}
+
                             # 候选池只在"需要平替/换点/改配额"时才去取；数据源失败不影响出方案。
                             _governance = await prepare_governance(
                                 _quality_context,
@@ -3441,6 +3483,7 @@ async def run_negotiate(msg: GatewayMessage):
                                 fetch=getattr(toolbox, "get_dynamic_pois", None),
                                 request_text=intent_str,
                                 increment=_refinement_delta,
+                                pool=_pool or None,
                             )
                             _snapshot = _governance["snapshot"]
                             # 增量真的改了方案：用调整后的路线替换（前端以 final_route 为准）

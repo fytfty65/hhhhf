@@ -133,18 +133,20 @@ const GOVERNANCE_PAYLOAD = {
   // 自动复核（core/plan_review.review_plan）：确定性修掉了什么、还剩几处、缺哪些数据
   review: {
     stopped_reason: 'needs_data',
-    rounds: 1,
-    action_count: 3,
+    rounds: 2,
+    action_count: 4,
     actions: [
       { code: 'reschedule', day: 1, node: '陕西历史博物馆', from: '12:30', to: '09:30' },
       { code: 'reschedule', day: 1, node: '回民街小吃', from: '12:30', to: '11:00' },
       { code: 'dedupe', day: 2, dropped: ['城墙南门'], count: 1 },
+      { code: 'add_meal', day: 3, node: '永兴坊小吃（候选池）', intent: 'food', source: 'amap', detail: '这一天没有餐饮节点' },
     ],
     initial_score: 68.4,
     final_score: 72.1,
-    initial_hard_failures: 2,
+    initial_hard_failures: 4,
     remaining_hard: 0,
     needs_data: ['needs_candidates'],
+    used_pool: true,
   },
   // 用户诉求逐条核对（core/constraint_coverage）：稳定 id + 状态，前端逐条渲染
   constraints: {
@@ -328,10 +330,10 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByText(/没有菜品级数据，是否满足无法核实/)).toBeVisible();
     await expect(panel.getByText('部分落实', { exact: true }).first()).toBeVisible();
 
-    // 自动复核：改了什么、还剩几处、哪些改不动（说"已自动修正"，不说"AI 已优化"）
+    // 自动复核：改了什么（含"从候选池补点"）、还剩几处、哪些改不动
     await expect(panel.getByText('自动复核')).toBeVisible();
-    await expect(panel.getByText('需处理的问题 2 → 0')).toBeVisible();
-    await expect(panel.getByText(/已自动修正：重排时间 2 处 · 去掉重复 1 处/)).toBeVisible();
+    await expect(panel.getByText('需处理的问题 4 → 0')).toBeVisible();
+    await expect(panel.getByText(/已自动修正：重排时间 2 处 · 去掉重复 1 处 · 补餐饮 1 处/)).toBeVisible();
     await expect(panel.getByText(/第 1 天「陕西历史博物馆」/)).toBeVisible();
     await expect(panel.getByText(/这些我改不动，要靠数据或你确认：候选池补点/)).toBeVisible();
 
