@@ -26,10 +26,22 @@ TIER_LEVELS = {"free": 0, "economy": 1, "comfort": 2, "quality": 3, "luxury": 4}
 
 
 def intent_of(value: Any) -> str:
-    """节点或纯文本 → 意图标签（命中 PREFERENCE_TAXONOMY 的第一个标签，兜底 other）。"""
+    """节点或纯文本 → 意图标签（显式意图优先，其次按 PREFERENCE_TAXONOMY 关键词）。
+
+    显式优先很重要：候选池条目与我们插入的节点都带 `intent`/`tags`，
+    若只按中文关键词猜，"蒲城会馆"这类名字会被判成 other，响应度与配额核对都会算错。
+    """
     if isinstance(value, Mapping):
-        text = f"{node_name(value)} {value.get('type') or ''} {value.get('desc') or ''}"
+        explicit = str(value.get("intent") or "").strip()
+        if explicit in PREFERENCE_TAXONOMY:
+            return explicit
         tags = value.get("tags") or []
+        if isinstance(tags, list):
+            for tag in tags:
+                label = str(tag).strip()
+                if label in PREFERENCE_TAXONOMY:
+                    return label
+        text = f"{node_name(value)} {value.get('type') or ''} {value.get('desc') or ''}"
         if isinstance(tags, list):
             text += " " + " ".join(str(tag) for tag in tags)
     else:

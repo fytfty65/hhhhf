@@ -3252,6 +3252,7 @@ async def run_negotiate(msg: GatewayMessage):
                         # 业务逻辑在 core/plan_quality.plan_quality_snapshot 里（可单测），
                         # 这里只做薄接线；任何异常都不得阻断规划主流程。
                         try:
+                            from core.increment import parse_increment
                             from core.planning_governance import prepare_governance
 
                             _quality_signals = pref_signals if isinstance(pref_signals, dict) else None
@@ -3263,8 +3264,28 @@ async def run_negotiate(msg: GatewayMessage):
                                     "interest": (_quality_signals or {}).get("interest"),
                                 },
                             }
-                            # 候选池只在"需要平替或需要换点"时才去取（预算可能超支 / 用户提到不想去·换掉），
-                            # 避免每次推演都多打一次 POI 数据源；数据源失败也绝不影响出方案。
+                            # 二次增量：把"这次新说的话"解析成结构化 delta（排他 / 配额 / 天数预算）。
+                            # 只有 refine（已有历史 + 既有路线）时才解析，首次生成不会是增量。
+                            _refinement_delta = None
+                            if is_refinement:
+                                _known_names: List[str] = []
+                                if isinstance(current_existing_route, str) and current_existing_route.strip().startswith("["):
+                                    try:
+                                        _parsed_prev = json.loads(current_existing_route)
+                                        if isinstance(_parsed_prev, list):
+                                            _known_names = [
+                                                str(item.get("name") or item.get("location") or "")
+                                                for item in _parsed_prev
+                                                if isinstance(item, dict)
+                                            ]
+                                    except Exception:
+                                        _known_names = []
+                                _refinement_delta = parse_increment(
+                                    intent_str,
+                                    previous_plan=final_data,
+                                    known_names=_known_names,
+                                )
+                            # 候选池只在"需要平替/换点/改配额"时才去取；数据源失败不影响出方案。
                             _governance = await prepare_governance(
                                 _quality_context,
                                 final_data,
@@ -3272,13 +3293,21 @@ async def run_negotiate(msg: GatewayMessage):
                                 city=target_city,
                                 fetch=getattr(toolbox, "get_dynamic_pois", None),
                                 request_text=intent_str,
+                                increment=_refinement_delta,
                             )
                             _snapshot = _governance["snapshot"]
+                            # 增量真的改了方案：用调整后的路线替换（前端以 final_route 为准）
+                            _adjusted = _governance.get("plan")
+                            if isinstance(_adjusted, dict) and isinstance(_adjusted.get("route"), list):
+                                if _governance.get("exclusions") or _governance.get("quota"):
+                                    final_data["route"] = _adjusted["route"]
                             final_data["quality"] = _snapshot["quality"]
                             final_data["budget_report"] = _snapshot["budget"]
                             final_data["horizon"] = _snapshot["horizon"]
                             if _governance.get("pool_sizes"):
                                 final_data["candidate_pool"] = _governance["pool_sizes"]
+                            if _governance.get("increment"):
+                                final_data["increment"] = _governance["increment"]
                             if _snapshot.get("fallback"):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案

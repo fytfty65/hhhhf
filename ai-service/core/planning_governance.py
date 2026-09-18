@@ -21,12 +21,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 from .budget_planner import propose_fallback
 from .candidate_index import apply_exclusions
+from .increment import enforce_quota, measure_increment
 from .plan_quality import plan_quality_snapshot
 from .poi_pool import build_candidate_pool, intents_for_plan
 
 FetchFn = Callable[..., Awaitable[Sequence[Mapping[str, Any]]]]
 
-# 用户说"不想去/换掉/别安排"这类话时的触发词（真正解析在后续步骤，这里只做兜底触发）
+# 用户说"不想去/换掉/别安排"这类话时的触发词（真正解析由 core/increment.parse_increment 完成）
 EXCLUSION_HINTS = ("不想去", "不要去", "别安排", "换掉", "换成", "去掉", "删除")
 
 
@@ -45,14 +46,32 @@ async def prepare_governance(
     exclude_terms: Sequence[str] = (),
     limit_per_intent: int = 6,
     request_text: str = "",
+    increment: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """返回 `{snapshot, pool_sizes, exclusions, used_pool}`；任何数据源失败都不抛异常。"""
+    """返回 `{snapshot, pool_sizes, exclusions, quota, increment, plan, used_pool}`；任何数据源失败都不抛异常。
+
+    `increment` 是 `core/increment.parse_increment()` 的结果：
+    - `exclude` → 剔除+同类替换；
+    - `quota` → 从候选池补/减节点（真的改变选点）；
+    - 结果方案放在返回值的 `plan` 里，调用方据此替换路线（`measure_increment` 给出"改了多少/扰动多少"）。
+    """
+    increment = increment or {}
+    exclude_terms = list(exclude_terms) + list(increment.get("exclude") or [])
     snapshot = plan_quality_snapshot(context, plan, expectations=expectations, signals=signals)
 
-    needs_pool = snapshot["budget"]["status"] in {"over", "at_risk"} or bool(exclude_terms) or mentions_exclusion(request_text)
+    quota = {k: v for k, v in (increment.get("quota") or {}).items() if isinstance(v, int) and v}
+    needs_pool = (
+        snapshot["budget"]["status"] in {"over", "at_risk"}
+        or bool(exclude_terms)
+        or bool(quota)
+        or mentions_exclusion(request_text)
+    )
     pool: Dict[str, List[Dict[str, Any]]] = {}
     if needs_pool and fetch and city:
         intents = intents_for_plan(plan, extra=[str(item) for item in exclude_terms])
+        for intent in quota:
+            if intent not in intents:
+                intents.append(intent)
         pool = await build_candidate_pool(
             city,
             intents,
@@ -60,25 +79,48 @@ async def prepare_governance(
             limit_per_intent=limit_per_intent,
             exclude_names=exclude_terms,
         )
-        if pool:
-            # 有候选池 → 重算，让 fallback 能做"同类替换"而不是只会删/降
-            snapshot = plan_quality_snapshot(
-                context,
-                plan,
-                expectations=expectations,
-                signals=signals,
-                candidates_by_intent=pool,
-            )
 
+    working_plan: Any = plan
     exclusions: Optional[Dict[str, Any]] = None
     if exclude_terms:
-        exclusions = apply_exclusions(plan, list(exclude_terms), index=pool)
+        exclusions = apply_exclusions(working_plan, list(exclude_terms), index=pool)
+        working_plan = exclusions["plan"]
+
+    quota_result: Optional[Dict[str, Any]] = None
+    if quota:
+        quota_result = enforce_quota(
+            working_plan,
+            quota,
+            pool=pool,
+            context=context,
+            max_nodes_per_day=int(context.get("max_nodes_per_day") or 0) or None,
+        )
+        working_plan = quota_result["plan"]
+
+    if pool:
+        # 有候选池 → 用**最终方案**重算，让 fallback 基于真实候选做同类替换
+        snapshot = plan_quality_snapshot(
+            context,
+            working_plan,
+            expectations=expectations,
+            signals=signals,
+            candidates_by_intent=pool,
+        )
+
+    increment_metrics = None
+    if exclusions or quota_result:
+        increment_metrics = measure_increment(plan, working_plan, increment)
+        parts = [item for item in ((exclusions or {}).get("disclosure"), (quota_result or {}).get("disclosure")) if item]
+        increment_metrics["disclosure"] = "；".join(parts)
 
     return {
         "snapshot": snapshot,
         "pool_sizes": {intent: len(items) for intent, items in pool.items()},
         "used_pool": bool(pool),
         "exclusions": exclusions,
+        "quota": quota_result,
+        "increment": increment_metrics,
+        "plan": working_plan,
     }
 
 

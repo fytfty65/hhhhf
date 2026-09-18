@@ -178,5 +178,63 @@ class TestGovernance(unittest.TestCase):
         self.assertFalse(result["used_pool"])
 
 
+class TestIncrementThroughGovernance(unittest.TestCase):
+    """二次增量走编排：排他要真的换掉，配额要真的多排，并给出响应度。"""
+
+    def _run(self, text, budget=99999):
+        from core.increment import parse_increment
+
+        delta = parse_increment(text, previous_plan=plan_with())
+        return asyncio.run(
+            prepare_governance(
+                {"days": 2, "budget": budget, "preferences": {"interest": ["美食", "博物馆"]}},
+                plan_with(),
+                city="西安",
+                fetch=fake_fetch,
+                request_text=text,
+                increment=delta,
+            )
+        )
+
+    def test_exclusion_rewrites_route(self):
+        result = self._run("上次排的城墙我不想去，换掉")
+        names = [node["name"] for node in result["plan"]["route"]]
+        self.assertNotIn("城墙南门", names)
+        self.assertTrue(result["exclusions"]["removed"])
+        self.assertTrue(result["exclusions"]["replaced"] or result["exclusions"]["unreplaced"])
+        self.assertIsNotNone(result["increment"])
+
+    def test_quota_actually_adds_nodes_and_reports_responsiveness(self):
+        result = self._run("这次想多吃点地道美食")
+        from core.candidate_index import intent_of
+
+        before_food = [n for n in plan_with()["route"] if intent_of(n) == "food"]
+        after_food = [n for n in result["plan"]["route"] if intent_of(n) == "food"]
+        self.assertGreater(len(after_food), len(before_food))
+        metrics = result["increment"]
+        self.assertEqual(metrics["requested"], 2)
+        self.assertGreaterEqual(metrics["achieved"], 1)
+        self.assertIsNotNone(metrics["responsiveness"])
+        self.assertLess(metrics["disturbance"], 0.6)
+
+    def test_quota_without_pool_reports_unmet_not_fabricated(self):
+        from core.increment import parse_increment
+
+        delta = parse_increment("这次想多吃点地道美食", previous_plan=plan_with())
+        result = asyncio.run(
+            prepare_governance(
+                {"days": 2, "budget": 99999},
+                plan_with(),
+                city="西安",
+                fetch=None,
+                increment=delta,
+            )
+        )
+        self.assertFalse(result["used_pool"])
+        self.assertEqual(result["quota"]["added"], [])
+        self.assertEqual(result["quota"]["unmet"].get("food"), 2)
+        self.assertIn("没能补上", result["quota"]["disclosure"])
+
+
 if __name__ == "__main__":
     unittest.main()
