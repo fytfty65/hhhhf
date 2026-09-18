@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updated": "2026-09-17",
+  "version": 2,
+  "updated": "2026-09-18",
   "how_to_use": [
     "本文件是『阶段 0：规划质量评测』的需求样本集，用于给规划结果打分（core/plan_quality.py + tools/eval_plan_quality.py）。",
     "每条包含：request（用户原话）、context（天数/预算/人数/偏好/季节天气）、signals（偏好信号，等价于 extract_preference_signals 的输出）、expectations、notes（为什么这条重要）。",
@@ -8,6 +8,8 @@
     "must_not 目前是**人工评审参考**（例如『博物馆排在周一闭馆日』），不参与自动判定；等阶段 1 把闭馆日数据接进来后再自动化。",
     "expect_fallback=true 表示这条用例应当触发兜底（平替）方案：机器判定由阶段 1 步 2 的 fallback_quality 维度消费；现在只作为人工评审与后续实现的依据。",
     "场景专用字段：horizon（超长行程的分段/休整日要求）、second_turn（二次规划的排他/保留要求）、anchoring_km（吃住到玩点的最大可接受距离）。这三个字段目前供人工评审与后续机器判定使用。",
+    "v2 起 horizon **真正参与机器判定**（tools/eval_plan_quality.py 的 long_trip_check）：用 core/long_trip.continuity_report 检查天数断档/越界天/某段住宿夜数不足（计入 --require-hard-gates），跳段跨城/休整日不足/分段超预算只做顾问；horizon.first_round_required=true 时还要求 plan dump 里带 long_trip.first_round（首轮按 7 天一段生成的结果），缺失或有段落失败都算失败。",
+    "v2 新增（目前供人工评审 + 后续判定）：second_turn.quota（配额型增量，如『多加两顿小吃』）、second_turn.tier（升降档）、second_turn.structural/must_confirm（结构性改动必须先让用户确认）、transport（跨城出行方式比较与『票价未核实』）、price_honesty（未核实不得当 0 元）。这些能力在 core/increment.py、core/transport_options.py、core/price_sources.py 里已实现，用例用来固定口径。",
     "口径：非供应商字段一律『未核实』，评分不奖励无法核实的内容——宁可分低，也不把编造当丰富；预算判定分三级（verified 才算硬结论，estimated 必须标明，unknown 不得声称满足）。"
   ],
   "cases": [
@@ -532,6 +534,194 @@
       },
       "anchoring_km": 15,
       "notes": "机制级用例：复合意图 mountain_water（山、水两组必须同时命中）与 anchoring 维度（吃住到当天玩点 ≤15km，缺坐标不给满分）已实现；anchoring_km 字段供后续机器判定消费。"
+    },
+    {
+      "id": "long-trip-30d-per-segment-first-round",
+      "title": "超长行程 · 30 天必须按段生成（首轮分段，一周一周来）",
+      "request": "30 天走川西加滇西北，一周一周地排，别一次全给我排完（上次漏了好几天），每段之间车要接得上，钱也按段分着花",
+      "context": {
+        "city": "成都", "days": 30, "budget": 36000, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["自然风光", "徒步", "藏区文化", "美食"], "rest_days": true },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "wants_cultural": true, "wants_food": true, "pace": "relaxed" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "must_not": [
+          "一次生成 150+ 节点且无法校验",
+          "任何一天是空的",
+          "某一段 7 天里一晚住宿都没有",
+          "把自己没排完的段落说成已经排好了"
+        ],
+        "min_nodes_per_day": 1, "max_nodes_per_day": 4
+      },
+      "horizon": { "segment_days": 7, "min_rest_days": 4, "first_round_required": true, "max_segments": 6 },
+      "notes": "用户原话『一个月（30 天）』+『一周一周地排』的机制化版本：现在**机器可判** —— eval 会用 continuity_report 检查 30 天有没有断档/越界/某段住宿夜数不足（计入硬门禁），并要求 plan dump 里带 long_trip.first_round（首轮按 7 天一段生成的结果）。对应 core/long_trip.build_segmented_plan + api/agent.py 的薄接线。"
+    },
+    {
+      "id": "long-trip-45d-segment-cap-honest",
+      "title": "45 天超长行程 · 超出分段上限时必须如实说，不许假装排满",
+      "request": "计划 45 天走西北：西安、兰州、敦煌、乌鲁木齐、喀什，慢慢走别赶，中间要留休息的日子",
+      "context": {
+        "city": "西安", "days": 45, "budget": 60000, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["丝绸之路", "自然风光", "美食"], "rest_days": true },
+        "season": "夏", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "wants_cultural": true, "pace": "relaxed" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "must_not": [
+          "把没生成的段说成已排好",
+          "45 天每天换一次酒店",
+          "为了凑满天数而编造不存在的地点"
+        ],
+        "min_nodes_per_day": 1, "max_nodes_per_day": 4
+      },
+      "horizon": { "segment_days": 7, "min_rest_days": 6, "max_segments": 6, "truncation_must_be_disclosed": true },
+      "notes": "边界用例：45 天 = 7 段，超过首轮分段上限 6 段 → 第 7 段必须进 skipped_segments 并在前端核对面板如实写出『还有几段没排』，而不是硬凑满。truncation_must_be_disclosed 目前供人工评审（机器判定只查已经生成的段落连续性）。"
+    },
+    {
+      "id": "second-turn-exclude-keep-rest-chengdu-3d",
+      "title": "二次规划 · 只换掉不想去的那一个（其余别动）",
+      "request": "上次排的宽窄巷子我不想去，换一个同类的；其它地方都挺好，别动",
+      "context": {
+        "city": "成都", "days": 3, "budget": 3000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["美食", "市井", "文化"] },
+        "season": "秋", "weather": "多云"
+      },
+      "signals": { "wants_food": true, "wants_cultural": true },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": ["把宽窄巷子留在方案里", "顺手把没点名的地点也换掉", "换成一个不存在的地点"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "second_turn": { "exclude": ["宽窄巷子"], "keep_others": true, "responsiveness_expected": "1/1" },
+      "notes": "对应用户原话『不想去规划中的地点，换一个』。core/candidate_index.apply_exclusions（排他 + 同类替换，不重复替换、候选池没有就如实说没换成）与 core/increment.measure_increment（响应度 = 达成/要求 ×(1-扰动)）已实现；responsiveness_expected 供人工评审。"
+    },
+    {
+      "id": "second-turn-quota-more-streetfood-xian-3d",
+      "title": "二次规划 · 配额型增量（多排两顿地道小吃）",
+      "request": "再给我多加两顿地道小吃吧，别的安排别动",
+      "context": {
+        "city": "西安", "days": 3, "budget": 3000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["美食", "历史"] },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_food": true, "wants_cultural": true },
+      "expectations": {
+        "must_have": ["餐"],
+        "must_not": ["两顿小吃挤在同一个晚上", "加了小吃却把原来的正餐删掉", "加了两顿但只说出来没落在行程里"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 6
+      },
+      "second_turn": { "quota": { "food": "+2" }, "keep_others": true, "responsiveness_expected": "2/2" },
+      "notes": "core/increment.parse_increment 只认显式数量（需要量词，如『两顿』）→ enforce_quota 用候选池补点；实测『多吃点地道美食』食物节点 2→4、响应度 0.714。这条用例固定『配额必须真的落到节点上』的口径。"
+    },
+    {
+      "id": "second-turn-upgrade-lodging-lijiang-3d",
+      "title": "二次规划 · 住宿升一档（愿意多花钱，但别太远）",
+      "request": "住宿想住好一点，贵点也行，反正就晚上回来睡个觉，别离古城太远",
+      "context": {
+        "city": "丽江", "days": 3, "budget": 4500, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["古城", "自然风光"], "anchor_near_scenic": true },
+        "season": "春", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "wants_cultural": true },
+      "expectations": {
+        "must_have": ["酒店"],
+        "must_not": ["把降档说成升档", "为了升档把门票/餐饮预算挪空", "住宿搬到离当天玩点 15 公里外"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "second_turn": { "tier": { "lodging": "up" }, "keep_others": true },
+      "anchoring_km": 15,
+      "notes": "core/increment.tier_policy + delta_to_ranking_preferences 已实现（升档写进排序偏好，网关 ranker 下次推演读取）。**已知数据缺口**：实测高德不返回酒店价格（6 个酒店候选全是 unknown），所以真实数据下酒店档位变化无法执行 —— 这条用例专门用来暴露该缺口，人工评审时要看它有没有如实说明『没有可核实的价格，档位暂时调不动』。"
+    },
+    {
+      "id": "second-turn-change-city-needs-confirm",
+      "title": "二次规划 · 换城市属于结构性改动，必须先让用户确认",
+      "request": "西安不去了，改成去洛阳吧",
+      "context": {
+        "city": "西安", "days": 3, "budget": 3000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["历史", "美食"] },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "wants_food": true },
+      "expectations": {
+        "must_have": [],
+        "must_not": [
+          "未经确认就把整份方案换成另一个城市",
+          "城市换了但天数/预算没有重算",
+          "把换城市当成一次普通平替悄悄做掉"
+        ],
+        "min_nodes_per_day": 1, "max_nodes_per_day": 4
+      },
+      "second_turn": { "structural": ["change_city"], "must_confirm": true },
+      "notes": "把我们已经定下的规矩写进评测集：改天数/换城市这类**结构性改动不自动执行**，必须先请用户确认（core/increment 只处理排他/配额/档位）。防止以后有人为了『自动化』顺手把它做掉。"
+    },
+    {
+      "id": "transport-cheapest-cross-city-yunnan-8d",
+      "title": "跨城出行 · 怎么走最划算（票价没有来源就标未核实）",
+      "request": "8 天走昆明、大理、丽江，中间这几段怎么走最划算？高铁还是大巴？别给我编票价",
+      "context": {
+        "city": "昆明", "days": 8, "budget": 8000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["自然风光", "古城"], "transport_preference": "便宜" },
+        "season": "秋", "weather": "多云"
+      },
+      "signals": { "wants_scenic": true, "wants_cultural": true },
+      "expectations": {
+        "must_have": ["酒店"],
+        "must_not": [
+          "把没有来源的票价说成确定价格",
+          "只比时长不比价格（或反过来）",
+          "推荐一个查不到来源的车次/航班号"
+        ],
+        "min_nodes_per_day": 1, "max_nodes_per_day": 4
+      },
+      "transport": { "cross_city": true, "compare": ["高铁", "动车", "大巴"], "fare_must_be_verified": false },
+      "notes": "core/transport_options：find_transfer_legs（≥150km 才算跨城腿，最多比 2 段）+ build_transport_audit（票价没有可核实来源就标未核实，unknown 绝不当作免费），随 payload 下发、前端核对面板有『跨城怎么走』一节。"
+    },
+    {
+      "id": "mountain-water-anchored-guilin-4d",
+      "title": "有山有水 · 四天（吃住都得离玩点近，中间留一天什么都不干）",
+      "request": "想去有山有水的地方待 4 天，住得离景区近一点，吃饭也别跑太远，中间留一天什么都不干",
+      "context": {
+        "city": "桂林", "days": 4, "budget": 4500, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["有山有水", "自然风光"], "anchor_near_scenic": true, "rest_days": true },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "interest": ["有山有水"] },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": [
+          "只有山没有水（或反过来）",
+          "吃住离当天玩点超过 15 公里",
+          "四天全排满、没有任何低强度的一天"
+        ],
+        "min_nodes_per_day": 1, "max_nodes_per_day": 4
+      },
+      "anchoring_km": 15,
+      "notes": "scenic-mountain-water-3d 的 4 天版，多了『中间留一天什么都不干』：复合意图 mountain_water（山、水两组必须同时命中）+ anchoring 维度（吃住到当天玩点 ≤15km）+ 休整日（pacing）。"
+    },
+    {
+      "id": "price-honesty-unverified-lodging-tickets-3d",
+      "title": "价格诚信 · 住宿与门票没有供应商数据时必须标『未核实』",
+      "request": "去敦煌 3 天，莫高窟、鸣沙山都要去，顺便先给我算个总花费",
+      "context": {
+        "city": "敦煌", "days": 3, "budget": 5000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["历史", "自然风光"] },
+        "season": "夏", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "wants_scenic": true },
+      "expectations": {
+        "must_have": ["酒店"],
+        "must_not": [
+          "把没有来源的门票/房价写成确定金额",
+          "把未核实的价格当 0 元加进合计",
+          "给出一个查不到来源的『人均总花费』"
+        ],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "price_honesty": { "must_label_unverified": ["酒店", "门票"], "unknown_never_zero": true },
+      "notes": "口径用例：三级价格模型（verified > estimated > unknown）里 unknown **不得**计入合计、不得声称满足预算，估算值必须标明来源；实测高德对酒店一律不返回价格，所以这条很容易被违反。"
     }
   ]
 }

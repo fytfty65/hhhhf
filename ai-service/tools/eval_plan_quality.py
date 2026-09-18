@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """规划质量评测 CLI（阶段 0）。
 
-三种用法
+四种用法
 --------
 1) 自检（不需要任何服务/网络，验证"尺子"有区分度）：
        python tools/eval_plan_quality.py --self-check
@@ -11,6 +11,14 @@
 
 3) 当门禁用（硬约束必须全过 + 平均分不低于阈值）：
        python tools/eval_plan_quality.py --plans work/eval-runs --min-score 65 --require-hard-gates
+
+4) 长途用例的 horizon 判定（本次新增）
+   用例里写了 `horizon` 的（分段天数 / 最少休整日 / 是否要求首轮分段生成），会额外跑一遍
+   `core/long_trip.continuity_report` 与 `summarize_segments`：
+   - 天数断档、越界天、某段住宿夜数不足 → 记为长途失败，**计入 `--require-hard-gates`**；
+   - 跳段跨城、休整日不足、分段超预算 → 只做顾问（跨城本来就要坐车）；
+   - 用例要求首轮分段生成（`horizon.first_round_required`）时，plan dump 里必须带
+     `long_trip.first_round`（由 api 层下发），否则记为 `long_trip_first_round_missing`。
 
 原则
 ----
@@ -26,16 +34,18 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 
+from core.long_trip import continuity_report, summarize_segments  # noqa: E402
 from core.plan_quality import DEFAULT_WEIGHTS, evaluate_plan, stability_score  # noqa: E402
 
 DEFAULT_CASES = SERVICE_ROOT / "tests" / "eval" / "golden_cases.json"
 REPO_ROOT = SERVICE_ROOT.parent
+DEFAULT_CHUNK_DAYS = 7
 
 
 def load_cases(path: Path) -> List[Dict[str, Any]]:
@@ -55,6 +65,66 @@ def find_plan_files(plans_dir: Path, case_id: str) -> List[Path]:
     if single.exists():
         return [single] + [p for p in numbered if p != single]
     return numbered
+
+
+def long_trip_check(case: Dict[str, Any], plan: Any) -> Optional[Dict[str, Any]]:
+    """长途用例的 horizon 判定（用例没写 horizon 就返回 None）。
+
+    - 硬失败：天数断档 / 越界天 / 某段住宿夜数不足（计入硬门禁）；
+    - 顾问：跳段跨城距离、休整日不足、分段花费超分配；
+    - `horizon.first_round_required`：要求 plan dump 里带 `long_trip.first_round`
+      （api 层下发的首轮分段生成结果），缺失或 `failed` 非空都记为失败 —— 这是
+      "30 天不许假装一次排好"的机器化判定。
+    """
+    horizon = case.get("horizon")
+    if not isinstance(horizon, Mapping):
+        return None
+    context = case.get("context") or {}
+    chunk_days = int(horizon.get("segment_days") or DEFAULT_CHUNK_DAYS)
+    check_context = {
+        "days": context.get("days"),
+        "budget": context.get("budget"),
+        "expectations": {"min_rest_days": horizon.get("min_rest_days")},
+    }
+    continuity = continuity_report(plan, check_context, chunk_days)
+    summary = summarize_segments(plan, check_context, chunk_days)
+    failures: List[Dict[str, Any]] = [dict(item) for item in continuity["failures"]]
+
+    first_round: Optional[Dict[str, Any]] = None
+    if isinstance(plan, Mapping):
+        raw_first_round = plan.get("long_trip")
+        if isinstance(raw_first_round, Mapping):
+            candidate = raw_first_round.get("first_round")
+            if isinstance(candidate, Mapping):
+                first_round = dict(candidate)
+    if horizon.get("first_round_required"):
+        if first_round is None:
+            failures.append(
+                {
+                    "code": "long_trip_first_round_missing",
+                    "detail": "这条用例要求首轮分段生成，但方案里没有 long_trip.first_round（api 层未下发）",
+                }
+            )
+        elif first_round.get("failed"):
+            failures.append(
+                {
+                    "code": "long_trip_first_round_failed",
+                    "detail": "首轮分段生成有 %d 段没生成出来（第 %s 段）"
+                    % (len(first_round.get("failed") or []), "、".join(str(i) for i in first_round.get("failed") or [])),
+                }
+            )
+
+    return {
+        "chunk_days": chunk_days,
+        "ok": not failures,
+        "failures": failures,
+        "advisories": continuity["advisories"][:5],
+        "segments": summary["segments"],
+        "rest_days": continuity["rest_days"],
+        "rest_days_required": continuity["rest_days_required"],
+        "first_round_required": bool(horizon.get("first_round_required")),
+        "first_round": first_round,
+    }
 
 
 def score_case(case: Dict[str, Any], plans: Sequence[Any]) -> Dict[str, Any]:
@@ -77,6 +147,7 @@ def score_case(case: Dict[str, Any], plans: Sequence[Any]) -> Dict[str, Any]:
         "dimensions": primary["dimensions"],
         "nodes": primary["nodes"],
         "stability": stability.get("value"),
+        "long_trip": long_trip_check(case, plans[0]),
     }
 
 
@@ -99,6 +170,7 @@ def build_report(cases: Sequence[Dict[str, Any]], plans_dir: Optional[Path]) -> 
             dimension_means[key] = round(sum(values) / len(values), 3) if values else 0.0
 
     scores = [row["score"] for row in scored]
+    long_trip_rows = [row for row in scored if row.get("long_trip")]
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "cases_total": len(cases),
@@ -120,6 +192,9 @@ def build_report(cases: Sequence[Dict[str, Any]], plans_dir: Optional[Path]) -> 
             if any(row["stability"] is not None for row in scored)
             else None
         ),
+        "long_trip_cases": len(long_trip_rows),
+        "long_trip_failures": sum(len(row["long_trip"]["failures"]) for row in long_trip_rows),
+        "long_trip_failure_cases": [row["id"] for row in long_trip_rows if not row["long_trip"]["ok"]],
         "cases": scored,
     }
 
@@ -167,6 +242,44 @@ def render_markdown(report: Dict[str, Any]) -> str:
                 lines.append(f"**{row['id']}**（{row['title']}）")
                 for item in row["gate_failures"]:
                     lines.append(f"- `{item['code']}` {item['detail']}")
+    long_trip_rows = [row for row in report["cases"] if row.get("long_trip")]
+    if long_trip_rows:
+        lines.append("")
+        lines.append("## 长途（horizon 判定）")
+        lines.append("")
+        lines.append("| 用例 | 段数 | 休整日/要求 | 首轮分段生成 | 结论 |")
+        lines.append("|---|---|---|---|---|")
+        for row in long_trip_rows:
+            trip = row["long_trip"]
+            first = trip.get("first_round")
+            if first:
+                first_text = "生成 %d 段%s" % (
+                    len(first.get("generated") or []),
+                    ("，失败 %d 段" % len(first.get("failed") or [])) if first.get("failed") else "",
+                )
+            elif trip.get("first_round_required"):
+                first_text = "**未下发（用例要求了首轮分段生成）**"
+            else:
+                first_text = "用例未要求"
+            lines.append(
+                f"| {row['id']} | {len(trip['segments'])} | {trip['rest_days']}/{trip['rest_days_required']} | "
+                f"{first_text} | {'通过' if trip['ok'] else '失败'} |"
+            )
+        trip_failures = [row for row in long_trip_rows if row["long_trip"]["failures"]]
+        if trip_failures:
+            lines.append("")
+            lines.append("### 长途失败明细")
+            for row in trip_failures:
+                lines.append("")
+                lines.append(f"**{row['id']}**")
+                for item in row["long_trip"]["failures"]:
+                    lines.append(f"- `{item['code']}` {item['detail']}")
+        advisories = [(row["id"], text) for row in long_trip_rows for text in row["long_trip"]["advisories"]]
+        if advisories:
+            lines.append("")
+            lines.append("### 长途顾问（不判死：跨城本来就要坐车）")
+            for case_id, text in advisories:
+                lines.append(f"- **{case_id}**：{text}")
     lines.append("")
     return "\n".join(lines)
 
@@ -254,6 +367,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     exit_code = 0
     if args.require_hard_gates and report["hard_gate_failures"]:
         print(f"[门禁] 硬约束失败 {report['hard_gate_failures']} 处 -> FAIL")
+        exit_code = 1
+    if args.require_hard_gates and report.get("long_trip_failures"):
+        print(
+            f"[门禁] 长途（horizon）失败 {report['long_trip_failures']} 处 -> FAIL"
+            f"（涉及用例 {report.get('long_trip_failure_cases')}）"
+        )
         exit_code = 1
     if args.min_score is not None:
         if report["mean_score"] is None:
