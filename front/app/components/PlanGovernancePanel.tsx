@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange, Route } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
@@ -93,6 +93,24 @@ export type PlanGovernance = {
   };
   /** 跨城腿的出行建议（含"票价未核实"清单） */
   transportAudit?: { legs?: TransportLeg[]; note?: string; error?: string };
+  /** 用户诉求逐条核对（后端真值字段）：每条诉求一个稳定 id + 状态，前端逐条渲染 */
+  constraints?: {
+    items?: {
+      id?: string;
+      category?: string;
+      text?: string;
+      polarity?: string;
+      source?: string;
+      status?: string;
+      detail?: string;
+    }[];
+    total?: number;
+    counts?: Record<string, number>;
+    summary?: string;
+    unverified_ids?: string[];
+    missing_ids?: string[];
+    error?: string;
+  };
   /** 自动复核（critic + 确定性修补）的结果：改了什么、还剩几处门禁问题、缺哪些数据 */
   review?: {
     stopped_reason?: string;
@@ -140,6 +158,15 @@ const BUDGET_STATUS: Record<string, { label: string; tone: string }> = {
   unverifiable: { label: '价格未核实，暂无法判定', tone: 'text-amber-600' },
   no_budget: { label: '未设置预算', tone: 'text-slate-500' },
   ok: { label: '在预算内', tone: 'text-emerald-600' },
+};
+
+// 诉求核对：每条诉求的状态 → 人话标签与颜色（未核实绝不写成"已满足"）
+const CONSTRAINT_STATUS: Record<string, { label: string; tone: string }> = {
+  applied: { label: '已落实', tone: 'text-emerald-600' },
+  partially_applied: { label: '部分落实', tone: 'text-amber-600' },
+  unverified: { label: '未核实', tone: 'text-amber-600' },
+  advisory: { label: '仅写进偏好', tone: 'text-slate-500' },
+  missing: { label: '没做到', tone: 'text-rose-600' },
 };
 
 // 自动复核做了什么 → 人话标签
@@ -213,7 +240,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip, review } = data;
+  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip, review, constraints } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -239,9 +266,11 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
         (review.action_count ?? 0) > 0 ||
         (review.initial_hard_failures ?? 0) > (review.remaining_hard ?? 0)),
   );
+  const hasConstraintBlock = Boolean(constraints && ((constraints.items?.length ?? 0) > 0 || constraints.error));
   if (
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
-    !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock && !hasReviewBlock
+    !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
+    !hasReviewBlock && !hasConstraintBlock
   ) {
     return null;
   }
@@ -474,8 +503,46 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
         </div>
       )}
 
+      {hasConstraintBlock && (
+        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<Target className="h-3 w-3" />}>诉求核对</SectionLabel>
+            {typeof constraints?.total === 'number' && (
+              <span className="font-mono text-[11px] font-bold tabular-nums text-slate-600">
+                {constraints.total} 条
+              </span>
+            )}
+          </div>
+          {constraints?.error ? (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+              这次没能逐条核对（{constraints.error}），你提的要求请以方案本身为准。
+            </p>
+          ) : (
+            <>
+              <ul className="mt-1.5 space-y-1">
+                {(constraints?.items || []).slice(0, 8).map((item) => {
+                  const tone = CONSTRAINT_STATUS[item.status || ''] || CONSTRAINT_STATUS.unverified;
+                  return (
+                    <li key={item.id} className="flex items-baseline gap-2 text-[11px] leading-relaxed">
+                      <span className={`shrink-0 font-bold ${tone.tone}`}>{tone.label}</span>
+                      <span className="text-slate-700">{item.text}</span>
+                      {item.detail && <span className="text-slate-400">{item.detail}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+              {(constraints?.items?.length ?? 0) > 8 && (
+                <p className="mt-1.5 text-[11px] text-slate-400">
+                  还有 {(constraints?.items?.length ?? 0) - 8} 条没列出来
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {hasReviewBlock && (
-        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock || hasPriceBlock || hasTransportBlock || hasLongTripBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock || hasPriceBlock || hasTransportBlock || hasLongTripBlock || hasConstraintBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
           <div className="flex items-center justify-between">
             <SectionLabel icon={<SlidersHorizontal className="h-3 w-3" />}>自动复核</SectionLabel>
             {typeof review?.remaining_hard === 'number' && typeof review?.initial_hard_failures === 'number' && (
@@ -527,7 +594,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
         <div
           className={
             hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock ||
-            hasPriceBlock || hasTransportBlock || hasLongTripBlock || hasReviewBlock
+            hasPriceBlock || hasTransportBlock || hasLongTripBlock || hasReviewBlock || hasConstraintBlock
               ? 'mt-3 border-t border-slate-200 pt-2.5'
               : ''
           }

@@ -3462,6 +3462,26 @@ async def run_negotiate(msg: GatewayMessage):
                             if _governance.get("ranking_preferences"):
                                 final_data["ranking_preferences"] = _governance["ranking_preferences"]
 
+                            # 👑 用户诉求逐条核对（后端真值字段）：每条诉求一个稳定 id + 状态
+                            # （已落实 / 部分落实 / 未核实 / 仅建议 / 没做到），前端逐条渲染。
+                            # 教训来自同类开源项目：它把这些字段算出来了，但前端适配层从没映射，
+                            # 界面上"未核实"一次都没出现 —— **没渲染出来的未核实，等于没做**。
+                            try:
+                                from core.constraint_coverage import constraint_coverage
+
+                                final_data["constraints"] = constraint_coverage(
+                                    _quality_context,
+                                    final_data,
+                                    signals=_quality_signals,
+                                    increment=_refinement_delta,
+                                    increment_metrics=_governance.get("increment"),
+                                    tier_policy_map=_governance.get("tier_policy"),
+                                    exclusions=_governance.get("exclusions"),
+                                    request_text=intent_str,
+                                )
+                            except Exception as _coverage_exc:  # 诉求核对失败绝不影响出方案
+                                final_data["constraints"] = {"error": str(_coverage_exc)[:200]}
+
                             # 👑 价格补全（有界）：只查**缺价**节点、并发执行、整体超时保护；
                             # 来源标为 web → 结构上仍是"估算"，必须标明，不会冒充已验证价格。
                             try:

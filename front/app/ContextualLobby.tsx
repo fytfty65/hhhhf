@@ -1050,19 +1050,20 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
       if (!fd || typeof fd !== 'object') return;
       setPlanGovernance(
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
-          fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip || fd.review
+          fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip || fd.review || fd.constraints
           ? {
               quality: fd.quality,
               budget: fd.budget_report,
               fallback: fd.fallback,
               horizon: fd.horizon,
-              // 二次增量（这次到底改成了什么）、价格核对、跨城出行比较、长途分段、自动复核：
-              // 五块都是**后端说了才显示**，缺字段时面板不渲染空壳。
+              // 二次增量（这次到底改成了什么）、价格核对、跨城出行比较、长途分段、自动复核、
+              // 诉求核对：六块都是**后端说了才显示**，缺字段时面板不渲染空壳。
               increment: fd.increment,
               priceAudit: fd.price_audit,
               transportAudit: fd.transport_audit,
               longTrip: fd.long_trip,
               review: fd.review,
+              constraints: fd.constraints,
             }
           : null,
       );

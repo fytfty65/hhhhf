@@ -146,6 +146,22 @@ const GOVERNANCE_PAYLOAD = {
     remaining_hard: 0,
     needs_data: ['needs_candidates'],
   },
+  // 用户诉求逐条核对（core/constraint_coverage）：稳定 id + 状态，前端逐条渲染
+  constraints: {
+    total: 6,
+    summary: '共 6 条诉求：落实 3 · 部分落实 1 · 未核实 1 · 仅建议 0 · 没做到 1',
+    counts: { applied: 3, partially_applied: 1, unverified: 1, advisory: 0, missing: 1 },
+    unverified_ids: ['dietary'],
+    missing_ids: ['interest:scenic'],
+    items: [
+      { id: 'must_have:酒店', category: 'must_have', text: '必须包含「酒店」', status: 'applied', polarity: 'require', source: 'user_explicit', detail: '' },
+      { id: 'budget', category: 'budget', text: '预算 ¥1200 以内', status: 'applied', polarity: 'require', source: 'user_explicit', detail: '可核实花费 ¥1164 在预算内' },
+      { id: 'interest:food', category: 'interest', text: '美食', status: 'applied', polarity: 'prefer', source: 'signal', detail: '' },
+      { id: 'interest:scenic', category: 'interest', text: '自然风光', status: 'missing', polarity: 'prefer', source: 'signal', detail: '方案里没有这类内容' },
+      { id: 'dietary', category: 'accessibility', text: '饮食要求：不吃辣', status: 'unverified', polarity: 'require', source: 'user_explicit', detail: '没有菜品级数据，是否满足无法核实' },
+      { id: 'quota', category: 'change', text: '增加：美食 +2', status: 'partially_applied', polarity: 'require', source: 'user_explicit', detail: '要 2 个，只加上 1 个' },
+    ],
+  },
 };
 
 async function installMocks(page: Page) {
@@ -208,6 +224,7 @@ async function installMocks(page: Page) {
                     transport_audit: payload.governance.transport_audit,
                     long_trip: payload.governance.long_trip,
                     review: payload.governance.review,
+                    constraints: payload.governance.constraints,
                   }),
               }),
             });
@@ -299,6 +316,17 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByText(/第 2 段 · 第 8-14 天/)).toBeVisible();
     await expect(panel.getByText(/18 个节点 · 休整 1 天/)).toBeVisible();
     await expect(panel.getByText(/已重新生成 1 段（第 8-14 天）；未补上 1 段（从第 15 天起）/)).toBeVisible();
+
+    // 诉求核对：逐条给状态；"未核实"绝不能写成"已满足"
+    await expect(panel.getByText('诉求核对')).toBeVisible();
+    await expect(panel.getByText('6 条', { exact: true })).toBeVisible();
+    await expect(panel.getByText('已落实', { exact: true }).first()).toBeVisible();
+    await expect(panel.getByText('未核实', { exact: true }).first()).toBeVisible();
+    await expect(panel.getByText('没做到', { exact: true }).first()).toBeVisible();
+    await expect(panel.getByText('必须包含「酒店」')).toBeVisible();
+    await expect(panel.getByText(/饮食要求：不吃辣/)).toBeVisible();
+    await expect(panel.getByText(/没有菜品级数据，是否满足无法核实/)).toBeVisible();
+    await expect(panel.getByText('部分落实', { exact: true }).first()).toBeVisible();
 
     // 自动复核：改了什么、还剩几处、哪些改不动（说"已自动修正"，不说"AI 已优化"）
     await expect(panel.getByText('自动复核')).toBeVisible();
