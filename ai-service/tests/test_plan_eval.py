@@ -15,7 +15,15 @@ if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 
 from tests.test_long_trip import node, thirty_day_plan  # noqa: E402
-from tools.eval_plan_quality import build_report, long_trip_check, render_markdown  # noqa: E402
+from tools.eval_plan_quality import (  # noqa: E402
+    build_report,
+    find_plan_files,
+    load_cases,
+    long_trip_check,
+    render_markdown,
+)
+
+FIXTURE_DIR = SERVICE_ROOT / "tests" / "eval" / "fixtures"
 
 
 def long_case(**horizon):
@@ -118,6 +126,47 @@ class TestReportAggregation(unittest.TestCase):
             report = build_report([case], plans_dir)
         markdown = render_markdown(report)
         self.assertIn("未下发（用例要求了首轮分段生成）", markdown)
+
+
+class TestCommittedFixtures(unittest.TestCase):
+    """评测夹具必须进仓库：全新 clone、没有 Key、不联网也能跑出报告。
+
+    同类开源项目把 fixtures/ 写进了 .gitignore，导致它的"可复现评测"开箱不可复现 —— 这条测试
+    就是我们的反例保险：夹具文件在仓库里，且评测器确实能把"编造"和"干净"区分开。
+    """
+
+    def setUp(self):
+        self.cases = load_cases(FIXTURE_DIR / "cases.json")
+        self.report = build_report(self.cases, FIXTURE_DIR / "plans")
+        self.by_id = {row["id"]: row for row in self.report["cases"]}
+
+    def test_every_fixture_case_has_a_committed_plan(self):
+        self.assertGreaterEqual(len(self.cases), 2)
+        for case in self.cases:
+            files = find_plan_files(FIXTURE_DIR / "plans", str(case["id"]))
+            self.assertTrue(files, f"夹具用例 {case['id']} 没有对应的 plan 文件")
+
+    def test_clean_fixture_has_no_unsourced_claims(self):
+        clean = self.by_id["fixture-clean"]
+        self.assertEqual(clean["no_invention"]["unsourced_count"], 0)
+        self.assertEqual(clean["no_invention"]["value"], 1.0)
+        self.assertTrue(clean["gate_passed"], clean["gate_failures"])
+
+    def test_fabricated_fixture_is_caught(self):
+        fabricated = self.by_id["fixture-fabricated"]
+        self.assertGreater(fabricated["no_invention"]["unsourced_count"], 0)
+        self.assertLess(fabricated["no_invention"]["value"], 1.0)
+        fields = {field for claim in fabricated["no_invention"]["unsourced_claims"] for field in claim["fields"]}
+        self.assertIn("cost_estimate", fields)
+        self.assertIn("rating", fields)
+
+    def test_report_names_the_offenders(self):
+        markdown = render_markdown(self.report)
+        self.assertIn("## 不凭空编造（g_no_invention）", markdown)
+        self.assertIn("没有可核实来源", markdown)
+        self.assertIn("fixture-fabricated", markdown)
+        self.assertEqual(self.report["unsourced_cases"], ["fixture-fabricated"])
+        self.assertGreater(self.report["unsourced_claims_total"], 0)
 
 
 if __name__ == "__main__":

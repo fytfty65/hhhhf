@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "note": [
+    "离线评测夹具：不依赖任何服务、网络或 API Key，`python -m unittest tests.test_plan_eval` 就能验证评测框架本身有区分度。",
+    "为什么必须进仓库：同类开源项目把 fixtures/ 写进了 .gitignore，结果它的『可复现评测』开箱不可复现（需要真 Key + 手工标注），指标页面永远没数据。",
+    "两条用例共用同一份 context/expectations，只有 plan 不同：一条字段全都有可核实来源，一条的价格/评分/营业时间都没有来源。"
+  ],
+  "cases": [
+    {
+      "id": "fixture-clean",
+      "title": "干净方案（带数值的字段都有可核实来源）",
+      "request": "西安两天，看博物馆、吃当地小吃，住得离玩点近一点",
+      "context": {
+        "city": "西安", "days": 2, "budget": 2000, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["博物馆", "美食"], "anchor_near_scenic": true },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "wants_food": true },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": ["把没有来源的价格写成确定金额"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "期望：过硬门禁、g_no_invention = 1.0（0 个无来源数值）。"
+    },
+    {
+      "id": "fixture-fabricated",
+      "title": "编造方案（价格/评分/营业时间都没有来源，却写得很具体）",
+      "request": "同上，但这份方案的数据是编的",
+      "context": {
+        "city": "西安", "days": 2, "budget": 2000, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["博物馆", "美食"], "anchor_near_scenic": true },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "wants_food": true },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": ["把没有来源的价格写成确定金额"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "期望：truthfulness 掉下来、g_no_invention < 1，并且报告里逐条列出『没有可核实来源』的字段。"
+    }
+  ]
+}

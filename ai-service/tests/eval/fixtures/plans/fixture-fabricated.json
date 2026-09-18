@@ -1,0 +1,38 @@
+{
+  "status": "ok",
+  "negotiation_summary": "离线夹具：数值写得很具体，但一个来源都没有（用来验证评测器能不能抓到）",
+  "route": [
+    {
+      "day": 1, "name": "某博物馆", "location": "某博物馆", "time": "09:30", "type": "博物馆",
+      "cost_estimate": "¥120", "open_time": "09:00-17:00", "rating": "4.9", "lnglat": [108.95, 34.22],
+      "estimated": false,
+      "tags": ["博物馆", "文化"]
+    },
+    {
+      "day": 1, "name": "某网红小吃", "location": "某网红小吃", "time": "12:30", "type": "餐饮",
+      "cost_estimate": "¥88", "open_time": "10:00-22:00", "rating": "4.8", "lnglat": [108.94, 34.26],
+      "data_sources": { "cost_estimate": "llm_estimate", "open_time": "llm_estimate", "rating": "llm_estimate" },
+      "estimated": true,
+      "tags": ["美食"]
+    },
+    {
+      "day": 1, "name": "某精品酒店", "location": "某精品酒店", "time": "20:00", "type": "住宿",
+      "cost_estimate": "¥480", "open_time": "00:00-23:59", "rating": "4.9", "lnglat": [108.94, 34.26],
+      "estimated": false,
+      "tags": ["住宿"]
+    },
+    {
+      "day": 2, "name": "某古城墙", "location": "某古城墙", "time": "09:30", "type": "文化",
+      "cost_estimate": "¥80", "open_time": "08:00-20:00", "rating": "4.7", "lnglat": [108.94, 34.25],
+      "estimated": false,
+      "tags": ["地标", "文化"]
+    },
+    {
+      "day": 2, "name": "某夜市", "location": "某夜市", "time": "12:30", "type": "餐饮",
+      "cost_estimate": "¥95", "open_time": "10:00-22:00", "rating": "4.6", "lnglat": [108.97, 34.27],
+      "data_sources": { "cost_estimate": "llm_estimate" },
+      "estimated": true,
+      "tags": ["美食"]
+    }
+  ]
+}

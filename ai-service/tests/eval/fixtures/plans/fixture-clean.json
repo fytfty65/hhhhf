@@ -1,0 +1,36 @@
+{
+  "status": "ok",
+  "negotiation_summary": "离线夹具：每个带数值的字段都能追到可核实来源（高德）",
+  "route": [
+    {
+      "day": 1, "name": "陕西历史博物馆", "location": "陕西历史博物馆", "time": "09:30", "type": "博物馆",
+      "cost_estimate": "¥0", "open_time": "09:00-17:00", "rating": "4.7", "lnglat": [108.95, 34.22],
+      "data_sources": { "cost_estimate": "amap", "open_time": "amap", "rating": "amap" }, "estimated": false,
+      "tags": ["博物馆", "文化"]
+    },
+    {
+      "day": 1, "name": "回民街小吃", "location": "回民街小吃", "time": "12:30", "type": "餐饮",
+      "cost_estimate": "¥60", "open_time": "10:00-22:00", "rating": "4.5", "lnglat": [108.94, 34.26],
+      "data_sources": { "cost_estimate": "amap", "open_time": "amap", "rating": "amap" }, "estimated": false,
+      "tags": ["美食"]
+    },
+    {
+      "day": 1, "name": "钟楼附近酒店", "location": "钟楼附近酒店", "time": "20:00", "type": "住宿",
+      "cost_estimate": "¥320", "open_time": "00:00-23:59", "rating": "4.6", "lnglat": [108.94, 34.26],
+      "data_sources": { "cost_estimate": "amap", "open_time": "amap", "rating": "amap" }, "estimated": false,
+      "tags": ["住宿"]
+    },
+    {
+      "day": 2, "name": "城墙南门", "location": "城墙南门", "time": "09:30", "type": "文化",
+      "cost_estimate": "¥54", "open_time": "08:00-20:00", "rating": "4.6", "lnglat": [108.94, 34.25],
+      "data_sources": { "cost_estimate": "amap", "open_time": "amap", "rating": "amap" }, "estimated": false,
+      "tags": ["地标", "文化"]
+    },
+    {
+      "day": 2, "name": "永兴坊美食", "location": "永兴坊美食", "time": "12:30", "type": "餐饮",
+      "cost_estimate": "¥70", "open_time": "10:00-22:00", "rating": "4.5", "lnglat": [108.97, 34.27],
+      "data_sources": { "cost_estimate": "amap", "open_time": "amap", "rating": "amap" }, "estimated": false,
+      "tags": ["美食"]
+    }
+  ]
+}

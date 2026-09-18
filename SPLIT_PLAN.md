@@ -86,7 +86,8 @@
 | F12 | 长途（≥14 天）**首轮按 7 天分段生成**（`core/long_trip.build_segmented_plan` + agent.py 薄接线），既有修补退化为兜底 | `ad9f6d0` |
 | F13 | 评测集 29 → 38 条（30/45 天长途、二次换点/配额/升档/换城市、跨城最划算、价格诚信）+ `horizon` 真正参与机器判定 | `a7ec892` |
 | F14 | **Critic/Repair 闭环**（`core/plan_review.review_plan`：propose→critique→repair→rescore，≤3 轮，掉门禁/掉分即回滚，无改动即停）+ 面板「自动复核」 | `d73c3d5` |
-| F15 | **诉求逐条核对**（`core/constraint_coverage`：稳定 id + 五态 applied/partial/unverified/advisory/missing，含"说改但没改"机械检测）+ 面板「诉求核对」端到端渲染 | 本批 |
+| F15 | **诉求逐条核对**（`core/constraint_coverage`：稳定 id + 五态 applied/partial/unverified/advisory/missing，含"说改但没改"机械检测）+ 面板「诉求核对」端到端渲染 | `29b7978` |
+| F16 | 评测报告新增 **`g_no_invention`** 节（逐条点名"写了数值却没有来源"的字段）+ `--max-unsourced` 可选门禁 + **离线夹具进仓库**（`tests/eval/fixtures/`，无 Key 无网络可复现） | 本批 |
 
 **F11 附带修掉一个真 bug**：宿主流式累积时用 `replace(/null/g, "")` 清洗 token，会把**合法 JSON 里的 null**（票价未核实就是 `price:null`）删成 `"price":`，导致整段 `[FINAL_JSON]` 解析失败——后果是 `quality`/`budget_report`/四块新数据全部丢失、核对面板整块不显示。现在改为**先按原文解析**（我们下发的 JSON 一定合法），解析不出来才退回"删 null"的兜底（那是给模型吐字夹带的 null 准备的）；展示用的清洗仍在 `humanReadableLogs`。E2E mock 里刻意保留 `price: null` 作为回归哨兵。同时 `final_route` 消息路径也接入同一份 payload（重连/回放只收到它时面板同样有数据）。
 

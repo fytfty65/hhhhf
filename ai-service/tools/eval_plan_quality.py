@@ -20,6 +20,13 @@
    - 用例要求首轮分段生成（`horizon.first_round_required`）时，plan dump 里必须带
      `long_trip.first_round`（由 api 层下发），否则记为 `long_trip_first_round_missing`。
 
+5) 不凭空编造（g_no_invention）+ 离线夹具
+   报告里单列一节统计"写了具体数值却没有可核实来源"的节点（价格/评分/营业时间），
+   逐条点名到节点与字段；默认只报告，需要当门禁时用 `--max-unsourced N`。
+   离线夹具在 `tests/eval/fixtures/`（cases.json + plans/*.json），**跟着仓库走**：
+   全新 clone、没有 Key、不联网也能 `python -m unittest tests.test_plan_eval` 验证评测器
+   有区分度（干净方案 0 个无来源数值，编造方案被抓出来）。
+
 原则
 ----
 - **没跑的用例不算 0 分**，单独统计为"未运行"，避免用"没数据"冒充"质量差"。
@@ -133,6 +140,8 @@ def score_case(case: Dict[str, Any], plans: Sequence[Any]) -> Dict[str, Any]:
     signals = case.get("signals") or {}
     primary = evaluate_plan(context, plans[0], expectations=expectations, signals=signals)
     stability = stability_score(plans)
+    truthfulness = (primary.get("dimensions") or {}).get("truthfulness") or {}
+    unsourced = truthfulness.get("unsourced_claims") or []
     return {
         "id": case.get("id"),
         "title": case.get("title"),
@@ -148,6 +157,13 @@ def score_case(case: Dict[str, Any], plans: Sequence[Any]) -> Dict[str, Any]:
         "nodes": primary["nodes"],
         "stability": stability.get("value"),
         "long_trip": long_trip_check(case, plans[0]),
+        # 不凭空编造（g_no_invention）：没有来源却写了具体数值的节点，一条都不许放过
+        "no_invention": {
+            "value": truthfulness.get("value"),
+            "verified_nodes": truthfulness.get("verified_nodes"),
+            "unsourced_count": truthfulness.get("unsourced_count", len(unsourced)),
+            "unsourced_claims": unsourced[:5],
+        },
     }
 
 
@@ -195,6 +211,16 @@ def build_report(cases: Sequence[Dict[str, Any]], plans_dir: Optional[Path]) -> 
         "long_trip_cases": len(long_trip_rows),
         "long_trip_failures": sum(len(row["long_trip"]["failures"]) for row in long_trip_rows),
         "long_trip_failure_cases": [row["id"] for row in long_trip_rows if not row["long_trip"]["ok"]],
+        "no_invention_mean": (
+            round(
+                sum(row["no_invention"]["value"] or 0.0 for row in scored) / len(scored),
+                3,
+            )
+            if scored
+            else None
+        ),
+        "unsourced_claims_total": sum(row["no_invention"]["unsourced_count"] or 0 for row in scored),
+        "unsourced_cases": [row["id"] for row in scored if (row["no_invention"]["unsourced_count"] or 0) > 0],
         "cases": scored,
     }
 
@@ -280,6 +306,22 @@ def render_markdown(report: Dict[str, Any]) -> str:
             lines.append("### 长途顾问（不判死：跨城本来就要坐车）")
             for case_id, text in advisories:
                 lines.append(f"- **{case_id}**：{text}")
+    if report["cases"]:
+        lines.append("")
+        lines.append("## 不凭空编造（g_no_invention）")
+        lines.append("")
+        lines.append(
+            f"- 均值 **{report.get('no_invention_mean')}**（1.0 = 每个带数值的节点都有可核实来源）；"
+            f"无来源却写了具体数值的节点合计 **{report.get('unsourced_claims_total')}** 个"
+        )
+        if report.get("unsourced_cases"):
+            lines.append(f"- 涉及用例：{', '.join(report['unsourced_cases'])}")
+        offenders = [row for row in report["cases"] if (row["no_invention"]["unsourced_count"] or 0) > 0]
+        for row in offenders:
+            lines.append("")
+            lines.append(f"**{row['id']}**（{row['title']}）：{row['no_invention']['unsourced_count']} 个节点")
+            for claim in row["no_invention"]["unsourced_claims"]:
+                lines.append(f"- 「{claim['name']}」的 {'、'.join(claim['fields'])} 没有可核实来源")
     lines.append("")
     return "\n".join(lines)
 
@@ -347,6 +389,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--json-out", type=Path, default=None, help="JSON 报告输出路径（默认与 --out 同名 .json）")
     parser.add_argument("--min-score", type=float, default=None, help="平均分低于该值即失败（门禁模式）")
     parser.add_argument("--require-hard-gates", action="store_true", help="任何硬约束失败即失败（门禁模式）")
+    parser.add_argument(
+        "--max-unsourced",
+        type=int,
+        default=None,
+        help="无来源却写了具体数值的节点数超过该值即失败（g_no_invention 门禁，默认只报告不判死）",
+    )
     parser.add_argument("--self-check", action="store_true", help="用内置样例验证评分器有区分度")
     args = parser.parse_args(argv)
 
@@ -372,6 +420,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(
             f"[门禁] 长途（horizon）失败 {report['long_trip_failures']} 处 -> FAIL"
             f"（涉及用例 {report.get('long_trip_failure_cases')}）"
+        )
+        exit_code = 1
+    if args.max_unsourced is not None and (report.get("unsourced_claims_total") or 0) > args.max_unsourced:
+        print(
+            f"[门禁] 无来源却写了具体数值的节点 {report['unsourced_claims_total']} 个 > {args.max_unsourced} -> FAIL"
+            f"（涉及用例 {report.get('unsourced_cases')}）"
         )
         exit_code = 1
     if args.min_score is not None:
