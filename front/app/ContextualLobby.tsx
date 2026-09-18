@@ -33,6 +33,11 @@ import DraftingPanel from './components/DraftingPanel';
 // 马蜂窝风行程面板（自 ContextualLobby 拆分出来的展示型组件）
 import MafengwoStylePanel from './components/MafengwoStylePanel';
 
+// 预算核对 / 已作调整 / 行程规模 说明面板（字段来自 final_route.payload）。
+// 按需加载：只在决策阶段出现，没必要进首屏包（实测直接 import 会让首屏 JS +6.5KB）。
+const PlanGovernancePanel = dynamic(() => import('./components/PlanGovernancePanel'), { ssr: false });
+import type { PlanGovernance } from './components/PlanGovernancePanel';
+
 // 系统图标与登录门户（自 ContextualLobby 拆分出来的展示型组件）
 import OmniLogo from './components/OmniLogo';
 import AuthPortalScreen from './components/AuthPortalScreen';
@@ -922,6 +927,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   const [deductionTimeout, setDeductionTimeout] = useState(false);
   const [deductionError, setDeductionError] = useState<string | null>(null);
   const [isFallbackRoute, setIsFallbackRoute] = useState(false);
+  // 规划核对信息（预算三级模型 / 兜底调整说明 / 超长行程建议 / 门禁问题），随 final_route 下发
+  const [planGovernance, setPlanGovernance] = useState<PlanGovernance | null>(null);
   // 👑 多方案：后端返回的多套行程方案与当前选中方案
   const [planVariants, setPlanVariants] = useState<any[]>([]);
   const [activePlanId, setActivePlanId] = useState<string>('primary');
@@ -1114,6 +1121,18 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   } else {
                     setSimulation(null);
                   }
+                  // 规划核对：预算三级模型 + 兜底调整说明 + 超长行程建议 + 门禁问题。
+                  // 后端可能只给其中一部分（例如未超预算时没有 fallback），缺什么就渲染什么。
+                  setPlanGovernance(
+                    finalData.quality || finalData.budget_report || finalData.fallback || finalData.horizon
+                      ? {
+                          quality: finalData.quality,
+                          budget: finalData.budget_report,
+                          fallback: finalData.fallback,
+                          horizon: finalData.horizon,
+                        }
+                      : null,
+                  );
                   if (finalData.arbitration_records) setArbitrationRecords(finalData.arbitration_records);
                   // Capture the bandit arm the planner actually used. Without
                   // this the satisfaction form posts an empty bandit_arm_id, the
@@ -1660,7 +1679,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               <button onClick={() => setShowPoster(true)} className="px-3.5 py-1.5 bg-purple-50 text-purple-600 rounded-xl font-bold text-xs hover:bg-purple-100 transition-colors flex items-center gap-1.5 border border-purple-100 shadow-2xs cursor-pointer">
                 <Share2 className="w-3.5 h-3.5"/> 行程海报
               </button>
-              <button data-testid="open-diary" onClick={() => setShowDiary(true)} className="px-3.5 py-1.5 bg-amber-50 text-amber-600 rounded-xl font-bold text-xs hover:bg-amber-100 transition-colors flex items-center gap-1.5 border border-amber-100 shadow-2xs cursor-pointer"><BookOpen className="w-3.5 h-3.5"/> AI 日记</button>
+              <button data-testid="open-diary" onClick={() => setShowDiary(true)} className="px-3.5 py-1.5 bg-amber-50 text-amber-600 rounded-xl font-bold text-xs hover:bg-amber-100 transition-colors flex items-center gap-1.5 border border-amber-100 shadow-2xs cursor-pointer"><BookOpen className="w-3.5 h-3.5"/> 行程日记</button>
               <button data-testid="export-ics" onClick={downloadIcs} className="px-3.5 py-1.5 bg-teal-50 text-teal-600 rounded-xl font-bold text-xs hover:bg-teal-100 transition-colors flex items-center gap-1.5 border border-teal-100 shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出日历</button>
               <button data-testid="export-json" onClick={downloadJson} className="px-3.5 py-1.5 bg-slate-50 text-slate-600 rounded-xl font-bold text-xs hover:bg-slate-100 transition-colors flex items-center gap-1.5 border border-slate-200 shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出 JSON</button>
               <button onClick={() => setShowBudget(true)} className="px-3.5 py-1.5 bg-cyan-50 text-cyan-700 rounded-xl font-bold text-xs hover:bg-cyan-100 transition-colors flex items-center gap-1.5 border border-cyan-100 shadow-2xs cursor-pointer" title="打开预算管家"><PiggyBank className="w-3.5 h-3.5"/> 预算账本</button>
@@ -1689,19 +1708,23 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           {phase === 'decision' && (
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-bold text-slate-500" aria-label="路书质量摘要">
               <span><strong className="text-slate-800">{planQuality.days}</strong> 天 · <strong className="text-slate-800">{planQuality.nodes}</strong> 个节点</span>
-              {planQuality.costUnavailable ? (
-                <span className="text-amber-600" title="供应商未返回价格，无法给出估算总额">
-                  价格待补充<strong className="ml-1">（{planQuality.unpricedCount} 个节点无报价）</strong>
-                </span>
-              ) : (
-                <span>
-                  估算 ¥<strong className="text-orange-600">{planQuality.estimatedCost.toLocaleString()}</strong>
-                  {planQuality.unpricedCount > 0 && (
-                    <span className="ml-1 font-medium text-slate-400" title="这些节点缺少供应商报价，未计入合计">
-                      · {planQuality.unpricedCount} 个未计价
-                    </span>
-                  )}
-                </span>
+              {/* 花费只认一个来源：后端给了三级预算报告（已核实/估算/未核实）时，
+                  这里不再重复显示前端自行汇总的"估算总额"，避免同屏出现两个不同金额。 */}
+              {!planGovernance?.budget && (
+                planQuality.costUnavailable ? (
+                  <span className="text-amber-600" title="供应商未返回价格，无法给出估算总额">
+                    价格待补充<strong className="ml-1">（{planQuality.unpricedCount} 个节点无报价）</strong>
+                  </span>
+                ) : (
+                  <span>
+                    估算 ¥<strong className="text-orange-600">{planQuality.estimatedCost.toLocaleString()}</strong>
+                    {planQuality.unpricedCount > 0 && (
+                      <span className="ml-1 font-medium text-slate-400" title="这些节点缺少供应商报价，未计入合计">
+                        · {planQuality.unpricedCount} 个未计价
+                      </span>
+                    )}
+                  </span>
+                )
               )}
               <span>坐标覆盖 <strong className={planQuality.coverage >= 80 ? 'text-emerald-600' : 'text-amber-600'}>{planQuality.coverage}%</strong></span>
               <span className={planQuality.consensus >= 70 ? 'text-emerald-600' : 'text-amber-600'}>共识指数 <strong>{planQuality.consensus}</strong></span>
@@ -1753,6 +1776,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               {planQuality.dailyCounts.length > 0 && <span className="text-slate-400">白天节点 {planQuality.dailyCounts.map((item: any) => `D${item.day}:${item.count}`).join(' · ')}</span>}
             </div>
           )}
+          {phase === 'decision' && <PlanGovernancePanel data={planGovernance} />}
         </header>
 
         <div className="flex-1 overflow-y-auto bg-white custom-scrollbar relative">

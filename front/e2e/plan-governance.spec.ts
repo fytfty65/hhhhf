@@ -1,0 +1,205 @@
+import { test, expect, Page } from '@playwright/test';
+
+/**
+ * 行程核对面板（预算核对 / 已作调整 / 行程规模 / 还需要你留意）的渲染与视觉回归。
+ *
+ * 数据来自后端 final_route.payload 的 quality / budget_report / fallback / horizon；
+ * 这里用 WebSocket mock 造出一份"预算可能超支 + 已给平替 + 超长行程 + 有遗留问题"的
+ * 真实形状 payload，既做断言（文案必须出现），也存一张截图供人工审阅排版。
+ */
+
+const user = {
+  id: 'e2e-user',
+  username: 'e2e-user',
+  nickname: 'E2E 旅行者',
+  avatarSeed: 'e2e-user',
+  avatarUrl: '',
+  signature: '',
+  token: 'e2e-token',
+  isLoggedIn: true,
+};
+
+// 与后端 plan_quality_snapshot / budget_report / propose_fallback 输出的字段保持一致
+const GOVERNANCE_PAYLOAD = {
+  quality: {
+    score: 76.5,
+    verdict: 'fail',
+    gate_passed: false,
+    gate_failures: [
+      { code: 'skeleton_play_missing', detail: '第 3 天没有游玩安排' },
+      { code: 'open_time_missing', detail: '「陕西历史博物馆」营业时间未核实' },
+    ],
+    unverifiable_count: 3,
+    dimensions: { preference_coverage: 1, pacing: 0.8, space_efficiency: 0.9, truthfulness: 0.6, anchoring: 0.85, diversity: 0.95 },
+  },
+  budget_report: {
+    budget: 1200,
+    verified_cost: 1164,
+    estimated_cost: 260,
+    unknown_count: 2,
+    status: 'at_risk',
+    shortfall: 224,
+    confidence: 'medium',
+  },
+  fallback: {
+    trigger: 'budget_shortfall',
+    shortfall: 224,
+    remaining_shortfall: 0,
+    substitutions: [
+      { from: '钟楼酒店', to: '青旅床位', saving: 480, reason: '把「钟楼酒店」换成同类的「青旅床位」' },
+      { from: '豪华博物馆', to: '社区博物馆（免费）', saving: 300, reason: '把「豪华博物馆」换成同类的「社区博物馆（免费）」' },
+    ],
+    dropped: [],
+    preserved_ratio: 1,
+    needs_confirmation: false,
+    disclosure: '你的预算比「已核实花费」少约 ¥224；我做了 2 处平替（合计约省 ¥780）；原始偏好保留率约 100%；预算覆盖度约 100%',
+  },
+  horizon: {
+    days: 16,
+    segments: [
+      { start: 1, end: 7, days: 7 },
+      { start: 8, end: 14, days: 7 },
+      { start: 15, end: 16, days: 2 },
+    ],
+    advisories: [
+      '行程 16 天属超长行程：建议按 7 天分段生成与校验（共 3 段），否则单次生成节点过多、可靠性下降',
+      '住宿建议按「同一城市连续住」聚合，避免逐夜重复下单与比价成本',
+      '长行程必须设置中途休整日（建议每 7 天至少 1 天低强度）',
+    ],
+  },
+};
+
+async function installMocks(page: Page) {
+  await page.addInitScript(
+    (payload) => {
+      localStorage.setItem('omni_user', JSON.stringify(payload.user));
+      localStorage.setItem('omni_room_' + payload.user.id, JSON.stringify({ room_id: 'ROOM-E2E', invite_code: 'ROOM-E2E' }));
+      class MockWebSocket {
+        static OPEN = 1;
+        static CLOSED = 3;
+        readyState = 0;
+        onopen: (() => void) | null = null;
+        onclose: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor() {
+          setTimeout(() => {
+            this.readyState = 1;
+            this.onopen?.();
+            this.onmessage?.({
+              data: JSON.stringify({
+                type: 'room_members_update',
+                payload: [{ id: 'e2e-user', name: 'E2E 旅行者', role: '寻味探索', intent: '地道美食', avatarSeed: 'e2e-user' }],
+              }),
+            });
+          }, 20);
+        }
+        send(raw: string) {
+          const request = JSON.parse(raw);
+          if (request.type !== 'agent_negotiate') return;
+          const route = [
+            { day: 1, location: '钟楼酒店', name: '钟楼酒店', time: '09:00', type: '住宿', cost_estimate: '¥300', tags: ['住宿'] },
+            { day: 1, location: '陕西历史博物馆', name: '陕西历史博物馆', time: '10:30', type: '博物馆', cost_estimate: '¥0', tags: ['文化'] },
+            { day: 1, location: '回民街小吃', name: '回民街小吃', time: '12:30', type: '餐饮', cost_estimate: '¥60', tags: ['美食'] },
+            { day: 2, location: '城墙南门', name: '城墙南门', time: '09:30', type: '文化', cost_estimate: '¥54', tags: ['地标'] },
+            { day: 2, location: '永兴坊美食', name: '永兴坊美食', time: '12:30', type: '餐饮', cost_estimate: '¥70', tags: ['美食'] },
+          ];
+          setTimeout(() => {
+            this.onmessage?.({
+              data: JSON.stringify({ type: 'target_city', payload: { name: '西安', lnglat: [108.94, 34.26] } }),
+            });
+          }, 20);
+          setTimeout(() => {
+            this.onmessage?.({
+              data: JSON.stringify({
+                type: 'stream_token',
+                payload:
+                  '[FINAL_JSON]' +
+                  JSON.stringify({
+                    status: 'ok',
+                    negotiation_summary: '已按预算与偏好完成协商',
+                    route,
+                    team_satisfaction: { 'E2E 旅行者': 62 },
+                    quality: payload.governance.quality,
+                    budget_report: payload.governance.budget_report,
+                    fallback: payload.governance.fallback,
+                    horizon: payload.governance.horizon,
+                  }),
+              }),
+            });
+          }, 80);
+        }
+        close() {
+          this.readyState = 3;
+        }
+        addEventListener() {}
+        removeEventListener() {}
+      }
+      (window as unknown as { WebSocket: unknown }).WebSocket = MockWebSocket;
+    },
+    { user, governance: GOVERNANCE_PAYLOAD },
+  );
+
+  await page.route('**/api/v1/**', (route) => route.fulfill({ json: { ok: true, success: true, data: {} } }));
+  await page.route('**/api/auth/login', (route) => route.fulfill({ json: { message: '登录成功', token: user.token, user } }));
+  await page.route('**/api/user/**', (route) => route.fulfill({ json: { ok: true, user, trips: [] } }));
+  await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
+}
+
+async function reachDecision(page: Page) {
+  await page.getByTestId('join-room-code').fill('ROOM-E2E');
+  await page.getByTestId('join-room-submit').click();
+  await expect(page.getByTestId('room-code')).not.toBeEmpty();
+  await page.getByTestId('begin-plan').click();
+  await expect(page.getByText('进入共识沙盘')).toBeVisible({ timeout: 10_000 });
+  await page.getByText('进入共识沙盘').click();
+  await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
+  await page.locator('textarea').first().fill('带孩子去西安 3 天，预算 1200，必须住得下也要每天有正餐');
+  await page.getByText('锁定意图并开始推演').click();
+  await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 20_000 });
+}
+
+test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）', () => {
+  test('渲染四段说明并留下视觉基线截图', async ({ page }) => {
+    // 这条要走完整流程 + 截图，机器负载高时 45s 会不够（实测在并发构建时超时过）
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installMocks(page);
+    await page.goto('/');
+    await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
+    await reachDecision(page);
+
+    const panel = page.getByLabel('行程核对说明');
+    await expect(panel).toBeVisible({ timeout: 10_000 });
+
+    // 预算核对：三级模型的措辞必须在（"已核实"而不是"AI 估算总价"）
+    await expect(panel.getByText('预算核对')).toBeVisible();
+    await expect(panel.getByText('已核实花费', { exact: true })).toBeVisible();
+    await expect(panel.getByText('可能超支')).toBeVisible();
+    await expect(panel.getByText('估算花费（未核实）', { exact: true })).toBeVisible();
+
+    // 已作调整：平替明细 + 人话说明
+    await expect(panel.getByText('已作调整')).toBeVisible();
+    await expect(panel.getByText('把「钟楼酒店」换成「青旅床位」')).toBeVisible();
+    await expect(panel.getByText(/已核实花费」少约/)).toBeVisible();
+
+    // 行程规模：超长行程分段
+    await expect(panel.getByText('行程规模')).toBeVisible();
+    await expect(panel.getByText('16 天 · 3 段（7/7/2）')).toBeVisible();
+
+    // 遗留问题：说人话的标签而不是错误码
+    await expect(panel.getByText('还需要你留意')).toBeVisible();
+    await expect(panel.getByText('某一天没有游玩安排', { exact: true })).toBeVisible();
+    await expect(panel.getByText('营业时间未核实', { exact: true })).toBeVisible();
+
+    // 去 AI 化检查：面板内不得出现这类措辞
+    const text = (await panel.innerText()).toLowerCase();
+    for (const banned of ['ai ', 'ai已', '智能推荐', '一键生成', '✨', '🚀']) {
+      expect(text.includes(banned), `面板不应出现「${banned}」`).toBeFalsy();
+    }
+
+    // 截图时禁用动画：页面里的 framer-motion / 3D 画布会一直动，
+    // 不禁用的话 Playwright 会等"字体加载 + 动画稳定"直到超时。
+    await page.screenshot({ path: '../work/plan-governance.png', animations: 'disabled', fullPage: false });
+  });
+});
