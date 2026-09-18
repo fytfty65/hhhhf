@@ -36,7 +36,7 @@
 | 5 | `getCleanPhotoUrl` → `lib/lobbyUtils.ts`（具名导出）；`PoiImage`+`PoiImageProps`(123) → `components/PoiImage.tsx` | ✅ 提交 `9b22dee`（门禁全绿；**顺序已调整**，见下） |
 | 6 | `MafengwoStylePanel`(403) → `components/MafengwoStylePanel.tsx`；宿主随之清理 10 个失效 import | ✅ 提交 `6cadefd`（门禁全绿） |
 | 7 | `shortenRegionName`/`tryExtractJson`/`normalizeLnglat`/`extractStreamingRoutes` → `lib/lobbyUtils.ts`（具名导出）；`OmniLogo`(21，纯 SVG) → `components/OmniLogo.tsx`；`AuthPortalScreen`(232) → `components/AuthPortalScreen.tsx` | ✅ 提交 `1977fe3`（门禁全绿） |
-| 8 | `UnifiedWorkspace`（1,357 行，占宿主 60%）按面板继续拆 | ⬜ **未决，需用户确认后再动** |
+| 8 | `UnifiedWorkspace`（1,357 行，占宿主 60%）按面板继续拆 | ⛔ **用户 2026-09-18 决定不拆，本项关闭** |
 | 收尾 | 体积/行数对比 + 全门禁复跑 | ✅ 见下（批 7 后已完成一次） |
 
 **顺序调整说明**：原计划批 5 是 `MafengwoStylePanel`。依赖分析发现它引用了仍在宿主里的 `PoiImage` 与 `getCleanPhotoUrl`，先抽它会形成 `ContextualLobby ⇄ MafengwoStylePanel` 循环导入，故改为先抽叶子（PoiImage + 工具函数），再抽 `MafengwoStylePanel`。
@@ -65,7 +65,7 @@
 4. ✅ 已完成（提交 `97a59b0`）：收尾类型清理 —— ① 修复上一轮我自己引入的回归（宿主 type import 里 `CommunityComment`/`ProfileTrip` 实际未使用）；② 删除宿主的死类型 `interface CommunityPostItem`（这三个类型在拆分前的 `ebd2d90` 里就都是"只有定义、从无引用"的死代码）及其孤立区块注释；③ `components/DeductionPanel.tsx` 的本地 `DeductionPanelProps` 去重为规范定义（规范版多一个可选字段 `reasoningSteps?`，编译期放宽、运行时无影响）。宿主 2,219 → 2,202 行，且宿主与本次改动文件经脚本复检**均无未用 import**。
 5. `work/` 下的抽取脚本（`extract-split2.ps1`、`move-to-lib.ps1`、`cleanup-imports.ps1`、`fix-imports7.ps1`、`extract-auth.ps1`、`dedupe-types*.ps1`、`cleanup-types-final.ps1`）是本次拆分的工具，`work/` 已被 gitignore，不会进仓库；续做时可复用。**脚本编写注意**：插入换行必须写 `${eol}`（写 `$eolxxx` 会被当成变量名），多行字面量要同时兼容 LF/CRLF，`git commit -m` 传多行消息在本机 PowerShell 下会被解析坏，改用 `git commit -F 消息文件`。
 
-> **清理项已全部完成。剩余唯一工作 = `UnifiedWorkspace`（1,357 行）的拆分，按约定需用户先确认（选项：① 停 ② 只抽无状态展示子块 ③ 按相位彻底拆）。**
+> **清理项已全部完成。`UnifiedWorkspace`（1,357 行）用户已于 2026-09-18 明确「不用拆」→ 拆分任务到此结束，不再有未决项。** 后续工作转为规划质量与产品能力（见下「功能批次」）。
 
 ### 功能批次（拆分任务之后，同一门禁协议）
 
