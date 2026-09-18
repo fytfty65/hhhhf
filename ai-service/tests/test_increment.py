@@ -144,5 +144,48 @@ class TestMeasureIncrement(unittest.TestCase):
         self.assertGreater(report["disturbance"], 0.8)
 
 
+class TestTierPolicy(unittest.TestCase):
+    """升/降档要真的影响候选选择与排序偏好（用户："要接入排序权重"）。"""
+
+    def test_policy_from_upgrade_and_downgrade(self):
+        from core.increment import tier_policy
+
+        delta = parse_increment("住宿住好一点，吃的省一点")
+        policy = tier_policy(delta)
+        self.assertEqual(policy.get("hotel"), 1)
+        self.assertEqual(policy.get("food", 0) < 0, True)
+
+    def test_ranking_preferences_mapping(self):
+        from core.increment import delta_to_ranking_preferences
+
+        self.assertEqual(
+            delta_to_ranking_preferences({"upgrade": {"hotel": "quality"}}).get("accommodation_style"),
+            "品质",
+        )
+        prefs = delta_to_ranking_preferences({"downgrade": {"hotel": "economy", "food": "economy"}})
+        self.assertEqual(prefs.get("accommodation_style"), "经济")
+        self.assertEqual(prefs.get("budget"), "low")
+
+    def test_upgrade_quota_prefers_higher_tier_candidate(self):
+        pool = {
+            "hotel": [
+                {"name": "青旅床位", "price": 80, "price_tier": "economy", "tier_level": 1, "rating": "4.1"},
+                {"name": "精品酒店", "price": 800, "price_tier": "quality", "tier_level": 3, "rating": "4.8"},
+            ]
+        }
+        result = enforce_quota(PLAN, {"hotel": 1}, pool=pool, context={"days": 2}, tier_policy_map={"hotel": 1})
+        self.assertEqual(result["added"][0]["name"], "精品酒店")
+
+    def test_downgrade_quota_prefers_cheapest_candidate(self):
+        pool = {
+            "hotel": [
+                {"name": "青旅床位", "price": 80, "price_tier": "economy", "tier_level": 1, "rating": "4.1"},
+                {"name": "精品酒店", "price": 800, "price_tier": "quality", "tier_level": 3, "rating": "4.8"},
+            ]
+        }
+        result = enforce_quota(PLAN, {"hotel": 1}, pool=pool, context={"days": 2}, tier_policy_map={"hotel": -1})
+        self.assertEqual(result["added"][0]["name"], "青旅床位")
+
+
 if __name__ == "__main__":
     unittest.main()

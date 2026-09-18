@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 from .budget_planner import propose_fallback
 from .candidate_index import apply_exclusions
-from .increment import enforce_quota, measure_increment
+from .increment import delta_to_ranking_preferences, enforce_quota, measure_increment, tier_policy
 from .plan_quality import plan_quality_snapshot
 from .poi_pool import build_candidate_pool, intents_for_plan
 
@@ -57,7 +57,10 @@ async def prepare_governance(
     """
     increment = increment or {}
     exclude_terms = list(exclude_terms) + list(increment.get("exclude") or [])
-    snapshot = plan_quality_snapshot(context, plan, expectations=expectations, signals=signals)
+    policy = tier_policy(increment)
+    snapshot = plan_quality_snapshot(
+        context, plan, expectations=expectations, signals=signals, tier_policy=policy
+    )
 
     quota = {k: v for k, v in (increment.get("quota") or {}).items() if isinstance(v, int) and v}
     needs_pool = (
@@ -94,17 +97,19 @@ async def prepare_governance(
             pool=pool,
             context=context,
             max_nodes_per_day=int(context.get("max_nodes_per_day") or 0) or None,
+            tier_policy_map=policy,
         )
         working_plan = quota_result["plan"]
 
     if pool:
-        # 有候选池 → 用**最终方案**重算，让 fallback 基于真实候选做同类替换
+        # 有候选池 → 用**最终方案**重算，让 fallback 基于真实候选做同类替换（升档类别会被保护）
         snapshot = plan_quality_snapshot(
             context,
             working_plan,
             expectations=expectations,
             signals=signals,
             candidates_by_intent=pool,
+            tier_policy=policy,
         )
 
     increment_metrics = None
@@ -120,6 +125,8 @@ async def prepare_governance(
         "exclusions": exclusions,
         "quota": quota_result,
         "increment": increment_metrics,
+        "tier_policy": policy,
+        "ranking_preferences": delta_to_ranking_preferences(increment),
         "plan": working_plan,
     }
 

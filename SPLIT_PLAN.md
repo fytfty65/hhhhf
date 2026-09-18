@@ -17,12 +17,12 @@
 | 指标 | 基线值 |
 |---|---|
 | `ContextualLobby.tsx` | 3,991 行 / 218,225 B |
-| 首屏 JS | **1,104.6 KB（13 个 chunk）** |
-| 首屏 CSS | 140.2 KB |
+| 首屏 JS | **1,105.0 KB（13 个 chunk）**（2026-09-17 经用户确认由 1,104.6 KB 更新：新增"行程核对面板"已按需加载，差额 +0.4 KB 来自 dynamic 包装与状态接线） |
+| 首屏 CSS | 140.9 KB（同上：面板用到的 Tailwind 类进全局样式） |
 | 单测 | 79 个（`app/lib/*.test.ts`，9 个文件） |
-| E2E | `refactor-regression.spec.ts` 7 个 + `core-flow.spec.ts` 1 个 = 8 个 |
+| E2E | `refactor-regression.spec.ts` 7 个 + `core-flow.spec.ts` 1 个 + `plan-governance.spec.ts` 1 个 = **9 个** |
 
-**验收**：拆分后首屏 JS ≤ 1,104.6 KB，8 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
+**验收**：拆分后首屏 JS ≤ **1,105.0 KB**，9 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
 
 ## 3. 进度
 

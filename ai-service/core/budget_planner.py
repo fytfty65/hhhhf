@@ -167,17 +167,18 @@ def propose_fallback(
     shortfall: Optional[float] = None,
     candidates_by_intent: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
     max_actions: int = 6,
+    tier_policy_map: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, Any]:
     """在"不动天数/城市"的前提下给出兜底（平替）方案。
 
-    candidates_by_intent：同义候选池（键为意图标签），每个候选形如
-    {"name","price","price_tier","tier_level","lnglat"}；按价格从低到高比较。
-    没有候选池时只给动作策略（不虚构替代品）——**绝不编造"某店替代某店"**。
+    `tier_policy_map`：正数表示该意图被用户要求**升档**，兜底时**不得**对它降档（保护用户明确要求）。
+    负数表示用户接受降档，可优先对它动手。
     """
     nodes = [dict(node) for node in nodes_of(plan)]
     report = budget_report(context, plan)
     gap = float(shortfall if shortfall is not None else report["shortfall"])
     candidates_by_intent = candidates_by_intent or {}
+    policy = dict(tier_policy_map or {})
 
     actions: List[Dict[str, Any]] = []
     substitutions: List[Dict[str, Any]] = []
@@ -186,11 +187,13 @@ def propose_fallback(
     used_replacements: List[str] = []  # 已用过的替代不再复用（否则两个点会换成同一个地方）
 
     if gap > 0:
-        # ① / ② / ⑤ 降档：同意图候选里找更便宜的
+        # ① / ② / ⑤ 降档：同意图候选里找更便宜的（用户明确要求升档的类别跳过，不擅自降级）
         for node in list(nodes):
             if remaining <= 0 or len(actions) >= max_actions:
                 break
             intent = _intent_of(node)
+            if policy.get(intent, 0) > 0:
+                continue  # 用户点名要"住好一点/吃好一点"，兜底不动它
             pool = sorted(
                 [c for c in (candidates_by_intent.get(intent) or [])],
                 key=lambda c: float(c.get("price") or 0),

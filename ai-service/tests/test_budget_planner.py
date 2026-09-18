@@ -74,7 +74,29 @@ class TestBudgetReport(unittest.TestCase):
         self.assertEqual(budget_report({"days": 1}, plan)["status"], "no_budget")
 
 
-class TestFallback(unittest.TestCase):
+    def test_upgraded_intent_is_protected_from_downgrade(self):
+        """用户明确说"住宿住好一点"时，兜底不得把这部分降档。"""
+        plan = {"route": [
+            node("品质酒店", "¥1800", kind="住宿", day=1),
+            node("贵餐厅", "¥600", kind="餐饮", day=1),
+            node("景点", "¥50", kind="文化", day=1),
+            node("面馆", "¥50", kind="餐饮", day=2),
+            node("城墙", "¥50", kind="文化", day=2),
+        ]}
+        candidates = {
+            "hotel": [{"name": "青旅床位", "price": 80, "price_tier": "economy"}],
+            "food": [{"name": "便宜小吃", "price": 20, "price_tier": "economy"}],
+        }
+        protected = propose_fallback(CONTEXT, plan, shortfall=1000, candidates_by_intent=candidates,
+                                     tier_policy_map={"hotel": 1})
+        self.assertTrue(all(item.get("to") != "青旅床位" for item in protected["substitutions"]),
+                        f"升档类别被降级了: {protected['substitutions']}")
+
+        unprotected = propose_fallback(CONTEXT, plan, shortfall=1000, candidates_by_intent=candidates)
+        self.assertTrue(any(item.get("to") == "青旅床位" for item in unprotected["substitutions"]))
+
+
+class TestFallbackRegressions(unittest.TestCase):
     def test_tier_down_uses_cheaper_same_intent_candidate(self):
         plan = {"route": [
             node("豪华博物馆", "¥500", kind="博物馆"),

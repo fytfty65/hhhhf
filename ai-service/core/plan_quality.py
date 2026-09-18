@@ -722,6 +722,7 @@ def plan_quality_snapshot(
     signals: Optional[Mapping[str, Any]] = None,
     candidates_by_intent: Optional[Mapping[str, Any]] = None,
     include_fallback: bool = True,
+    tier_policy: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, Any]:
     """给调用方（`api/agent.py`、CLI）一个"一次调用拿到全部结论"的入口。
 
@@ -778,7 +779,12 @@ def plan_quality_snapshot(
     if include_fallback and report["budget"]["status"] in {"over", "at_risk"}:
         from .budget_planner import propose_fallback  # 延迟导入（见模块头说明）
 
-        snapshot["fallback"] = propose_fallback(context, plan, candidates_by_intent=candidates_by_intent)
+        snapshot["fallback"] = propose_fallback(
+            context,
+            plan,
+            candidates_by_intent=candidates_by_intent,
+            tier_policy_map=tier_policy,
+        )
     return snapshot
 
 

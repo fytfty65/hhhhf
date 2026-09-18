@@ -3308,6 +3308,12 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["candidate_pool"] = _governance["pool_sizes"]
                             if _governance.get("increment"):
                                 final_data["increment"] = _governance["increment"]
+                            # 升/降档 → 排序偏好（网关 ranker 下次推演会读这些键；本次的配额填充与
+                            # 兜底方向已经在核心层按同一份策略执行）
+                            if _governance.get("tier_policy"):
+                                final_data["tier_policy"] = _governance["tier_policy"]
+                            if _governance.get("ranking_preferences"):
+                                final_data["ranking_preferences"] = _governance["ranking_preferences"]
                             if _snapshot.get("fallback"):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案

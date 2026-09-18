@@ -137,16 +137,24 @@ def parse_increment(
             quota[intent] = quota.get(intent, 0) - count
             matched.append(f"reduce:{intent}")
 
-    # ---- 档位：住好一点 / 省一点 ----
+    # ---- 档位：住好一点 / 省一点（按分句归属意图，避免"吃的省一点"被套到住宿上） ----
     upgrade: Dict[str, str] = {}
     downgrade: Dict[str, str] = {}
-    if any(hint in raw for hint in UPGRADE_HINTS):
-        upgrade["hotel"] = "quality"
-        matched.append("upgrade:hotel")
-    if any(hint in raw for hint in DOWNGRADE_HINTS):
-        downgrade["hotel"] = "economy"
-        downgrade["food"] = "economy"
-        matched.append("downgrade:cost")
+    clauses = [part for part in re.split(r"[，,。;；、\s]+", raw) if part]
+    for clause in clauses:
+        clause_intent = _detect_intent(clause)
+        if any(hint in clause for hint in UPGRADE_HINTS):
+            target = clause_intent or "hotel"
+            upgrade[target] = "quality"
+            matched.append(f"upgrade:{target}")
+        if any(hint in clause for hint in DOWNGRADE_HINTS):
+            if clause_intent in {"hotel", "food"}:
+                downgrade[clause_intent] = "economy"
+                matched.append(f"downgrade:{clause_intent}")
+            else:
+                downgrade["hotel"] = "economy"
+                downgrade["food"] = "economy"
+                matched.append("downgrade:cost")
 
     # ---- 结构：天数 / 预算 ----
     days: Optional[int] = None
@@ -169,6 +177,42 @@ def parse_increment(
         "matched": matched,
         "is_noop": not (exclude or quota or upgrade or downgrade or days or budget),
     }
+
+
+TIER_POLICY_SYNONYMS: Dict[str, int] = {"economy": -1, "cheap": -1, "budget": -1, "quality": 1, "premium": 1, "luxury": 2}
+
+
+def tier_policy(delta: Mapping[str, Any]) -> Dict[str, int]:
+    """把 upgrade/downgrade 解析结果翻译成**档位策略**：正=升档（偏好更高档/更高分），负=降档（偏好更便宜）。
+
+    `{"hotel": 1, "food": -1}` 表示"住宿住好一点、餐饮省一点"。
+    """
+    policy: Dict[str, int] = {}
+    for label, target in (delta.get("upgrade") or {}).items():
+        policy[label] = max(policy.get(label, 0), TIER_POLICY_SYNONYMS.get(str(target).lower(), 1))
+    for label, target in (delta.get("downgrade") or {}).items():
+        policy[label] = min(policy.get(label, 0), TIER_POLICY_SYNONYMS.get(str(target).lower(), -1))
+    return {label: value for label, value in policy.items() if value}
+
+
+def delta_to_ranking_preferences(delta: Mapping[str, Any]) -> Dict[str, Any]:
+    """把增量映射成**排序器认得的偏好键**。
+
+    网关的 `service/planning_ranker.go` 会读这些键（关键词命中 +0.05；`budget=low` 会触发
+    更低价的定量 nudge），Python 侧的配额填充与兜底方向也读同一份策略，避免两边各说各话。
+    """
+    preferences: Dict[str, Any] = {}
+    upgrades = delta.get("upgrade") or {}
+    downgrades = delta.get("downgrade") or {}
+    if "hotel" in upgrades:
+        preferences["accommodation_style"] = "品质"
+    if "hotel" in downgrades:
+        preferences["accommodation_style"] = "经济"
+    if downgrades:
+        preferences["budget"] = "low"
+    if "food" in upgrades:
+        preferences["style"] = "地道品质"
+    return preferences
 
 
 def _count_by_intent(plan: Any) -> Dict[str, int]:
@@ -222,14 +266,17 @@ def enforce_quota(
     pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
     context: Optional[Mapping[str, Any]] = None,
     max_nodes_per_day: Optional[int] = None,
+    tier_policy_map: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, Any]:
     """按配额增/减某类节点；**保留一体化底线**（住宿/正餐的存在性不会被削减到 0）。
 
-    返回 `{plan, added[], removed[], unmet{}, disclosure}`（不修改传入 plan）。
+    `tier_policy_map`：`{"hotel": 1}` 表示这类要**升档**（补点时优先更高档/更高分），
+    负数表示降档（优先更便宜）。不传则维持"便宜优先"的原有行为。
     """
     nodes = [dict(node) for node in nodes_of(plan)]
     context = context or {}
     pool = pool or {}
+    policy = dict(tier_policy_map or {})
     added: List[Dict[str, Any]] = []
     removed: List[str] = []
     unmet: Dict[str, int] = {}
@@ -240,14 +287,23 @@ def enforce_quota(
 
     for intent, delta in (quota or {}).items():
         if delta > 0:
-            current = sum(1 for node in nodes if intent_of(node) == intent)
             needed = delta
             candidates = [
                 item
                 for item in (pool.get(intent) or [])
                 if normalize_text(item.get("name")) not in used_names
             ]
-            candidates.sort(key=lambda item: (item.get("price") is None, float(item.get("price") or 0)))
+            if policy.get(intent, 0) > 0:
+                # 升档：优先档位高、评分高的候选（价格只作次序）
+                candidates.sort(
+                    key=lambda item: (
+                        -int(item.get("tier_level") or 0),
+                        -float(item.get("rating") or 0),
+                        float(item.get("price") or 0),
+                    )
+                )
+            else:
+                candidates.sort(key=lambda item: (item.get("price") is None, float(item.get("price") or 0)))
             for candidate in candidates:
                 if needed <= 0:
                     break
