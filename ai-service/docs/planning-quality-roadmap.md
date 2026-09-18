@@ -54,9 +54,17 @@
 |---|---|---|
 | 1 | 骨架 + 预算分配器（三级价格模型）+ 两个新硬门禁 | ✅ 完成（提交 `7ff3fb8`）：`core/itinerary_skeleton.py`、`core/budget_planner.py`、门禁接入 + 27 项单测 |
 | 1.5 | **接线到真实管线**：`agent.py` 在 `final_route` 下发前调用 `plan_quality_snapshot()`，随 payload 附 `quality` / `budget_report` / `fallback`（受 try/except 保护，失败不影响出方案） | ✅ 完成：业务逻辑在 core（可单测），agent.py 只做薄接线；已通过 `py_compile`、应用导入检查、5 项 snapshot 单测 |
-| 2 | 平替库（真实候选池按意图归档）+ `fallback_quality` 维度 + 前端展示 disclosure | ⬜ 待做（当前无候选池时只能"删/降"，不能"换同类"） |
-| 3 | 增量 delta + 配额 + `increment_responsiveness`（服务里已有 `is_refinement` 分支可复用） | ⬜ 待做 |
+| 2 | 平替库（真实候选池按意图归档）+ `fallback_quality` 维度 + 前端展示 disclosure | 🟡 部分完成：`core/candidate_index.py`（意图归档 / 同类替换 / **排他替换** `apply_exclusions`）已实现并单测；**真实候选池接入**与 `fallback_quality` 维度待做 |
+| 3 | 增量 delta + 配额 + `increment_responsiveness`（服务里已有 `is_refinement` 分支可复用） | ⬜ 待做（`apply_exclusions` 已提供"排他+替换"的执行层，缺的是从用户话里解析 delta 并接进 `is_refinement` 路径） |
 | 4 | Critic/Repair 闭环（LLM 只当候选生成器） | ⬜ 待做 |
+
+### 用户场景支持现状（2026-09-17 追加）
+
+| 场景 | 支持程度 | 关键实现 |
+|---|---|---|
+| **一个月（30 天）长途** | 🟡 确定性层已支持 | `itinerary_skeleton.segment_days(30)` → 5 段（7/7/7/7/2）；`horizon_advisories()` 给出"按周分段生成、住宿按城市聚合、每 7 天至少 1 个休整日"；骨架/预算/评分本就按天计算。**缺口**：单次 LLM 生成 150+ 节点不可靠，需要真正的"分段生成 + 段间滚动上下文"（未做） |
+| **二次说"不想去这些点，换掉"** | 🟡 执行层已就绪 | `candidate_index.apply_exclusions()`：点名剔除 → 从候选池补同类（保证不重复替换同一候选、一体化不破）→ 候选池没有就如实告知"没换成"、点名地点本就不在方案里也如实告知。**缺口**：候选池接入 + 从用户话里解析 exclude（步 3） |
+| **"有山有水" + 吃住怎么安排** | ✅ 已可判定 | 复合意图 `mountain_water`（山、水两组**必须同时命中**，只排山不算满足）；新维度 `anchoring`（当天餐饮/住宿到玩点最近距离 ≤15km，**缺坐标不给满分**），权重 0.15 |
 
 ### 已下发给前端的字段（步 1.5）
 

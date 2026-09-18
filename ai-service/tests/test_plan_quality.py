@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.itinerary_skeleton import build_skeleton, horizon_advisories, segment_days  # noqa: E402
 from core.plan_quality import (  # noqa: E402
     DEFAULT_WEIGHTS,
     check_hard_constraints,
@@ -21,6 +22,7 @@ from core.plan_quality import (  # noqa: E402
     parse_clock,
     parse_open_window,
     plan_quality_snapshot,
+    score_anchoring,
     score_diversity,
     score_pacing,
     score_preference_coverage,
@@ -366,6 +368,94 @@ class TestQualitySnapshot(unittest.TestCase):
         self.assertEqual(snapshot["budget"]["status"], "unverifiable")
         self.assertEqual(snapshot["budget"]["confidence"], "low")
         self.assertIsNone(snapshot["fallback"])  # 未核实不该触发"降级"，而是提示补数据
+
+
+class TestCompoundIntentAndAnchoring(unittest.TestCase):
+    """用户场景：'想去看有山有水的地方' + '中间的吃住怎么安排'。"""
+
+    def test_mountain_water_requires_both(self):
+        context = {"preferences": {"interest": ["有山有水"]}}
+        only_mountain = {"route": [
+            node("华山", 1, "09:00", node_type="山景"),
+            node("酒店", 1, "20:00", node_type="住宿", open_time="00:00-23:59"),
+        ]}
+        with_water = {"route": [
+            node("华山", 1, "09:00", node_type="山景"),
+            node("洱海", 1, "15:00", node_type="湖泊"),
+            node("酒店", 1, "20:00", node_type="住宿", open_time="00:00-23:59"),
+        ]}
+        report_only_land = score_preference_coverage(context, only_mountain)
+        report_both = score_preference_coverage(context, with_water)
+        self.assertIn("mountain_water", report_only_land["missing"])
+        self.assertIn("mountain_water", report_both["addressed"])
+        self.assertGreater(report_both["value"], report_only_land["value"])
+
+    def test_explicit_phrase_triggers_compound(self):
+        report = score_preference_coverage({"request": "我想去有山有水的地方"}, good_plan())
+        self.assertIn("mountain_water", report["compound_requests"])
+
+    def test_anchoring_rewards_food_and_hotel_near_play(self):
+        near = {"route": [
+            node("雪山景区", 1, "09:00", (100.10, 25.10), node_type="山景"),
+            node("山下农家菜", 1, "12:30", (100.11, 25.11), node_type="餐饮"),
+            node("山脚民宿", 1, "20:00", (100.12, 25.12), node_type="住宿", open_time="00:00-23:59"),
+        ]}
+        far = {"route": [
+            node("雪山景区", 1, "09:00", (100.10, 25.10), node_type="山景"),
+            node("城里餐厅", 1, "12:30", (102.00, 27.00), node_type="餐饮"),
+            node("机场酒店", 1, "20:00", (102.20, 27.20), node_type="住宿", open_time="00:00-23:59"),
+        ]}
+        near_report = score_anchoring({}, near)
+        far_report = score_anchoring({}, far)
+        self.assertEqual(near_report["value"], 1.0)
+        self.assertLess(far_report["value"], 1.0)
+        self.assertGreaterEqual(len(far_report["far_nodes"]), 2)
+
+    def test_anchoring_does_not_reward_missing_coords(self):
+        no_coords = {"route": [
+            {"day": 1, "name": "雪山景区", "type": "山景", "time": "09:00"},
+            {"day": 1, "name": "山下农家菜", "type": "餐饮", "time": "12:30"},
+        ]}
+        self.assertEqual(score_anchoring({}, no_coords)["value"], 0.0)
+
+
+class TestHorizon(unittest.TestCase):
+    """用户场景：一个月（30 天）的行程。"""
+
+    def test_segments_split_long_trip(self):
+        segments = segment_days(30)
+        self.assertEqual(len(segments), 5)
+        self.assertEqual(segments[0], {"start": 1, "end": 7, "days": 7})
+        self.assertEqual(segments[-1], {"start": 29, "end": 30, "days": 2})
+
+    def test_short_trip_has_single_segment(self):
+        self.assertEqual(segment_days(3), [{"start": 1, "end": 3, "days": 3}])
+
+    def test_advisories_for_long_trip(self):
+        advisories = horizon_advisories({"days": 30})
+        self.assertTrue(any("分段" in text for text in advisories))
+        self.assertTrue(any("休整" in text for text in advisories))
+        self.assertEqual(horizon_advisories({"days": 5}), [])
+
+    def test_skeleton_supports_thirty_days(self):
+        skeleton = build_skeleton({"days": 30, "preferences": {"pace": "normal"}})
+        self.assertEqual(len(skeleton["days"]), 30)
+        self.assertEqual(skeleton["segments"][0]["days"], 7)
+        self.assertTrue(skeleton["advisories"])
+
+    def test_snapshot_exposes_horizon(self):
+        plan = {"route": [
+            {"day": 1, "name": "酒店", "type": "住宿", "time": "09:00", "cost_estimate": "¥100",
+             "data_sources": {"cost_estimate": "amap"}},
+            {"day": 1, "name": "博物馆", "type": "博物馆", "time": "10:00", "cost_estimate": "¥0",
+             "data_sources": {"cost_estimate": "amap"}},
+            {"day": 1, "name": "面馆", "type": "餐饮", "time": "12:00", "cost_estimate": "¥30",
+             "data_sources": {"cost_estimate": "amap"}},
+        ]}
+        snapshot = plan_quality_snapshot({"days": 30, "budget": 20000}, plan)
+        self.assertEqual(snapshot["horizon"]["days"], 30)
+        self.assertEqual(len(snapshot["horizon"]["segments"]), 5)
+        self.assertTrue(snapshot["horizon"]["advisories"])
 
 
 if __name__ == "__main__":

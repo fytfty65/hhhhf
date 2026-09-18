@@ -53,6 +53,41 @@ def _is_food(node: Mapping[str, Any]) -> bool:
     return any(keyword in text for keyword in PREFERENCE_TAXONOMY["food"])
 
 
+LONG_TRIP_DAYS = 14
+CHUNK_DAYS = 7
+
+
+def segment_days(days: int, chunk: int = CHUNK_DAYS) -> List[Dict[str, int]]:
+    """把长行程按 chunk 天分段（供"分段生成 + 分段校验"使用，避免单次生成 150+ 节点）。
+
+    例：30 天 → [{start:1,end:7,days:7}, {8,14,7}, {15,21,7}, {22,28,7}, {29,30,2}]
+    """
+    total = max(1, int(days or 1))
+    size = max(1, int(chunk or CHUNK_DAYS))
+    segments: List[Dict[str, int]] = []
+    start = 1
+    while start <= total:
+        end = min(total, start + size - 1)
+        segments.append({"start": start, "end": end, "days": end - start + 1})
+        start = end + 1
+    return segments
+
+
+def horizon_advisories(context: Mapping[str, Any]) -> List[str]:
+    """超长行程的顾问提示：只提示，不改行为（是否分段由调用方/产品决定）。"""
+    days = max(1, int(context.get("days") or context.get("trip_days") or 1))
+    advisories: List[str] = []
+    if days >= LONG_TRIP_DAYS:
+        segments = segment_days(days)
+        advisories.append(
+            f"行程 {days} 天属超长行程：建议按 {CHUNK_DAYS} 天分段生成与校验"
+            f"（共 {len(segments)} 段），否则单次生成节点过多、可靠性下降"
+        )
+        advisories.append("住宿建议按'同一城市连续住'聚合，避免逐夜重复下单与比价成本")
+        advisories.append("长行程必须设置中途休整日（建议每 7 天至少 1 天低强度）")
+    return advisories
+
+
 def skeleton_requirements(context: Mapping[str, Any], expectations: Optional[Mapping[str, Any]] = None) -> Dict[str, int]:
     """行程至少要有的槽位数。
 
@@ -98,6 +133,8 @@ def build_skeleton(context: Mapping[str, Any], expectations: Optional[Mapping[st
         "requirements": requirements,
         "pace": _pace_of(context),
         "play_slots_per_day": play_slots,
+        "segments": segment_days(requirements["days"]),
+        "advisories": horizon_advisories(context),
         "note": "骨架先定、候选后填：住宿/正餐/玩点的存在性由结构保证，不由 LLM 自觉保证。",
     }
 

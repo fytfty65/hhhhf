@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .plan_quality import PREFERENCE_TAXONOMY, cost_of, node_lnglat, node_name, nodes_of
 from .plan_quality import haversine_km
+from .candidate_index import intent_of as _intent_of
 
 VERIFIED_SOURCES = {
     "provider", "vendor", "amap", "rollinggo", "seniverse", "official", "ticket", "api", "supplier", "official_site",
@@ -34,17 +35,6 @@ ESTIMATED_SOURCES = {
 }
 # 兜底动作优先级（前面的先做，尽量少动结构）
 FALLBACK_ORDER = ("tier_down_play", "tier_down_food", "drop_secondary_play", "swap_nearer", "lodging_downgrade", "transport_downgrade")
-
-
-def _intent_of(node: Mapping[str, Any]) -> str:
-    text = f"{node_name(node)} {node.get('type') or ''} {node.get('desc') or ''}"
-    tags = node.get("tags") or []
-    if isinstance(tags, list):
-        text += " " + " ".join(str(tag) for tag in tags)
-    for label, keywords in PREFERENCE_TAXONOMY.items():
-        if any(keyword in text for keyword in keywords):
-            return label
-    return "other"
 
 
 def _is_hotel(node: Mapping[str, Any]) -> bool:

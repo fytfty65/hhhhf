@@ -34,10 +34,11 @@ from .simulation import category_of, cost_of, dwell_minutes_of, travel_minutes_o
 # 默认参数（都可被 context / expectations 覆盖，禁止在代码里偷偷放宽）
 # --------------------------------------------------------------------------
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "preference_coverage": 0.30,
-    "pacing": 0.25,
-    "space_efficiency": 0.20,
+    "preference_coverage": 0.25,
+    "pacing": 0.20,
+    "space_efficiency": 0.15,
     "truthfulness": 0.15,
+    "anchoring": 0.15,
     "diversity": 0.10,
 }
 
@@ -314,7 +315,7 @@ def check_hard_constraints(
 # --------------------------------------------------------------------------
 # 偏好标签 -> 命中关键词（只做可判定的粗分类，避免"感觉上满足"）
 PREFERENCE_TAXONOMY: Dict[str, Tuple[str, ...]] = {
-    "food": ("餐", "食", "小吃", "夜市", "老字号", "火锅", "面", "饭", "茶", "咖啡", "甜品", "烧烤"),
+    "food": ("餐", "食", "小吃", "夜市", "老字号", "火锅", "面", "饭", "茶", "咖啡", "甜品", "烧烤", "馍", "馆子", "饺子", "包子", "串", "粥", "米粉"),
     "scenic": ("景区", "风景", "公园", "山", "湖", "江", "河", "海", "岛", "峡", "瀑布", "草原", "森林"),
     "cultural": ("博物馆", "古迹", "遗址", "寺", "庙", "塔", "古城", "古镇", "文化", "美术馆", "纪念馆", "书院"),
     "shopping": ("购物", "商场", "商圈", "步行街", "市集", "市场", "超市", "奥莱"),
@@ -327,6 +328,27 @@ PREFERENCE_TAXONOMY: Dict[str, Tuple[str, ...]] = {
     "market": ("菜市场", "集市", "老街", "小吃街", "美食街"),
     "landmark": ("地标", "广场", "塔", "桥", "钟楼", "鼓楼", "城墙"),
 }
+
+# 复合意图：必须**同时**命中每一组关键词才算满足（避免"有山有水"只排了山就算过）
+COMPOUND_INTENTS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
+    "mountain_water": (
+        ("山", "峰", "峡谷", "石林", "雪山", "丘陵", "崖"),
+        ("湖", "江", "河", "海", "溪", "瀑", "水", "滩", "泉", "岛", "湿地"),
+    ),
+}
+COMPOUND_TRIGGER_WORDS = ("山水", "有山有水", "依山傍水", "山和水", "湖光山色")
+
+
+def _compound_requests(text: str) -> List[str]:
+    """识别复合意图：显式说法（"有山有水"）或同时出现两组关键词。"""
+    requested: List[str] = []
+    for label, groups in COMPOUND_INTENTS.items():
+        if any(word in text for word in COMPOUND_TRIGGER_WORDS):
+            requested.append(label)
+            continue
+        if all(any(keyword in text for keyword in group) for group in groups):
+            requested.append(label)
+    return requested
 
 
 def _signals_to_tags(signals: Optional[Mapping[str, Any]], context: Mapping[str, Any]) -> List[str]:
@@ -379,11 +401,31 @@ def score_preference_coverage(
     for label in tags:
         keywords = PREFERENCE_TAXONOMY[label]
         (addressed if any(k in haystack for k in keywords) else missing).append(label)
+
+    # 复合意图（如"有山有水"要求两类**都**出现，而不是命中任意一类就算满足）
+    preferences = context.get("preferences") if isinstance(context.get("preferences"), Mapping) else {}
+    request_text = " ".join(
+        [
+            str((signals or {}).get("interest") or ""),
+            str((signals or {}).get("interests") or ""),
+            str(preferences.get("interest") or ""),
+            str(preferences.get("interests") or ""),
+            str(context.get("request") or ""),
+        ]
+    )
+    compound_requests = _compound_requests(request_text)
+    for label in compound_requests:
+        groups = COMPOUND_INTENTS[label]
+        ok = all(any(keyword in haystack for keyword in group) for group in groups)
+        (addressed if ok else missing).append(label)
+
+    total = len(tags) + len(compound_requests)
     return {
-        "value": _ratio(len(addressed), len(tags)),
-        "requested": tags,
+        "value": _ratio(len(addressed), total),
+        "requested": tags + compound_requests,
         "addressed": addressed,
         "missing": missing,
+        "compound_requests": compound_requests,
     }
 
 
@@ -493,6 +535,67 @@ def score_space_efficiency(context: Mapping[str, Any], plan: Any) -> Dict[str, A
         "max_day_km": round(max(day_km) if day_km else 0.0, 1),
         "long_hops": long_hops,
         "days": days,
+        "coordinate_coverage": round(coverage, 3),
+    }
+
+
+# 吃住到当天玩点的可接受距离（公里）
+ANCHOR_KM = 15.0
+
+
+def _is_anchor_side(node: Mapping[str, Any]) -> bool:
+    """"吃住一侧"的节点（餐饮/住宿）——它们应当贴着当天的玩点。"""
+    text = f"{node_name(node)} {node.get('type') or ''} {node.get('desc') or ''}"
+    tags = node.get("tags") or []
+    if isinstance(tags, list):
+        text += " " + " ".join(str(tag) for tag in tags)
+    return any(keyword in text for keyword in PREFERENCE_TAXONOMY["hotel"]) or any(
+        keyword in text for keyword in PREFERENCE_TAXONOMY["food"]
+    )
+
+
+def score_anchoring(context: Mapping[str, Any], plan: Any) -> Dict[str, Any]:
+    """吃住是否贴着当天玩点 —— "中间的吃住应该如何安排"的可判定版本。
+
+    规则：当天每个餐饮/住宿节点，到当天任一玩点的**最近距离**应 ≤ `ANCHOR_KM`（默认 15km）。
+    缺坐标不计入分子，但按"有坐标占比"折算：**缺数据不给满分**（与空间效率口径一致）。
+    """
+    nodes = nodes_of(plan)
+    if not nodes:
+        return {"value": 0.0, "checked": 0, "within": 0, "threshold_km": ANCHOR_KM, "far_nodes": []}
+
+    by_day: Dict[int, List[Dict[str, Any]]] = {}
+    for index, node in enumerate(nodes, start=1):
+        by_day.setdefault(node_day(node, index), []).append(node)
+
+    checked = within = coord_total = coord_ok = 0
+    far_nodes: List[Dict[str, Any]] = []
+    for day, day_nodes in sorted(by_day.items()):
+        plays = [(node_name(n), node_lnglat(n)) for n in day_nodes if not _is_anchor_side(n)]
+        plays = [(name, pos) for name, pos in plays if pos is not None]
+        for node in day_nodes:
+            if not _is_anchor_side(node):
+                continue
+            coord_total += 1
+            position = node_lnglat(node)
+            if position is None or not plays:
+                continue
+            coord_ok += 1
+            nearest = min(haversine_km(position, play_pos) for _, play_pos in plays)
+            checked += 1
+            if nearest <= ANCHOR_KM:
+                within += 1
+            else:
+                far_nodes.append({"day": day, "name": node_name(node), "distance_km": round(nearest, 1)})
+
+    coverage = _ratio(coord_ok, coord_total, empty=0.0)
+    base = _ratio(within, checked, empty=0.0)
+    return {
+        "value": base * coverage,
+        "checked": checked,
+        "within": within,
+        "threshold_km": ANCHOR_KM,
+        "far_nodes": far_nodes[:8],
         "coordinate_coverage": round(coverage, 3),
     }
 
@@ -625,6 +728,9 @@ def plan_quality_snapshot(
     这样接线本身不需要跑 LLM 就能单测。
     """
     report = evaluate_plan(context, plan, expectations=expectations, signals=signals)
+    from .itinerary_skeleton import horizon_advisories, segment_days  # 延迟导入（见模块头说明）
+
+    days = max(1, int(context.get("days") or context.get("trip_days") or 1))
     snapshot: Dict[str, Any] = {
         "quality": {
             "score": report["score"],
@@ -636,6 +742,7 @@ def plan_quality_snapshot(
         },
         "budget": report["budget"],
         "skeleton": report["skeleton"],
+        "horizon": {"days": days, "segments": segment_days(days), "advisories": horizon_advisories(context)},
         "fallback": None,
     }
     if include_fallback and report["budget"]["status"] in {"over", "at_risk"}:
@@ -659,6 +766,7 @@ def evaluate_plan(
         "pacing": score_pacing(context, plan, expectations),
         "space_efficiency": score_space_efficiency(context, plan),
         "truthfulness": score_truthfulness(plan),
+        "anchoring": score_anchoring(context, plan),
         "diversity": score_diversity(plan),
     }
     active_weights = dict(DEFAULT_WEIGHTS)

@@ -7,6 +7,7 @@
     "机器会自动检查：天数覆盖、预算（未知价格记为『未核实』而非 0）、must_have、时间窗与单日时序、开放时间冲突（缺数据记『未核实』）。",
     "must_not 目前是**人工评审参考**（例如『博物馆排在周一闭馆日』），不参与自动判定；等阶段 1 把闭馆日数据接进来后再自动化。",
     "expect_fallback=true 表示这条用例应当触发兜底（平替）方案：机器判定由阶段 1 步 2 的 fallback_quality 维度消费；现在只作为人工评审与后续实现的依据。",
+    "场景专用字段：horizon（超长行程的分段/休整日要求）、second_turn（二次规划的排他/保留要求）、anchoring_km（吃住到玩点的最大可接受距离）。这三个字段目前供人工评审与后续机器判定使用。",
     "口径：非供应商字段一律『未核实』，评分不奖励无法核实的内容——宁可分低，也不把编造当丰富；预算判定分三级（verified 才算硬结论，estimated 必须标明，unknown 不得声称满足）。"
   ],
   "cases": [
@@ -477,6 +478,60 @@
       },
       "expect_fallback": true,
       "notes": "与既有 budget-student-luoyang-5d 的区别：这条预算更紧且明确要求'免费优先/公交优先'，用来检验兜底动作是否真的按预算选择档位。"
+    },
+    {
+      "id": "long-trip-30d-southwest",
+      "title": "超长行程 · 西南环线 30 天（需分段与休整日）",
+      "request": "我想用一个月（30 天）走一趟西南：成都、昆明、大理、丽江、香格里拉，节奏别太赶，中间要有休息的日子，住宿别天天换",
+      "context": {
+        "city": "成都", "days": 30, "budget": 30000, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["自然风光", "古城", "美食"], "rest_days": true },
+        "season": "春", "weather": "多云"
+      },
+      "signals": { "wants_scenic": true, "wants_cultural": true, "wants_food": true, "pace": "relaxed" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "must_not": ["30 天一次性生成 150+ 节点且无法校验", "全程 30 天每天换住宿", "没有任何休整日"],
+        "min_nodes_per_day": 1, "max_nodes_per_day": 4
+      },
+      "horizon": { "segment_days": 7, "min_rest_days": 3 },
+      "notes": "机制级用例：骨架与分段工具已支持 30 天（segment_days=7 → 5 段 + 休整建议）；但**单次 LLM 生成不可靠**，需要按段生成/校验（阶段 1 后续）。horizon 字段供后续机器判定消费。"
+    },
+    {
+      "id": "second-turn-exclude-places-xian-2d",
+      "title": "二次规划 · 明确换掉不想去的地点（西安两天）",
+      "request": "上次给我排的兵马俑和华清宫我不想去，换成别的，其它的别动",
+      "context": {
+        "city": "西安", "days": 2, "budget": 2000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["历史", "美食"] },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "wants_food": true },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": ["把被点名的地点留在方案里", "整段重排导致其它未点名内容也变了", "换成不存在的地点"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "second_turn": { "exclude": ["兵马俑", "华清宫"], "keep_others": true },
+      "notes": "机制级用例：core/candidate_index.apply_exclusions 已实现排他+同类替换（并保证不重复替换同一候选、候选池没有就如实说'没换成'）；仍需（a）把 gateway 候选池接进来，（b）从用户话里解析出 exclude 列表（阶段 1 步 3）。second_turn 字段供后续机器判定消费。"
+    },
+    {
+      "id": "scenic-mountain-water-3d",
+      "title": "明确'有山有水' · 三天（含吃住怎么安排）",
+      "request": "我就想去有山有水的地方，待 3 天，住得离景区近一点，吃饭也别太远，别每天在路上折腾",
+      "context": {
+        "city": "桂林", "days": 3, "budget": 3500, "members": 2,
+        "preferences": { "pace": "relaxed", "interest": ["有山有水", "自然风光"], "anchor_near_scenic": true },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "interest": ["有山有水"] },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "must_not": ["只有山没有水（或反过来）", "住宿/餐饮离当天玩点超过 15 公里", "单日通勤超过 2 小时"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "anchoring_km": 15,
+      "notes": "机制级用例：复合意图 mountain_water（山、水两组必须同时命中）与 anchoring 维度（吃住到当天玩点 ≤15km，缺坐标不给满分）已实现；anchoring_km 字段供后续机器判定消费。"
     }
   ]
 }
