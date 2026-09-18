@@ -130,6 +130,22 @@ const GOVERNANCE_PAYLOAD = {
     repaired: [{ segment: 2, days: '8-14', added: 3, dropped_out_of_range: [17], reasons: ['long_trip_day_gap'] }],
     repair_failed_segments: [15],
   },
+  // 自动复核（core/plan_review.review_plan）：确定性修掉了什么、还剩几处、缺哪些数据
+  review: {
+    stopped_reason: 'needs_data',
+    rounds: 1,
+    action_count: 3,
+    actions: [
+      { code: 'reschedule', day: 1, node: '陕西历史博物馆', from: '12:30', to: '09:30' },
+      { code: 'reschedule', day: 1, node: '回民街小吃', from: '12:30', to: '11:00' },
+      { code: 'dedupe', day: 2, dropped: ['城墙南门'], count: 1 },
+    ],
+    initial_score: 68.4,
+    final_score: 72.1,
+    initial_hard_failures: 2,
+    remaining_hard: 0,
+    needs_data: ['needs_candidates'],
+  },
 };
 
 async function installMocks(page: Page) {
@@ -191,6 +207,7 @@ async function installMocks(page: Page) {
                     price_audit: payload.governance.price_audit,
                     transport_audit: payload.governance.transport_audit,
                     long_trip: payload.governance.long_trip,
+                    review: payload.governance.review,
                   }),
               }),
             });
@@ -282,6 +299,13 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByText(/第 2 段 · 第 8-14 天/)).toBeVisible();
     await expect(panel.getByText(/18 个节点 · 休整 1 天/)).toBeVisible();
     await expect(panel.getByText(/已重新生成 1 段（第 8-14 天）；未补上 1 段（从第 15 天起）/)).toBeVisible();
+
+    // 自动复核：改了什么、还剩几处、哪些改不动（说"已自动修正"，不说"AI 已优化"）
+    await expect(panel.getByText('自动复核')).toBeVisible();
+    await expect(panel.getByText('需处理的问题 2 → 0')).toBeVisible();
+    await expect(panel.getByText(/已自动修正：重排时间 2 处 · 去掉重复 1 处/)).toBeVisible();
+    await expect(panel.getByText(/第 1 天「陕西历史博物馆」/)).toBeVisible();
+    await expect(panel.getByText(/这些我改不动，要靠数据或你确认：候选池补点/)).toBeVisible();
 
     // 遗留问题：说人话的标签而不是错误码
     await expect(panel.getByText('还需要你留意')).toBeVisible();

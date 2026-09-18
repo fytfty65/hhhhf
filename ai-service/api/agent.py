@@ -3379,6 +3379,38 @@ async def run_negotiate(msg: GatewayMessage):
                                     "interest": (_quality_signals or {}).get("interest"),
                                 },
                             }
+                            # 👑 方案复核 + 确定性修补（propose → critique → repair → rescore，≤3 轮）
+                            # 只修**确定性就能修好**的问题：时间倒序/越界、重复地点、越界天数；
+                            # 修不动的（缺玩点/缺餐/缺住宿夜数、预算超支）留给候选池与用户确认，
+                            # **绝不编造**。掉门禁或掉分即回滚到最好的一版；修补毫无改动就停
+                            # （不空转烧预算）。跑在治理快照之前，保证面板上的分数与门禁都基于修好的方案。
+                            try:
+                                from core.plan_review import review_plan
+
+                                _review = review_plan(
+                                    _quality_context,
+                                    final_data,
+                                    signals=_quality_signals,
+                                    max_rounds=3,
+                                )
+                                _reviewed_plan = _review.get("plan")
+                                if isinstance(_reviewed_plan, dict) and isinstance(_reviewed_plan.get("route"), list):
+                                    final_data["route"] = _reviewed_plan["route"]
+                                _review_actions = list(_review.get("actions") or [])
+                                final_data["review"] = {
+                                    "stopped_reason": _review.get("stopped_reason"),
+                                    "rounds": len(_review.get("rounds") or []),
+                                    "actions": _review_actions[:8],
+                                    "action_count": len(_review_actions),
+                                    "initial_score": _review.get("initial_score"),
+                                    "final_score": _review.get("final_score"),
+                                    "initial_hard_failures": _review.get("initial_hard_failures"),
+                                    "remaining_hard": _review.get("remaining_hard"),
+                                    "needs_data": _review.get("needs_data") or [],
+                                }
+                            except Exception as _review_exc:  # 复核失败绝不影响出方案
+                                final_data["review"] = {"error": str(_review_exc)[:200]}
+
                             # 二次增量：把"这次新说的话"解析成结构化 delta（排他 / 配额 / 天数预算）。
                             # 只有 refine（已有历史 + 既有路线）时才解析，首次生成不会是增量。
                             _refinement_delta = None

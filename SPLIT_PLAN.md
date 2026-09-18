@@ -17,12 +17,12 @@
 | 指标 | 基线值 |
 |---|---|
 | `ContextualLobby.tsx` | 3,991 行 / 218,225 B |
-| 首屏 JS | **1,105.3 KB（13 个 chunk）**（2026-09-17 经用户确认由 1,104.6 → 1,105.0 KB；同日二次更新到 1,105.3 KB：核对面板新增「本次调整 / 价格核对 / 跨城怎么走 / 长途分段」四段 + 流式 JSON 解析修复，面板本体走 dynamic 按需加载，差额来自宿主接线） |
+| 首屏 JS | **1,105.4 KB（13 个 chunk）**（2026-09-17 经用户确认由 1,104.6 → 1,105.0 KB；2026-09-18 二次更新到 1,105.4 KB：核对面板陆续加了「本次调整 / 价格核对 / 跨城怎么走 / 长途分段 / 自动复核」与流式 JSON 解析修复，面板本体走 dynamic 按需加载，差额来自宿主接线） |
 | 首屏 CSS | 141.1 KB（同上：面板用到的 Tailwind 类进全局样式） |
 | 单测 | 79 个（`app/lib/*.test.ts`，9 个文件） |
 | E2E | `refactor-regression.spec.ts` 7 个 + `core-flow.spec.ts` 1 个 + `plan-governance.spec.ts` 1 个 = **9 个** |
 
-**验收**：拆分后首屏 JS ≤ **1,105.3 KB**，9 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
+**验收**：拆分后首屏 JS ≤ **1,105.4 KB**，9 个 E2E 全绿，`ContextualLobby.tsx` 只剩状态与编排。
 
 ## 3. 进度
 
@@ -83,6 +83,9 @@
 | F10 | 跨城腿识别 + 出行审计随 payload 下发 | `8942499` |
 | F11 | 前端渲染四块新 payload（本次调整 / 价格核对 / 跨城怎么走 / 长途分段） | `a1021ac` |
 | F11b | 面板从「不可滚的 header」挪进滚动区（否则 8 段内容把正文挤成 0 高、后几段滚不到）+ E2E 加版面守卫 | 见下 |
+| F12 | 长途（≥14 天）**首轮按 7 天分段生成**（`core/long_trip.build_segmented_plan` + agent.py 薄接线），既有修补退化为兜底 | `ad9f6d0` |
+| F13 | 评测集 29 → 38 条（30/45 天长途、二次换点/配额/升档/换城市、跨城最划算、价格诚信）+ `horizon` 真正参与机器判定 | `a7ec892` |
+| F14 | **Critic/Repair 闭环**（`core/plan_review.review_plan`：propose→critique→repair→rescore，≤3 轮，掉门禁/掉分即回滚，无改动即停）+ 面板「自动复核」 | 本批 |
 
 **F11 附带修掉一个真 bug**：宿主流式累积时用 `replace(/null/g, "")` 清洗 token，会把**合法 JSON 里的 null**（票价未核实就是 `price:null`）删成 `"price":`，导致整段 `[FINAL_JSON]` 解析失败——后果是 `quality`/`budget_report`/四块新数据全部丢失、核对面板整块不显示。现在改为**先按原文解析**（我们下发的 JSON 一定合法），解析不出来才退回"删 null"的兜底（那是给模型吐字夹带的 null 准备的）；展示用的清洗仍在 `humanReadableLogs`。E2E mock 里刻意保留 `price: null` 作为回归哨兵。同时 `final_route` 消息路径也接入同一份 payload（重连/回放只收到它时面板同样有数据）。
 

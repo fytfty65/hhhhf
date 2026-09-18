@@ -93,6 +93,28 @@ export type PlanGovernance = {
   };
   /** 跨城腿的出行建议（含"票价未核实"清单） */
   transportAudit?: { legs?: TransportLeg[]; note?: string; error?: string };
+  /** 自动复核（critic + 确定性修补）的结果：改了什么、还剩几处门禁问题、缺哪些数据 */
+  review?: {
+    stopped_reason?: string;
+    rounds?: number;
+    action_count?: number;
+    actions?: {
+      code?: string;
+      day?: number;
+      node?: string;
+      from?: string;
+      to?: string;
+      dropped?: string[];
+      days?: number[];
+      count?: number;
+    }[];
+    initial_score?: number;
+    final_score?: number;
+    initial_hard_failures?: number;
+    remaining_hard?: number;
+    needs_data?: string[];
+    error?: string;
+  };
   /** 长途分段摘要（哪段被重生成过、哪段还没补上） */
   longTrip?: {
     segments?: LongTripSegment[];
@@ -119,6 +141,31 @@ const BUDGET_STATUS: Record<string, { label: string; tone: string }> = {
   no_budget: { label: '未设置预算', tone: 'text-slate-500' },
   ok: { label: '在预算内', tone: 'text-emerald-600' },
 };
+
+// 自动复核做了什么 → 人话标签
+const REVIEW_ACTION_LABELS: Record<string, string> = {
+  reschedule: '重排时间',
+  dedupe: '去掉重复',
+  drop_out_of_range: '丢弃越界天数',
+  trim_day: '单日限流',
+};
+
+// 复核改不动、需要补数据的部分（不编造，只能去数据源取或问用户）
+const REVIEW_NEEDS_DATA_LABELS: Record<string, string> = {
+  needs_candidates: '候选池补点（缺玩点 / 餐 / 住宿）',
+  needs_data: '补数据（价格 / 开放时间）',
+};
+
+function summarizeReviewActions(actions: { code?: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const action of actions) {
+    const key = action.code || 'other';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([code, count]) => `${REVIEW_ACTION_LABELS[code] || '调整'} ${count} 处`)
+    .join(' · ');
+}
 
 // 门禁失败码 → 人话标签（说"哪里不合适"，不说"AI 检测到异常"）
 const GATE_LABELS: Record<string, string> = {
@@ -166,7 +213,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip } = data;
+  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip, review } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -186,9 +233,15 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
   );
   const hasTransportBlock = Boolean(transportAudit && (transportAudit.legs?.length || transportAudit.error));
   const hasLongTripBlock = Boolean(longTrip && (longTrip.segments?.length || longTrip.error));
+  const hasReviewBlock = Boolean(
+    review &&
+      (review.error ||
+        (review.action_count ?? 0) > 0 ||
+        (review.initial_hard_failures ?? 0) > (review.remaining_hard ?? 0)),
+  );
   if (
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
-    !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock
+    !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock && !hasReviewBlock
   ) {
     return null;
   }
@@ -421,8 +474,64 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
         </div>
       )}
 
+      {hasReviewBlock && (
+        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock || hasPriceBlock || hasTransportBlock || hasLongTripBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<SlidersHorizontal className="h-3 w-3" />}>自动复核</SectionLabel>
+            {typeof review?.remaining_hard === 'number' && typeof review?.initial_hard_failures === 'number' && (
+              <span
+                className={`font-mono text-[11px] font-bold tabular-nums ${
+                  review.remaining_hard === 0 ? 'text-emerald-600' : 'text-amber-600'
+                }`}
+              >
+                需处理的问题 {review.initial_hard_failures} → {review.remaining_hard}
+              </span>
+            )}
+          </div>
+          {review?.error ? (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+              这次没能跑自动复核（{review.error}），方案按原样给出。
+            </p>
+          ) : (
+            <>
+              {(review?.action_count ?? 0) > 0 && (
+                <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+                  已自动修正：{summarizeReviewActions(review?.actions || [])}
+                </p>
+              )}
+              {(review?.actions || [])
+                .filter((item) => item.code === 'reschedule' && item.node)
+                .slice(0, 3)
+                .map((item, index) => (
+                  <div key={`review-${index}`} className="flex items-baseline justify-between gap-3 py-0.5 text-[11px] text-slate-500">
+                    <span className="truncate">
+                      第 {item.day} 天「{item.node}」
+                    </span>
+                    <span className="font-mono tabular-nums">
+                      {item.from} → {item.to}
+                    </span>
+                  </div>
+                ))}
+              {(review?.needs_data || []).length > 0 && (
+                <p className="mt-1.5 text-[11px] leading-relaxed text-amber-600">
+                  这些我改不动，要靠数据或你确认：
+                  {(review?.needs_data || []).map((item) => REVIEW_NEEDS_DATA_LABELS[item] || item).join('、')}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {hasFailureBlock && (
-        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+        <div
+          className={
+            hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock ||
+            hasPriceBlock || hasTransportBlock || hasLongTripBlock || hasReviewBlock
+              ? 'mt-3 border-t border-slate-200 pt-2.5'
+              : ''
+          }
+        >
           <SectionLabel icon={<ReceiptText className="h-3 w-3" />}>还需要你留意</SectionLabel>
           <ul className="mt-1.5 space-y-1">
             {failures.slice(0, 3).map((item, index) => (

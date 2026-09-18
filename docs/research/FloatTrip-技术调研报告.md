@@ -125,6 +125,8 @@ FloatTrip/
 
 **为什么好**：这是一套**"约束可追踪性"数据模型**——不是把偏好拼成一段字符串塞进 prompt，而是每条约束有 ID、有来源（`conversation` / `manual` / `long_term_memory`）、有作用级别（`preference` / `hard` / `context_only`）、有"我到底有没有被执行"的状态。它天然支持我们的诚信口径：**没有把握落实的约束，宁可标 `unverified` 也不假装 `applied`**。另外 `matching_fingerprint()`（`:95-106`）把目的地+预算+约束+记忆版本一起哈希，用来判断"同一份需求是否可复用上次规划"——这也是幂等/缓存的好抓手。
 
+> ⚠️ **但它自己没用上这套数据**：`final_plan.constraint_coverage` 确实被后端写进了最终 payload（`nodes.py:864`），**但前端 `adaptPlan()`（`frontend/api.js:792-809`）和移动端 `adaptTripEnvelope()`（`mobile-app/src/mappers.ts:84-92`）都没有映射这两个字段**——UI 里 `unverified` / `advisory` **零出现**。也就是说：它建好了"哪些约束没核实"的真值字段，却没有任何界面把它展示给用户（"住宿偏好未接入酒店数据"这条 `planning_notes` 也是同理，生成了但没渲染）。**这是"诚信设计做到一半"的典型——数据层做了，呈现层漏了，等于没做。**
+
 **落到 OmniRoute**：强烈建议在 `ai-service/core/` 增加同构模块，把「多角色偏好 → 折中」的结果从**一段自由文本**升级为**带 ID 的约束对象列表**。具体：`Constraint(id, role, polarity, target_stage, status)`，`status ∈ {applied, partially_applied, unverified, advisory}`；规划质量门禁按 `status` 计分（`unverified` 既不算满足也不算违反，但要在核对面板显示）。这样我们前端「核对面板」说的"哪些价格已核实、做了哪些替换、哪段还没补上"就有了**后端真值字段**可直接渲染，而不是前端再猜。
 
 ### 6. 三级降级策略被反复用在每一个外部依赖上（weather / Redis / LLM / 单天餐饮 / 地图）
@@ -155,8 +157,8 @@ FloatTrip/
 - **Reviewer 可靠性**：用代码打分的客观真值当"标准答案"，统计 **误放行率**（reviewer 通过但客观未过——最危险）和 **误打回率**（`reviewer_reliability.py:25-39`）。
 - **Planner 反驳率**：`_pair_rounds()` 用正则 `^\[第(\d+)轮\]\s*(Planner|Reviewer)` 从 `planner_reviewer_dialogue` 里配出「Reviewer 打回 → 下一轮 Planner 回应」的转移，再用 LLM 分类 `adopt / rebut / ignore`，并明确注释「反驳是当前 prompt 未设计的**涌现行为**」（`reviewer_reliability.py:1-7, 64-128`）。概念上直接对齐 Anthropic 的《Demystifying Evals for AI Agents》。
 - **query_rewrite 专项评测**（`tests/eval_query_rewrite/`）三个指标里有一个叫 **`g_no_invention`**：「query 和画像均无偏好时，三字段应为 null，**不凭空编造**」。
-- **只读的评测结果预览 API**：`GET /api/sweep/list` 和 `/api/sweep/trial`（`sweep_routes.py`）把真实跑批的 JSONL（含 transcript + final_plan + 各 grader 结果）做成可浏览接口，还带路径穿越防护。
-- **评测结果有可视化界面**：`SweepPreviewPage`（`frontend/pages.jsx:2182`）提供文件/trial 下拉（✅/❌/💥 标记 pass/crash），并用**生产同一套 `adaptPlan()` + 行程详情组件**渲染该 trial 的 `final_plan`——即"把跑批结果当真实行程看"。
+- **只读的评测结果预览 API**：`GET /api/sweep/list` 和 `/api/sweep/trial`（`sweep_routes.py`）把真实跑批的 JSONL（含 transcript + final_plan + 各 grader 结果）做成可浏览接口，还带路径穿越防护。⚠️ 但见"不足"第 17 条：**产出这些 JSONL 的 `tests/eval/sweep.py` 与 `sweep_results/` 都不在仓库里**，这条链路实际是空壳。
+- **评测结果有可视化界面**：`SweepPreviewPage`（`frontend/pages.jsx:2182`）提供文件/trial 下拉（✅/❌/💥 标记 pass/crash），并用**生产同一套 `adaptPlan()` + 行程详情组件**渲染该 trial 的 `final_plan`——即"把跑批结果当真实行程看"（同样受上面"空壳"影响）。
 
 **为什么好**：大多数 Agent 项目止步于"我写了个评测脚本"。它做对了三件更难的事：(a) **把 LLM 评委的偏见用确定性 grader 校准**（误放行/误打回）；(b) **评测多轮协商行为本身**（反驳/忽略），而不只是评测最终产物；(c) **把"不发明数据"写成一个可量化的断言**（`g_no_invention`）。
 
@@ -182,8 +184,10 @@ FloatTrip/
 
 **落到 OmniRoute**：我们前端已经在做"去 AI 化"报表/批注风格和核对面板。建议补三件它做得具体的事：
 - **`interrupt` 式的异议确认**：当二次增量解析发现"用户要求会打破硬约束"（如"不想去 X，改成免费景点"但那天唯一免费景点距其他节点 40km），不要把决定权全给 LLM，而是把 `concern` 抛给用户确认。可以用我们的 WebSocket 房间直接做，不必引 LangGraph interrupt。
-- **回退快照**：我们的"候选池替换（换点/平替）"必须**在服务端保存替换前的原始版本**，前端才能一键回退到"协商原始结果"。它这条 `revert_day` + 前端快照的组合值得照抄。
+- **回退快照**：我们的"候选池替换（换点/平替）"必须**在服务端保存替换前的原始版本**，前端才能一键回退到"协商原始结果"。它这条 `revert_day` + 前端快照的组合值得照抄。（它还有一点很值得注意：`PUT /api/plan/{id}/timeline` 是**原地覆盖、不产生新 plan_id**，而运行时修改走的是 `itineraries` 的 `parent_id/root_id/version` 版本链——**同一个产品里两套修改语义并存**，前端撤销栈是整份 `structuredClone` 快照。我们最好统一成"一切修改都产生新版本"。）
 - **双读者文案**：把 `ai-service` 的内部诊断（硬约束违反了哪条、哪段没补上）与前端展示文案**在 schema 层面分开字段**，并在字段描述里写明禁止的技术词汇。这能防止"未核实/违规"这类词直接漏到用户界面。
+
+> 附：它的地图实现有个**降级范式**值得单独抄——**双轨制**：先用纯 SVG 画一张"相对位置示意图"（`components.jsx:116-170`，投影算法在 `api.js:639-661`），高德 JS v2 就绪后再以 `opacity` 覆盖（`components.jsx:212-223`）；折线**只连景点**、餐厅用带旋转角度的方块 marker；加载竞态用 `inst.seq` 序号丢弃过期回调（`api.js:381`）。三层降级：未配 Key → SVG 兜底 → 文案「地点示意 · 相对位置」「虚线为景点游览顺序」（`components.jsx:208, 228`）。**用户任何时候都能看到一张能用的图，而且清楚知道这是不是真实地图。** 我们的 Next.js 前端做地图时可以照抄这个"先降级后增强 + 明确标注示意"的顺序。
 
 ---
 
@@ -233,13 +237,21 @@ FloatTrip/
 4. **封闭池校验不阻断交付——幻觉景点会进入最终行程。** `unknown_spots()` 的结果只是喂给 Reviewer、并在 prompt 里要求它 `approved=False`（`nodes.py:353, 392`），**但没有任何代码在 finalize 前阻断**。一旦 `review_round > max_review_rounds`，流程照样走 `time_check → meal_search → finalize`；此时 `_finalize_impl` 用 `info = spot_info.get(spot["name"], {})`（`nodes.py:813`）取元数据，于是**越界景点会带着 `rating/open_time/location/cost` 全为 `None` 正常出现在最终行程里**（`nodes.py:814-828`），前端渲染成一张没有评分、没有票价、也缺 `dist_from_prev_km` 的卡片。**它检测到了幻觉，却没有把检测结果用于阻止幻觉交付**——门禁只用来打分，不用来拦截。我们必须反过来做：硬门禁失败要么阻止交付，要么强制带上醒目的降级标记。
 5. **没有多人协作、没有分享、没有导出**。全仓库 grep `websocket|协作|分享|导出|pdf|ics|calendar`：唯一的"分享行程"是 `mobile-prototype/src/Prototype.tsx:512` 里一个 `onClick={() => {}}` 的空壳按钮（纯视觉原型，非生产代码）。移动端 README 的「当前边界」也明写「首版不包含……社交分享」（`mobile-app/README.md:110`）。**它的"协作"是"人和 AI 多轮对话"，不是"多人同房间"**——我们的 gateway/房间/WebSocket 是它完全没有的维度。
 6. **评测夹具不在仓库里**。`.gitignore` 有 `tests/eval/fixtures/`、`tests/eval/transcripts/`、`tests/eval/data/`、`tests/eval/sweep_results/`（另外还有 `eval*` 这个过宽的规则）。`git ls-files tests/eval` 确认**只有 10 个 .py 文件被跟踪，没有任何 fixture JSON**。而 `capture_pool.py` 生成骨架需要真实高德 Key，且 `indoor` 标签必须**手工标注**、天气必须**手工构造**（`EVAL_GUIDE.md:138-156`）。→ **"可复现的评测"实际上无法开箱复现**，想复现得自己花 API 钱重建数据集。我们可以做得更好：把 fixture 直接提交进仓库。
-7. **文档与代码已经漂移**。`tests/EVAL_GUIDE.md:61-73` 仍在讲 `G1–G7`、G2="开放时间"、G3="地理跨度"；但 `code_graders.py:1-10` 已经是 **G1/G2/G4/G5/G6/G7/G8**，**G3（地理跨度）已从代码中移除**，G2 语义也改成了"time_check 干净"，README 徽章还写着 `pass@k / pass^k` 而 guide 说 `objective_pass = G1–G6`、代码里是 5 个 key（G1,G2,G4,G5,G6）。**单一文档与实现不同步**。
+7. **文档与代码已经漂移，而且漂移已经渗进 UI**。`tests/EVAL_GUIDE.md:61-73` 仍在讲 `G1–G7`、G2="开放时间"、G3="地理跨度"；但 `code_graders.py:1-10` 已经是 **G1/G2/G4/G5/G6/G7/G8**，**G3（地理跨度）已从代码中移除**，G2 语义也改成了"time_check 干净"。更糟的是**前端仍在展示这个不存在的 grader**：`frontend/components.jsx:556` 有 `{ key: "g3_proximity", label: "G3 地理跨度" }`，而 `max_day_span_km` 在**全部 `.py/.js/.jsx/.ts/.tsx` 中零命中**（只存在于 md 文档）——**用户会在评测面板上看到一个永远没有数据的"地理跨度"指标**。同时 `code_graders.py:17-22` 仍 import `haversine_km / open_time_violations / spot_location_map` **三个函数却一个都不用**，是 G3 删除后的残留。
+   → 对我们的直接教训：**grader/门禁的名字一旦出现在 UI 或文档上，就成了一份对外契约**。我们加评测指标时应让"指标注册表"只有一处定义（后端），前端从注册表渲染、禁止硬编码指标名——否则被删掉的检查会以"永远绿的指标"形式留在产品里，比没有更危险。
 8. **服务端零 CI**。唯一的 workflow 只覆盖移动端（`mobile-ci.yml`），路径过滤还限定在 `mobile-app/**`、`app/**`、`requirements.txt`。16 个 Python 单测**没有任何自动化执行保障**，而 `requirements.txt` 连 `pytest` 都没有。
 9. **前端 `pages.jsx` 单文件 116KB**（`components.jsx` 27KB、`tweaks-panel.jsx` 25KB），无构建、浏览器内 Babel。虽然 README 强调"无构建"是优点，但对一个 11 万字符的文件做修改，协作与 review 成本极高。我们已有 Next.js + TS 的分层，不需要回头。
 10. **存在"删掉的 grader 语义"和"未使用的纯函数"**：`open_time_violations()` 被 `code_graders` import 但生产主流程不用（`code_graders.py:17-22` 同时 import 了 `haversine_km`/`spot_location_map` 却从不调用，是 G3 被删除后的残留）；`filter_by_rating` 把无评分 POI 当不达标丢弃；`restaurant_to_dict` 的 `_lookup`（`nodes.py:658-669`）用**双向子串匹配**把 LLM 返回的餐厅名映射回候选池，`name in key or key in name` 会把"南京大牌档"匹配到"南京大牌档（德基广场店）"这类同名不同店——**餐厅名这条线没有像景点那样严格**，是个隐性幻觉入口。
 11. **单节点运行时天花板已自我声明**：`docs/agent-runtime.md:62-66` 与 `docs/deferred-runtime-work.md` 明确列出未做多节点任务领取、无分布式 SSE fan-out、无 exactly-once、无 Prometheus/OTel。**它自己承认这是单机玩具级部署**（`RUNTIME_PLANNING_CONCURRENCY` 默认仅 2）。我们 Go gateway + 房间协作的架构在并发维度上领先，不需要参考它的运行时。
 12. **License 缺失**（见上表）。如果我们打算借鉴/搬运它的代码片段，先要解决授权问题——目前**没有授予任何权利**。
 13. **测试策略有自我矛盾**：`tests/test_architecture_boundaries.py:28-38` 断言 `app/chat/{graph,service,executor}.py` **不得 import `re`**，注释是「no rule-based language fallback」——即禁止任何正则风格的对话语义兜底。这个原则本身可敬，但同一个仓库里 `planning/helpers.py` 大量使用正则解析时间、`reviewer_reliability.py:20` 用正则拆对话轮次。**边界测试画在了 `app/chat` 一个包上，而真正脆弱的正则解析都在 `app/planning`**——门禁建错了地方。这提醒我们：架构边界测试要钉在"数据完整性关键路径"上，而不是钉在某个目录上。
+14. **前端完全没有自动化测试**。项目自己的设计文档写明「无测试框架，走 `/qa` 浏览器验收」（`docs/superpowers/specs/2026-06-12-itinerary-manual-edit-design.md:115`）。移动端有 Jest（仅 `planning` / `tripEditor` / `mappers` 三个纯函数测试文件）+ Maestro 3 个流程，**但 `mobile-app/.maestro/core-planning.yaml:16,19` 引用的 testID `clarification-0` 在整个 `mobile-app/` 下不存在**（我实测：全仓 `clarification` 只有这 2 处命中，无任何组件定义）→ **该 E2E 流程必然失败且无人发现**。这说明"有 CI"不等于"测试有效"——我们加 CI 时要注意**E2E 引用完整性**，最好让 CI 断言「Maestro 里引用的每个 testID 都能在源码中 grep 到」。
+15. **存在未引用的死代码**：`frontend/pages.jsx:2343-2516` 的 `HomePage`（营销落地页）**既未 `export` 也未被任何地方引用**（实测全 `frontend/` 仅此 1 处命中）。同理根目录还有独立的 `launch-page.html` / `app-pages-preview.html`。属于演示素材残留。
+16. **「零构建」的代价未被诚实评估**：`frontend/index.html:15-34` 用 React 18.3.1 UMD + `@babel/standalone` 在**浏览器里实时编译** 6 个 JSX（靠 `Object.assign(window, …)` 串联），SortableJS 走 CDN；无 bundler、无 `package.json`、无 Tailwind、无路由库（`main.jsx:18-21` 靠 pathname + `useState` 手写页面枚举）。副作用是**首屏可用性依赖 unpkg 与 Babel、没有任何构建期类型检查**，而它却同时维护了一个 35KB 的 OpenAPI 生成类型文件给移动端做类型安全（`mobile-app/src/api/schema.ts`）——**同一个项目里两套前端，类型安全水平差了一个数量级**。
+17. **有两处代码引用了根本不存在的东西（连"能跑"都不成立）**——我逐一实测确认：
+    - `tests/test_weather_mock.py:44` 写 `from app.planning.state import TravelPlanState`，但 **`app/planning/state.py` 不存在**（`Test-Path` = False，状态定义在 `schemas.py:153`）→ 这个"雨天 mock 冒烟测试"**一跑就 ImportError**，而且它 patch 掉天气后仍会真实调用高德（`build_graph()` 里的 `attraction_search`），**既不 mock 也不离线**。
+    - `app/api/sweep_routes.py:14-15` 的 `SWEEP_DIR` 指向 `tests/eval/sweep_results`，前端 `pages.jsx` 也实现了完整的 `SweepPreviewPage`（文件/trial 下拉 + 用生产组件渲染该 trial 的 `final_plan`），但 `Get-ChildItem -Recurse -Filter "*sweep*"` **除了 `sweep_routes.py` 之外零命中**——`tests/eval/sweep.py` 与 `sweep_results/` 都不存在。**"评测结果可视化"这条产品链路是个空壳：页面上永远只有"暂无 sweep 结果"。**
+    → 这两处合起来是一个很实际的教训：**它把"测试/评测作为对外展示的能力"讲得比实现更完整**（README 徽章、UI 面板、CI 引用都在，但数据与模块缺失）。我们宣传自己的评测能力前，应先在 CI 里跑通一次"空仓库全新 clone → 一条命令出报告"，把"开箱可复现"当成验收条件。
 
 ---
 
@@ -263,9 +275,18 @@ FloatTrip/
 `app/providers/amap/poi.py`、
 `app/api/plan_routes.py`、`app/api/runtime_routes.py`、`app/api/sweep_routes.py`、
 `frontend/components.jsx`、`frontend/pages.jsx`、`frontend/edit.jsx`、`frontend/api.js`、`frontend/chat-state.js`、
-`mobile-app/README.md`、`mobile-app/src/native/QZAMapView.tsx`、`mobile-app/src/screens/TripMapScreen.tsx`、`mobile-prototype/src/Prototype.tsx`、
-`tests/EVAL_GUIDE.md`、`tests/eval/graders/code_graders.py`、`tests/eval/graders/llm_judge.py`、`tests/eval/graders/reviewer_reliability.py`、`tests/test_architecture_boundaries.py`、
-`docs/project-introduction.md`、`docs/agent-runtime.md`、`docs/conversation-entry-migration.md`、`docs/deferred-runtime-work.md`、
+`mobile-app/README.md`、`mobile-app/.maestro/core-planning.yaml`、`mobile-app/src/native/QZAMapView.tsx`、`mobile-app/src/screens/TripMapScreen.tsx`、`mobile-app/src/services/{api,runStream,mappers}.ts`、`mobile-prototype/src/Prototype.tsx`、
+`tests/EVAL_GUIDE.md`、`tests/eval/graders/{code_graders,llm_judge,reviewer_reliability}.py`、`tests/test_architecture_boundaries.py`、`tests/test_weather_mock.py`、
+`docs/project-introduction.md`、`docs/agent-runtime.md`、`docs/conversation-entry-migration.md`、`docs/deferred-runtime-work.md`、`docs/superpowers/specs/{2026-06-12-itinerary-manual-edit-design,2026-06-13-trip-detail-enhancements-design}.md`、
 `openspec/specs/*`（12 个规格文件，已枚举）、`docs/superpowers/specs/*`（已枚举）。
 
-**仓库中未找到**（已 grep 确认）：任何价格核实等级/来源标注字段；住宿/酒店搜索与预订；跨城/城际交通与票价；多天分段生成；多人协作/房间/WebSocket；PDF/ICS/日历/分享导出；Python 服务端 CI；被跟踪的评测 fixture JSON；`LICENSE` 文件；`pyproject.toml`/`pytest.ini`。
+**仓库中未找到**（已 grep 确认）：任何价格核实等级/来源标注字段；住宿/酒店搜索与预订；跨城/城际交通与票价；多天分段生成；多人协作/房间/WebSocket；PDF/ICS/日历/分享导出；Python 服务端 CI；被跟踪的评测 fixture JSON；`tests/eval/sweep.py` 与 `tests/eval/sweep_results/`；`app/planning/state.py`；`LICENSE` 文件；`pyproject.toml`/`pytest.ini`。
+
+---
+
+## 附：本报告的取证与交叉验证说明
+
+- 报告基于 **`git clone` 到本地后逐文件静态阅读**，未运行该项目代码；行号对应本次读取的 `main` @ `ec911f7` 版本。若上游后续提交，行号可能偏移。
+- 我另外派了两个子代理分别深挖后端编排与前端/移动端，其输出**仅作线索**。其中一条被证实为**假阴性**（子代理称 `.github/workflows/mobile-ci.yml` 不存在，实测该文件存在且被 git 跟踪、2895 字节），已在报告正文中更正并附上我的实测结果。
+- 凡属关键事实点（`LICENSE` 404、stars/forks、`unknown_spots` 调用点、`open_time_violations` 为死代码、`app/planning/state.py` 不存在、`g3_proximity` 残留、`clarification-0` 不存在、`HomePage` 无引用、无 WebSocket/导出、未跟踪 fixture）**均由我本人用 `Test-Path` / `git ls-files` / `grep` / `Get-ChildItem` 独立复核**。
+- 未做的验证：我没有申请高德 Key，因此**没有实测 `biz_ext.cost` 的覆盖率与语义**（它到底是门票还是人均、空值比例多高）。报告中关于该字段的断言**仅基于仓库自身代码与其设计文档**，不代表高德官方字段定义。
