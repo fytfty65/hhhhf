@@ -302,10 +302,17 @@ def check_hard_constraints(
             )
 
     # 6) 一体化骨架：吃/玩/住的存在性（不允许"只有景点、没有酒店或正餐"）
-    from .itinerary_skeleton import validate_skeleton  # 延迟导入，避免模块级循环
+    from .itinerary_skeleton import LONG_TRIP_DAYS, validate_skeleton  # 延迟导入，避免模块级循环
 
     skeleton = validate_skeleton(plan, ctx, expectations)
     failures.extend(skeleton["failures"])
+
+    # 7) 长途（≥14 天）段间衔接：天数缺口/越界、分段住宿夜数不足属硬失败
+    if days >= LONG_TRIP_DAYS:
+        from .long_trip import continuity_report  # 延迟导入，避免模块级循环
+
+        continuity = continuity_report(plan, {**dict(ctx), "expectations": expectations})
+        failures.extend(continuity["failures"])
 
     return {"failures": failures, "unverifiable": unverifiable}
 
@@ -728,9 +735,18 @@ def plan_quality_snapshot(
     这样接线本身不需要跑 LLM 就能单测。
     """
     report = evaluate_plan(context, plan, expectations=expectations, signals=signals)
-    from .itinerary_skeleton import horizon_advisories, segment_days  # 延迟导入（见模块头说明）
+    from .itinerary_skeleton import LONG_TRIP_DAYS, horizon_advisories, segment_days  # 延迟导入（见模块头说明）
 
     days = max(1, int(context.get("days") or context.get("trip_days") or 1))
+    advisories = list(horizon_advisories(context))
+    continuity: Optional[Dict[str, Any]] = None
+    if days >= 7:
+        from .long_trip import continuity_report  # 延迟导入，避免模块级循环
+
+        continuity = continuity_report(plan, {**dict(context), "expectations": expectations})
+        if days >= LONG_TRIP_DAYS:
+            # 长途：把衔接顾问与"下一段简报"一起给出去（前端面板已在渲染 advisories）
+            advisories.extend(continuity["advisories"])
     snapshot: Dict[str, Any] = {
         "quality": {
             "score": report["score"],
@@ -742,7 +758,21 @@ def plan_quality_snapshot(
         },
         "budget": report["budget"],
         "skeleton": report["skeleton"],
-        "horizon": {"days": days, "segments": segment_days(days), "advisories": horizon_advisories(context)},
+        "horizon": {
+            "days": days,
+            "segments": segment_days(days),
+            "advisories": advisories,
+            "continuity": (
+                {
+                    "ok": continuity["ok"],
+                    "rest_days": continuity["rest_days"],
+                    "rest_days_required": continuity["rest_days_required"],
+                    "budgets": continuity["budgets"],
+                }
+                if continuity
+                else None
+            ),
+        },
         "fallback": None,
     }
     if include_fallback and report["budget"]["status"] in {"over", "at_risk"}:
