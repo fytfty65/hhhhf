@@ -104,6 +104,10 @@ LLM_MAX_RETRIES = 2
 # 心跳间隔：流式请求过程中如果长时间未收到 token，则给前端推送心跳日志
 HEARTBEAT_INTERVAL_SEC = 8
 
+# 长途（≥14 天）首轮分段生成的**总时间预算**（秒）：超预算的段不再调用 LLM，
+# 如实记为"这一段没生成出来"，由前端核对面板提示，而不是让用户无限等。
+LONG_TRIP_GENERATION_SECONDS = 240.0
+
 # Production bandit is opt-in. Keeping the singleton at module scope preserves
 # posterior state across requests while the disabled path is a no-op.
 def _bandit_enabled() -> bool:
@@ -3251,12 +3255,17 @@ async def run_negotiate(msg: GatewayMessage):
                         # 👑 阶段 1：规划质量门禁 + 预算可行性 + 兜底方案（纯确定性，零网络）
                         # 业务逻辑在 core/plan_quality.plan_quality_snapshot 里（可单测），
                         # 这里只做薄接线；任何异常都不得阻断规划主流程。
-                        # 👑 长途（≥14 天）分段修补：**只重生成失败的段**（有界：最多 2 段/次）
-                        # 30 天 × 每天多节点靠单次生成不可靠；这里按段校验（空天/住宿夜数/休整日），
-                        # 只对失败段落再调一次 LLM，并丢弃越界天数，避免"顺手改了别的天"。
+                        # 👑 长途（≥14 天）：**首轮按段生成** + 事后修补（两层，都有界）
+                        # 30 天 × 每天多节点靠单次生成不可靠（会截断、漏天、编造）。所以：
+                        #   第一层 首轮分段生成：按 7 天一段逐段生成、边生成边合并，每段的"衔接简报"
+                        #          都取自上一段**真实产出**的最后节点 → 长行程不再断链；
+                        #   第二层 修补：首轮之后仍不合格的段，最多再补 2 段（防止一轮打太多请求）。
+                        # 全程有界：段数上限 6 段（42 天）、单段 45s 超时、整段生成 240s 预算，
+                        # 超了就把没生成的段如实列出来（failed/skipped），绝不假装排好了。
                         if trip_days >= 14:
                             try:
                                 from core.long_trip import (
+                                    build_segmented_plan,
                                     merge_segment_nodes,
                                     segment_prompt,
                                     segment_repair_targets,
@@ -3264,6 +3273,55 @@ async def run_negotiate(msg: GatewayMessage):
                                 )
 
                                 _long_context = {"days": trip_days, "budget": total_calc_budget}
+                                _long_deadline = _time.monotonic() + LONG_TRIP_GENERATION_SECONDS
+
+                                async def _generate_segment(_target: Dict[str, Any]) -> List[Any]:
+                                    """只生成该段的节点数组（越界天数由 core 丢弃）。"""
+                                    if _time.monotonic() > _long_deadline:
+                                        return []  # 超预算：如实记为"这一段没生成出来"
+                                    _resp = await asyncio.wait_for(
+                                        client.chat.completions.create(
+                                            model=MODEL_NAME,
+                                            messages=[
+                                                {"role": "system", "content": system_prompt},
+                                                {"role": "user", "content": segment_prompt(_target)},
+                                            ],
+                                            temperature=0.2,
+                                            max_tokens=4096,
+                                        ),
+                                        timeout=45.0,
+                                    )
+                                    _content = (_resp.choices[0].message.content if _resp.choices else "") or ""
+                                    _match = re.search(r"\[[\s\S]*\]", _content)
+                                    if not _match:
+                                        return []
+                                    try:
+                                        _nodes = json.loads(_match.group(0))
+                                    except Exception:
+                                        return []
+                                    return _nodes if isinstance(_nodes, list) else []
+
+                                _segmented = await build_segmented_plan(final_data, _long_context, _generate_segment)
+                                _segmented_plan = _segmented.get("plan")
+                                if _segmented.get("applied") and isinstance(_segmented_plan, dict) and isinstance(
+                                    _segmented_plan.get("route"), list
+                                ):
+                                    final_data["route"] = _segmented_plan["route"]
+                                _first_round = {
+                                    "chunk_days": _segmented.get("chunk_days"),
+                                    "generated": _segmented.get("generated_segments") or [],
+                                    "failed": _segmented.get("failed_segments") or [],
+                                    "skipped": _segmented.get("skipped_segments") or [],
+                                    "truncated": bool(_segmented.get("truncated")),
+                                    "out_of_range_days": sorted(
+                                        {
+                                            int(day)
+                                            for _record in (_segmented.get("segments") or [])
+                                            for day in (_record.get("out_of_range") or [])
+                                        }
+                                    )[:5],
+                                }
+
                                 _segment_targets = segment_repair_targets(final_data, _long_context)
                                 _repaired: List[Dict[str, Any]] = []
                                 _repair_failed: List[int] = []
@@ -3301,10 +3359,11 @@ async def run_negotiate(msg: GatewayMessage):
                                         _repair_failed.append(int(_target["start_day"]))
                                 final_data["long_trip"] = {
                                     **summarize_segments(final_data, _long_context),
+                                    "first_round": _first_round,
                                     "repaired": _repaired,
                                     "repair_failed_segments": _repair_failed,
                                 }
-                            except Exception as _long_exc:  # 分段修补失败绝不影响出方案
+                            except Exception as _long_exc:  # 分段生成/修补失败绝不影响出方案
                                 final_data["long_trip"] = {"error": str(_long_exc)[:200]}
 
                         try:

@@ -97,6 +97,15 @@ export type PlanGovernance = {
   longTrip?: {
     segments?: LongTripSegment[];
     ok?: boolean;
+    /** 首轮按 7 天一段生成再合并的结果：排好了几段、哪几段没生成出来 */
+    first_round?: {
+      chunk_days?: number;
+      generated?: number[];
+      failed?: number[];
+      skipped?: number[];
+      truncated?: boolean;
+      out_of_range_days?: number[];
+    };
     repaired?: { segment?: number; days?: string; added?: number; dropped_out_of_range?: number[]; reasons?: string[] }[];
     repair_failed_segments?: number[];
     error?: string;
@@ -366,6 +375,21 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
               </span>
             )}
           </div>
+          {longTrip?.first_round && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+              按 {longTrip.first_round.chunk_days ?? 7} 天一段逐段生成：
+              {(longTrip.first_round.generated || []).length} 段已排好
+              {(longTrip.first_round.failed || []).length > 0
+                ? `；${(longTrip.first_round.failed || []).length} 段没生成出来（第 ${(longTrip.first_round.failed || []).join('、')} 段）`
+                : ''}
+              {(longTrip.first_round.skipped || []).length > 0
+                ? `；${(longTrip.first_round.skipped || []).length} 段超出本次上限、还没排（第 ${(longTrip.first_round.skipped || []).join('、')} 段）`
+                : ''}
+              {(longTrip.first_round.out_of_range_days || []).length > 0
+                ? `；模型多给了第 ${(longTrip.first_round.out_of_range_days || []).join('、')} 天，已丢弃`
+                : ''}
+            </p>
+          )}
           <div className="mt-1.5 space-y-0.5">
             {(longTrip?.segments || []).map((item) => (
               <div key={item.index} className="flex items-baseline justify-between gap-3 text-[11px] text-slate-600">

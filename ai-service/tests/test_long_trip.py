@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.long_trip import (  # noqa: E402
     allocate_budget,
     build_long_trip_plan,
+    build_segmented_plan,
     continuity_report,
     merge_segment_nodes,
     required_rest_days,
@@ -222,6 +223,157 @@ class TestSegmentRepair(unittest.TestCase):
         summary = summarize_segments(thirty_day_plan(), CONTEXT)
         self.assertTrue(summary["ok"])
         self.assertFalse(any(item["needs_repair"] for item in summary["segments"]))
+
+
+def segment_nodes(target, trip_days, *, extra=None):
+    """给"某一段"造一份合格产出：每天 1 个玩点 + 1 餐，7 的倍数当天低强度（休整日），
+    最后一晚之外都给住宿节点（长途每段要求 段天数-1 夜）。"""
+    start, end = int(target["start_day"]), int(target["end_day"])
+    index = int(target["index"])
+    produced = []
+    for day in range(start, end + 1):
+        rest = day % 7 == 0
+        produced.append(node(day, f"段{index}玩点{day}", "文化", "10:00"))
+        if not rest:
+            produced.append(node(day, f"段{index}玩点{day}B", "文化", "14:00"))
+        produced.append(node(day, f"段{index}餐馆{day}", "餐饮", "12:30", cost="¥50"))
+        if day != trip_days:
+            produced.append(node(day, f"段{index}酒店{day}", "住宿", "20:00", cost="¥300"))
+    if extra:
+        produced.extend(extra)
+    return produced
+
+
+class TestFirstRoundSegmentedGeneration(unittest.IsolatedAsyncioTestCase):
+    """首轮分段生成：先按段生成再合并，段间简报基于已落地的真实计划。"""
+
+    async def test_generates_every_segment_and_fills_all_days(self):
+        calls = []
+
+        async def generate(target):
+            calls.append(target)
+            return segment_nodes(target, 21)
+
+        result = await build_segmented_plan({"route": []}, {"days": 21, "budget": 21000}, generate)
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["generated_segments"], [1, 2, 3])
+        self.assertEqual(result["failed_segments"], [])
+        self.assertEqual(result["skipped_segments"], [])
+        self.assertFalse(result["truncated"])
+        self.assertEqual(len(calls), 3)
+
+        days_present = {n["day"] for n in result["plan"]["route"]}
+        self.assertEqual(days_present, set(range(1, 22)))
+        self.assertTrue(result["continuity"]["ok"], result["continuity"]["failures"])
+        self.assertEqual(result["needs_repair_segments"], [])
+
+    async def test_each_segment_brief_carries_the_real_previous_output(self):
+        seen = []
+
+        async def generate(target):
+            seen.append(target["brief"]["carry_in"].get("last_node"))
+            return segment_nodes(target, 21)
+
+        await build_segmented_plan({"route": []}, {"days": 21, "budget": 21000}, generate)
+
+        self.assertIsNone(seen[0])                    # 第一段没有"上一段"
+        self.assertEqual(seen[1], "段1酒店7")           # 第二段接着第一段真实产出的最后一个节点
+        self.assertEqual(seen[2], "段2酒店14")
+
+    async def test_one_failed_segment_does_not_stop_the_others(self):
+        async def generate(target):
+            if int(target["index"]) == 2:
+                raise RuntimeError("provider 超时")
+            return segment_nodes(target, 21)
+
+        result = await build_segmented_plan({"route": []}, {"days": 21, "budget": 21000}, generate)
+
+        self.assertEqual(result["generated_segments"], [1, 3])
+        self.assertEqual(result["failed_segments"], [2])
+        record = next(item for item in result["segments"] if item["index"] == 2)
+        self.assertIn("provider 超时", record["error"])
+        # 第 2 段（8-14 天）仍然是空的，如实报出来交给后续修补，而不是假装成功
+        days_present = {n["day"] for n in result["plan"]["route"]}
+        self.assertFalse(days_present & set(range(8, 15)))
+        self.assertIn(8, result["needs_repair_segments"])
+
+    async def test_empty_output_counts_as_failure(self):
+        async def generate(target):
+            return [] if int(target["index"]) == 1 else segment_nodes(target, 21)
+
+        result = await build_segmented_plan({"route": []}, {"days": 21, "budget": 21000}, generate)
+        self.assertEqual(result["failed_segments"], [1])
+        self.assertEqual(result["generated_segments"], [2, 3])
+
+    async def test_sync_generator_is_supported(self):
+        def generate(target):  # 普通函数（离线场景/测试）
+            return segment_nodes(target, 14)
+
+        result = await build_segmented_plan({"route": []}, {"days": 14, "budget": 14000}, generate)
+        self.assertEqual(result["generated_segments"], [1, 2])
+
+    async def test_longer_than_cap_is_truncated_honestly(self):
+        calls = []
+
+        async def generate(target):
+            calls.append(int(target["index"]))
+            return segment_nodes(target, 70)
+
+        result = await build_segmented_plan({"route": []}, {"days": 70, "budget": 70000}, generate, max_segments=3)
+
+        self.assertEqual(calls, [1, 2, 3])
+        self.assertEqual(result["generated_segments"], [1, 2, 3])
+        self.assertEqual(result["skipped_segments"], [4, 5, 6, 7, 8, 9, 10])
+        self.assertTrue(result["truncated"])
+        days_present = {n["day"] for n in result["plan"]["route"]}
+        self.assertTrue(days_present.issubset(set(range(1, 22))))  # 只落地了前 3 段
+        self.assertIn(22, result["needs_repair_segments"])
+
+    async def test_out_of_range_nodes_are_dropped_and_reported(self):
+        async def generate(target):
+            extra = [{"day": 99, "name": "越界节点", "time": "10:00", "type": "文化"}]
+            return segment_nodes(target, 14, extra=extra)
+
+        result = await build_segmented_plan({"route": []}, {"days": 14, "budget": 14000}, generate)
+
+        names = [n["name"] for n in result["plan"]["route"]]
+        self.assertNotIn("越界节点", names)
+        self.assertEqual(result["segments"][0]["out_of_range"], [99])
+
+    async def test_short_trip_is_left_untouched(self):
+        async def generate(target):  # pragma: no cover - 不该被调用
+            raise AssertionError("短途不应触发首轮分段生成")
+
+        original = {"route": [node(1, "景点1"), node(1, "酒店1", "住宿")]}
+        result = await build_segmented_plan(original, {"days": 3, "budget": 3000}, generate)
+
+        self.assertFalse(result["applied"])
+        self.assertFalse(result["is_long_trip"])
+        self.assertEqual(result["generated_segments"], [])
+        self.assertEqual(result["plan"], original)
+
+    async def test_continuity_failures_stay_visible(self):
+        """生成器交不出住宿 → 首轮"成功"但衔接校验如实报住宿不足，且列进待修补。"""
+        async def generate(target):
+            return [n for n in segment_nodes(target, 14) if n["type"] != "住宿"]
+
+        result = await build_segmented_plan({"route": []}, {"days": 14, "budget": 14000}, generate)
+
+        self.assertTrue(result["generated_segments"])
+        self.assertFalse(result["continuity"]["ok"])
+        codes = {item["code"] for item in result["continuity"]["failures"]}
+        self.assertIn("long_trip_lodging_shortfall", codes)
+        # 待修补列表按"段起始日"给出（1-7、8-14）
+        self.assertEqual(result["needs_repair_segments"], [1, 8])
+
+    def test_first_round_prompt_says_it_is_first_round(self):
+        target = {"index": 1, "start_day": 1, "end_day": 7, "days": 7, "reasons": [],
+                  "brief": {"carry_in": {}, "rest_days_required": 1}}
+        prompt = segment_prompt(target)
+        self.assertIn("首轮分段生成", prompt)
+        self.assertNotIn("当前的问题", prompt)
+        self.assertIn("只生成第 1-7 天", prompt)
 
 
 if __name__ == "__main__":

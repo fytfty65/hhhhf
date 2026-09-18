@@ -118,6 +118,15 @@ const GOVERNANCE_PAYLOAD = {
       { index: 3, start_day: 15, end_day: 16, days: 2, nodes: 5, rest_days: 0, needs_repair: false },
     ],
     ok: false,
+    // 首轮：按 7 天一段逐段生成后合并（core/long_trip.build_segmented_plan → agent.py 薄接线）
+    first_round: {
+      chunk_days: 7,
+      generated: [1, 2, 3],
+      failed: [],
+      skipped: [],
+      truncated: false,
+      out_of_range_days: [17],
+    },
     repaired: [{ segment: 2, days: '8-14', added: 3, dropped_out_of_range: [17], reasons: ['long_trip_day_gap'] }],
     repair_failed_segments: [15],
   },
@@ -265,9 +274,11 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByText(/建议高铁：约 4 小时 10 分，二等座票价未核实/)).toBeVisible();
     await expect(panel.getByText(/备选：飞机 约 1 小时 30 分（票价未核实）/)).toBeVisible();
 
-    // 长途分段：段级节点数/休整日 + 哪段重生成过、哪段没补上
+    // 长途分段：段级节点数/休整日 + 首轮按段生成的结果 + 哪段重生成过、哪段没补上
     await expect(panel.getByText('长途分段')).toBeVisible();
     await expect(panel.getByText('有待修补')).toBeVisible();
+    await expect(panel.getByText(/按 7 天一段逐段生成：3 段已排好/)).toBeVisible();
+    await expect(panel.getByText(/模型多给了第 17 天，已丢弃/)).toBeVisible();
     await expect(panel.getByText(/第 2 段 · 第 8-14 天/)).toBeVisible();
     await expect(panel.getByText(/18 个节点 · 休整 1 天/)).toBeVisible();
     await expect(panel.getByText(/已重新生成 1 段（第 8-14 天）；未补上 1 段（从第 15 天起）/)).toBeVisible();
