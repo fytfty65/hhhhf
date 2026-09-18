@@ -321,3 +321,174 @@ def cheapest_verified(options: Sequence[Mapping[str, Any]]) -> Optional[Dict[str
     if not verified:
         return None
     return min(verified, key=lambda item: float(item["price"]))
+
+
+# --------------------------------------------------------------------------
+# 接进方案：跨城/长距离腿 → 候选 → 建议
+# --------------------------------------------------------------------------
+TRAVEL_INFO_MODES = {"transit": "transit", "driving": "drive", "walking": "walk", "taxi": "ride"}
+
+
+def normalize_travel_info(travel_info: Mapping[str, Any], default_source: str = "amap") -> List[Dict[str, Any]]:
+    """`ExpertToolbox.get_travel_options()` 的输出 → 候选。
+
+    该函数的返回形如 `{"transit": {"label": "公交/地铁", "duration_min": 42, "steps": [...]}, ...}`，
+    **只有时长与换乘信息、没有票价**，因此票价一律为未知（未核实）。
+    """
+    options: List[Dict[str, Any]] = []
+    if not isinstance(travel_info, Mapping):
+        return options
+    for key, payload in travel_info.items():
+        mode = TRAVEL_INFO_MODES.get(str(key))
+        if not mode or not isinstance(payload, Mapping):
+            continue
+        duration = _number(payload.get("duration_min") or payload.get("duration_minutes"))
+        steps = payload.get("steps")
+        transfers = max(0, len(steps) - 1) if isinstance(steps, list) and steps else None
+        options.append(
+            normalize_option(
+                {
+                    "mode": mode,
+                    "duration_minutes": duration,
+                    "transfers": transfers,
+                    "price": None,  # AMap 不给票价
+                    "source": default_source,
+                    "provider": default_source,
+                },
+                default_source=default_source,
+            )
+        )
+    return [item for item in options if item]
+
+
+def _parse_lnglat(value: Any) -> Optional[Tuple[float, float]]:
+    if isinstance(value, Mapping):
+        lng, lat = value.get("lng"), value.get("lat")
+        try:
+            return float(lng), float(lat)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return float(value[0]), float(value[1])
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str) and "," in value:
+        parts = value.split(",")
+        try:
+            return float(parts[0]), float(parts[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    import math
+
+    lng1, lat1 = a
+    lng2, lat2 = b
+    radius = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lng2 - lng1)
+    h = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * radius * math.asin(min(1.0, math.sqrt(h)))
+
+
+def find_transfer_legs(
+    plan: Any,
+    min_km: float = 150.0,
+    max_legs: int = 3,
+) -> List[Dict[str, Any]]:
+    """找出"需要专门比较出行方式"的腿（默认 ≥150km，即跨城/跨段）。
+
+    按行程顺序扫描相邻节点；只保留**距离超阈值**的腿，避免把市内步行段也拿来做交通比价。
+    """
+    from .plan_quality import node_day, node_name, nodes_of  # 延迟导入避免模块级循环
+
+    nodes = nodes_of(plan)
+    legs: List[Dict[str, Any]] = []
+    previous = None
+    previous_day = None
+    for index, node in enumerate(nodes, start=1):
+        position = _parse_lnglat(node.get("lnglat"))
+        day = node_day(node, index)
+        if position is None:
+            previous, previous_day = None, day
+            continue
+        if previous is not None:
+            distance = _haversine_km(previous["position"], position)
+            if distance >= float(min_km):
+                legs.append(
+                    {
+                        "after_day": previous_day,
+                        "before_day": day,
+                        "from": previous["name"],
+                        "to": node_name(node),
+                        "from_lnglat": list(previous["position"]),
+                        "to_lnglat": list(position),
+                        "distance_km": round(distance, 1),
+                    }
+                )
+                if len(legs) >= max(1, int(max_legs)):
+                    break
+        previous = {"name": node_name(node), "position": position}
+        previous_day = day
+    return legs
+
+
+async def build_transport_audit(
+    legs: Sequence[Mapping[str, Any]],
+    fetch: Optional[Any],
+    city: str = "",
+    preferences: Optional[Mapping[str, Any]] = None,
+    budget_left: Optional[float] = None,
+    max_legs: int = 2,
+) -> Dict[str, Any]:
+    """为每条腿取候选并给出建议（有界、失败不抛出）。
+
+    `fetch` 形如 `ExpertToolbox.get_travel_options(origin, dest, city)`（异步）。
+    没有 fetch / 没有候选时**如实说明**（不编造班次与票价）。
+    """
+    audits: List[Dict[str, Any]] = []
+    for leg in list(legs)[: max(1, int(max_legs))]:
+        entry: Dict[str, Any] = {
+            "from": leg.get("from"),
+            "to": leg.get("to"),
+            "distance_km": leg.get("distance_km"),
+            "after_day": leg.get("after_day"),
+            "before_day": leg.get("before_day"),
+        }
+        if not fetch:
+            entry["advice"] = "未配置出行数据源，这一段建议按你的习惯选择（票价与班次未核实）"
+            audits.append(entry)
+            continue
+        try:
+            origin = ",".join(str(item) for item in (leg.get("from_lnglat") or []))
+            destination = ",".join(str(item) for item in (leg.get("to_lnglat") or []))
+            info = await fetch(origin, destination, city)
+            options = normalize_travel_info(info or {})
+            if not options:
+                entry["advice"] = "这一段没有取到可用的出行方式（数据源未返回），票价与班次未核实"
+            else:
+                result = advice(options, preferences, budget_left=budget_left)
+                entry["advice"] = result["recommendation"]
+                entry["alternatives"] = result["alternatives"]
+                entry["unverified_fares"] = result["unverified_fares"]
+                entry["options"] = [
+                    {
+                        "mode": item.get("mode_label"),
+                        "duration_minutes": item.get("duration_minutes"),
+                        "transfers": item.get("transfers"),
+                        "price": item.get("price"),
+                        "fare_verified": item.get("fare_verified"),
+                    }
+                    for item in result["ranked"][:3]
+                ]
+        except Exception as exc:  # 单条腿失败不影响其它腿，也不影响出方案
+            entry["advice"] = f"这一段出行方式检索失败（{str(exc)[:60]}），票价与班次未核实"
+        audits.append(entry)
+    return {
+        "legs": audits,
+        "note": "跨城段的票价需要可核实的票务来源；缺来源时只比较时长，并明确标注未核实。",
+    }

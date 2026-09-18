@@ -3418,6 +3418,25 @@ async def run_negotiate(msg: GatewayMessage):
                                     final_data["price_audit"] = _coverage(final_data)
                                 except Exception:
                                     pass
+
+                            # 👑 跨城腿的出行方式比较（有界：最多 2 段；票价无来源就标未核实）
+                            try:
+                                from core.transport_options import build_transport_audit, find_transfer_legs
+
+                                _transfer_legs = find_transfer_legs(final_data, min_km=150, max_legs=3)
+                                if _transfer_legs:
+                                    final_data["transport_audit"] = await build_transport_audit(
+                                        _transfer_legs,
+                                        getattr(toolbox, "get_travel_options", None),
+                                        city=target_city,
+                                        preferences={
+                                            "transport_preference": (user_prefs or {}).get("transport_preference"),
+                                            "pace": intent_str,
+                                        },
+                                        max_legs=2,
+                                    )
+                            except Exception as _transport_exc:  # 出行比较失败绝不能影响出方案
+                                final_data["transport_audit"] = {"error": str(_transport_exc)[:200]}
                             if _snapshot.get("fallback"):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案
