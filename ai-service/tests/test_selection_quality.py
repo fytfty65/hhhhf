@@ -135,5 +135,34 @@ class TestSelectionGates(unittest.TestCase):
         self.assertIn("category_cap_exceeded", self._codes(stricter, route))
 
 
+class TestCompositionPromptRules(unittest.TestCase):
+    """策略要真的写进提示词（让模型第一轮就少犯），而且数字跟着二次增量变。"""
+
+    CTX = {"days": 7, "city": "库尔勒", "request_text": "我想在库尔勒躺7天，想吃特色美食"}
+
+    def _rules(self, increment=None):
+        from core.composition import composition_policy, composition_prompt_rules
+
+        return composition_prompt_rules(composition_policy(self.CTX, increment=increment))
+
+    def test_nature_destination_gets_daily_scenic_rule(self):
+        rules = self._rules()
+        self.assertIn("每天至少安排 1 个自然景观", rules)
+        self.assertIn("文化类", rules)
+        self.assertIn("停车场", rules)  # 设施类必须被明确禁止
+        self.assertIn("只有住宿", rules)
+
+    def test_increment_raises_the_number_in_the_rule(self):
+        rules = self._rules({"quota": {"scenic": 6}})
+        self.assertIn("每天至少安排 3 个自然景观", rules)
+
+    def test_plain_city_without_nature_request_has_no_scenic_floor(self):
+        from core.composition import composition_policy, composition_prompt_rules
+
+        plain = {"days": 3, "city": "上海", "request_text": "去上海逛街吃东西"}
+        rules = composition_prompt_rules(composition_policy(plain))
+        self.assertNotIn("每天至少安排", rules)
+
+
 if __name__ == "__main__":
     unittest.main()

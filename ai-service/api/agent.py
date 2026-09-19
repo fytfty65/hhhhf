@@ -2108,6 +2108,26 @@ async def run_negotiate(msg: GatewayMessage):
             else:
                 summary_desc = f"已为您匹配【{target_city}】{trip_days}天高性价比精算路线，预估总花销{total_calc_budget}元（日均约{round(total_calc_budget/trip_days)}元）：覆盖完整 {trip_days} 天，每日精细规划 {actual_daily_count} 个文旅节点，平衡美食打卡与文化慢游。"
 
+            # 👑 构成策略 → 提示词硬规则：目标值由"目的地 + 偏好 + 二次增量"推导（不是写死的），
+            # 让模型第一轮就按它排，而不是全靠事后 gate + 自动补点去救。
+            try:
+                from core.composition import composition_policy, composition_prompt_rules
+                from core.increment import parse_increment as _parse_increment_for_prompt
+
+                _prompt_policy = composition_policy(
+                    {
+                        "days": trip_days,
+                        "city": target_city,
+                        "request_text": intent_str,
+                        "preferences": user_prefs if isinstance(user_prefs, dict) else {},
+                    },
+                    increment=_parse_increment_for_prompt(intent_str) if is_refinement else None,
+                    signals=pref_signals if isinstance(pref_signals, dict) else None,
+                )
+                composition_rules_block = composition_prompt_rules(_prompt_policy)
+            except Exception:
+                composition_rules_block = ""
+
             # 👑 严格保证天数输出、每日 5 节点、真实花费与干净外链的 Prompt
             system_prompt = f"""
 你是一个专业的多智能体团队旅行协同专家。当前任务：规划【{target_city}】完整【{trip_days}天】的深度团队行程。
@@ -2153,6 +2173,8 @@ async def run_negotiate(msg: GatewayMessage):
 3. 午餐和晚餐节点必须从底座数据中 type 包含 "餐饮" 或 name 含美食关键词（如 火锅/面馆/老字号/特色菜/小吃/夜市）的对象中选取，严禁用景区名称充当餐饮节点！
 4. 上午节点优先安排户外风景区（天气好时）或文化地标，下午可穿插博物馆/商业街/文创园，形成「上午户外 + 中午美食 + 下午文化 + 晚间夜市」的节奏感！
 5. 【开放时间感知】博物馆/美术馆/科技馆/纪念馆等场馆普遍【周一闭馆】——若行程覆盖周一，必须把此类场馆安排到非周一日期，并在其 `open_time` 字段如实标注闭馆日（如 "周二-周日 09:00-17:00，周一闭馆"），严禁在周一安排此类场馆。
+
+{composition_rules_block}
 
 [FINAL_JSON]
 {{

@@ -132,6 +132,55 @@ def composition_policy(
     }
 
 
+CATEGORY_LABELS: Dict[str, str] = {
+    "scenic": "自然景观（湖/河/草原/沙漠/峡谷/公园/雪山）",
+    "cultural": "文化类（博物馆/古迹/纪念馆）",
+    "food": "特色餐饮/老字号",
+    "shopping": "逛街/市集",
+    "nightlife": "夜景/夜市",
+    "outdoor": "户外（徒步/骑行）",
+    "family": "亲子",
+    "photo": "摄影机位",
+    "hotspot": "温泉",
+}
+
+
+def composition_prompt_rules(policy: Mapping[str, Any]) -> str:
+    """把策略写成人话规则，直接注入给模型的提示词（纯函数，可单测）。
+
+    目的：让模型**第一轮**就按"这趟该看什么"来排，而不是全靠事后 gate + 自动补点去救。
+    规则里的数字来自策略（目的地/偏好/二次增量），所以用户说"想多打卡自然景观"时，
+    这条规则里的下限会跟着变高。
+    """
+    lines: List[str] = []
+    min_scenic = float(policy.get("min_scenic_per_day") or 0)
+    if min_scenic > 0:
+        lines.append(
+            f"每天至少安排 {int(min_scenic)} 个自然景观（湖/河/草原/沙漠/峡谷/公园/雪山）——"
+            "这趟是奔着自然风景去的，严禁整天泡在博物馆/纪念馆里"
+        )
+    max_cultural = policy.get("max_cultural_total")
+    if max_cultural is not None:
+        lines.append(f"全行程「文化类」（博物馆/古迹/纪念馆/美术馆）合计不超过 {int(max_cultural)} 个")
+    share = policy.get("max_category_share")
+    if share:
+        lines.append(f"任何单一类别的玩点不超过全部玩点的 {int(float(share) * 100)}%（自然景观不计入这条）")
+    lines.append(
+        "严禁把【停车场/出入口/售票处/服务中心/商店/文创店/宾馆酒店/车站机场】当作景点排进行程 —— "
+        "名字里带景区关键词也不行（例如「xx博物馆-西北门地上停车场」不是景点）"
+    )
+    lines.append("每天至少 1 个玩点 + 1 餐；严禁出现只有住宿、没有玩点的一天")
+    required = [str(item) for item in (policy.get("required_categories") or [])]
+    if required:
+        labels = "、".join(CATEGORY_LABELS.get(item, item) for item in required)
+        lines.append(f"用户这次明确要求增加：{labels} —— 请优先安排")
+    if not lines:
+        return ""
+    return "【🔴 构成规则（按这趟的目的地和你的要求推导，必须遵守）】\n" + "\n".join(
+        f"{index + 1}. {line}" for index, line in enumerate(lines)
+    )
+
+
 def count_categories(plan: Any) -> Dict[str, int]:
     """按"玩点类别"统计方案（餐饮/住宿不计入，它们不是玩点）。"""
     from .plan_quality import _coarse_category, nodes_of  # 延迟导入，避免模块级循环
