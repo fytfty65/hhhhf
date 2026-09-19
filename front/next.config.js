@@ -19,17 +19,32 @@
  *   object-src, base-uri locked to self, frame-ancestors none, restricted
  *   connect/frame/img origins). connect-src is broader in development only, so
  *   HMR and the local API keep working.
+ *
+ *   2026-09-19 事故记录：地图瓦片域名当初只加进了 `img-src`，而 MapLibre 是用
+ *   fetch 取栅格瓦片的 → CSP 在发请求之前就拦掉，表现为"地图全白 + 网络面板零请求 +
+ *   控制台一堆 Refused to connect"。**改动这里的白名单时，栅格瓦片域名必须同时留在
+ *   `connect-src`**；`app/lib/csp.test.ts` 会把这条契约钉住。
  */
 
 const isDev = process.env.NODE_ENV !== 'production';
 
-// Map/raster tile hosts, avatar placeholders, globe textures and fonts actually
-// referenced by the client.
-const IMG_HOSTS = [
+// Map/raster tile hosts. **必须同时出现在 `connect-src` 和 `img-src` 里**：
+// MapLibre GL 是用 fetch/XHR 取栅格瓦片的（不是 <img>），所以它受 `connect-src` 管 ——
+// 只写进 `img-src` 的话，浏览器会在网络层之前就把请求拦掉：DevTools 网络面板里一条都看不到、
+// 控制台刷 "Refused to connect ... violates ... connect-src"，MapLibre 只会报
+// `AJAXError: Failed to fetch (0)`。2026-09-19 用户实测：直接在地址栏打开同一个瓦片 URL 能显示，
+// 但页面里一个瓦片请求都不发 —— 就是这个原因（不是网络问题，也不是备用底图选错）。
+const TILE_HOSTS = [
   'https://*.is.autonavi.com',
-  'https://*.tile.openstreetmap.org',
   'https://tile.openstreetmap.org',
+  'https://*.tile.openstreetmap.org',
   'https://server.arcgisonline.com',
+];
+
+const IMG_HOSTS = [
+  ...TILE_HOSTS,
+  // 高德静态地图（节点配图兜底，走 <img>）
+  'https://restapi.amap.com',
   'https://api.dicebear.com',
   'https://unpkg.com',
   'https://cdn.jsdelivr.net',
@@ -54,7 +69,7 @@ function contentSecurityPolicy() {
   const scriptSrc = isDev
     ? "'self' 'unsafe-inline' 'unsafe-eval' blob:"
     : "'self' 'unsafe-inline' blob:";
-  const connectSrc = ["'self'", ...API_TARGETS];
+  const connectSrc = ["'self'", ...API_TARGETS, ...TILE_HOSTS];
   if (isDev) {
     connectSrc.push('ws://localhost:3001', 'ws://127.0.0.1:3001');
   }

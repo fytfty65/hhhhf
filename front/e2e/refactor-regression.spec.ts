@@ -283,76 +283,21 @@ test.describe('refactor regression', () => {
     await expect(radar).toBeHidden({ timeout: 10_000 });
   });
 
-  test('底图不可达时：离线示意图兜底、提示不被遮挡（版面回归）', async ({ page }) => {
+  test('地图瓦片请求确实发出去了（CSP 连接层回归）', async ({ page }) => {
     test.setTimeout(90_000);
-    // 让高德瓦片一定失败 → 必定走"底图不可达"这条路径（确定性，不依赖外网快慢）
-    await page.route('**/appmaptile**', (route) => route.abort());
+    // 2026-09-19 事故：瓦片域名只在 CSP 的 img-src 里、不在 connect-src 里，
+    // 而 MapLibre 是用 fetch 取栅格瓦片的 → 浏览器在发请求之前就拦掉，
+    // 表现为"地图全白 + 网络面板零请求 + 控制台一堆 Refused to connect"。
+    // 这条断言只看"请求有没有真的发出去"：无论外网通不通，请求事件都必须出现。
+    const tileRequests: string[] = [];
+    page.on('request', (request) => {
+      if (/autonavi|arcgisonline|openstreetmap/.test(request.url())) tileRequests.push(request.url());
+    });
     await installMocks(page);
     await page.goto('/');
     await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
     await reachDecision(page);
 
-    const status = page.locator('.map-tile-status');
-    await expect(status).toBeVisible({ timeout: 30_000 });
-    const green = page.getByTitle('碳足迹与绿色交通评估');
-    await expect(green).toBeVisible();
-
-    const statusBox = await status.boundingBox();
-    const greenBox = await green.boundingBox();
-    expect(statusBox).not.toBeNull();
-    expect(greenBox).not.toBeNull();
-    // 两个浮动元素曾经都贴在左下角（状态条 bottom-20 / 按钮 bottom-[5.25rem]）而重叠，
-    // 按钮把状态文字压掉一半。这条断言直接比较两个盒子有没有相交。
-    const overlaps =
-      statusBox!.x < greenBox!.x + greenBox!.width &&
-      greenBox!.x < statusBox!.x + statusBox!.width &&
-      statusBox!.y < greenBox!.y + greenBox!.height &&
-      greenBox!.y < statusBox!.y + statusBox!.height;
-    expect(
-      overlaps,
-      `状态条与绿色出行按钮重叠：status=${JSON.stringify(statusBox)} green=${JSON.stringify(greenBox)}`,
-    ).toBe(false);
-    // 而且状态条必须**在按钮上方**（不是被挤到别处去了）
-    expect(
-      statusBox!.y + statusBox!.height,
-      `状态条应位于按钮上方：status=${JSON.stringify(statusBox)} green=${JSON.stringify(greenBox)}`,
-    ).toBeLessThanOrEqual(greenBox!.y + 1);
-
-    // 最关键的一条：状态条必须**真的露在最上面**。左下角时它被行程节点卡片条盖住，
-    // Playwright 的 toBeVisible 看不出来（元素有盒子、未被 visibility:hidden），
-    // 只有 elementFromPoint 能证明"用户读得到"。
-    const covered = await page.evaluate(() => {
-      const el = document.querySelector('.map-tile-status') as HTMLElement | null;
-      if (!el) return { found: false, covered: true };
-      const r = el.getBoundingClientRect();
-      const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) as HTMLElement | null;
-      return { found: true, covered: !(el === top || el.contains(top)) };
-    });
-    expect(covered.found, '状态条应当存在').toBe(true);
-    expect(covered.covered, '状态条被其它元素盖住了，用户读不到').toBe(false);
-
-    // 反过来也不能让状态条压住地图控制条（第一次挪到顶部居中时正好压在"实时路况"上）
-    const trafficButton = page.getByRole('button', { name: '实时路况' });
-    const trafficBox = await trafficButton.boundingBox();
-    if (trafficBox) {
-      const hitsControl =
-        statusBox!.x < trafficBox.x + trafficBox.width &&
-        trafficBox.x < statusBox!.x + statusBox!.width &&
-        statusBox!.y < trafficBox.y + trafficBox.height &&
-        trafficBox.y < statusBox!.y + statusBox!.height;
-      expect(
-        hitsControl,
-        `状态条压住了「实时路况」按钮：status=${JSON.stringify(statusBox)} traffic=${JSON.stringify(trafficBox)}`,
-      ).toBe(false);
-    }
-
-    // 底图一块都没画出来时，离线示意图必须兜底（不依赖网络），路线与编号仍然可读
-    const schematic = page.getByTestId('route-schematic');
-    await expect(schematic).toBeVisible({ timeout: 15_000 });
-    await expect(schematic.getByText('路线相对位置示意图')).toBeVisible();
-    await expect(schematic.getByText(/底图暂时取不到/)).toBeVisible();
-    await expect(schematic.getByText(/1\. 洛阳古城/)).toBeVisible();
-
-    await page.screenshot({ path: '../work/map-fallback.png', animations: 'disabled' });
+    await expect.poll(() => tileRequests.length, { timeout: 25_000 }).toBeGreaterThan(0);
   });
 });

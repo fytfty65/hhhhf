@@ -272,6 +272,9 @@ export default function InteractiveAmapComponent({
     const armFallbackTimer = () => {
       if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
       fallbackTimer = window.setTimeout(() => {
+        // `firstTileSeen` 现在只由**真正加载成功的瓦片**置位（见 sourcedata）：
+        // 之前用 `sourceDataType === 'content'` 判断，瓦片全挂时它照样触发，
+        // 于是"一个瓦片都没画出来"也不会走降级 —— 实测就是这么漏的。
         if (!firstTileSeen || tileErrorCountRef.current > 0) activateFallback();
       }, MAP_TILE_TIMEOUT_MS);
     };
@@ -301,19 +304,10 @@ export default function InteractiveAmapComponent({
     }, MAP_TILE_TIMEOUT_MS + 2500);
     map.on('sourcedata', (event: any) => {
       const sourceId = String(event?.sourceId || '');
-      const tileLoaded = event?.sourceDataType === 'content' || event?.tile?.state === 'loaded';
-      // 只有**真的有一块瓦片加载成功**才算"底图可用"：`sourceDataType === 'content'` 在
-      // 瓦片全部失败时也会触发（实测：请求被 abort 后它照样来），用它判断会把离线示意图
-      // 提前撤掉，地图又变回空白。
-      if (event?.tile?.state === 'loaded' && (sourceId.startsWith('amap-') || sourceId.startsWith('fallback-'))) {
-        setBasemapPainted(true);
-      }
-      if (sourceId.startsWith('fallback-') && tileLoaded) {
-        fallbackTileSeen = true;
-        return;
-      }
-      if (sourceId.startsWith('amap-') && tileLoaded) {
+      const realTileLoaded = event?.tile?.state === 'loaded';
+      if (realTileLoaded && sourceId.startsWith('amap-')) {
         firstTileSeen = true;
+        setBasemapPainted(true);
         tileErrorCountRef.current = 0;
         // 高德瓦片到了 = 底图其实是好的：撤销可能的误判（回到"正常"），
         // 而不是一直挂着"已切换备用底图"这个已经不成立的结论。
@@ -325,6 +319,11 @@ export default function InteractiveAmapComponent({
         }
         setTileError('');
         setTileRetrying(false);
+        return;
+      }
+      if (realTileLoaded && sourceId.startsWith('fallback-')) {
+        fallbackTileSeen = true;
+        setBasemapPainted(true);
       }
     });
     const handleTileError = (event: any) => {
@@ -332,7 +331,8 @@ export default function InteractiveAmapComponent({
       // Ignore style/glyph errors without a source id; the timeout above is
       // the backstop for a style that never reaches the loaded state.
       if (!sourceId.startsWith('amap-')) return;
-      if (!styleReady) return;
+      // 不再要求 `styleReady`：瓦片可能在样式就绪**之前**就整批失败（代理 500、DNS 立刻失败），
+      // 之前这里直接 return，导致三连错被吞掉、用户永远看不到降级提示（实测复现）。
       tileErrorCountRef.current += 1;
       // One tile may fail transiently. Wait for a few failures before
       // switching providers so the normal multi-host AMap source can recover.
