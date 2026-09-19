@@ -283,9 +283,9 @@ test.describe('refactor regression', () => {
     await expect(radar).toBeHidden({ timeout: 10_000 });
   });
 
-  test('底图不可达时的提示不遮挡「绿色出行」按钮（版面回归）', async ({ page }) => {
+  test('底图不可达时：离线示意图兜底、提示不被遮挡（版面回归）', async ({ page }) => {
     test.setTimeout(90_000);
-    // 让高德瓦片一定失败 → 必定走"切换备用底图"这条路径（确定性，不依赖外网快慢）
+    // 让高德瓦片一定失败 → 必定走"底图不可达"这条路径（确定性，不依赖外网快慢）
     await page.route('**/appmaptile**', (route) => route.abort());
     await installMocks(page);
     await page.goto('/');
@@ -318,9 +318,6 @@ test.describe('refactor regression', () => {
       `状态条应位于按钮上方：status=${JSON.stringify(statusBox)} green=${JSON.stringify(greenBox)}`,
     ).toBeLessThanOrEqual(greenBox!.y + 1);
 
-    // 底图拿不到时，行程节点标记仍然要渲染（文案承诺的"路线与编号仍可读"必须是真的）
-    await expect(page.locator('.map-visualizer-shell .maplibregl-marker').first()).toBeVisible({ timeout: 10_000 });
-
     // 最关键的一条：状态条必须**真的露在最上面**。左下角时它被行程节点卡片条盖住，
     // Playwright 的 toBeVisible 看不出来（元素有盒子、未被 visibility:hidden），
     // 只有 elementFromPoint 能证明"用户读得到"。
@@ -333,6 +330,28 @@ test.describe('refactor regression', () => {
     });
     expect(covered.found, '状态条应当存在').toBe(true);
     expect(covered.covered, '状态条被其它元素盖住了，用户读不到').toBe(false);
+
+    // 反过来也不能让状态条压住地图控制条（第一次挪到顶部居中时正好压在"实时路况"上）
+    const trafficButton = page.getByRole('button', { name: '实时路况' });
+    const trafficBox = await trafficButton.boundingBox();
+    if (trafficBox) {
+      const hitsControl =
+        statusBox!.x < trafficBox.x + trafficBox.width &&
+        trafficBox.x < statusBox!.x + statusBox!.width &&
+        statusBox!.y < trafficBox.y + trafficBox.height &&
+        trafficBox.y < statusBox!.y + statusBox!.height;
+      expect(
+        hitsControl,
+        `状态条压住了「实时路况」按钮：status=${JSON.stringify(statusBox)} traffic=${JSON.stringify(trafficBox)}`,
+      ).toBe(false);
+    }
+
+    // 底图一块都没画出来时，离线示意图必须兜底（不依赖网络），路线与编号仍然可读
+    const schematic = page.getByTestId('route-schematic');
+    await expect(schematic).toBeVisible({ timeout: 15_000 });
+    await expect(schematic.getByText('路线相对位置示意图')).toBeVisible();
+    await expect(schematic.getByText(/底图暂时取不到/)).toBeVisible();
+    await expect(schematic.getByText(/1\. 洛阳古城/)).toBeVisible();
 
     await page.screenshot({ path: '../work/map-fallback.png', animations: 'disabled' });
   });

@@ -19,6 +19,7 @@ import {
   Globe2,
   RefreshCw,
 } from 'lucide-react';
+import RouteSchematicMap from './components/RouteSchematicMap';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   AMAP_LABEL_TILES,
@@ -121,6 +122,9 @@ export default function InteractiveAmapComponent({
   const [show3DGlobe, setShow3DGlobe] = useState(false); // 👑 3D 态势大屏模态框开关
   const [mapLoaded, setMapLoaded] = useState(false);
   const [tileFallback, setTileFallback] = useState(false);
+  // 只要**任意一块底图瓦片**画出来了就置 true；一直是 false 时用离线示意图兜底，
+  // 保证地图区永远不是一块空白（沙箱/受限网络实测：一个瓦片请求都发不出去）。
+  const [basemapPainted, setBasemapPainted] = useState(false);
   const [tileError, setTileError] = useState('');
   const [tileRetrying, setTileRetrying] = useState(false);
   const [mapEngineError, setMapEngineError] = useState('');
@@ -288,6 +292,12 @@ export default function InteractiveAmapComponent({
     map.on('sourcedata', (event: any) => {
       const sourceId = String(event?.sourceId || '');
       const tileLoaded = event?.sourceDataType === 'content' || event?.tile?.state === 'loaded';
+      // 只有**真的有一块瓦片加载成功**才算"底图可用"：`sourceDataType === 'content'` 在
+      // 瓦片全部失败时也会触发（实测：请求被 abort 后它照样来），用它判断会把离线示意图
+      // 提前撤掉，地图又变回空白。
+      if (event?.tile?.state === 'loaded' && (sourceId.startsWith('amap-') || sourceId.startsWith('fallback-'))) {
+        setBasemapPainted(true);
+      }
       if (sourceId.startsWith('fallback-') && tileLoaded) {
         fallbackTileSeen = true;
         return;
@@ -635,6 +645,10 @@ export default function InteractiveAmapComponent({
       <div className="map-empty-surface absolute inset-0 pointer-events-none" aria-hidden="true" />
       <div ref={mapContainer} className="w-full h-full absolute inset-0" />
 
+      {/* 👑 一块底图瓦片都没画出来时，用**离线示意图**兜底：不依赖网络，
+          路线与编号仍然可读（之前这种情况就是一块空白）。 */}
+      {!basemapPainted && <RouteSchematicMap routes={renderRoute} />}
+
       {/* 👑 顶部控制面板（包含图层、路况、WorldMonitor 状态卡与 3D 态势雷达切换按钮）。
           sm 及以上与左上返回按钮、右上动作条统一抬到 top-6 同一基线，实现左右水平对齐；
           宽度在 globals.css 中为右侧动作条预留车道，换行也不会遮挡。
@@ -783,11 +797,10 @@ export default function InteractiveAmapComponent({
       )}
 
       {tileError && (
-        // 位置：地图上方的状态位（与"正在连接地图服务…"同一处），**不再放左下角**。
-        // 左下角依次叠着：归属 pill、绿色出行按钮、行程节点卡片条、碳足迹面板 ——
-        // 实测状态条被卡片条盖住（elementFromPoint 命中的是卡片里的占位图），
-        // 用户根本读不到；挪到上方就与这些浮动元素彻底无关。
-        <div className="map-tile-status absolute top-4 sm:top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-xl bg-slate-950/90 text-slate-100 border border-amber-400/40 px-3 py-2.5 text-[11px] font-bold shadow-lg" role="status">
+        // 位置：小屏居中在顶部（控制条在 top-[8.5rem]，不会撞），sm 及以上靠右、
+        // 压在地图右下侧 —— 左侧那一列是图层/路况/雷达/唤醒按钮，居中会正好压在它们上面。
+        // 左下角更不行：归属 pill、绿色出行按钮、行程节点卡片条层层叠着（实测状态条会被卡片盖住）。
+        <div className="map-tile-status absolute top-4 left-1/2 -translate-x-1/2 sm:top-20 sm:left-auto sm:right-4 sm:translate-x-0 z-40 flex items-center gap-2 rounded-xl bg-slate-950/90 text-slate-100 border border-amber-400/40 px-3 py-2.5 text-[11px] font-bold shadow-lg" role="status">
           <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${tileRetrying ? 'animate-spin' : ''}`} />
           <span className="min-w-0">{tileError}</span>
           <button onClick={retryMapTiles} disabled={tileRetrying} className="ml-auto shrink-0 text-amber-300 hover:text-white underline underline-offset-2 disabled:opacity-60">
