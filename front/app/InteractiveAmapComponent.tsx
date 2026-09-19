@@ -815,7 +815,7 @@ export default function InteractiveAmapComponent({
         </div>
       )}
 
-      {tileError && (
+      {tileError && phase === 'decision' && (
         // 位置：小屏居中在顶部（控制条在 top-[8.5rem]，不会撞），sm 及以上靠右、
         // 压在地图右下侧 —— 左侧那一列是图层/路况/雷达/唤醒按钮，居中会正好压在它们上面。
         // 左下角更不行：归属 pill、绿色出行按钮、行程节点卡片条层层叠着（实测状态条会被卡片盖住）。
