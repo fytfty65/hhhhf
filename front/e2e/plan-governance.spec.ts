@@ -1,4 +1,4 @@
-import { test, expect, Page } from '@playwright/test';
+﻿import { test, expect, Page } from '@playwright/test';
 
 /**
  * 行程核对面板（预算核对 / 已作调整 / 行程规模 / 本次调整 / 价格核对 / 跨城怎么走 / 长途分段 /
@@ -323,7 +323,7 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
 
     // 价格核对：比例 + 还需补价的节点（未核实必须写明，不得当成 0 元）
     await expect(panel.getByText('价格核对')).toBeVisible();
-    await expect(panel.getByText('可核实 40% · 未取到 40%')).toBeVisible();
+    await expect(panel.getByText('已核实 2 项 · 需要你确认 2 项')).toBeVisible();
     await expect(panel.getByText(/还需补价：城墙南门门票、永兴坊美食/)).toBeVisible();
     await expect(panel.getByText(/补上 1 个价格/)).toBeVisible();
 
@@ -355,7 +355,7 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
 
     // 自动复核：改了什么（含"从候选池补点"）、还剩几处、哪些改不动
     await expect(panel.getByText('自动复核')).toBeVisible();
-    await expect(panel.getByText('需处理的问题 4 → 0')).toBeVisible();
+    await expect(panel.getByText('4 处已修好 · 没有遗留问题')).toBeVisible();
     await expect(panel.getByText(/已自动修正：重排时间 2 处 · 去掉重复 1 处 · 补餐饮 1 处/)).toBeVisible();
     await expect(panel.getByText(/第 1 天「陕西历史博物馆」/)).toBeVisible();
     await expect(panel.getByText(/这些我改不动，要靠数据或你确认：候选池补点/)).toBeVisible();

@@ -236,7 +236,7 @@ function money(value: unknown): string {
 
 function SectionLabel({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-wide text-slate-400">
+    <div className="flex items-center gap-1.5 text-[11px] font-bold tracking-wide text-slate-500">
       {icon}
       <span>{children}</span>
     </div>
@@ -246,8 +246,8 @@ function SectionLabel({ icon, children }: { icon: React.ReactNode; children: Rea
 function Row({ label, value, tone, hint }: { label: string; value: React.ReactNode; tone?: string; hint?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-0.5">
-      <span className="text-[11px] text-slate-500" title={hint}>{label}</span>
-      <span className={`font-mono text-[12px] font-bold tabular-nums ${tone || 'text-slate-800'}`}>{value}</span>
+      <span className="text-[12.5px] text-slate-600" title={hint}>{label}</span>
+      <span className={`font-mono text-[13.5px] font-bold tabular-nums ${tone || 'text-slate-800'}`}>{value}</span>
     </div>
   );
 }
@@ -294,14 +294,14 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
 
   return (
     <section
-      className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 px-3.5 py-3 text-left"
+      className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3.5 text-left"
       aria-label="行程核对说明"
     >
       {hasBudgetBlock && (
         <div>
           <div className="flex items-center justify-between">
             <SectionLabel icon={<ReceiptText className="h-3 w-3" />}>预算核对</SectionLabel>
-            <span className={`text-[11px] font-bold ${budgetStatus?.tone}`}>{budgetStatus?.label}</span>
+            <span className={`text-[12.5px] font-bold ${budgetStatus?.tone}`}>{budgetStatus?.label}</span>
           </div>
           <div className="mt-1.5">
             <Row label="已核实花费" value={money(budget?.verified_cost)} hint="来自供应商/可核来源的价格" />
@@ -323,18 +323,18 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
       )}
 
       {hasFallbackBlock && (
-        <div className={hasBudgetBlock ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+        <div className={hasBudgetBlock ? 'mt-4 border-t border-slate-200 pt-3' : ''}>
           <SectionLabel icon={<SlidersHorizontal className="h-3 w-3" />}>已作调整</SectionLabel>
           {fallback?.disclosure && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">{fallback.disclosure}</p>
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">{fallback.disclosure}</p>
           )}
           {substitutions.length > 0 && (
             <ul className="mt-1.5 space-y-1">
               {substitutions.slice(0, 5).map((item, index) => {
                 const from = item.from || item.node;
                 return (
-                  <li key={`${from || item.kind}-${index}`} className="flex items-baseline gap-2 text-[11px] text-slate-600">
-                    <span className="text-slate-400">·</span>
+                  <li key={`${from || item.kind}-${index}`} className="flex items-baseline gap-2 text-[12.5px] text-slate-600">
+                    <span className="text-slate-500">·</span>
                     {from && item.to ? (
                       <span>
                         把「{from}」换成「{item.to}」
@@ -351,7 +351,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
             </ul>
           )}
           {fallback?.needs_confirmation && (
-            <p className="mt-1.5 text-[11px] font-bold text-amber-600">
+            <p className="mt-1.5 text-[12.5px] font-bold text-amber-600">
               还有缺口，只能通过改天数或换城市才能补上——这类改动我不会自动做，你确认了我再调整。
             </p>
           )}
@@ -359,18 +359,18 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
       )}
 
       {hasHorizonBlock && (
-        <div className={(hasBudgetBlock || hasFallbackBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+        <div className={(hasBudgetBlock || hasFallbackBlock) ? 'mt-4 border-t border-slate-200 pt-3' : ''}>
           <div className="flex items-center justify-between">
             <SectionLabel icon={<CalendarRange className="h-3 w-3" />}>行程规模</SectionLabel>
-            <span className="font-mono text-[11px] font-bold tabular-nums text-slate-600">
+            <span className="font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
               {horizon?.days} 天
               {segments.length > 1 && ` · ${segments.length} 段（${segments.map((s) => s.days).join('/')}）`}
             </span>
           </div>
           <ul className="mt-1.5 space-y-1">
             {advisories.slice(0, 3).map((text, index) => (
-              <li key={index} className="flex items-baseline gap-2 text-[11px] leading-relaxed text-slate-600">
-                <span className="text-slate-400">·</span>
+              <li key={index} className="flex items-baseline gap-2 text-[12.5px] leading-relaxed text-slate-600">
+                <span className="text-slate-500">·</span>
                 <span>{text}</span>
               </li>
             ))}
@@ -383,7 +383,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           <div className="flex items-center justify-between">
             <SectionLabel icon={<SlidersHorizontal className="h-3 w-3" />}>本次调整</SectionLabel>
             {typeof increment?.responsiveness === 'number' && (
-              <span className="font-mono text-[11px] font-bold tabular-nums text-slate-600">
+              <span className="font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
                 响应度 {Math.round(increment.responsiveness * 100)}%
               </span>
             )}
@@ -407,31 +407,45 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
             </div>
           )}
           {increment?.disclosure && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">{increment.disclosure}</p>
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">{increment.disclosure}</p>
           )}
         </div>
       )}
 
       {hasPriceBlock && (
-        <div className="mt-3 border-t border-slate-200 pt-2.5">
+        <div className="mt-4 border-t border-slate-200 pt-3">
           <div className="flex items-center justify-between">
             <SectionLabel icon={<ReceiptText className="h-3 w-3" />}>价格核对</SectionLabel>
-            <span className="font-mono text-[11px] font-bold tabular-nums text-slate-600">
-              可核实 {Math.round((priceAudit?.verified_ratio ?? 0) * 100)}% · 未取到{' '}
-              {Math.round((priceAudit?.unknown_ratio ?? 0) * 100)}%
+            <span className="font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
+              {(() => {
+                // 人话优先：不写"可核实 27% / 未取到 73%"，直接说"几项已核实、几项要你确认"
+                const total = priceAudit?.total ?? 0;
+                const verified = Math.round((priceAudit?.verified_ratio ?? 0) * total);
+                const unknown = Math.max(
+                  priceAudit?.still_unknown?.length || priceAudit?.unknown?.length || 0,
+                  Math.round((priceAudit?.unknown_ratio ?? 0) * total),
+                );
+                return `已核实 ${verified} 项 · 需要你确认 ${unknown} 项`;
+              })()}
             </span>
           </div>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-slate-500">
+            价格分三类：<strong className="text-slate-700">已核实</strong>（来自供应商/官方）、
+            <strong className="text-slate-700">估算</strong>（已标明，不计入"已核实花费"）、
+            <strong className="text-slate-700">需要你确认</strong>（暂时取不到来源）。
+            取不到的价格不会当成 0 元。
+          </p>
           {(() => {
             const missing = (priceAudit?.still_unknown?.length ? priceAudit?.still_unknown : priceAudit?.unknown) || [];
             return missing.length > 0 ? (
-              <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+              <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">
                 还需补价：{missing.slice(0, 5).join('、')}
                 {missing.length > 5 ? ` 等 ${missing.length} 个` : ''}
               </p>
             ) : null;
           })()}
           {priceAudit?.summary && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">{priceAudit.summary}</p>
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">{priceAudit.summary}</p>
           )}
         </div>
       )}
@@ -441,7 +455,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           <SectionLabel icon={<Route className="h-3 w-3" />}>跨城怎么走</SectionLabel>
           <ul className="mt-1.5 space-y-1.5">
             {(transportAudit?.legs || []).slice(0, 2).map((leg, index) => (
-              <li key={`${leg.from}-${leg.to}-${index}`} className="text-[11px] leading-relaxed text-slate-600">
+              <li key={`${leg.from}-${leg.to}-${index}`} className="text-[12.5px] leading-relaxed text-slate-600">
                 <span className="font-bold text-slate-700">
                   {leg.from} → {leg.to}
                 </span>
@@ -456,11 +470,11 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
             ))}
           </ul>
           {transportAudit?.error && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">
               这一段没能比出行方式（{transportAudit.error}），票价与班次未核实。
             </p>
           )}
-          {transportAudit?.note && <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{transportAudit.note}</p>}
+          {transportAudit?.note && <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">{transportAudit.note}</p>}
         </div>
       )}
 
@@ -469,13 +483,13 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           <div className="flex items-center justify-between">
             <SectionLabel icon={<CalendarRange className="h-3 w-3" />}>长途分段</SectionLabel>
             {typeof longTrip?.ok === 'boolean' && (
-              <span className={`text-[11px] font-bold ${longTrip.ok ? 'text-emerald-600' : 'text-amber-600'}`}>
+              <span className={`text-[12.5px] font-bold ${longTrip.ok ? 'text-emerald-600' : 'text-amber-600'}`}>
                 {longTrip.ok ? '衔接正常' : '有待修补'}
               </span>
             )}
           </div>
           {longTrip?.first_round && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">
               按 {longTrip.first_round.chunk_days ?? 7} 天一段逐段生成：
               {(longTrip.first_round.generated || []).length} 段已排好
               {(longTrip.first_round.failed || []).length > 0
@@ -491,7 +505,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           )}
           <div className="mt-1.5 space-y-0.5">
             {(longTrip?.segments || []).map((item) => (
-              <div key={item.index} className="flex items-baseline justify-between gap-3 text-[11px] text-slate-600">
+              <div key={item.index} className="flex items-baseline justify-between gap-3 text-[12.5px] text-slate-600">
                 <span>
                   第 {item.index} 段 · 第 {item.start_day}-{item.end_day} 天
                 </span>
@@ -503,7 +517,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
             ))}
           </div>
           {(longTrip?.repaired?.length || longTrip?.repair_failed_segments?.length) ? (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">
               {longTrip?.repaired?.length
                 ? `已重新生成 ${longTrip.repaired.length} 段（第 ${longTrip.repaired.map((item) => item.days).join('、')} 天）`
                 : ''}
@@ -513,7 +527,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
             </p>
           ) : null}
           {longTrip?.error && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">
               这次没能做分段核对（{longTrip.error}），长途日程的长短是否合适未核实。
             </p>
           )}
@@ -521,17 +535,17 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
       )}
 
       {hasConstraintBlock && (
-        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock) ? 'mt-4 border-t border-slate-200 pt-3' : ''}>
           <div className="flex items-center justify-between">
             <SectionLabel icon={<Target className="h-3 w-3" />}>诉求核对</SectionLabel>
             {typeof constraints?.total === 'number' && (
-              <span className="font-mono text-[11px] font-bold tabular-nums text-slate-600">
+              <span className="font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
                 {constraints.total} 条
               </span>
             )}
           </div>
           {constraints?.error ? (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">
               这次没能逐条核对（{constraints.error}），你提的要求请以方案本身为准。
             </p>
           ) : (
@@ -540,16 +554,16 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                 {(constraints?.items || []).slice(0, 8).map((item) => {
                   const tone = CONSTRAINT_STATUS[item.status || ''] || CONSTRAINT_STATUS.unverified;
                   return (
-                    <li key={item.id} className="flex items-baseline gap-2 text-[11px] leading-relaxed">
+                    <li key={item.id} className="flex items-baseline gap-2 text-[12.5px] leading-relaxed">
                       <span className={`shrink-0 font-bold ${tone.tone}`}>{tone.label}</span>
                       <span className="text-slate-700">{item.text}</span>
-                      {item.detail && <span className="text-slate-400">{item.detail}</span>}
+                      {item.detail && <span className="text-slate-500">{item.detail}</span>}
                     </li>
                   );
                 })}
               </ul>
               {(constraints?.items?.length ?? 0) > 8 && (
-                <p className="mt-1.5 text-[11px] text-slate-400">
+                <p className="mt-1.5 text-[12.5px] text-slate-500">
                   还有 {(constraints?.items?.length ?? 0) - 8} 条没列出来
                 </p>
               )}
@@ -559,27 +573,30 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
       )}
 
       {hasReviewBlock && (
-        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock || hasPriceBlock || hasTransportBlock || hasLongTripBlock || hasConstraintBlock) ? 'mt-3 border-t border-slate-200 pt-2.5' : ''}>
+        <div className={(hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock || hasPriceBlock || hasTransportBlock || hasLongTripBlock || hasConstraintBlock) ? 'mt-4 border-t border-slate-200 pt-3' : ''}>
           <div className="flex items-center justify-between">
             <SectionLabel icon={<SlidersHorizontal className="h-3 w-3" />}>自动复核</SectionLabel>
-            {typeof review?.remaining_hard === 'number' && typeof review?.initial_hard_failures === 'number' && (
+            {typeof review?.remaining_hard === 'number' && (
               <span
-                className={`font-mono text-[11px] font-bold tabular-nums ${
+                className={`font-mono text-[12.5px] font-bold tabular-nums ${
                   review.remaining_hard === 0 ? 'text-emerald-600' : 'text-amber-600'
                 }`}
               >
-                需处理的问题 {review.initial_hard_failures} → {review.remaining_hard}
+                {review.action_count ?? 0} 处已修好
+                {review.remaining_hard === 0
+                  ? ' · 没有遗留问题'
+                  : ` · 还剩 ${review.remaining_hard} 处要你确认`}
               </span>
             )}
           </div>
           {review?.error ? (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">
               这次没能跑自动复核（{review.error}），方案按原样给出。
             </p>
           ) : (
             <>
               {(review?.action_count ?? 0) > 0 && (
-                <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+                <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">
                   已自动修正：{summarizeReviewActions(review?.actions || [])}
                 </p>
               )}
@@ -587,7 +604,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                 .filter((item) => item.code === 'reschedule' && item.node)
                 .slice(0, 3)
                 .map((item, index) => (
-                  <div key={`review-${index}`} className="flex items-baseline justify-between gap-3 py-0.5 text-[11px] text-slate-500">
+                  <div key={`review-${index}`} className="flex items-baseline justify-between gap-3 py-0.5 text-[12.5px] text-slate-500">
                     <span className="truncate">
                       第 {item.day} 天「{item.node}」
                     </span>
@@ -597,7 +614,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                   </div>
                 ))}
               {(review?.needs_data || []).length > 0 && (
-                <p className="mt-1.5 text-[11px] leading-relaxed text-amber-600">
+                <p className="mt-1.5 text-[12.5px] leading-relaxed text-amber-600">
                   这些我改不动，要靠数据或你确认：
                   {(review?.needs_data || []).map((item) => REVIEW_NEEDS_DATA_LABELS[item] || item).join('、')}
                 </p>
@@ -612,15 +629,15 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           className={
             hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock ||
             hasPriceBlock || hasTransportBlock || hasLongTripBlock || hasReviewBlock || hasConstraintBlock
-              ? 'mt-3 border-t border-slate-200 pt-2.5'
+              ? 'mt-4 border-t border-slate-200 pt-3'
               : ''
           }
         >
           <SectionLabel icon={<ReceiptText className="h-3 w-3" />}>还需要你留意</SectionLabel>
           <ul className="mt-1.5 space-y-1">
             {failures.slice(0, 3).map((item, index) => (
-              <li key={`${item.code}-${index}`} className="flex items-baseline gap-2 text-[11px] leading-relaxed">
-                <span className="text-slate-400">·</span>
+              <li key={`${item.code}-${index}`} className="flex items-baseline gap-2 text-[12.5px] leading-relaxed">
+                <span className="text-slate-500">·</span>
                 <span className="font-bold text-slate-700">{GATE_LABELS[item.code || ''] || '安排需要调整'}</span>
                 <span className="text-slate-500">{item.detail}</span>
               </li>
@@ -633,38 +650,38 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           className={
             hasBudgetBlock || hasFallbackBlock || hasHorizonBlock || hasIncrementBlock || hasPriceBlock ||
             hasTransportBlock || hasLongTripBlock || hasReviewBlock || hasConstraintBlock || hasFailureBlock
-              ? 'mt-3 border-t border-slate-200 pt-2.5'
+              ? 'mt-4 border-t border-slate-200 pt-3'
               : ''
           }
         >
           <div className="flex items-center justify-between">
             <SectionLabel icon={<AlertTriangle className="h-3 w-3" />}>数据降级</SectionLabel>
             {typeof degradations?.total === 'number' && (
-              <span className="font-mono text-[11px] font-bold tabular-nums text-amber-600">
+              <span className="font-mono text-[12.5px] font-bold tabular-nums text-amber-600">
                 {degradations.total} 项
               </span>
             )}
           </div>
           {degradations?.error ? (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">
               这次没能统计数据降级（{degradations.error}）。
             </p>
           ) : (
             <>
               <ul className="mt-1.5 space-y-1">
                 {(degradations?.items || []).slice(0, 5).map((item, index) => (
-                  <li key={`${item.source}-${index}`} className="text-[11px] leading-relaxed">
+                  <li key={`${item.source}-${index}`} className="text-[12.5px] leading-relaxed">
                     <span className={`font-bold ${item.status === 'missing' ? 'text-rose-600' : 'text-amber-600'}`}>
-                      {item.status === 'missing' ? '没拿到' : '不完整'}
+                      {item.status === 'missing' ? '这项没取到' : '只取到一部分'}
                     </span>
                     <span className="ml-1 font-bold text-slate-700">{item.label}</span>
                     <span className="ml-1 text-slate-500">{item.reason}</span>
-                    {item.impact && <span className="ml-1 text-slate-400">（{item.impact}）</span>}
+                    {item.impact && <span className="ml-1 text-slate-500">（{item.impact}）</span>}
                   </li>
                 ))}
               </ul>
               {(degradations?.items?.length ?? 0) > 5 && (
-                <p className="mt-1.5 text-[11px] text-slate-400">
+                <p className="mt-1.5 text-[12.5px] text-slate-500">
                   还有 {(degradations?.items?.length ?? 0) - 5} 项没列出来
                 </p>
               )}

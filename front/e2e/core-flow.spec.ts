@@ -146,6 +146,8 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByTestId('save-trip').click();
   await expect(page.getByText('已保存')).toBeVisible();
   const jsonDownload = page.waitForEvent('download');
+  // 导出 JSON 收在「更多」菜单里（工具栏折叠）
+  await page.getByTestId('toggle-more-tools').click();
   await page.getByTestId('export-json').click();
   await expect((await jsonDownload).suggestedFilename()).toContain('.json');
   const icsDownload = page.waitForEvent('download');

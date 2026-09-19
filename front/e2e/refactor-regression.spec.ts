@@ -229,13 +229,16 @@ test.describe('refactor regression', () => {
     await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
     await reachDecision(page);
 
-    // Toolbar (all delegate to extracted panels)
+    // Toolbar: 常用 4 个在外面，其余收进「更多」（10 个按钮挤成一团太乱）
     await expect(page.getByTestId('save-trip')).toBeVisible();
     await expect(page.getByTestId('open-diary')).toBeVisible();
     await expect(page.getByTestId('export-ics')).toBeVisible();
+    await expect(page.getByText('预算账本')).toBeVisible();
+    // 折叠项默认不可见
+    await expect(page.getByTestId('export-json')).toBeHidden();
+    await page.getByTestId('toggle-more-tools').click();
     await expect(page.getByTestId('export-json')).toBeVisible();
     await expect(page.getByText('行程海报')).toBeVisible();
-    await expect(page.getByText('预算账本')).toBeVisible();
     await expect(page.getByText('消费复盘')).toBeVisible();
     await expect(page.getByText('行程评价')).toBeVisible();
     await expect(page.getByText('官方渠道')).toBeVisible();
@@ -250,10 +253,15 @@ test.describe('refactor regression', () => {
     await page.getByText('预算账本').click();
     await expect(page.getByRole('dialog', { name: '协作预算账本' })).toBeVisible({ timeout: 10_000 });
     await page.getByRole('button', { name: '关闭预算账本' }).click();
+    // 点了主行按钮 → 「更多」菜单自动收起
+    await expect(page.getByTestId('export-json')).toBeHidden();
 
+    await page.getByTestId('toggle-more-tools').click();
     await page.getByText('行程海报').click();
-    await expect(page.getByText('行程海报').first()).toBeVisible();
     await page.keyboard.press('Escape');
+    // 菜单点完就收起（不留在屏幕上），主行按钮仍在
+    await expect(page.getByTestId('export-json')).toBeHidden();
+    await expect(page.getByTestId('save-trip')).toBeVisible();
 
     await page.setViewportSize({ width: 390, height: 844 });
     await noHorizontalOverflow(page);

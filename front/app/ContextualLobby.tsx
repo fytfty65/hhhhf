@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import dynamic from 'next/dynamic';
 import { useState, useRef, useEffect, useMemo } from 'react';
@@ -11,7 +11,7 @@ import {
   Compass as CompassIcon, ShieldCheck, ArrowLeft, CalendarDays, Route, Save, Shuffle,
   CalendarClock, Heart, Send, Plus, MessageCircle, Flame, Mic, Navigation,
   Trophy, Award, Medal, Star, Mountain, UtensilsCrossed, Landmark, Quote, BookOpen, Footprints,
-  Activity, Radio, Wifi, Zap, Signal, Share2, Link2, Download, Train
+  Activity, Radio, Wifi, Zap, Signal, Share2, Link2, Download, Train, MoreHorizontal
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { API_BASE, WS_BASE, apiFetch, getAuthToken, installApiFetchInterceptor } from './lib/utils';
@@ -927,6 +927,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   const [deductionTimeout, setDeductionTimeout] = useState(false);
   const [deductionError, setDeductionError] = useState<string | null>(null);
   const [isFallbackRoute, setIsFallbackRoute] = useState(false);
+  // 工具栏「更多」折叠（原来 10 个按钮挤成一团）
+  const [showMoreTools, setShowMoreTools] = useState(false);
   // 规划核对信息（预算三级模型 / 兜底调整说明 / 超长行程建议 / 门禁问题），随 final_route 下发
   const [planGovernance, setPlanGovernance] = useState<PlanGovernance | null>(null);
   // 👑 多方案：后端返回的多套行程方案与当前选中方案
@@ -1700,26 +1702,46 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
             <p className="text-xs text-slate-400 font-bold mt-0.5">OmniRoute 多智能体联网知识增强交付</p>
           </div>
           {phase === 'decision' && (
-            <div className="workspace-toolbar grid w-full grid-cols-2 gap-2 sm:w-[430px] sm:grid-cols-3" aria-label="行程工具">
+            // 工具栏折叠：常用的 4 个留在外面，其余收进「更多」。原来 10 个按钮挤成 3 列，又长又乱。
+            <div className="workspace-toolbar relative flex w-full flex-wrap items-center gap-2 sm:w-[430px]" aria-label="行程工具">
+              {/* 主行：点其中任何一个都把「更多」菜单收起来（菜单不该一直挂在屏幕上） */}
+              <div className="flex flex-wrap items-center gap-2" onClick={() => setShowMoreTools(false)}>
               <button data-testid="save-trip" onClick={handleSaveTrip} className="px-3.5 py-1.5 bg-emerald-50 text-emerald-600 rounded-xl font-bold text-xs hover:bg-emerald-100 transition-colors flex items-center gap-1.5 border border-emerald-100 shadow-2xs cursor-pointer">
                 {tripSaved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />} {tripSaved ? '已保存' : '保存到我的行程'}
               </button>
-              <button onClick={handleRegenerateVariant} className="px-3.5 py-1.5 bg-blue-50 text-blue-600 rounded-xl font-bold text-xs hover:bg-blue-100 transition-colors flex items-center gap-1.5 border border-blue-100 shadow-2xs cursor-pointer">
-                <Shuffle className="w-3.5 h-3.5"/> 换一版
-              </button>
-              <button onClick={() => setShowPoster(true)} className="px-3.5 py-1.5 bg-purple-50 text-purple-600 rounded-xl font-bold text-xs hover:bg-purple-100 transition-colors flex items-center gap-1.5 border border-purple-100 shadow-2xs cursor-pointer">
-                <Share2 className="w-3.5 h-3.5"/> 行程海报
-              </button>
               <button data-testid="open-diary" onClick={() => setShowDiary(true)} className="px-3.5 py-1.5 bg-amber-50 text-amber-600 rounded-xl font-bold text-xs hover:bg-amber-100 transition-colors flex items-center gap-1.5 border border-amber-100 shadow-2xs cursor-pointer"><BookOpen className="w-3.5 h-3.5"/> 行程日记</button>
               <button data-testid="export-ics" onClick={downloadIcs} className="px-3.5 py-1.5 bg-teal-50 text-teal-600 rounded-xl font-bold text-xs hover:bg-teal-100 transition-colors flex items-center gap-1.5 border border-teal-100 shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出日历</button>
-              <button data-testid="export-json" onClick={downloadJson} className="px-3.5 py-1.5 bg-slate-50 text-slate-600 rounded-xl font-bold text-xs hover:bg-slate-100 transition-colors flex items-center gap-1.5 border border-slate-200 shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出 JSON</button>
               <button onClick={() => setShowBudget(true)} className="px-3.5 py-1.5 bg-cyan-50 text-cyan-700 rounded-xl font-bold text-xs hover:bg-cyan-100 transition-colors flex items-center gap-1.5 border border-cyan-100 shadow-2xs cursor-pointer" title="打开预算管家"><PiggyBank className="w-3.5 h-3.5"/> 预算账本</button>
-              <button onClick={() => setShowExpenseReport(true)} className="px-3.5 py-1.5 bg-indigo-50 text-indigo-700 rounded-xl font-bold text-xs hover:bg-indigo-100 transition-colors flex items-center gap-1.5 border border-indigo-100 shadow-2xs cursor-pointer" title="查看消费复盘"><TrendingDown className="w-3.5 h-3.5"/> 消费复盘</button>
-              <button onClick={() => setShowSatisfaction(true)} className="px-3.5 py-1.5 bg-rose-50 text-rose-700 rounded-xl font-bold text-xs hover:bg-rose-100 transition-colors flex items-center gap-1.5 border border-rose-100 shadow-2xs cursor-pointer" title="提交行程满意度"><Star className="w-3.5 h-3.5"/> 行程评价</button>
-              <button onClick={() => setShowBookingHub(true)} className="px-3.5 py-1.5 bg-orange-50 text-orange-700 rounded-xl font-bold text-xs hover:bg-orange-100 transition-colors flex items-center gap-1.5 border border-orange-100 shadow-2xs cursor-pointer" title="打开官方渠道"><ExternalLink className="w-3.5 h-3.5"/> 官方渠道</button>
-              <button onClick={() => { setPhase('drafting'); setIntentsReady(false); }} className="px-3.5 py-1.5 bg-orange-50 text-orange-600 rounded-xl font-bold text-xs hover:bg-orange-100 transition-colors flex items-center gap-1.5 border border-orange-100 shadow-2xs cursor-pointer">
-                <Wand2 className="w-3.5 h-3.5"/> 重新调整
+              </div>
+              <button
+                data-testid="toggle-more-tools"
+                onClick={() => setShowMoreTools((open) => !open)}
+                aria-expanded={showMoreTools}
+                className={`px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer ${showMoreTools ? 'bg-slate-800 text-white border-slate-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+              >
+                <MoreHorizontal className="w-3.5 h-3.5" /> {showMoreTools ? '收起' : '更多'}
               </button>
+              {showMoreTools && (
+                <div
+                  // 点菜单里任何一项都收起（捕获阶段先关，再执行按钮自己的动作）
+                  onClick={() => setShowMoreTools(false)}
+                  className="absolute right-0 top-full z-50 mt-2 grid w-[330px] grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white/98 p-3 shadow-xl backdrop-blur"
+                >
+                  <button onClick={handleRegenerateVariant} className="px-3.5 py-1.5 bg-blue-50 text-blue-600 rounded-xl font-bold text-xs hover:bg-blue-100 transition-colors flex items-center gap-1.5 border border-blue-100 shadow-2xs cursor-pointer">
+                    <Shuffle className="w-3.5 h-3.5"/> 换一版
+                  </button>
+                  <button onClick={() => setShowPoster(true)} className="px-3.5 py-1.5 bg-purple-50 text-purple-600 rounded-xl font-bold text-xs hover:bg-purple-100 transition-colors flex items-center gap-1.5 border border-purple-100 shadow-2xs cursor-pointer">
+                    <Share2 className="w-3.5 h-3.5"/> 行程海报
+                  </button>
+                  <button data-testid="export-json" onClick={downloadJson} className="px-3.5 py-1.5 bg-slate-50 text-slate-600 rounded-xl font-bold text-xs hover:bg-slate-100 transition-colors flex items-center gap-1.5 border border-slate-200 shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出 JSON</button>
+                  <button onClick={() => setShowExpenseReport(true)} className="px-3.5 py-1.5 bg-indigo-50 text-indigo-700 rounded-xl font-bold text-xs hover:bg-indigo-100 transition-colors flex items-center gap-1.5 border border-indigo-100 shadow-2xs cursor-pointer" title="查看消费复盘"><TrendingDown className="w-3.5 h-3.5"/> 消费复盘</button>
+                  <button onClick={() => setShowSatisfaction(true)} className="px-3.5 py-1.5 bg-rose-50 text-rose-700 rounded-xl font-bold text-xs hover:bg-rose-100 transition-colors flex items-center gap-1.5 border border-rose-100 shadow-2xs cursor-pointer" title="提交行程满意度"><Star className="w-3.5 h-3.5"/> 行程评价</button>
+                  <button onClick={() => setShowBookingHub(true)} className="px-3.5 py-1.5 bg-orange-50 text-orange-700 rounded-xl font-bold text-xs hover:bg-orange-100 transition-colors flex items-center gap-1.5 border border-orange-100 shadow-2xs cursor-pointer" title="打开官方渠道"><ExternalLink className="w-3.5 h-3.5"/> 官方渠道</button>
+                  <button onClick={() => { setPhase('drafting'); setIntentsReady(false); setShowMoreTools(false); }} className="col-span-2 px-3.5 py-1.5 bg-orange-50 text-orange-600 rounded-xl font-bold text-xs hover:bg-orange-100 transition-colors flex items-center justify-center gap-1.5 border border-orange-100 shadow-2xs cursor-pointer">
+                    <Wand2 className="w-3.5 h-3.5"/> 重新调整
+                  </button>
+                </div>
+              )}
             </div>
           )}
           </div>
