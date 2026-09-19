@@ -269,6 +269,28 @@ func decodePlanningContext(c *gin.Context) (contracts.PlanningContext, bool) {
 
 // PlanningContextHandler validates and echoes the canonical context so the
 // frontend can establish identity before calling domain agents.
+// jointKeptNodes 把"保留的原路线节点"整理成前端能直接展示的清单。
+// 之前只回一个 `preserved_nodes: 5` 的数字，用户在"联合规划"卡片上根本看不出这套方案到底排了什么
+// （只能看到一堆季节系数/客流系数），所以这里把节点名与天号一起下发。
+func jointKeptNodes(baseNodes []map[string]any) []gin.H {
+	nodes := make([]gin.H, 0, len(baseNodes))
+	for _, node := range baseNodes {
+		name, _ := node["name"].(string)
+		if name == "" {
+			continue
+		}
+		entry := gin.H{"name": name}
+		if day, ok := node["day"]; ok {
+			entry["day"] = day
+		}
+		if kind, ok := node["type"]; ok {
+			entry["type"] = kind
+		}
+		nodes = append(nodes, entry)
+	}
+	return nodes
+}
+
 func PlanningContextHandler(c *gin.Context) {
 	ctx, ok := decodePlanningContext(c)
 	if !ok {
@@ -614,7 +636,7 @@ func JointPlanHandler(c *gin.Context) {
 	pareto := jointParetoAudit(alternatives)
 	planningData(c, gin.H{
 		"plan_id": run.ID,
-		"context": ctx, "model": gin.H{"name": modelName, "version": version, "status": modelStatus, "execution": executionStatus, "estimated": executionStatus != "executed"}, "plan": gin.H{"name": selected, "estimated_cost": baseCost, "estimated": executionStatus != "executed", "source": jointSource, "currency": ctx.Currency, "days": days, "travelers": travelers, "preserved_nodes": len(req.BaseNodes)},
+		"context": ctx, "model": gin.H{"name": modelName, "version": version, "status": modelStatus, "execution": executionStatus, "estimated": executionStatus != "executed"}, "plan": gin.H{"name": selected, "estimated_cost": baseCost, "estimated": executionStatus != "executed", "source": jointSource, "currency": ctx.Currency, "days": days, "travelers": travelers, "preserved_nodes": len(req.BaseNodes), "kept_nodes": jointKeptNodes(req.BaseNodes)},
 		"source":       jointSource,
 		"alternatives": alternatives, "optimization": gin.H{"method": "multi_objective_pareto", "objectives": []string{"cost", "duration", "carbon", "satisfaction", "fairness"}, "weights": gin.H{"cost": 0.25, "duration": 0.2, "carbon": 0.15, "satisfaction": 0.25, "fairness": 0.15}, "pareto": pareto},
 		"constraints": gin.H{"hard_satisfied": feasible, "violations": func() []string {
