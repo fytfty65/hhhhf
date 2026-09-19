@@ -65,6 +65,10 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "诉求逐条核对",
         "impact": "你提的每条要求有没有落实，这次没能逐条核对",
     },
+    "llm_plan": {
+        "label": "多智能体推演",
+        "impact": "本次方案是候选池保底合成（不是模型推演结果），可稍后重新推演一次",
+    },
 }
 
 
@@ -115,6 +119,11 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     """从既有 payload 推导"哪些数据没拿到/不完整"，不新增任何取数逻辑。"""
     data = _as_mapping(payload)
     items: List[Dict[str, Any]] = []
+
+    # 0) 整份方案是不是"保底路线"（大模型不可用时由候选池合成）：
+    #    这是最深的一层降级，必须让用户一眼看出来，而不是悄悄当成正常推演结果。
+    if str(data.get("status") or "").strip() == "degraded_fallback":
+        items.append(_entry("llm_plan", STATUS_DEGRADED, "大模型不可用，本次方案改由高德候选池合成"))
 
     # 1) 主流程：质量核对 / 复核 / 诉求核对 直接报错
     quality = _as_mapping(data.get("quality"))

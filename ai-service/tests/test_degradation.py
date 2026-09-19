@@ -117,6 +117,21 @@ class TestLongTripAndPrice(unittest.TestCase):
         self.assertIsNone(degradation_for(payload, "hotel_price"))
 
 
+class TestDegradedFallbackRoute(unittest.TestCase):
+    """整份方案是"保底路线"时，必须作为最重的一层降级如实报出来。"""
+
+    def test_degraded_fallback_is_reported(self):
+        payload = {"status": "degraded_fallback", "route": [node("景点A")]}
+        entry = degradation_for(payload, "llm_plan")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["status"], STATUS_DEGRADED)
+        self.assertIn("候选池合成", entry["reason"])
+
+    def test_normal_status_is_not_reported(self):
+        self.assertIsNone(degradation_for({"status": "ok"}, "llm_plan"))
+        self.assertIsNone(degradation_for({}, "llm_plan"))
+
+
 class TestTransportAndSummary(unittest.TestCase):
     def test_transport_without_options_or_fares(self):
         payload = {

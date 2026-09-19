@@ -1048,26 +1048,30 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
     // 两条路径都要写，缺一条就会出现"方案出来了但核对面板是空的"。
     const applyPlanGovernance = (fd: any) => {
       if (!fd || typeof fd !== 'object') return;
-      setPlanGovernance(
+      // 只合并、不整体替换：后端在**保底模式**下额外下发的那条 final_route 只带
+      // status/route/simulation，不带 quality/budget_report…；早先这里整体覆盖，
+      // 结果那条消息把刚拿到的核对数据（预算/门禁/诉求/降级）全清空、面板整块消失。
+      const hasGovernance = Boolean(
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
-          fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip || fd.review || fd.constraints || fd.degradations
-          ? {
-              quality: fd.quality,
-              budget: fd.budget_report,
-              fallback: fd.fallback,
-              horizon: fd.horizon,
-              // 二次增量（这次到底改成了什么）、价格核对、跨城出行比较、长途分段、自动复核、
-              // 诉求核对、数据降级：七块都是**后端说了才显示**，缺字段时面板不渲染空壳。
-              increment: fd.increment,
-              priceAudit: fd.price_audit,
-              transportAudit: fd.transport_audit,
-              longTrip: fd.long_trip,
-              review: fd.review,
-              constraints: fd.constraints,
-              degradations: fd.degradations,
-            }
-          : null,
+          fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
+          fd.review || fd.constraints || fd.degradations,
       );
+      if (!hasGovernance) return;
+      setPlanGovernance((prev) => ({
+        quality: fd.quality ?? prev?.quality,
+        budget: fd.budget_report ?? prev?.budget,
+        fallback: fd.fallback ?? prev?.fallback,
+        horizon: fd.horizon ?? prev?.horizon,
+        // 二次增量（这次到底改成了什么）、价格核对、跨城出行比较、长途分段、自动复核、
+        // 诉求核对、数据降级：七块都是**后端说了才显示**，缺字段时面板不渲染空壳。
+        increment: fd.increment ?? prev?.increment,
+        priceAudit: fd.price_audit ?? prev?.priceAudit,
+        transportAudit: fd.transport_audit ?? prev?.transportAudit,
+        longTrip: fd.long_trip ?? prev?.longTrip,
+        review: fd.review ?? prev?.review,
+        constraints: fd.constraints ?? prev?.constraints,
+        degradations: fd.degradations ?? prev?.degradations,
+      }));
     };
 
     const connect = () => {
@@ -1143,6 +1147,9 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   }));
                   
                   setDynamicRoutes(mappedRoutes);
+                  // 流式路径也认一次"保底路线"：后端在保底模式下会额外下发 final_route，
+                  // 但只收到 stream_token（或它先到）时这个标记也必须立起来，不能等。
+                  setIsFallbackRoute(finalData.status === 'degraded_fallback');
                   if (finalData.negotiation_summary) setConsensusSummary(finalData.negotiation_summary);
                   if (finalData.team_satisfaction) setTeamSatisfaction(finalData.team_satisfaction);
                   // 概率化仿真的分布结果（P50/P90 与超预算概率）
@@ -1752,6 +1759,17 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               )}
               <span>坐标覆盖 <strong className={planQuality.coverage >= 80 ? 'text-emerald-600' : 'text-amber-600'}>{planQuality.coverage}%</strong></span>
               <span className={planQuality.consensus >= 70 ? 'text-emerald-600' : 'text-amber-600'}>共识指数 <strong>{planQuality.consensus}</strong></span>
+              {/* 保底路线必须一眼看出来：大模型不可用时方案是候选池合成的，
+                  不能让它看起来像正常的智能体推演结果（后端同时会在核对面板里登记这条降级）。 */}
+              {isFallbackRoute && (
+                <span
+                  className="text-amber-600"
+                  data-testid="fallback-route-badge"
+                  title="大模型暂时不可用时，方案改由高德候选池合成（真实 POI，但不是智能体推演结果）"
+                >
+                  保底路线 <strong>（非智能体推演）</strong>
+                </span>
+              )}
               {/* Make the learning step visible: which style the policy picked,
                   and whether it was exploring or exploiting. Without this the
                   bandit's decisions were invisible in the product. */}

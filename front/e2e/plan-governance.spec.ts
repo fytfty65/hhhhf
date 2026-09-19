@@ -173,6 +173,7 @@ const GOVERNANCE_PAYLOAD = {
     items: [
       { source: 'hotel_price', label: '住宿价格', status: 'missing', reason: '2 个住宿节点都没拿到报价', impact: '住宿花费无法核实（高德对酒店普遍不返回价格），预算结论只能按缺价处理' },
       { source: 'candidate_pool', label: '候选地点池', status: 'degraded', reason: '候选池里没有更多可用的同类地点', impact: '缺玩点/缺餐/住宿夜数不够时无法自动补，只能如实告诉你' },
+      { source: 'llm_plan', label: '多智能体推演', status: 'degraded', reason: '大模型不可用，本次方案改由高德候选池合成', impact: '本次方案是候选池保底合成（不是模型推演结果），可稍后重新推演一次' },
     ],
   },
 };
@@ -224,7 +225,7 @@ async function installMocks(page: Page) {
                 payload:
                   '[FINAL_JSON]' +
                   JSON.stringify({
-                    status: 'ok',
+                    status: 'degraded_fallback',
                     negotiation_summary: '已按预算与偏好完成协商',
                     route,
                     team_satisfaction: { 'E2E 旅行者': 62 },
@@ -243,6 +244,16 @@ async function installMocks(page: Page) {
               }),
             });
           }, 80);
+          // 生产里后端在保底模式下会额外下发一条 final_route（status=degraded_fallback），
+          // 这里照实补上，才能验证"保底路线"标记是真的会显示出来。
+          setTimeout(() => {
+            this.onmessage?.({
+              data: JSON.stringify({
+                type: 'final_route',
+                payload: { status: 'degraded_fallback', route, negotiation_summary: '已按预算与偏好完成协商' },
+              }),
+            });
+          }, 120);
         }
         close() {
           this.readyState = 3;
@@ -353,6 +364,12 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByText('还需要你留意')).toBeVisible();
     await expect(panel.getByText('某一天没有游玩安排', { exact: true })).toBeVisible();
     await expect(panel.getByText('营业时间未核实', { exact: true })).toBeVisible();
+
+    // 保底路线必须一眼看出来（不是正常推演结果），核对面板里也要有这条降级
+    await expect(page.getByTestId('fallback-route-badge')).toBeVisible();
+    await expect(page.getByTestId('fallback-route-badge')).toContainText('非智能体推演');
+    await expect(panel.getByText('多智能体推演')).toBeVisible();
+    await expect(panel.getByText(/大模型不可用，本次方案改由高德候选池合成/)).toBeVisible();
 
     // 数据降级：哪个数据源没拿到、用户损失什么（"没拿到"≠"已满足"）
     await expect(panel.getByText('数据降级')).toBeVisible();
