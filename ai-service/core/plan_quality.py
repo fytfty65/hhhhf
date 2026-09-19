@@ -314,6 +314,72 @@ def check_hard_constraints(
         continuity = continuity_report(plan, {**dict(ctx), "expectations": expectations})
         failures.extend(continuity["failures"])
 
+    # 8) 玩点必须是真景点，且不能一类刷到底
+    #    用户实测（2026-09-19，库尔勒 7 天）：「xx博物馆-西北门地上停车场」「xx博物馆文创空间」
+    #    「xx园林宾馆」被当成景点，且 7 天几乎全是博物馆。这里是**判定层**，选点层同时也在挡
+    #    （core/poi_pool.is_play_worthy），两道一起才既挡得住数据源、也挡得住模型自己编的。
+    from .poi_pool import FACILITY_NAME_MARKERS, is_play_worthy  # 延迟导入，避免模块级循环
+
+    hits: List[Dict[str, Any]] = []
+    for node in nodes:
+        label = _coarse_category(node)
+        if label in {"food", "hotel"}:
+            continue
+        text = " ".join(
+            [node_name(node), str(node.get("type") or ""), " ".join(str(tag) for tag in (node.get("tags") or []))]
+        ).lower()
+        if any(marker in text for marker in FACILITY_NAME_MARKERS) or not is_play_worthy(
+            node_name(node), node.get("type"), strict_type=False
+        ):
+            failures.append(
+                {
+                    "code": "facility_as_attraction",
+                    "detail": f"「{node_name(node)}」不是可游玩的景点（停车场/商店/住宿/交通设施一类），不该排进行程",
+                }
+            )
+            continue
+        hits.append(node)
+
+    # 单调性只在"行程够长、玩点够多"时才判定：2 天 4 个点里有 3 个文化类是正常的，
+    # 而 7 天 21 个点里 19 个博物馆就是明显跑偏（用户实测的库尔勒方案）。
+    if days >= 3 and len(hits) >= 6:
+        counts: Dict[str, int] = {}
+        for node in hits:
+            label = _coarse_category(node)
+            counts[label] = counts.get(label, 0) + 1
+        top_label, top_count = max(counts.items(), key=lambda item: item[1])
+        share = top_count / len(hits)
+        if share >= 0.8:
+            failures.append(
+                {
+                    "code": "play_category_monotony",
+                    "detail": f"{len(hits)} 个玩点里有 {top_count} 个是同一类（{top_label}），行程太单调",
+                }
+            )
+        elif share >= 0.6:
+            unverifiable.append(
+                {
+                    "code": "play_category_monotony_hint",
+                    "detail": f"{top_count}/{len(hits)} 个玩点是同一类（{top_label}），建议再混一些别的类型",
+                }
+            )
+
+    # 9) 自然风景目的地：如果方案里一个自然景观都没有，如实报出来
+    #    （"去新疆却全是博物馆"就是这么被发现是错的）
+    wants_nature = bool(
+        (expectations or {}).get("min_scenic_ratio")
+        or any(word in _normalize(str(ctx.get("request_text") or "")) for word in ("自然", "风景", "山水", "草原", "湖", "雪山", "沙漠", "胡杨"))
+    )
+    if hits and wants_nature:
+        scenic_hits = sum(1 for node in hits if _coarse_category(node) == "scenic")
+        if scenic_hits == 0:
+            failures.append(
+                {
+                    "code": "scenic_missing",
+                    "detail": "这趟是以自然风景为目的地的行程，但一个自然景观（湖/草原/沙漠/峡谷/公园）都没有排进去",
+                }
+            )
+
     return {"failures": failures, "unverifiable": unverifiable}
 
 

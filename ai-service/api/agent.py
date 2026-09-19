@@ -998,7 +998,7 @@ class ExpertToolbox:
         if not self.amap_key:
             return []
         from core.poi_pool import parse_amap_location as _parse_amap_location
-        from core.poi_pool import poi_record_from_amap
+        from core.poi_pool import is_play_worthy, poi_record_from_amap
         async with httpx.AsyncClient(timeout=4.0) as http_client:
             params = {
                 "key": self.amap_key, "keywords": keywords, "city": city,
@@ -1023,6 +1023,11 @@ class ExpertToolbox:
                         # 严格负向过滤：直接丢弃非文旅商业门店
                         poi_lower = poi_name.lower()
                         if any(b.lower() in poi_lower for b in NON_TOURIST_BLACKLIST):
+                            continue
+                        # 👑 还要挡住"名字里借了景点关键词、其实是设施/商店/住宿"的 POI：
+                        # 实测（2026-09-19）「xx博物馆-西北门地上停车场」「xx博物馆文创空间」
+                        # 「xx园林宾馆」都被当成景点排进了 7 天行程。
+                        if not is_play_worthy(poi_name, poi.get("type")):
                             continue
 
                         biz_ext = poi.get("biz_ext")
@@ -3351,6 +3356,8 @@ async def run_negotiate(msg: GatewayMessage):
                             _quality_context = {
                                 "days": trip_days,
                                 "budget": total_calc_budget,
+                                # 原话带上：质量层要判断"这趟是不是以自然风景为主"这类诉求
+                                "request_text": intent_str,
                                 "preferences": {
                                     "pace": intent_str,
                                     "interest": (_quality_signals or {}).get("interest"),
