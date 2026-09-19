@@ -13,9 +13,10 @@
  */
 
 import React from 'react';
-import { projectSchematic, type SchematicInput } from '../lib/routeSchematic';
+import { projectSchematic, projectSequence, type SchematicInput } from '../lib/routeSchematic';
 
 type Props = {
+  /** 方案的**全部**节点（含缺坐标的），组件自己决定用哪种画法 */
   routes?: readonly SchematicInput[] | null;
   className?: string;
 };
@@ -23,24 +24,30 @@ type Props = {
 const DAY_COLORS = ['#f97316', '#0ea5e9', '#10b981', '#8b5cf6', '#f43f5e', '#eab308'];
 
 export default function RouteSchematicMap({ routes, className = '' }: Props) {
-  const projection = React.useMemo(() => projectSchematic(routes), [routes]);
+  const geographic = React.useMemo(() => projectSchematic(routes), [routes]);
+  const sequence = React.useMemo(() => projectSequence(routes), [routes]);
+  const hasAnyNode = sequence.plotted > 0;
+  // 有坐标就画相对位置图；只有坐标缺失时才退到"顺序图"（并且标题写明，不冒充地理信息）
+  const view = geographic.hasCoordinates ? geographic : sequence;
+  const isSequence = !geographic.hasCoordinates && hasAnyNode;
+
   const days = React.useMemo(
-    () => Array.from(new Set(projection.points.map((point) => point.day))).sort((a, b) => a - b),
-    [projection.points],
+    () => Array.from(new Set(view.points.map((point) => point.day))).sort((a, b) => a - b),
+    [view.points],
   );
 
   return (
     <div
       data-testid="route-schematic"
       className={`absolute inset-0 z-10 bg-slate-100 ${className}`}
-      aria-label="路线相对位置示意图"
+      aria-label={isSequence ? '行程顺序示意图' : '路线相对位置示意图'}
     >
       <svg
         viewBox="0 0 640 420"
         preserveAspectRatio="xMidYMid slice"
         className="absolute inset-0 h-full w-full"
         role="img"
-        aria-label={`路线示意图，共 ${projection.plotted} 个节点`}
+        aria-label={`${isSequence ? '行程顺序示意图' : '路线示意图'}，共 ${view.plotted} 个节点`}
       >
         <defs>
           <pattern id="schematic-grid" width="40" height="40" patternUnits="userSpaceOnUse">
@@ -49,9 +56,9 @@ export default function RouteSchematicMap({ routes, className = '' }: Props) {
         </defs>
         <rect width="640" height="420" fill="url(#schematic-grid)" />
 
-        {projection.points.length > 1 && (
+        {view.points.length > 1 && (
           <polyline
-            points={projection.polyline}
+            points={view.polyline}
             fill="none"
             stroke="#94a3b8"
             strokeWidth="1.5"
@@ -59,7 +66,7 @@ export default function RouteSchematicMap({ routes, className = '' }: Props) {
           />
         )}
 
-        {projection.points.map((point) => {
+        {view.points.map((point) => {
           const color = DAY_COLORS[(point.day - 1) % DAY_COLORS.length];
           return (
             <g key={`${point.name}-${point.index}`}>
@@ -79,15 +86,19 @@ export default function RouteSchematicMap({ routes, className = '' }: Props) {
       {/* 说明卡片：压在地图顶部控制条之下（top-[13.5rem]），避开左上角那一列按钮 */}
       <div className="absolute left-4 top-[13.5rem] z-20 max-w-[calc(100%-2rem)] rounded-xl border border-slate-200 bg-white/92 px-3 py-2 shadow-sm backdrop-blur">
         <div className="flex items-baseline gap-2">
-          <span className="text-[11px] font-bold tracking-wide text-slate-700">路线相对位置示意图</span>
-          {projection.plotted > 0 && (
+          <span className="text-[11px] font-bold tracking-wide text-slate-700">
+            {isSequence ? '行程顺序示意图' : '路线相对位置示意图'}
+          </span>
+          {view.plotted > 0 && (
             <span className="font-mono text-[10px] font-bold tabular-nums text-slate-500">
-              {projection.plotted} 个节点
+              {view.plotted} 个节点
             </span>
           )}
         </div>
         <p className="mt-0.5 text-[10px] leading-relaxed text-slate-400">
-          底图暂时取不到 · 按经纬度相对位置绘制，不是真实地图
+          {isSequence
+            ? '底图暂时取不到、这些节点也没有坐标 · 按行程顺序排列，不代表地理位置'
+            : '底图暂时取不到 · 按经纬度相对位置绘制，不是真实地图'}
         </p>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
           {days.map((day) => (
@@ -99,19 +110,19 @@ export default function RouteSchematicMap({ routes, className = '' }: Props) {
               D{day}
             </span>
           ))}
-          {projection.skipped.length > 0 && (
+          {geographic.skipped.length > 0 && (
             <span className="text-[10px] text-amber-600">
-              缺坐标没画出来：{projection.skipped.slice(0, 4).join('、')}
-              {projection.skipped.length > 4 ? ` 等 ${projection.skipped.length} 个` : ''}
+              缺坐标没定位：{geographic.skipped.slice(0, 4).join('、')}
+              {geographic.skipped.length > 4 ? ` 等 ${geographic.skipped.length} 个` : ''}
             </span>
           )}
         </div>
       </div>
 
-      {!projection.hasCoordinates && (
+      {!hasAnyNode && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="rounded-xl border border-slate-200 bg-white/92 px-4 py-3 text-center shadow-sm backdrop-blur">
-            <p className="text-xs font-bold text-slate-600">这些节点都没有坐标，画不出示意图</p>
+            <p className="text-xs font-bold text-slate-600">这一版方案还没有可画的行程节点</p>
             <p className="mt-1 text-[11px] text-slate-400">左栏仍可逐个查看地点详情；底图恢复后地图会自动回来</p>
           </div>
         </div>

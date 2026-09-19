@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectSchematic } from './routeSchematic.ts';
+import { projectSchematic, projectSequence } from './routeSchematic.ts';
 
 const SIZE = { width: 640, height: 420, padding: 48 };
 
@@ -81,4 +81,35 @@ test('保持等比：经度跨度大时不会把纬度方向拉满', () => {
 test('空输入不抛异常', () => {
   assert.equal(projectSchematic(null, SIZE).hasCoordinates, false);
   assert.equal(projectSchematic([], SIZE).plotted, 0);
+});
+
+test('顺序示意图：没有坐标也能按行程顺序铺开（绝不推断地理位置）', () => {
+  const result = projectSequence(
+    [
+      { name: 'A', day: 1 },
+      { name: 'B', day: 1 },
+      { name: 'C', day: 2 },
+    ],
+    SIZE,
+  );
+  assert.equal(result.hasCoordinates, false);
+  assert.equal(result.plotted, 3);
+  assert.deepEqual(result.byDay, [1, 2]);
+  // 同一天从左到右；不同天上下分开（第一天在上）
+  assert.ok(result.points[0].x < result.points[1].x);
+  assert.equal(result.points[0].y, result.points[1].y);
+  assert.ok(result.points[2].y > result.points[0].y);
+  // 顺序图的点全部落在 padding 之内
+  for (const point of result.points) {
+    assert.ok(point.x >= SIZE.padding - 0.5 && point.x <= SIZE.width - SIZE.padding + 0.5);
+    assert.ok(point.y >= SIZE.padding - 0.5 && point.y <= SIZE.height - SIZE.padding + 0.5);
+  }
+});
+
+test('顺序示意图：单节点居中、空输入不抛异常', () => {
+  const single = projectSequence([{ name: '独点', day: 1 }], SIZE);
+  assert.equal(single.points[0].x, SIZE.width / 2);
+  assert.equal(single.points[0].y, SIZE.height / 2);
+  assert.equal(projectSequence([], SIZE).plotted, 0);
+  assert.equal(projectSequence(null, SIZE).points.length, 0);
 });

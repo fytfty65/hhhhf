@@ -8,7 +8,13 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.planning_governance import mentions_exclusion, prepare_governance  # noqa: E402
-from core.poi_pool import build_candidate_pool, candidate_from_poi, intents_for_plan, parse_amap_location  # noqa: E402
+from core.poi_pool import (  # noqa: E402
+    build_candidate_pool,
+    candidate_from_poi,
+    intents_for_plan,
+    parse_amap_location,
+    poi_record_from_amap,
+)
 
 AMAP_STYLE_POIS = {
     "博物馆|古迹|寺庙|文化馆": [
@@ -60,6 +66,43 @@ class TestPoiPool(unittest.TestCase):
         self.assertEqual(parse_amap_location("108.95,34.22"), [108.95, 34.22])
         self.assertIsNone(parse_amap_location(""))
         self.assertIsNone(parse_amap_location("北京"))
+
+    def test_poi_record_always_carries_lnglat_not_just_location(self):
+        """契约回归（2026-09-19 血的教训）：高德只给 location 字符串，下游只认 lnglat 数组。
+
+        少了 lnglat → 整池 0 条有坐标 → 每个方案节点都拿不到坐标 → 地图上一个点都画不出来。
+        """
+        raw = {
+            "id": "B000A",
+            "name": "洛阳博物馆",
+            "type": "科教文化服务;博物馆;博物馆",
+            "address": "聂泰路",
+            "location": "112.451541,34.643323",
+            "biz_ext": {"rating": ["4.7"], "cost": [], "open_time": "09:00-17:00"},
+            "photos": [{"url": "//store.is.autonavi.com/a.jpg"}, {"url": "http://x.com/b.jpg"}, {"url": "ftp://bad"}],
+        }
+        record = poi_record_from_amap(raw, city="洛阳", amap_key="k")
+        self.assertEqual(record["lnglat"], [112.451541, 34.643323])
+        self.assertEqual(record["location"], "112.451541,34.643323")
+        self.assertEqual(record["name"], "洛阳博物馆")
+        self.assertEqual(record["type"], "科教文化服务")
+        # 图片统一 https，坏协议直接丢
+        self.assertEqual(record["photos"], ["https://store.is.autonavi.com/a.jpg", "https://x.com/b.jpg"])
+        # 有位置就给 marker 深链；静态地图只在有 key 时生成
+        self.assertIn("uri.amap.com/marker", record["amap_url"])
+        self.assertIn("staticmap", record["map_image"])
+        # rating 来自高德 → verified；cost 缺 → estimated 必须为真（不许冒充已核实）
+        self.assertEqual(record["data_sources"]["rating"], "amap")
+        self.assertEqual(record["data_sources"]["cost"], "unavailable")
+        self.assertTrue(record["estimated"])
+
+    def test_poi_record_without_location_still_safe(self):
+        record = poi_record_from_amap({"name": "没有坐标的地方", "biz_ext": {}}, city="洛阳")
+        self.assertIsNone(record["lnglat"])
+        self.assertEqual(record["map_image"], "")
+        self.assertIn("amap.com/search", record["amap_url"])
+        self.assertEqual(record["rating"], "暂无供应商数据")
+        self.assertTrue(record["estimated"])
 
     def test_candidate_from_poi_marks_price_tier_and_source(self):
         candidate = candidate_from_poi(AMAP_STYLE_POIS["小吃|老字号|本地菜"][0])

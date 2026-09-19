@@ -997,11 +997,19 @@ class ExpertToolbox:
     async def get_dynamic_pois(self, city: str, keywords: str, types: str = "110000|141200|060400|060100", limit: int = 40) -> List[Dict]:
         if not self.amap_key:
             return []
+        from core.poi_pool import parse_amap_location as _parse_amap_location
+        from core.poi_pool import poi_record_from_amap
         async with httpx.AsyncClient(timeout=4.0) as http_client:
             params = {
                 "key": self.amap_key, "keywords": keywords, "city": city,
-                "types": types, "sortrule": "weight", "offset": limit, "page": 1, "extensions": "all"
+                "sortrule": "weight", "offset": limit, "page": 1, "extensions": "all"
             }
+            # 👑 有 keywords 时**不要**再传 types：实测（2026-09-19）传了 types 会把关键词相关性
+            # 打没 —— keywords=博物馆 + types=110000|141200|060400|060100 返回的是"泉舜购物中心/
+            # 大商新玛特/正大广场"等商场，而不传 types 时正确返回"洛阳博物馆/洛阳城定鼎门遗址博物馆"。
+            # types 只在没有关键词（纯按类别浏览）时才带上。
+            if not str(keywords or "").strip():
+                params["types"] = types
             try:
                 resp = await http_client.get(f"{self.amap_url}/place/text", params=params)
                 data = resp.json()
@@ -1031,55 +1039,16 @@ class ExpertToolbox:
                         rating_source = "amap" if rating not in (None, "") else "unavailable"
                         cost_source = "amap" if cost not in (None, "") else "unavailable"
 
-                        raw_photos = poi.get("photos", [])
-                        # 统一归一化为 HTTPS（兼容 http:// 与 // 协议相对），避免前端混合内容拦截导致图片空白
-                        real_photos = []
-                        for ph in raw_photos:
-                            if isinstance(ph, dict) and ph.get("url"):
-                                _u = str(ph.get("url")).strip()
-                                if _u.startswith("//"):
-                                    _u = "https:" + _u
-                                elif _u.startswith("http://"):
-                                    _u = "https://" + _u[len("http://"):]
-                                if _u.startswith("https://"):
-                                    real_photos.append(_u)
-                        real_photos = real_photos[:3]
-
-                        loc_str = str(poi.get("location") or "")
-                        clean_search_name = re.sub(r'[\(（].*?[\)）]', '', poi_name).strip()
-                        encoded_query = urllib.parse.quote(f"{city} {clean_search_name}")
-                        amap_hyperlink = f"https://www.amap.com/search?query={encoded_query}"
-                        if loc_str and "," in loc_str:
-                            lng, lat = loc_str.split(",")
-                            encoded_name = urllib.parse.quote(clean_search_name)
-                            amap_hyperlink = f"https://uri.amap.com/marker?position={lng},{lat}&name={encoded_name}"
-
-                        # 👑 按坐标生成高德静态地图，作为图片兜底（永不空白、与实际地理位置严格一致）
-                        map_image = ""
-                        if loc_str and "," in loc_str and self.amap_key:
-                            map_image = (
-                                f"https://restapi.amap.com/v3/staticmap"
-                                f"?location={loc_str}&zoom=15&size=480*360"
-                                f"&markers=mid,0xFF0000,A:{loc_str}"
-                                f"&key={self.amap_key}"
+                        # 记录构造走 core/poi_pool.poi_record_from_amap（纯函数、有单测）：
+                        # 它保证**同时**给出 location（"lng,lat" 字符串，供静态地图/跳转）与
+                        # lnglat（[lng, lat] 数组，供三层匹配与前端绘制）。见那里的契约注释。
+                        pois.append(
+                            poi_record_from_amap(
+                                poi,
+                                city=city,
+                                amap_key=self.amap_key or "",
                             )
-
-                        pois.append({
-                            "id": str(poi.get("id") or ""),
-                            "name": poi_name,
-                            "type": str(poi.get("type", "")).split(";")[0],
-                            "business_area": str(poi.get("business_area") or ""),
-                            "address": str(poi.get("address") or ""),
-                            "location": loc_str, 
-                            "rating": str(rating) if rating not in (None, "") else "暂无供应商数据",
-                            "cost": str(cost) if cost not in (None, "") else "暂无供应商数据",
-                            "open_time": str(biz_ext.get("open_time") or "暂无供应商数据"),
-                            "data_sources": {"rating": rating_source, "cost": cost_source, "open_time": "amap" if biz_ext.get("open_time") else "unavailable"},
-                            "estimated": rating_source == "unavailable" or cost_source == "unavailable" or not biz_ext.get("open_time"),
-                            "photos": real_photos[:3],
-                            "amap_url": amap_hyperlink,
-                            "map_image": map_image
-                        })
+                        )
                     # 👑 实景图增强：对未返回实拍照片但含高德 ID 的 POI，批量调用 place/detail 按 ID 补齐真实照片
                     no_photo_pois = [p for p in pois if not p.get("photos") and p.get("id")]
                     if no_photo_pois:

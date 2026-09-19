@@ -103,3 +103,61 @@ export function projectSchematic(
 function round(value: number): number {
   return Math.round(Math.max(0, Math.min(10_000, value)) * 10) / 10;
 }
+
+/**
+ * 没有坐标时的**顺序示意图**：按行程顺序（同一天一组）从左到右铺开，
+ * 不做任何地理推断 —— 只是"这一天先去哪、后去哪"的可读版本。
+ *
+ * 为什么需要：实测方案节点可能整批缺坐标（LLM 没照抄底座坐标、或上游 POI 池为空），
+ * 此时地图与"相对位置示意图"都画不出东西，但**行程顺序仍然是有效信息**，
+ * 不该让用户对着一块空白发呆。顺序图不冒充地理位置，标题会写明。
+ */
+export function projectSequence(
+  nodes: readonly SchematicInput[] | null | undefined,
+  options: { width?: number; height?: number; padding?: number } = {},
+): SchematicProjection & { byDay: number[] } {
+  const width = options.width ?? 640;
+  const height = options.height ?? 420;
+  const padding = options.padding ?? DEFAULT_PADDING;
+
+  const usable = (nodes ?? []).map((node, index) => ({
+    name: String(node?.name ?? `节点 ${index + 1}`),
+    day: Number(node?.day) || 1,
+  }));
+  if (usable.length === 0) {
+    return { points: [], polyline: '', hasCoordinates: false, plotted: 0, skipped: [], byDay: [] };
+  }
+
+  const days = Array.from(new Set(usable.map((item) => item.day))).sort((a, b) => a - b);
+  const availW = Math.max(1, width - padding * 2);
+  const availH = Math.max(1, height - padding * 2);
+  const rowGap = days.length > 1 ? availH / (days.length - 1) : 0;
+
+  const perDayTotal = new Map<number, number>();
+  for (const item of usable) perDayTotal.set(item.day, (perDayTotal.get(item.day) ?? 0) + 1);
+  const perDaySeen = new Map<number, number>();
+
+  const points: SchematicPoint[] = usable.map((item, index) => {
+    const totalInDay = perDayTotal.get(item.day) ?? 1;
+    const slot = perDaySeen.get(item.day) ?? 0;
+    perDaySeen.set(item.day, slot + 1);
+    const step = totalInDay > 1 ? availW / (totalInDay - 1) : 0;
+    const dayIndex = days.indexOf(item.day);
+    return {
+      x: round(padding + (totalInDay > 1 ? slot * step : availW / 2)),
+      y: round(days.length > 1 ? padding + dayIndex * rowGap : height / 2),
+      index,
+      name: item.name,
+      day: item.day,
+    };
+  });
+
+  return {
+    points,
+    polyline: points.map((point) => `${point.x},${point.y}`).join(' '),
+    hasCoordinates: false,
+    plotted: points.length,
+    skipped: [],
+    byDay: days,
+  };
+}

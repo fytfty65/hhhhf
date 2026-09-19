@@ -99,6 +99,86 @@ def candidate_from_poi(poi: Mapping[str, Any], intent: Optional[str] = None) -> 
     return candidate
 
 
+def poi_record_from_amap(poi: Mapping[str, Any], city: str = "", amap_key: str = "") -> Dict[str, Any]:
+    """高德 place/text 的单条 POI → 我们的**底座记录**（纯函数，可离线单测）。
+
+    契约（血的教训 2026-09-19）：高德只给 `location: "lng,lat"` 字符串，而下游三层匹配
+    （`_fill_from_match` / `_find_match_by_coord`）和候选池都只认 **`lnglat` 数组**。
+    之前这里只回 `location`，结果整池 0 条有坐标 → 每个方案节点都拿不到坐标 → 地图上
+    一个点都画不出来（用户看到的就是"地图空白 + 没有坐标"）。所以这个函数**必须**同时给出
+    `location`（原始字符串，用于静态地图/跳转）和 `lnglat`（数组，用于匹配与绘制）。
+    """
+    import urllib.parse
+
+    name = str(poi.get("name") or "")
+    biz_ext = poi.get("biz_ext") if isinstance(poi.get("biz_ext"), Mapping) else {}
+    rating = biz_ext.get("rating")
+    if isinstance(rating, list):
+        rating = rating[0] if rating else None
+    cost = biz_ext.get("cost")
+    if isinstance(cost, list):
+        cost = cost[0] if cost else None
+    open_time = biz_ext.get("open_time")
+
+    loc_str = str(poi.get("location") or "")
+    lnglat = parse_amap_location(loc_str)
+
+    # 图片统一归一化为 HTTPS（兼容 http:// 与 // 协议相对），避免混合内容拦截导致图片空白
+    photos: List[str] = []
+    raw_photos = poi.get("photos", [])
+    if isinstance(raw_photos, list):
+        for item in raw_photos:
+            if not isinstance(item, Mapping) or not item.get("url"):
+                continue
+            url = str(item["url"]).strip()
+            if url.startswith("//"):
+                url = "https:" + url
+            elif url.startswith("http://"):
+                url = "https://" + url[len("http://"):]
+            if url.startswith("https://"):
+                photos.append(url)
+    photos = photos[:3]
+
+    clean_search_name = re.sub(r"[\(（].*?[\)）]", "", name).strip()
+    if lnglat:
+        # 有坐标就给高德 marker 深链（点开就是准确位置），否则退回关键词搜索
+        amap_url = "https://uri.amap.com/marker?position={},{}&name={}".format(
+            loc_str.split(",")[0], loc_str.split(",")[1], urllib.parse.quote(clean_search_name)
+        )
+    else:
+        amap_url = "https://www.amap.com/search?query=" + urllib.parse.quote(f"{city} {clean_search_name}")
+
+    map_image = ""
+    if loc_str and "," in loc_str and amap_key:
+        map_image = (
+            "https://restapi.amap.com/v3/staticmap"
+            f"?location={loc_str}&zoom=15&size=480*360"
+            f"&markers=mid,0xFF0000,A:{loc_str}"
+            f"&key={amap_key}"
+        )
+
+    rating_source = "amap" if rating not in (None, "") else "unavailable"
+    cost_source = "amap" if cost not in (None, "") else "unavailable"
+    open_source = "amap" if open_time else "unavailable"
+    return {
+        "id": str(poi.get("id") or ""),
+        "name": name,
+        "type": str(poi.get("type", "")).split(";")[0],
+        "business_area": str(poi.get("business_area") or ""),
+        "address": str(poi.get("address") or ""),
+        "location": loc_str,
+        "lnglat": lnglat,
+        "rating": str(rating) if rating not in (None, "") else "暂无供应商数据",
+        "cost": str(cost) if cost not in (None, "") else "暂无供应商数据",
+        "open_time": str(open_time) if open_time else "暂无供应商数据",
+        "data_sources": {"rating": rating_source, "cost": cost_source, "open_time": open_source},
+        "estimated": rating_source == "unavailable" or cost_source == "unavailable" or open_source == "unavailable",
+        "photos": photos,
+        "amap_url": amap_url,
+        "map_image": map_image,
+    }
+
+
 def intents_for_plan(plan: Any, extra: Iterable[str] = ()) -> List[str]:
     """方案里出现过的意图（用于决定"要为哪些类别准备替代品"）。"""
     from .plan_quality import nodes_of  # 延迟导入，避免与 plan_quality 形成模块级循环

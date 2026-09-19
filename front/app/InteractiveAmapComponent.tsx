@@ -111,6 +111,9 @@ export default function InteractiveAmapComponent({
   onWakeAgent
 }: MapProps) {
   const renderRoute = luoyangRoute.filter((point) => validLngLat(point.lnglat));
+  // 底图兜底示意图要看**全部**节点（含缺坐标的）：有坐标画相对位置图，
+  // 没坐标就退到"行程顺序图"，两种情况都不让用户对着空白。
+  const schematicRoute = luoyangRoute;
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<{ marker: maplibregl.Marker; root: Root }[]>([]);
@@ -647,7 +650,7 @@ export default function InteractiveAmapComponent({
 
       {/* 👑 一块底图瓦片都没画出来时，用**离线示意图**兜底：不依赖网络，
           路线与编号仍然可读（之前这种情况就是一块空白）。 */}
-      {!basemapPainted && <RouteSchematicMap routes={renderRoute} />}
+      {!basemapPainted && <RouteSchematicMap routes={schematicRoute} />}
 
       {/* 👑 顶部控制面板（包含图层、路况、WorldMonitor 状态卡与 3D 态势雷达切换按钮）。
           sm 及以上与左上返回按钮、右上动作条统一抬到 top-6 同一基线，实现左右水平对齐；
