@@ -1949,6 +1949,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         <FullRouteVisualizer 
           phase={phase}
           routes={currentDayRoutes}
+          allRoutes={dynamicRoutes}
+          activeDay={totalDays[activeDayIndex]}
           actualPath={realPath}
           selectedPoiIndex={selectedPoiIndex}
           onPoiSelect={setSelectedPoiIndex}

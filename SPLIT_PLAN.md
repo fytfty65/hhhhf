@@ -92,7 +92,8 @@
 | F18 | **数据降级登记处**（`core/degradation`：数据源注册表 + 从 payload 推导 `{source,label,status,reason,impact}`）+ 面板「数据降级」统一渲染（文案只在后端一处定义） | `16569e6` |
 | F19 | 地图底图修复：备用底图换成**实测可达**的 Esri 街道图（OSM 在部分网络 8s 超时）、误判不再不可逆、状态条挪出左下角（原先被行程节点卡片条盖住）+ E2E「读得到」守卫 | `b4c8e1c` |
 | F20 | 地图**离线示意图兜底**（`lib/routeSchematic.ts` + `components/RouteSchematicMap.tsx`：一块瓦片都画不出来时按经纬度画相对位置图，零网络依赖）+ 状态条定位到不受任何浮动元素影响的位置 + E2E 断言"不被遮挡/不压控制条/示意图可用" | `f064541` |
-| F21 | **坐标断链修复**：`get_dynamic_pois` 只回 `location` 字符串、下游只认 `lnglat` 数组 → 整池 0 条坐标 → 方案全无坐标、地图空白；改为经 `core/poi_pool.poi_record_from_amap`（纯函数+单测）同时给两者。另修 `types` 参数压掉关键词相关性（搜"博物馆"返回购物中心） | 本批 |
+| F21 | **坐标断链修复**：`get_dynamic_pois` 只回 `location` 字符串、下游只认 `lnglat` 数组 → 整池 0 条坐标 → 方案全无坐标、地图空白；改为经 `core/poi_pool.poi_record_from_amap`（纯函数+单测）同时给两者。另修 `types` 参数压掉关键词相关性（搜"博物馆"返回购物中心） | `e3a8e33` |
+| F22 | 地图**只拿当天节点**导致"当天为空即整块空白"：改为当天为空时回退整个行程（并写明"这里是整个行程的 N 个节点"）+ 空状态自诊断（本天/全部/阶段） | 本批 |
 
 **F11 附带修掉一个真 bug**：宿主流式累积时用 `replace(/null/g, "")` 清洗 token，会把**合法 JSON 里的 null**（票价未核实就是 `price:null`）删成 `"price":`，导致整段 `[FINAL_JSON]` 解析失败——后果是 `quality`/`budget_report`/四块新数据全部丢失、核对面板整块不显示。现在改为**先按原文解析**（我们下发的 JSON 一定合法），解析不出来才退回"删 null"的兜底（那是给模型吐字夹带的 null 准备的）；展示用的清洗仍在 `humanReadableLogs`。E2E mock 里刻意保留 `price: null` 作为回归哨兵。同时 `final_route` 消息路径也接入同一份 payload（重连/回放只收到它时面板同样有数据）。
 

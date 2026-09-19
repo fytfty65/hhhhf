@@ -16,14 +16,28 @@ import React from 'react';
 import { projectSchematic, projectSequence, type SchematicInput } from '../lib/routeSchematic';
 
 type Props = {
-  /** 方案的**全部**节点（含缺坐标的），组件自己决定用哪种画法 */
+  /** 要画的节点（当天；当天为空时调用方会传整个行程） */
   routes?: readonly SchematicInput[] | null;
+  /** day = 画的就是当天的节点；overview = 当天没有节点、这里画的是整个行程 */
+  scope?: 'day' | 'overview';
+  activeDay?: number;
+  dayNodeCount?: number;
+  allNodeCount?: number;
+  phase?: string;
   className?: string;
 };
 
 const DAY_COLORS = ['#f97316', '#0ea5e9', '#10b981', '#8b5cf6', '#f43f5e', '#eab308'];
 
-export default function RouteSchematicMap({ routes, className = '' }: Props) {
+export default function RouteSchematicMap({
+  routes,
+  scope = 'day',
+  activeDay,
+  dayNodeCount,
+  allNodeCount,
+  phase,
+  className = '',
+}: Props) {
   const geographic = React.useMemo(() => projectSchematic(routes), [routes]);
   const sequence = React.useMemo(() => projectSequence(routes), [routes]);
   const hasAnyNode = sequence.plotted > 0;
@@ -100,6 +114,11 @@ export default function RouteSchematicMap({ routes, className = '' }: Props) {
             ? '底图暂时取不到、这些节点也没有坐标 · 按行程顺序排列，不代表地理位置'
             : '底图暂时取不到 · 按经纬度相对位置绘制，不是真实地图'}
         </p>
+        {scope === 'overview' && hasAnyNode && (
+          <p className="mt-0.5 text-[10px] leading-relaxed text-amber-600">
+            第 {activeDay ?? '—'} 天没有节点 · 这里是整个行程的 {allNodeCount ?? view.plotted} 个节点
+          </p>
+        )}
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
           {days.map((day) => (
             <span key={day} className="flex items-center gap-1 text-[10px] font-bold text-slate-500">
@@ -122,8 +141,14 @@ export default function RouteSchematicMap({ routes, className = '' }: Props) {
       {!hasAnyNode && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="rounded-xl border border-slate-200 bg-white/92 px-4 py-3 text-center shadow-sm backdrop-blur">
-            <p className="text-xs font-bold text-slate-600">这一版方案还没有可画的行程节点</p>
-            <p className="mt-1 text-[11px] text-slate-400">左栏仍可逐个查看地点详情；底图恢复后地图会自动回来</p>
+            <p className="text-xs font-bold text-slate-600">这一版还没有可画的行程节点</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+              左栏先推演一版方案，节点会自动出现在这里；底图恢复后地图也会自动回来
+            </p>
+            {/* 自诊断：把"为什么空"直接写在界面上，省得只能靠猜（也方便截图反馈） */}
+            <p className="mt-1.5 font-mono text-[10px] tabular-nums text-slate-400" data-testid="map-empty-diagnosis">
+              诊断：本天 {dayNodeCount ?? 0} 个 · 全部 {allNodeCount ?? 0} 个 · 阶段 {phase ?? '—'}
+            </p>
           </div>
         </div>
       )}

@@ -90,6 +90,9 @@ interface MapProps {
   selectedPoiIndex: number | null;
   onPoiSelect: (index: number) => void;
   luoyangRoute?: RoutePoint[];
+  /** 整个行程的节点（所有天）。当天没有节点时地图改为展示整个行程，避免"地图永远是空的" */
+  allRoute?: RoutePoint[];
+  activeDay?: number;
   actualPath?: [number, number][]; 
   safetyInfo?: SafetyInfo; // 👑 WorldMonitor 实时安全风控数据
   weatherInfo?: any; // 👑 高德/心知实时气象
@@ -103,6 +106,8 @@ export default function InteractiveAmapComponent({
   selectedPoiIndex,
   onPoiSelect,
   luoyangRoute = [],
+  allRoute = [],
+  activeDay,
   actualPath = [], 
   safetyInfo,
   weatherInfo,
@@ -110,10 +115,12 @@ export default function InteractiveAmapComponent({
   onExit,
   onWakeAgent
 }: MapProps) {
-  const renderRoute = luoyangRoute.filter((point) => validLngLat(point.lnglat));
-  // 底图兜底示意图要看**全部**节点（含缺坐标的）：有坐标画相对位置图，
-  // 没坐标就退到"行程顺序图"，两种情况都不让用户对着空白。
-  const schematicRoute = luoyangRoute;
+  // 当天节点 / 整个行程：**当天为空时不要交白卷** —— 改成展示整个行程（并在示意图里说明）。
+  const dayNodes = Array.isArray(luoyangRoute) ? luoyangRoute : [];
+  const overviewNodes = Array.isArray(allRoute) && allRoute.length > 0 ? allRoute : dayNodes;
+  const mapScope: 'day' | 'overview' = dayNodes.length > 0 ? 'day' : 'overview';
+  const activeNodes = mapScope === 'day' ? dayNodes : overviewNodes;
+  const renderRoute = activeNodes.filter((point) => validLngLat(point.lnglat));
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<{ marker: maplibregl.Marker; root: Root }[]>([]);
@@ -650,7 +657,16 @@ export default function InteractiveAmapComponent({
 
       {/* 👑 一块底图瓦片都没画出来时，用**离线示意图**兜底：不依赖网络，
           路线与编号仍然可读（之前这种情况就是一块空白）。 */}
-      {!basemapPainted && <RouteSchematicMap routes={schematicRoute} />}
+      {!basemapPainted && (
+        <RouteSchematicMap
+          routes={activeNodes}
+          scope={mapScope}
+          activeDay={activeDay}
+          dayNodeCount={dayNodes.length}
+          allNodeCount={overviewNodes.length}
+          phase={phase}
+        />
+      )}
 
       {/* 👑 顶部控制面板（包含图层、路况、WorldMonitor 状态卡与 3D 态势雷达切换按钮）。
           sm 及以上与左上返回按钮、右上动作条统一抬到 top-6 同一基线，实现左右水平对齐；

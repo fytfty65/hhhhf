@@ -110,6 +110,9 @@ export function getNaviSteps(naviObj: any): string[] {
 interface FullRouteVisualizerProps {
   phase: 'drafting' | 'deduction' | 'decision';
   routes?: RoutePoint[];
+  /** 整个行程（所有天）：当天没有节点时地图改为展示它，避免地图永远是空的 */
+  allRoutes?: RoutePoint[];
+  activeDay?: number;
   actualPath?: [number, number][];
   selectedPoiIndex: number | null;
   onPoiSelect: (index: number) => void;
@@ -126,6 +129,8 @@ interface FullRouteVisualizerProps {
 export default function FullRouteVisualizer({
   phase, 
   routes = [], 
+  allRoutes = [],
+  activeDay,
   actualPath = [], 
   selectedPoiIndex, 
   onPoiSelect, 
@@ -218,6 +223,8 @@ export default function FullRouteVisualizer({
           selectedPoiIndex={selectedPoiIndex}
           onPoiSelect={onPoiSelect}
           luoyangRoute={routes} 
+          allRoute={allRoutes}
+          activeDay={activeDay}
           actualPath={actualPath}
           safetyInfo={safetyInfo}
           weatherInfo={weatherInfo}
