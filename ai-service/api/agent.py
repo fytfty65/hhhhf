@@ -3516,12 +3516,15 @@ async def run_negotiate(msg: GatewayMessage):
                                 from core.price_sources import (
                                     merge_observations,
                                     parse_price_from_text,
+                                    pending_price_report,
                                     pending_price_targets,
                                     price_coverage,
                                     summarize_merge,
                                 )
 
-                                _targets = pending_price_targets(final_data, limit=3)
+                                # 补价节点数 3 → 8（有界）：太少会导致"未取到"一大片，
+                                # 用户看到的全是"需要你确认"。并发执行 + 整体超时保护不变。
+                                _targets = pending_price_targets(final_data, limit=8)
                                 _fetcher = getattr(toolbox, "get_real_time_web_price", None)
                                 if _targets and _fetcher:
                                     async def _lookup(_item: Dict[str, Any]) -> Dict[str, Any]:
@@ -3537,19 +3540,28 @@ async def run_negotiate(msg: GatewayMessage):
 
                                     _observations = await asyncio.wait_for(
                                         asyncio.gather(*[_lookup(item) for item in _targets]),
-                                        timeout=5.0,
+                                        timeout=12.0,
                                     )
                                     _merged = merge_observations(final_data, list(_observations))
                                     if _merged["updated"]:
                                         final_data["route"] = _merged["plan"]["route"]
+                                    _report = pending_price_report(final_data)
                                     final_data["price_audit"] = {
                                         **_merged["coverage"],
                                         "updated": len(_merged["updated"]),
                                         "still_unknown": _merged["coverage"]["unknown"][:5],
                                         "summary": summarize_merge(_merged),
+                                        "pending": _report["pending"],
+                                        "pending_summary": _report["summary"],
                                     }
                                 else:
-                                    final_data["price_audit"] = price_coverage(final_data)
+                                    _coverage = price_coverage(final_data)
+                                    _report = pending_price_report(final_data)
+                                    final_data["price_audit"] = {
+                                        **_coverage,
+                                        "pending": _report["pending"],
+                                        "pending_summary": _report["summary"],
+                                    }
                             except Exception as _price_exc:  # 价格补全失败绝不能影响出方案
                                 try:
                                     from core.price_sources import price_coverage as _coverage

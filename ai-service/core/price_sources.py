@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 import time
+import urllib.parse
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .candidate_index import intent_of, normalize_text
@@ -118,6 +119,54 @@ def pending_price_targets(plan: Any, limit: int = 20, include_estimated: bool = 
         if len(targets) >= max(1, int(limit)):
             break
     return targets
+
+
+def pending_price_report(plan: Any, limit: int = 6) -> Dict[str, Any]:
+    """给用户的"需要你确认"清单：哪些节点没价格、**为什么**、去哪里能核。
+
+    为什么单独做这一层：用户看到"未取到 73%"只会一脸问号。所以要逐条说清：
+    - 住宿：高德对酒店普遍不返回房价 → 明确写"高德不提供房价，需要你确认"，
+      而不是笼统的"暂无供应商数据"；
+    - 门票/其它：没有可核实报价 → "没有可核实报价，需要你确认"；
+    并给出可以点开核价的入口（高德 marker 深链 / 关键词搜索），用户自己 30 秒能确认。
+    """
+    pending: List[Dict[str, Any]] = []
+    for node in nodes_of(plan):
+        value = cost_of(node)
+        source = _current_price_source(node)
+        if value is not None and is_verified_source(source):
+            continue  # 已经是可核实价格，不用麻烦用户
+        if value is not None and source in {"amap", "official", "provider", "vendor", "ticketing", "12306"}:
+            continue
+        name = node_name(node)
+        if not name:
+            continue
+        kind = intent_of(node)
+        is_lodging = kind == "hotel"
+        reason = (
+            "高德不提供房价，需要你确认"
+            if is_lodging
+            else "没有可核实报价，需要你确认"
+        )
+        url = str(node.get("amap_url") or "").strip()
+        if not url:
+            query = urllib.parse.quote(name)
+            url = f"https://www.amap.com/search?query={query}"
+        pending.append({"name": name, "kind": kind or "other", "reason": reason, "url": url})
+        if len(pending) >= max(1, int(limit)):
+            break
+    lodging = sum(1 for item in pending if item["kind"] == "hotel")
+    others = len(pending) - lodging
+    if not pending:
+        summary = "价格都拿到了可核实来源，没有需要你确认的。"
+    else:
+        parts = []
+        if lodging:
+            parts.append(f"{lodging} 个住宿节点高德不提供房价")
+        if others:
+            parts.append(f"{others} 个节点没有可核实报价")
+        summary = f"{len(pending)} 项需要你确认：" + "；".join(parts) + "。点右侧入口可直接去核价。"
+    return {"pending": pending, "total": len(pending), "lodging": lodging, "summary": summary}
 
 
 def merge_observations(

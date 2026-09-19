@@ -1,4 +1,4 @@
-﻿import { test, expect, Page } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 
 /**
  * 行程核对面板（预算核对 / 已作调整 / 行程规模 / 本次调整 / 价格核对 / 跨城怎么走 / 长途分段 /
@@ -90,6 +90,11 @@ const GOVERNANCE_PAYLOAD = {
     updated: 1,
     still_unknown: ['城墙南门门票', '永兴坊美食'],
     summary: '补上 1 个价格；1 个查了没查到（保持未核实）；价格覆盖：可核实 40% / 未取到 40%',
+    pending_summary: '2 项需要你确认：1 个住宿节点高德不提供房价；1 个节点没有可核实报价。点右侧入口可直接去核价。',
+    pending: [
+      { name: '钟楼酒店', kind: 'hotel', reason: '高德不提供房价，需要你确认', url: 'https://uri.amap.com/marker?position=108.94,34.26&name=x' },
+      { name: '城墙南门门票', kind: 'cultural', reason: '没有可核实报价，需要你确认', url: 'https://www.amap.com/search?query=x' },
+    ],
   },
   // 跨城腿比较：票价没有可核实来源时只比时长，并明确标注未核实（core/transport_options）
   // 注意 `price: null` 是**故意**的：真实后端在票价未核实时就会下发 null，
@@ -324,6 +329,11 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // 价格核对：比例 + 还需补价的节点（未核实必须写明，不得当成 0 元）
     await expect(panel.getByText('价格核对')).toBeVisible();
     await expect(panel.getByText('已核实 2 项 · 需要你确认 2 项')).toBeVisible();
+    // "需要你确认"要逐条说清原因，并给可点开的核价入口（酒店房价尤其要写明高德不提供）
+    await expect(page.getByTestId('price-pending')).toBeVisible();
+    await expect(panel.getByText('高德不提供房价，需要你确认')).toBeVisible();
+    await expect(panel.getByText('没有可核实报价，需要你确认')).toBeVisible();
+    await expect(panel.getByRole('link', { name: '去核价' }).first()).toHaveAttribute('href', /^https:\/\//);
     await expect(panel.getByText(/还需补价：城墙南门门票、永兴坊美食/)).toBeVisible();
     await expect(panel.getByText(/补上 1 个价格/)).toBeVisible();
 

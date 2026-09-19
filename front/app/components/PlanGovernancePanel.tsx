@@ -90,6 +90,9 @@ export type PlanGovernance = {
     still_unknown?: string[];
     updated?: number;
     summary?: string;
+    /** 需要你确认的清单（后端给出原因 + 可点开的核价入口） */
+    pending?: { name?: string; kind?: string; reason?: string; url?: string }[];
+    pending_summary?: string;
   };
   /** 跨城腿的出行建议（含"票价未核实"清单） */
   transportAudit?: { legs?: TransportLeg[]; note?: string; error?: string };
@@ -444,6 +447,33 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
               </p>
             ) : null;
           })()}
+          {/* "需要你确认"逐条说清原因，并给一个能点开核价的入口 ——
+              只说"未取到 73%"用户没法行动，酒店房价尤其要写明白（高德就是不提供房价）。 */}
+          {(priceAudit?.pending?.length ?? 0) > 0 && (
+            <div className="mt-2 space-y-1" data-testid="price-pending">
+              <p className="text-[12.5px] font-bold text-slate-600">
+                {priceAudit?.pending_summary || '以下价格需要你确认：'}
+              </p>
+              {(priceAudit?.pending || []).slice(0, 5).map((item, index) => (
+                <div key={`${item.name}-${index}`} className="flex items-baseline justify-between gap-3">
+                  <span className="text-[12.5px] leading-relaxed text-slate-600">
+                    <strong className="font-bold text-slate-700">{item.name}</strong>
+                    <span className="ml-1 text-slate-500">{item.reason}</span>
+                  </span>
+                  {item.url && (
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="shrink-0 text-[12.5px] font-bold text-orange-600 underline underline-offset-2 hover:text-orange-700"
+                    >
+                      去核价
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {priceAudit?.summary && (
             <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">{priceAudit.summary}</p>
           )}

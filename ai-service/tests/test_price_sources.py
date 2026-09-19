@@ -11,6 +11,7 @@ from core.price_sources import (  # noqa: E402
     is_verified_source,
     make_observation,
     merge_observations,
+    pending_price_report,
     pending_price_targets,
     price_coverage,
     source_rank,
@@ -147,3 +148,35 @@ class TestMerge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestPendingPriceReport(unittest.TestCase):
+    """给用户的"需要你确认"清单：为什么没价格 + 去哪核（用户看不懂"未取到 73%"）。"""
+
+    def test_lodging_says_amap_has_no_room_rates(self):
+        sample = {"route": [
+            {"day": 1, "name": "某酒店", "type": "住宿", "cost_estimate": "暂无供应商数据"},
+            {"day": 1, "name": "某博物馆", "type": "文化", "cost_estimate": "暂无供应商数据",
+             "amap_url": "https://uri.amap.com/marker?position=1,2&name=x"},
+        ]}
+        report = pending_price_report(sample)
+        by_name = {item["name"]: item for item in report["pending"]}
+        self.assertIn("高德不提供房价", by_name["某酒店"]["reason"])
+        self.assertIn("没有可核实报价", by_name["某博物馆"]["reason"])
+        self.assertEqual(by_name["某酒店"]["kind"], "hotel")
+        for item in report["pending"]:
+            self.assertTrue(item["url"].startswith("https://"))
+        self.assertIn("需要你确认", report["summary"])
+
+    def test_verified_prices_are_not_asked_again(self):
+        sample = {"route": [
+            {"day": 1, "name": "有报价的景点", "type": "文化", "cost_estimate": "¥50",
+             "data_sources": {"cost_estimate": "amap"}},
+        ]}
+        report = pending_price_report(sample)
+        self.assertEqual(report["pending"], [])
+        self.assertIn("没有需要你确认的", report["summary"])
+
+    def test_missing_url_falls_back_to_search_link(self):
+        sample = {"route": [{"day": 1, "name": "没链接的酒店", "type": "住宿", "cost_estimate": "暂无供应商数据"}]}
+        item = pending_price_report(sample)["pending"][0]
+        self.assertIn("amap.com/search", item["url"])
