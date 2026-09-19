@@ -90,12 +90,49 @@ class TestSelectionGates(unittest.TestCase):
     def test_nature_request_without_any_scenic_is_a_hard_failure(self):
         route = []
         for day in range(1, 4):
-            route.extend([play(day, f"博物馆{day}"), meal(day), stay(day)])
+            route.extend([play(day, f"公园{day}", "自然风光"), play(day, f"博物馆{day}"), meal(day), stay(day)])
         context = {"days": 3, "request_text": "去库尔勒玩3天，想看自然风景和草原"}
-        self.assertIn("scenic_missing", self._codes(context, route))
-        # 排了自然风景就不报
-        route[0] = play(1, "博斯腾湖", "自然风光")
-        self.assertNotIn("scenic_missing", self._codes(context, route))
+        codes = self._codes(context, route)
+        self.assertNotIn("scenic_shortfall", codes)  # 每天都有自然景观
+        self.assertIn("category_cap_exceeded", codes)  # 但 3 个博物馆超了"自然型目的地"的上限(1)
+
+        # 把博物馆换成自然景观 → 两条都不再报
+        scenic_only = []
+        for day in range(1, 4):
+            scenic_only.extend([play(day, f"公园{day}", "自然风光"), play(day, f"湖{day}", "自然风光"), meal(day), stay(day)])
+        codes_after = self._codes(context, scenic_only)
+        self.assertNotIn("scenic_shortfall", codes_after)
+        self.assertNotIn("category_cap_exceeded", codes_after)
+
+        # 一个自然景观都没有 → 必然报
+        museum_only = []
+        for day in range(1, 4):
+            museum_only.extend([play(day, f"博物馆{day}"), meal(day), stay(day)])
+        self.assertIn("scenic_shortfall", self._codes(context, museum_only))
+
+    def test_increment_can_raise_the_scenic_target(self):
+        """"我想多打卡自然景观"必须真的改变判定标准（不是写死的常量）。"""
+        route = []
+        for day in range(1, 4):
+            route.extend([play(day, f"公园{day}", "自然风光"), meal(day), stay(day)])
+        context = {"days": 3, "request_text": "去库尔勒玩3天，想吃美食住舒服"}
+        # 默认（自然型目的地）：每天 1 个自然景观就够
+        self.assertNotIn("scenic_shortfall", self._codes(context, route))
+        # 二次增量要求多加自然景观 → 目标抬高，同样这份方案就不达标了
+        context_with_increment = {**context, "increment": {"quota": {"scenic": 4}}}
+        self.assertIn("scenic_shortfall", self._codes(context_with_increment, route))
+
+    def test_increment_can_lower_the_culture_cap(self):
+        """"少看点博物馆"要能把文化类上限压下来。"""
+        route = []
+        for day in range(1, 4):
+            route.extend([play(day, f"公园{day}", "自然风光"), meal(day), stay(day)])
+        route.append(play(1, "博物馆1"))  # 全行程 1 个博物馆 = 默认上限
+        context = {"days": 3, "request_text": "去库尔勒玩3天，多看自然风景"}
+        self.assertNotIn("category_cap_exceeded", self._codes(context, route))
+        # 用户说"少看点博物馆" → 上限压到 0，同一个博物馆也超
+        stricter = {**context, "increment": {"quota": {"cultural": -3}}}
+        self.assertIn("category_cap_exceeded", self._codes(stricter, route))
 
 
 if __name__ == "__main__":

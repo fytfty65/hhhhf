@@ -314,11 +314,13 @@ def check_hard_constraints(
         continuity = continuity_report(plan, {**dict(ctx), "expectations": expectations})
         failures.extend(continuity["failures"])
 
-    # 8) 玩点必须是真景点，且不能一类刷到底
+    # 8) 玩点必须是真景点，且不能一类刷到底 —— 阈值来自**构成策略**
+    #    （目的地 + 用户偏好 + 二次增量共同推导；用户说"想多打卡自然景观"时目标会跟着变）
     #    用户实测（2026-09-19，库尔勒 7 天）：「xx博物馆-西北门地上停车场」「xx博物馆文创空间」
-    #    「xx园林宾馆」被当成景点，且 7 天几乎全是博物馆。这里是**判定层**，选点层同时也在挡
+    #    「xx园林宾馆」被当成景点，且 7 天几乎全是博物馆。选点层同时也在挡
     #    （core/poi_pool.is_play_worthy），两道一起才既挡得住数据源、也挡得住模型自己编的。
-    from .poi_pool import FACILITY_NAME_MARKERS, is_play_worthy  # 延迟导入，避免模块级循环
+    from .composition import composition_policy, composition_targets_met  # 延迟导入，避免模块级循环
+    from .poi_pool import FACILITY_NAME_MARKERS, is_play_worthy  # 延迟导入
 
     hits: List[Dict[str, Any]] = []
     for node in nodes:
@@ -340,45 +342,51 @@ def check_hard_constraints(
             continue
         hits.append(node)
 
-    # 单调性只在"行程够长、玩点够多"时才判定：2 天 4 个点里有 3 个文化类是正常的，
-    # 而 7 天 21 个点里 19 个博物馆就是明显跑偏（用户实测的库尔勒方案）。
-    if days >= 3 and len(hits) >= 6:
-        counts: Dict[str, int] = {}
-        for node in hits:
-            label = _coarse_category(node)
-            counts[label] = counts.get(label, 0) + 1
-        top_label, top_count = max(counts.items(), key=lambda item: item[1])
-        share = top_count / len(hits)
-        if share >= 0.8:
-            failures.append(
-                {
-                    "code": "play_category_monotony",
-                    "detail": f"{len(hits)} 个玩点里有 {top_count} 个是同一类（{top_label}），行程太单调",
-                }
-            )
-        elif share >= 0.6:
-            unverifiable.append(
-                {
-                    "code": "play_category_monotony_hint",
-                    "detail": f"{top_count}/{len(hits)} 个玩点是同一类（{top_label}），建议再混一些别的类型",
-                }
-            )
+    policy = composition_policy(ctx, increment=ctx.get("increment"), signals=None, expectations=expectations)
+    targets = composition_targets_met(plan, policy)
 
-    # 9) 自然风景目的地：如果方案里一个自然景观都没有，如实报出来
-    #    （"去新疆却全是博物馆"就是这么被发现是错的）
-    wants_nature = bool(
-        (expectations or {}).get("min_scenic_ratio")
-        or any(word in _normalize(str(ctx.get("request_text") or "")) for word in ("自然", "风景", "山水", "草原", "湖", "雪山", "沙漠", "胡杨"))
-    )
-    if hits and wants_nature:
-        scenic_hits = sum(1 for node in hits if _coarse_category(node) == "scenic")
-        if scenic_hits == 0:
-            failures.append(
-                {
-                    "code": "scenic_missing",
-                    "detail": "这趟是以自然风景为目的地的行程，但一个自然景观（湖/草原/沙漠/峡谷/公园）都没有排进去",
-                }
-            )
+    # 8.1 单一类别占比上限（2 天 4 个点里 3 个文化类属正常，长行程才判）
+    if days >= 3 and len(hits) >= 6 and targets["share_over_cap"]:
+        failures.append(
+            {
+                "code": "play_category_monotony",
+                "detail": (
+                    f"{len(hits)} 个玩点里有 {max(targets['counts'].values())} 个是同一类，"
+                    f"超过上限 {int(float(policy['max_category_share']) * 100)}%（{policy['note']}）"
+                ),
+            }
+        )
+    elif len(hits) >= 4 and targets["share_over_cap"]:
+        unverifiable.append(
+            {
+                "code": "play_category_monotony_hint",
+                "detail": f"玩点类型偏单一（{max(targets['counts'].values())}/{len(hits)} 同一类），建议混一些别的类型",
+            }
+        )
+
+    # 8.2 文化类总量上限：自然型目的地默认设上限（用户要求少安排文化类时会压得更低）
+    if targets["cultural_over_cap"]:
+        failures.append(
+            {
+                "code": "category_cap_exceeded",
+                "detail": (
+                    f"文化类（博物馆/古迹）排了 {targets['cultural_total']} 个，超过上限 "
+                    f"{policy['max_cultural_total']} 个（{policy['note']}）"
+                ),
+            }
+        )
+
+    # 8.3 每天的自然景观下限：自然型目的地每天至少 1 个（二次增量要求"多打卡自然"时目标会上调）
+    if policy["min_scenic_per_day"] > 0 and targets["scenic_shortfall_days"]:
+        failures.append(
+            {
+                "code": "scenic_shortfall",
+                "detail": (
+                    "第 " + "、".join(str(day) for day in targets["scenic_shortfall_days"][:6])
+                    + f" 天没有自然景观（这趟要求每天至少 {policy['min_scenic_per_day']} 个自然景观：{policy['note']}）"
+                ),
+            }
+        )
 
     return {"failures": failures, "unverifiable": unverifiable}
 

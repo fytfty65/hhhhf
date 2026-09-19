@@ -3386,6 +3386,9 @@ async def run_negotiate(msg: GatewayMessage):
                                     previous_plan=final_data,
                                     known_names=_known_names,
                                 )
+                                # 二次增量直接影响"该看什么"的构成策略（例如"想多打卡自然景观"
+                                # 会抬高每天自然景观目标、压低文化类上限），所以要带进质量上下文。
+                                _quality_context["increment"] = _refinement_delta
 
                             # 👑 候选池：只有"复核发现结构缺口、或预算吃紧、或有排他/配额"时才去取，
                             # 一次取好、复核与治理共用（避免同一请求打两遍数据源）。

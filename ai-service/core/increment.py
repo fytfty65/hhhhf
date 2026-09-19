@@ -23,8 +23,20 @@ from .plan_quality import PREFERENCE_TAXONOMY, node_day, node_name, nodes_of, pa
 
 # 触发词
 EXCLUDE_HINTS = ("不想去", "不要去", "不去", "别安排", "不要安排", "换掉", "换成别的", "去掉", "删除", "去过", "不感兴趣", "不喜欢")
-INCREASE_HINTS = ("多吃", "多安排", "多一点", "多一些", "加大", "增加", "优先", "重点", "丰富")
-REDUCE_HINTS = ("少吃", "少安排", "减少", "不要太多", "太多了", "少一点", "精简")
+# 增减的说法要覆盖用户真实口语：实测"我想多打卡自然景观"这类说法一个都没命中，
+# 结果二次增量完全没被识别（策略层因此拿不到"该多加自然景观"的信号）。
+INCREASE_HINTS = (
+    "多吃", "多安排", "多一点", "多一些", "加大", "增加", "优先", "重点", "丰富",
+    "多打卡", "多看", "多点", "多去", "想多", "主要想", "加点", "来点", "再来", "为主",
+    "偏重", "倾向",
+)
+REDUCE_HINTS = (
+    "少吃", "少安排", "减少", "不要太多", "太多了", "少一点", "精简",
+    "少看", "少去", "别再看", "看腻", "不想再看", "太多",
+)
+# 一句话里可能同时有"少看博物馆 + 多安排自然风景"这种双向要求：按**分句**判定，
+# 否则整句只认第一个命中的意图（实测会把"少看博物馆"读成"要多加博物馆"）。
+CLAUSE_SPLIT = re.compile(r"[，。；;！!？?\n]+")
 UPGRADE_HINTS = ("住好", "升级", "品质", "高档", "奢华", "舒服")
 DOWNGRADE_HINTS = ("省一点", "便宜", "省钱", "降级", "经济")
 
@@ -124,18 +136,33 @@ def parse_increment(
                 seen.add(key)
                 exclude.append(name)
 
-    # ---- 配额：增减类说法 + 意图 ----
-    intent = _detect_intent(raw)
+    # ---- 配额：增减类说法 + 意图（**按分句**判定：一句话里可能同时有"少看博物馆 + 多排自然"） ----
     quota: Dict[str, int] = {}
-    if intent:
-        count = _detect_explicit_count(raw) or DEFAULT_STEP
+    clauses = [part for part in CLAUSE_SPLIT.split(raw) if part.strip()] or [raw]
+    for clause in clauses:
+        clause_intent = _detect_intent(clause)
+        if not clause_intent:
+            continue
+        count = _detect_explicit_count(clause) or DEFAULT_STEP
         count = max(1, min(MAX_STEP, count))
-        if any(hint in raw for hint in INCREASE_HINTS):
-            quota[intent] = quota.get(intent, 0) + count
-            matched.append(f"increase:{intent}")
-        elif any(hint in raw for hint in REDUCE_HINTS):
-            quota[intent] = quota.get(intent, 0) - count
-            matched.append(f"reduce:{intent}")
+        if any(hint in clause for hint in INCREASE_HINTS):
+            quota[clause_intent] = quota.get(clause_intent, 0) + count
+            matched.append(f"increase:{clause_intent}")
+        elif any(hint in clause for hint in REDUCE_HINTS):
+            quota[clause_intent] = quota.get(clause_intent, 0) - count
+            matched.append(f"reduce:{clause_intent}")
+    if not quota:
+        # 兜底：整句判定（老行为，覆盖"分句切不出来但整句能看出意图"的情况）
+        intent = _detect_intent(raw)
+        if intent:
+            count = _detect_explicit_count(raw) or DEFAULT_STEP
+            count = max(1, min(MAX_STEP, count))
+            if any(hint in raw for hint in INCREASE_HINTS):
+                quota[intent] = quota.get(intent, 0) + count
+                matched.append(f"increase:{intent}")
+            elif any(hint in raw for hint in REDUCE_HINTS):
+                quota[intent] = quota.get(intent, 0) - count
+                matched.append(f"reduce:{intent}")
 
     # ---- 档位：住好一点 / 省一点（按分句归属意图，避免"吃的省一点"被套到住宿上） ----
     upgrade: Dict[str, str] = {}
