@@ -193,7 +193,13 @@ export default function FullRouteVisualizer({
   const avgCost = dayNodes.length > 0 ? Math.round(dayTotal / memberCount) : 0;
   const overrunPercent = dailyBudget > 0 ? Math.max(0, Math.round((overrun / dailyBudget) * 100)) : 0;
   // 按成本降序排列的节点，用于决策看板成本条形图
-  const costSortedNodes = [...dayNodes].sort((a, b) => parseCostNumber(b.cost) - parseCostNumber(a.cost)).slice(0, 6);
+  // 价格只有"能解析出数字"的才参与比较：取不到价格的一律不计入、也不当 0 元
+  // （之前把"暂无供应商数据"解析成 0，于是看板显示"消费 ¥0 / 人均 ¥0 / 成本最低=某酒店"，
+  //  看着像结论，其实什么都没说）
+  const pricedNodes = [...dayNodes].filter((n: any) => parseCostNumber(n.cost) > 0);
+  const pricedTotal = pricedNodes.reduce((s: number, n: any) => s + parseCostNumber(n.cost), 0);
+  const unpricedNodes = dayNodes.filter((n: any) => parseCostNumber(n.cost) <= 0);
+  const costSortedNodes = [...pricedNodes].sort((a, b) => parseCostNumber(b.cost) - parseCostNumber(a.cost)).slice(0, 6);
   const maxNodeCost = costSortedNodes.length > 0 ? Math.max(1, parseCostNumber(costSortedNodes[0].cost)) : 1;
 
   // 👑 多日预算滚动预测：逐日累计花费 vs 累计预算，提前预警后期超支
@@ -340,46 +346,61 @@ export default function FullRouteVisualizer({
 
                 <div className="grid grid-cols-4 gap-2 my-4">
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
-                    <div className="text-[10px] text-slate-400 font-bold">Day {timelineDay} 消费</div>
-                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{dayTotal}</div>
+                    <div className="text-[10px] text-slate-400 font-bold">Day {timelineDay} 已计价</div>
+                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">
+                      {pricedNodes.length > 0 ? `¥${pricedTotal}` : '—'}
+                    </div>
                   </div>
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
                     <div className="text-[10px] text-slate-400 font-bold">日均预算</div>
                     <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{dailyBudget || '—'}</div>
                   </div>
-                  <div className={`rounded-2xl p-2.5 text-center ${hasOverrun ? 'bg-rose-50 dark:bg-rose-950/40' : 'bg-emerald-50 dark:bg-emerald-950/40'}`}>
-                    <div className={`text-[10px] font-bold ${hasOverrun ? 'text-rose-400' : 'text-emerald-400'}`}>预算状态</div>
-                    <div className={`text-sm font-black mt-0.5 ${hasOverrun ? 'text-rose-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                      {dailyBudget > 0 ? (hasOverrun ? `超 ¥${Math.round(overrun)}` : '健康') : '未设'}
+                  <div className={`rounded-2xl p-2.5 text-center ${hasOverrun ? 'bg-rose-50 dark:bg-rose-950/40' : unpricedNodes.length > 0 ? 'bg-amber-50 dark:bg-amber-950/40' : 'bg-emerald-50 dark:bg-emerald-950/40'}`}>
+                    <div className={`text-[10px] font-bold ${hasOverrun ? 'text-rose-400' : unpricedNodes.length > 0 ? 'text-amber-500' : 'text-emerald-400'}`}>预算状态</div>
+                    <div className={`text-sm font-black mt-0.5 ${hasOverrun ? 'text-rose-500' : unpricedNodes.length > 0 ? 'text-amber-600' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                      {dailyBudget <= 0 ? '未设' : hasOverrun ? `超 ¥${Math.round(overrun)}` : unpricedNodes.length > 0 ? '还有未计价' : '健康'}
                     </div>
                   </div>
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
-                    <div className="text-[10px] text-slate-400 font-bold">人均估计</div>
-                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">¥{avgCost}<span className="text-[9px] text-slate-400 font-normal">/{memberCount}人</span></div>
+                    <div className="text-[10px] text-slate-400 font-bold">待你确认</div>
+                    <div className="text-sm font-black text-slate-800 dark:text-white mt-0.5">
+                      {unpricedNodes.length} <span className="text-[9px] text-slate-400 font-normal">个节点</span>
+                    </div>
                   </div>
                 </div>
 
-                {/* 预算使用进度条 */}
+                {/* 预算使用进度：只按**已计价**部分算，并写清还有几个没计价（不混进合计） */}
                 {dailyBudget > 0 && (
                   <div className="mb-4">
                     <div className="flex items-center justify-between text-[11px] font-bold mb-1.5">
-                      <span className="text-slate-500">预算使用进度</span>
-                      <span className={hasOverrun ? 'text-rose-500' : 'text-emerald-600'}>{Math.round((dayTotal / dailyBudget) * 100)}%</span>
+                      <span className="text-slate-500">已计价花费 / 日均预算</span>
+                      <span className={hasOverrun ? 'text-rose-500' : 'text-emerald-600'}>
+                        {Math.round((pricedTotal / dailyBudget) * 100)}%
+                      </span>
                     </div>
                     <div className="h-2.5 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
                       <div
                         className={`h-full rounded-full transition-all duration-700 ${hasOverrun ? 'bg-gradient-to-r from-amber-500 to-rose-500' : 'bg-gradient-to-r from-emerald-500 to-teal-400'}`}
-                        style={{ width: `${Math.min(100, Math.round((dayTotal / dailyBudget) * 100))}%` }}
+                        style={{ width: `${Math.min(100, Math.round((pricedTotal / dailyBudget) * 100))}%` }}
                       />
                     </div>
+                    {unpricedNodes.length > 0 && (
+                      <p className="mt-1 text-[10px] text-amber-600">
+                        还有 {unpricedNodes.length} 个节点没有可核实价格，未计入上面的合计（取不到不当成 0 元）
+                      </p>
+                    )}
                   </div>
                 )}
 
-                {/* 成本最高节点条形图 */}
-                {costSortedNodes.length > 0 && (
+                {/* 成本分布：只画**有价格**的节点；一个都没有就如实说清 + 给核价入口，
+                    而不是显示一堆 ¥0 和"成本最低=某酒店"这种假结论 */}
+                {costSortedNodes.length > 0 ? (
                   <div className="mb-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl p-3.5">
                     <div className="text-[11px] font-bold text-slate-500 mb-2.5 flex items-center gap-1.5">
                       <Activity className="w-3.5 h-3.5 text-amber-500" /> 节点成本分布（TOP {costSortedNodes.length}）
+                      {unpricedNodes.length > 0 && (
+                        <span className="ml-auto text-[10px] text-amber-600">{unpricedNodes.length} 个未计价，未参与比较</span>
+                      )}
                     </div>
                     <div className="space-y-1.5">
                       {costSortedNodes.map((node: any, i: number) => {
@@ -398,6 +419,30 @@ export default function FullRouteVisualizer({
                           </div>
                         );
                       })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mb-4 bg-amber-50 dark:bg-slate-800/60 rounded-2xl p-3.5 border border-amber-200/60 dark:border-slate-700">
+                    <div className="text-[11px] font-bold text-amber-700 dark:text-amber-400 mb-2 flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5" /> 今天这些节点还没取到价格，无法比较贵/便宜
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-300 mb-2">
+                      取不到的价格不会当成 0 元，也不会参与"成本最高/最低"。下面这些可以点开自己核一下：
+                    </p>
+                    <div className="space-y-1">
+                      {(unpricedNodes.length > 0 ? unpricedNodes : dayNodes).slice(0, 4).map((item: any, i: number) => (
+                        <div key={`unpriced-${i}`} className="flex items-baseline justify-between gap-3">
+                          <span className="text-[11px] font-bold text-slate-700 dark:text-slate-200 truncate">{item.name}</span>
+                          <a
+                            href={item.amap_url || `https://www.amap.com/search?query=${encodeURIComponent(item.name || '')}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="shrink-0 text-[11px] font-bold text-orange-600 underline underline-offset-2 hover:text-orange-700"
+                          >
+                            去核价
+                          </a>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -429,9 +474,11 @@ export default function FullRouteVisualizer({
                 )}
 
                 <p className="text-xs text-slate-600 dark:text-slate-300 mb-4 leading-relaxed bg-amber-50 dark:bg-slate-800/60 p-3 rounded-xl border border-amber-200/60 dark:border-slate-700">
-                  {hasOverrun
-                    ? `精算 Agent 检测到【${cityName}】今日估算消费 ¥${dayTotal}，超出日均预算 ¥${dailyBudget} 约 ${overrunPercent}%（¥${Math.round(overrun)}）。建议优先优化最高成本节点【${highestCostNode?.name || '—'}】，或参考更低成本节点【${lowestCostNode?.name || '—'}】进行团队平替置换。`
-                    : `【${cityName}】今日估算消费 ¥${dayTotal}${dailyBudget > 0 ? `，处于日均预算 ¥${dailyBudget} 以内（使用率 ${Math.round((dayTotal / dailyBudget) * 100)}%）` : ''}。多智能体已完成成本与体验的多目标帕累托权衡，当前组合预算健康。`}
+                  {pricedNodes.length === 0
+                    ? `精算 Agent 说明：【${cityName}】今天的节点都还没拿到可核实价格，所以这里不给"花了多少、超没超"的结论 —— 需要你确认（上方可点开核价），确认后预算判断才有依据。`
+                    : hasOverrun
+                      ? `精算 Agent 检测到【${cityName}】今日已计价消费 ¥${pricedTotal}，超出日均预算 ¥${dailyBudget} 约 ${overrunPercent}%（¥${Math.round(overrun)}）。建议优先优化最高成本节点【${highestCostNode?.name || '—'}】，或参考更低成本节点【${lowestCostNode?.name || '—'}】做平替。`
+                      : `【${cityName}】今日已计价消费 ¥${pricedTotal}${dailyBudget > 0 ? `，在日均预算 ¥${dailyBudget} 以内（使用率 ${Math.round((pricedTotal / dailyBudget) * 100)}%）` : ''}${unpricedNodes.length > 0 ? `；另有 ${unpricedNodes.length} 个节点没有可核实价格，未计入` : ''}。`}
                 </p>
 
                 <div className="grid grid-cols-2 gap-3">
