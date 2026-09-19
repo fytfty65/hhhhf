@@ -346,13 +346,19 @@ def check_hard_constraints(
     targets = composition_targets_met(plan, policy)
 
     # 8.1 单一类别占比上限（2 天 4 个点里 3 个文化类属正常，长行程才判）
+    #     "自然景观占比高"不算单调：用户要的就是自然（targets 里已按策略排除 scenic）。
     if days >= 3 and len(hits) >= 6 and targets["share_over_cap"]:
+        monotony_counts = {
+            name: value for name, value in targets["counts"].items()
+            if not (name == "scenic" and policy["min_scenic_per_day"] > 0)
+        }
+        top_name, top_count = max(monotony_counts.items(), key=lambda item: item[1]) if monotony_counts else ("-", 0)
         failures.append(
             {
                 "code": "play_category_monotony",
                 "detail": (
-                    f"{len(hits)} 个玩点里有 {max(targets['counts'].values())} 个是同一类，"
-                    f"超过上限 {int(float(policy['max_category_share']) * 100)}%（{policy['note']}）"
+                    f"玩点里 {top_count} 个都是「{top_name}」，超过上限 "
+                    f"{int(float(policy['max_category_share']) * 100)}%（{policy['note']}）"
                 ),
             }
         )
@@ -360,7 +366,7 @@ def check_hard_constraints(
         unverifiable.append(
             {
                 "code": "play_category_monotony_hint",
-                "detail": f"玩点类型偏单一（{max(targets['counts'].values())}/{len(hits)} 同一类），建议混一些别的类型",
+                "detail": "玩点类型偏单一，建议混一些别的类型",
             }
         )
 

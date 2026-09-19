@@ -310,5 +310,50 @@ class TestReviewLoop(unittest.TestCase):
         self.assertLess(result["remaining_hard"], result["initial_hard_failures"])
 
 
+class TestCompositionDrivenRepair(unittest.TestCase):
+    """自动补点要按**构成策略**走：自然型目的地缺自然景观就补自然景观，文化类超上限就换掉。"""
+
+    CONTEXT = {"days": 4, "request_text": "去库尔勒看自然风景", "city": "库尔勒"}
+    EXPECTATIONS = {"min_nodes_per_day": 2, "max_nodes_per_day": 4}
+
+    def _pool(self):
+        def scenic(name):
+            return {
+                "name": name, "type": "scenic", "intent": "scenic", "price": 50, "price_source": "amap",
+                "rating": "4.6", "open_time": "00:00-23:59", "estimated": False,
+                "lnglat": [86.1, 41.7], "source": "amap",
+            }
+
+        return {
+            "scenic": [scenic(name) for name in ("博斯腾湖", "龙山公园", "天鹅湖", "孔雀公园", "罗布人村寨", "胡杨林")],
+            "food": [scenic("小吃")],
+            "hotel": [{**scenic("酒店"), "type": "hotel", "intent": "hotel", "price": 300}],
+        }
+
+    def _museum_only_plan(self):
+        route = [node(day, f"博物馆{day}", "文化") for day in range(1, 5)]
+        route += [node(day, f"餐馆{day}", "餐饮", "12:30") for day in range(1, 5)]
+        return {"route": route}
+
+    def test_nature_destination_gets_scenic_nodes_added(self):
+        result = review_plan(self.CONTEXT, self._museum_only_plan(), self.EXPECTATIONS, pool=self._pool())
+        names = [item["name"] for item in result["plan"]["route"]]
+        self.assertTrue(any(name in names for name in ("博斯腾湖", "龙山公园", "天鹅湖")), names)
+        codes = [action["code"] for action in result["actions"]]
+        self.assertIn("add_scenic", codes)
+
+    def test_culture_over_cap_triggers_rebalance(self):
+        result = review_plan(self.CONTEXT, self._museum_only_plan(), self.EXPECTATIONS, pool=self._pool())
+        rebalances = [action for action in result["actions"] if action["code"] == "rebalance_category"]
+        self.assertTrue(rebalances, "文化类超上限时应换掉一个（换成策略指定的自然景观）")
+        self.assertTrue(rebalances[0]["from"].startswith("博物馆"))
+        # 换进来的必须是自然景观
+        self.assertEqual(rebalances[0]["intent"], "scenic")
+
+    def test_without_pool_nothing_is_added(self):
+        result = review_plan(self.CONTEXT, self._museum_only_plan(), self.EXPECTATIONS)
+        self.assertEqual([action for action in result["actions"] if action["code"] == "add_scenic"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

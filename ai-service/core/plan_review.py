@@ -77,6 +77,10 @@ FIX_BY_CODE: Dict[str, str] = {
     "long_trip_day_gap": "needs_candidates",
     "long_trip_day_out_of_range": "drop_out_of_range",
     "long_trip_lodging_shortfall": "needs_candidates",
+    # 构成策略相关：缺自然景观 → 从候选池补；文化类超上限/类型太单一 → 按策略换掉一个
+    "scenic_shortfall": "needs_candidates",
+    "category_cap_exceeded": "rebalance",
+    "play_category_monotony": "rebalance",
 }
 
 # 这些码属于"信息性"，不参与"要不要修"的判断（缺数据永远修不了，别因此卡住）
@@ -89,7 +93,7 @@ PLAY_INTENTS: tuple = (
 # 确定性修补（不需要新数据）
 DETERMINISTIC_FIXES = {"reschedule", "dedupe", "trim_day", "drop_out_of_range"}
 # 候选池修补（需要真实候选，绝不编造节点）
-POOL_FIXES = {"needs_candidates"}
+POOL_FIXES = {"needs_candidates", "rebalance"}
 
 
 def _issue(code: str, detail: str, severity: str) -> Dict[str, Any]:
@@ -231,6 +235,13 @@ def _intent_of_node(node: Mapping[str, Any]) -> str:
     return intent_of(node)
 
 
+def _is_cultural_node(node: Mapping[str, Any]) -> bool:
+    """是不是"文化类"玩点（博物馆/古迹等）——用于按策略把它换成自然景观。"""
+    from .plan_quality import _coarse_category
+
+    return _coarse_category(node) == "cultural"
+
+
 def _pool_pick(
     pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]],
     intent: str,
@@ -332,6 +343,55 @@ def fill_structural_gaps(
 
             if "food" not in intents and (cap is None or (room or 0) >= 1):
                 add(day, "food", "add_meal", "12:30", "这一天没有餐饮节点")
+
+        # ---- 按**构成策略**补/换（策略来自"目的地 + 偏好 + 二次增量"）----
+        # 用户要求"多打卡自然景观"时，这里就会优先补自然景观；文化类超上限时按策略换掉一个。
+        from .composition import composition_policy  # 延迟导入
+        from .composition import scenic_days as _scenic_days  # 延迟导入
+
+        policy = composition_policy(context, increment=context.get("increment"), expectations=expectations)
+        working_plan = {"route": nodes + additions}
+        min_scenic = float(policy.get("min_scenic_per_day") or 0)
+        if min_scenic > 0:
+            per_day = _scenic_days(working_plan)
+            for day in range(1, days + 1):
+                if per_day.get(day, 0) >= min_scenic:
+                    continue
+                day_nodes = [node for node in (nodes + additions) if node_day(node, 1) == day]
+                room = None if cap is None else max(0, cap - len(day_nodes))
+                if cap is not None and room < 1:
+                    continue
+                add(day, "scenic", "add_scenic", "15:00", f"这一天还没有自然景观（策略：{policy['note']}）")
+
+        max_cultural = policy.get("max_cultural_total")
+        if max_cultural is not None:
+            while True:
+                cultural_plays = [
+                    node for node in nodes
+                    if _intent_of_node(node) not in {"food", "hotel"}
+                    and _is_cultural_node(node)
+                ]
+                if len(cultural_plays) <= int(max_cultural):
+                    break
+                replacement = _pool_pick(pool, "scenic", used)
+                if not replacement:
+                    break
+                victim = cultural_plays[-1]
+                nodes = [node for node in nodes if node is not victim]
+                day = node_day(victim, 1)
+                additions.append(build_node_from_candidate(replacement, day, "15:00", "scenic"))
+                actions.append(
+                    {
+                        "code": "rebalance_category",
+                        "day": day,
+                        "node": replacement.get("name"),
+                        "intent": "scenic",
+                        "source": replacement.get("price_source") or replacement.get("source") or "unavailable",
+                        "from": node_name(victim),
+                        "to": replacement.get("name"),
+                        "detail": f"文化类超过上限 {max_cultural} 个 → 换成自然景观（策略：{policy['note']}）",
+                    }
+                )
 
         # 住宿夜数：第 1..days-1 天每夜至少一个住宿节点
         expected_nights = max(0, days - 1)
@@ -474,12 +534,30 @@ def review_plan(
     """
     repair_fn = repair or (lambda ctx, current, exp=None: repair_plan(ctx, current, exp, pool=pool))
     has_pool = bool(pool)
+    # 构成策略（目的地+偏好+二次增量）：用于判断"这轮修补到底有没有变好"。
+    # 只看硬失败条数会误杀：一次修补可能把"缺自然景观的天数 4 → 1"却没减少硬失败条数，
+    # 旧规则会把它整个回滚掉 —— 用户就白修了。
+    from .composition import composition_policy, composition_targets_met  # 延迟导入
+
+    policy = composition_policy(context, increment=context.get("increment"), expectations=expectations)
+
+    def progress_of(target_plan: Any, critique: Mapping[str, Any]) -> tuple:
+        targets = composition_targets_met(target_plan, policy)
+        return (
+            len(critique.get("hard_failures") or []),
+            len(targets.get("scenic_shortfall_days") or []),
+            1 if targets.get("cultural_over_cap") else 0,
+            1 if targets.get("share_over_cap") else 0,
+            -float(critique.get("score") or 0.0),
+        )
+
     current = plan
     initial_critique = critique_plan(context, plan, expectations, signals, pool_available=has_pool)
     best = plan
     best_critique = initial_critique
     best_score = float(initial_critique.get("score") or 0.0)
     best_hard = len(initial_critique.get("hard_failures") or [])
+    best_progress = progress_of(plan, initial_critique)
     rounds: List[Dict[str, Any]] = []
     stopped_reason = "clean"
 
@@ -513,7 +591,10 @@ def review_plan(
         rescored = critique_plan(context, outcome["plan"], expectations, signals, pool_available=has_pool)
         new_score = float(rescored.get("score") or 0.0)
         new_hard = len(rescored.get("hard_failures") or [])
-        accepted = new_hard < best_hard or (new_hard == best_hard and new_score > best_score)
+        # 接受标准：**进步了就收**（硬失败更少 → 缺自然景观的天数更少 → 文化类回到上限内 →
+        # 类型更均衡 → 分数更高）。任何一项变差都会让 progress 变大，从而被回滚。
+        new_progress = progress_of(outcome["plan"], rescored)
+        accepted = new_progress < best_progress
         rounds.append(
             {
                 "round": index + 1,
@@ -529,6 +610,7 @@ def review_plan(
             stopped_reason = "no_improvement"
             break
         best, best_score, best_hard, best_critique, current = outcome["plan"], new_score, new_hard, rescored, outcome["plan"]
+        best_progress = new_progress
     else:
         if rounds:
             stopped_reason = "max_rounds"

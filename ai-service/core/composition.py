@@ -171,7 +171,12 @@ def composition_targets_met(plan: Any, policy: Mapping[str, Any]) -> Dict[str, A
         day for day in range(1, days + 1) if per_day.get(day, 0) < min_scenic
     ] if min_scenic > 0 else []
     cultural_total = sum(counts.get(name, 0) for name in CULTURE_CATEGORIES)
-    share = max(counts.values()) / total_plays if total_plays else 0.0
+    # "类型单一"只针对**非自然类**：用户要的就是自然景观时，自然占比高是设计意图，不是单调。
+    monotony_counts = {
+        name: value for name, value in counts.items()
+        if not (name == "scenic" and min_scenic > 0)
+    }
+    share = max(monotony_counts.values()) / sum(monotony_counts.values()) if sum(monotony_counts.values()) else 0.0
 
     return {
         "counts": counts,
