@@ -11,9 +11,9 @@ import { seasonOf, seasonLabel, type ServerRank, type Season } from './lib/provi
 import {
   AMAP_ATTRIBUTION,
   AMAP_NORMAL_TILES,
+  ESRI_ATTRIBUTION,
+  ESRI_STREET_TILES,
   MAP_TILE_TIMEOUT_MS,
-  OSM_ATTRIBUTION,
-  OSM_TILES,
   validLngLat,
 } from './lib/mapTiles';
 
@@ -102,10 +102,12 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
             },
             'fallback-normal': {
               type: 'raster',
-              tiles: [...OSM_TILES],
+              // 备用底图用 Esri 街道图：实测可达性比 OSM 好（OSM 在部分网络 8s 超时，
+              // 切过去就是一块白板）。见 lib/mapTiles.ts 的实测记录。
+              tiles: [...ESRI_STREET_TILES],
               tileSize: 256,
               maxzoom: 19,
-              attribution: OSM_ATTRIBUTION,
+              attribution: ESRI_ATTRIBUTION,
             }
           },
           layers: [

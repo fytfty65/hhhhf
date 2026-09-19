@@ -27,6 +27,8 @@ import {
   AMAP_ATTRIBUTION,
   ESRI_ATTRIBUTION,
   ESRI_SATELLITE_TILES,
+  ESRI_STREET_TILES,
+  MAP_FALLBACK_GRACE_MS,
   MAP_TILE_TIMEOUT_MS,
   OSM_ATTRIBUTION,
   OSM_TILES,
@@ -166,6 +168,13 @@ export default function InteractiveAmapComponent({
           },
           'fallback-normal': {
             type: 'raster',
+            tiles: [...ESRI_STREET_TILES],
+            tileSize: 256,
+            maxzoom: 19,
+            attribution: ESRI_ATTRIBUTION,
+          },
+          'fallback-osm': {
+            type: 'raster',
             tiles: [...OSM_TILES],
             tileSize: 256,
             maxzoom: 19,
@@ -182,9 +191,11 @@ export default function InteractiveAmapComponent({
         layers: [
           { id: 'map-background', type: 'background', paint: { 'background-color': '#dbe7f2' } },
           // Keep a provider-independent underlay visible from the first frame.
-          // AMap tiles render above it when available; failed/slow requests can
-          // therefore never turn the canvas into a blank black rectangle.
+          // Esri street map is the first fallback (reachable on networks where
+          // OSM times out); OSM stays as the last resort and is only revealed
+          // when Esri produces nothing either.
           { id: 'layer-fallback-normal', type: 'raster', source: 'fallback-normal', minzoom: 0, maxzoom: 22, layout: { visibility: 'visible' } },
+          { id: 'layer-fallback-osm', type: 'raster', source: 'fallback-osm', minzoom: 0, maxzoom: 22, layout: { visibility: 'none' } },
           { id: 'layer-fallback-satellite', type: 'raster', source: 'fallback-satellite', minzoom: 0, maxzoom: 22, layout: { visibility: 'none' } },
           { id: 'layer-normal', type: 'raster', source: 'amap-normal', minzoom: 0, maxzoom: 22, layout: { visibility: 'visible' } },
           { id: 'layer-satellite', type: 'raster', source: 'amap-satellite', minzoom: 0, maxzoom: 22, layout: { visibility: 'none' } },
@@ -212,9 +223,11 @@ export default function InteractiveAmapComponent({
     
     let fallbackTimer: number | undefined;
     let styleTimer: number | undefined;
+    let graceTimer: number | undefined;
     let styleReady = false;
     let firstTileSeen = false;
-    const activateFallback = (message = '高德底图暂时不可达，已切换备用地图') => {
+    let fallbackTileSeen = false;
+    const activateFallback = (message = '高德底图暂时不可达，已切换备用底图（Esri）') => {
       if (tileFallbackRef.current) return;
       if (!styleReady) {
         setTileError(message);
@@ -225,13 +238,22 @@ export default function InteractiveAmapComponent({
       setTileFallback(true);
       setTileError(message);
       setTileRetrying(false);
-      ['layer-normal', 'layer-satellite', 'layer-satellite-labels'].forEach((id) => {
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
-      });
-      const fallbackLayer = mapStyleRef.current === 'satellite' ? 'layer-fallback-satellite' : 'layer-fallback-normal';
-      if (map.getLayer(fallbackLayer)) map.setLayoutProperty(fallbackLayer, 'visibility', 'visible');
+      // 备用底图在**下面**：揭示它即可，**不隐藏高德图层**。
+      // 高德图层若真的坏，它的瓦片是透明的，备用底图自然露出来；若只是慢/抖动，
+      // 它自己会盖回备用底图（下面 sourcedata 里一旦看到高德瓦片就恢复"正常"）。
+      // 之前"一切换就把高德藏掉"会把一次误判变成不可逆的白板（OSM 不通时尤其致命）。
+      if (map.getLayer('layer-fallback-normal')) map.setLayoutProperty('layer-fallback-normal', 'visibility', 'visible');
       map.resize();
       map.triggerRepaint();
+      // 观察窗口：既没有备用瓦片、也没有高德瓦片 → 如实说"底图取不到"，
+      // 并放开最后一级 OSM（聊胜于无），绝不假装备用底图在工作。
+      if (graceTimer !== undefined) window.clearTimeout(graceTimer);
+      graceTimer = window.setTimeout(() => {
+        if (fallbackTileSeen || firstTileSeen) return;
+        if (map.getLayer('layer-fallback-osm')) map.setLayoutProperty('layer-fallback-osm', 'visibility', 'visible');
+        setTileError('底图暂时取不到（高德与备用底图都不通），路线与编号仍可读');
+        map.triggerRepaint();
+      }, MAP_FALLBACK_GRACE_MS);
     };
     const armFallbackTimer = () => {
       if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
@@ -266,13 +288,23 @@ export default function InteractiveAmapComponent({
     map.on('sourcedata', (event: any) => {
       const sourceId = String(event?.sourceId || '');
       const tileLoaded = event?.sourceDataType === 'content' || event?.tile?.state === 'loaded';
+      if (sourceId.startsWith('fallback-') && tileLoaded) {
+        fallbackTileSeen = true;
+        return;
+      }
       if (sourceId.startsWith('amap-') && tileLoaded) {
         firstTileSeen = true;
         tileErrorCountRef.current = 0;
-        if (!tileFallbackRef.current) {
-          setTileError('');
-          setTileRetrying(false);
+        // 高德瓦片到了 = 底图其实是好的：撤销可能的误判（回到"正常"），
+        // 而不是一直挂着"已切换备用底图"这个已经不成立的结论。
+        if (tileFallbackRef.current) {
+          tileFallbackRef.current = false;
+          setTileFallback(false);
+          if (graceTimer !== undefined) window.clearTimeout(graceTimer);
+          if (map.getLayer('layer-fallback-osm')) map.setLayoutProperty('layer-fallback-osm', 'visibility', 'none');
         }
+        setTileError('');
+        setTileRetrying(false);
       }
     });
     const handleTileError = (event: any) => {
@@ -293,6 +325,7 @@ export default function InteractiveAmapComponent({
     return () => {
       if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
       if (styleTimer !== undefined) window.clearTimeout(styleTimer);
+      if (graceTimer !== undefined) window.clearTimeout(graceTimer);
       map.off('load', markStyleReady);
       map.off('error', handleTileError);
       // React 18/19 warns when a portal root is synchronously unmounted while
@@ -354,7 +387,9 @@ export default function InteractiveAmapComponent({
     } else {
       if (map.getLayer('layer-satellite')) map.setLayoutProperty('layer-satellite', 'visibility', 'none');
       if (map.getLayer('layer-satellite-labels')) map.setLayoutProperty('layer-satellite-labels', 'visibility', 'none');
-      if (map.getLayer('layer-normal')) map.setLayoutProperty('layer-normal', 'visibility', useFallback ? 'none' : 'visible');
+      // 标准图下**不因为"进了备用模式"就藏掉高德**：坏瓦片本来就透明，好的瓦片能自己盖回来；
+      // 藏掉之后一次误判就再也回不来了。
+      if (map.getLayer('layer-normal')) map.setLayoutProperty('layer-normal', 'visibility', 'visible');
       if (map.getLayer('layer-fallback-normal')) map.setLayoutProperty('layer-fallback-normal', 'visibility', 'visible');
       if (map.getLayer('layer-fallback-satellite')) map.setLayoutProperty('layer-fallback-satellite', 'visibility', 'none');
     }
@@ -748,7 +783,11 @@ export default function InteractiveAmapComponent({
       )}
 
       {tileError && (
-        <div className="map-tile-status absolute bottom-20 left-4 right-4 sm:left-6 sm:right-auto z-40 flex items-center gap-2 rounded-xl bg-slate-950/90 text-slate-100 border border-amber-400/40 px-3 py-2.5 text-[11px] font-bold shadow-lg" role="status">
+        // 位置：地图上方的状态位（与"正在连接地图服务…"同一处），**不再放左下角**。
+        // 左下角依次叠着：归属 pill、绿色出行按钮、行程节点卡片条、碳足迹面板 ——
+        // 实测状态条被卡片条盖住（elementFromPoint 命中的是卡片里的占位图），
+        // 用户根本读不到；挪到上方就与这些浮动元素彻底无关。
+        <div className="map-tile-status absolute top-4 sm:top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-xl bg-slate-950/90 text-slate-100 border border-amber-400/40 px-3 py-2.5 text-[11px] font-bold shadow-lg" role="status">
           <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${tileRetrying ? 'animate-spin' : ''}`} />
           <span className="min-w-0">{tileError}</span>
           <button onClick={retryMapTiles} disabled={tileRetrying} className="ml-auto shrink-0 text-amber-300 hover:text-white underline underline-offset-2 disabled:opacity-60">

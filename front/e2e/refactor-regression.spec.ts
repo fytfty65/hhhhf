@@ -83,7 +83,7 @@ async function installMocks(page: Page) {
                 '"budget_overrun_probability":0.12,"per_day_minutes_p90":{"1":180},' +
                 '"member_satisfaction":{"E2E 旅行者":{"satisfaction_p50":0.62,"satisfaction_floor_p10":0.55}},' +
                 '"assumptions":{"nodes":1,"unpriced_nodes":0,"sample_count":2000}},' +
-                '"route":[{"day":1,"location":"洛阳古城","time":"09:00","cost_estimate":"¥80","tags":["地标"]}]}',
+                '"route":[{"day":1,"location":"洛阳古城","time":"09:00","cost_estimate":"¥80","lnglat":[112.45,34.62],"tags":["地标"]}]}',
             }),
           });
         }, 80);
@@ -281,5 +281,59 @@ test.describe('refactor regression', () => {
     await expect(page.getByRole('button', { name: '打开全球情报视图' })).toBeVisible();
     await page.getByRole('button', { name: '退出雷达' }).click();
     await expect(radar).toBeHidden({ timeout: 10_000 });
+  });
+
+  test('底图不可达时的提示不遮挡「绿色出行」按钮（版面回归）', async ({ page }) => {
+    test.setTimeout(90_000);
+    // 让高德瓦片一定失败 → 必定走"切换备用底图"这条路径（确定性，不依赖外网快慢）
+    await page.route('**/appmaptile**', (route) => route.abort());
+    await installMocks(page);
+    await page.goto('/');
+    await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
+    await reachDecision(page);
+
+    const status = page.locator('.map-tile-status');
+    await expect(status).toBeVisible({ timeout: 30_000 });
+    const green = page.getByTitle('碳足迹与绿色交通评估');
+    await expect(green).toBeVisible();
+
+    const statusBox = await status.boundingBox();
+    const greenBox = await green.boundingBox();
+    expect(statusBox).not.toBeNull();
+    expect(greenBox).not.toBeNull();
+    // 两个浮动元素曾经都贴在左下角（状态条 bottom-20 / 按钮 bottom-[5.25rem]）而重叠，
+    // 按钮把状态文字压掉一半。这条断言直接比较两个盒子有没有相交。
+    const overlaps =
+      statusBox!.x < greenBox!.x + greenBox!.width &&
+      greenBox!.x < statusBox!.x + statusBox!.width &&
+      statusBox!.y < greenBox!.y + greenBox!.height &&
+      greenBox!.y < statusBox!.y + statusBox!.height;
+    expect(
+      overlaps,
+      `状态条与绿色出行按钮重叠：status=${JSON.stringify(statusBox)} green=${JSON.stringify(greenBox)}`,
+    ).toBe(false);
+    // 而且状态条必须**在按钮上方**（不是被挤到别处去了）
+    expect(
+      statusBox!.y + statusBox!.height,
+      `状态条应位于按钮上方：status=${JSON.stringify(statusBox)} green=${JSON.stringify(greenBox)}`,
+    ).toBeLessThanOrEqual(greenBox!.y + 1);
+
+    // 底图拿不到时，行程节点标记仍然要渲染（文案承诺的"路线与编号仍可读"必须是真的）
+    await expect(page.locator('.map-visualizer-shell .maplibregl-marker').first()).toBeVisible({ timeout: 10_000 });
+
+    // 最关键的一条：状态条必须**真的露在最上面**。左下角时它被行程节点卡片条盖住，
+    // Playwright 的 toBeVisible 看不出来（元素有盒子、未被 visibility:hidden），
+    // 只有 elementFromPoint 能证明"用户读得到"。
+    const covered = await page.evaluate(() => {
+      const el = document.querySelector('.map-tile-status') as HTMLElement | null;
+      if (!el) return { found: false, covered: true };
+      const r = el.getBoundingClientRect();
+      const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) as HTMLElement | null;
+      return { found: true, covered: !(el === top || el.contains(top)) };
+    });
+    expect(covered.found, '状态条应当存在').toBe(true);
+    expect(covered.covered, '状态条被其它元素盖住了，用户读不到').toBe(false);
+
+    await page.screenshot({ path: '../work/map-fallback.png', animations: 'disabled' });
   });
 });

@@ -89,7 +89,8 @@
 | F15 | **诉求逐条核对**（`core/constraint_coverage`：稳定 id + 五态 applied/partial/unverified/advisory/missing，含"说改但没改"机械检测）+ 面板「诉求核对」端到端渲染 | `29b7978` |
 | F16 | 评测报告新增 **`g_no_invention`** 节（逐条点名"写了数值却没有来源"的字段）+ `--max-unsourced` 可选门禁 + **离线夹具进仓库**（`tests/eval/fixtures/`，无 Key 无网络可复现） | `e17c358` |
 | F17 | **候选池接进 Repair 闭环**（空天/缺玩点/缺餐/住宿夜数/必去项都能用真实候选补上；无池不编造）+ 复核与治理**共用一份候选池**（一次取数、`POOL_FETCH_TIMEOUT_SECONDS=12s`） | `ae81033` |
-| F18 | **数据降级登记处**（`core/degradation`：数据源注册表 + 从 payload 推导 `{source,label,status,reason,impact}`）+ 面板「数据降级」统一渲染（文案只在后端一处定义） | 本批 |
+| F18 | **数据降级登记处**（`core/degradation`：数据源注册表 + 从 payload 推导 `{source,label,status,reason,impact}`）+ 面板「数据降级」统一渲染（文案只在后端一处定义） | `16569e6` |
+| F19 | 地图底图修复：备用底图换成**实测可达**的 Esri 街道图（OSM 在部分网络 8s 超时）、误判不再不可逆、状态条挪出左下角（原先被行程节点卡片条盖住）+ E2E「读得到」守卫 | 本批 |
 
 **F11 附带修掉一个真 bug**：宿主流式累积时用 `replace(/null/g, "")` 清洗 token，会把**合法 JSON 里的 null**（票价未核实就是 `price:null`）删成 `"price":`，导致整段 `[FINAL_JSON]` 解析失败——后果是 `quality`/`budget_report`/四块新数据全部丢失、核对面板整块不显示。现在改为**先按原文解析**（我们下发的 JSON 一定合法），解析不出来才退回"删 null"的兜底（那是给模型吐字夹带的 null 准备的）；展示用的清洗仍在 `humanReadableLogs`。E2E mock 里刻意保留 `price: null` 作为回归哨兵。同时 `final_route` 消息路径也接入同一份 payload（重连/回放只收到它时面板同样有数据）。
 
