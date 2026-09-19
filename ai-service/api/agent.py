@@ -2409,16 +2409,22 @@ async def run_negotiate(msg: GatewayMessage):
                     "optimization_audit": optimization_audit,
                     "fairness": fairness_report(syn_routes, room_members),
                 }
-                # 保底路线同样给出不确定度报告，而不是让前端在降级时丢失该信息
-                final_data["simulation"] = _simulate_final_plan(
-                    final_data,
-                    room_members=room_members,
-                    budget=total_calc_budget,
-                    weather=weather_info,
-                )
-                computed_satisfaction = _satisfaction_from_simulation(final_data["simulation"])
-                if computed_satisfaction:
-                    final_data["team_satisfaction"] = computed_satisfaction
+                # 保底路线同样给出不确定度报告，而不是让前端在降级时丢失该信息。
+                # 注意两侧都要兜住：这段是"最后的兜底"，它自己再抛异常就等于用户什么都拿不到
+                # （实测 2026-09-19：这里引用了不存在的 `weather_info` → NameError → 流直接断，
+                #  前端只能显示"推演超时"，而后端日志里明明写了"已切换候选池保底模式"）。
+                try:
+                    final_data["simulation"] = _simulate_final_plan(
+                        final_data,
+                        room_members=room_members,
+                        budget=total_calc_budget,
+                        weather=weather_data,
+                    )
+                    computed_satisfaction = _satisfaction_from_simulation(final_data["simulation"])
+                    if computed_satisfaction:
+                        final_data["team_satisfaction"] = computed_satisfaction
+                except Exception as _fallback_sim_exc:
+                    print(f"⚠️ [兜底] 不确定度报告生成失败，仍下发保底路线: {_fallback_sim_exc}", flush=True)
                 # 直接发送 final_route，跳过 Post-Route 中依赖 LLM 输出的回填逻辑（保底路线已经带齐所有字段）
                 yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                 print(f"🏆 [兜底完成] 已下发 {len(syn_routes)} 个合成节点", flush=True)
@@ -3217,7 +3223,7 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data,
                             room_members=fairness_members or room_members,
                             budget=total_calc_budget,
-                            weather=final_data.get("weather_info") or weather_info,
+                            weather=final_data.get("weather_info") or weather_data,
                         )
                         computed = _satisfaction_from_simulation(final_data["simulation"])
                         if computed:
