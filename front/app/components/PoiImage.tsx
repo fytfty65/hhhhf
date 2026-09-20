@@ -11,23 +11,37 @@ import React, { useState } from 'react';
 import { Camera, ExternalLink } from 'lucide-react';
 import { getCleanPhotoUrl } from '../lib/lobbyUtils';
 import { clearUserPhoto, fileToDataUrl, readUserPhoto, saveUserPhoto } from '../lib/userPhotos';
+import { orderPhotoSources } from '../lib/photoPriority';
 import type { PoiImageProps } from '../types';
 
 // 👑 智能POI图片组件：5级兜底链保证100%视觉覆盖，永不空白
 // 实景图轮询[0→1→2] → 静态坐标地图 → 精美地图预览卡片（带跳转）
 
-export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', name, type = '', className = '', index, onPhotoClick, photoFallback }: PoiImageProps & { photoFallback?: { url?: string; caption?: string; kind?: string; attribution?: string } | null }) {
+export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', name, type = '', className = '', index, onPhotoClick, photoFallback, publicPhotos }: PoiImageProps & { photoFallback?: { url?: string; caption?: string; kind?: string; attribution?: string } | null; publicPhotos?: { url?: string; uploader?: string }[] }) {
   // 👑 只使用真实实景照片，绝不用高德静态地图充数（静态地图≠实景照片，用户无法了解地点实况）
-  const queue = React.useMemo(() => {
-    const urls: string[] = [];
-    (Array.isArray(photos) ? photos : []).forEach(p => {
-      const u = getCleanPhotoUrl(p);
-      if (u && !urls.includes(u)) urls.push(u);
-    });
-    // mapImage（高德静态坐标地图）不再加入图片队列——它只是一张带红点的地图截图，
-    // 无法让用户看到地点的实际面貌。没有实景照片时直接展示兜底卡片。
-    return urls;
-  }, [photos]);
+  const ordered = React.useMemo(
+    () =>
+      orderPhotoSources({
+        publicPhotos,
+        amapPhotos: (Array.isArray(photos) ? photos : []).map((p) => getCleanPhotoUrl(p)).filter(Boolean) as string[],
+        fallback:
+          photoFallback && photoFallback.url
+            ? photoFallback
+            : mapImage
+              ? { url: mapImage, kind: 'street_map', caption: '位置示意：街道地图（非实景照片）' }
+              : null,
+      }),
+    [photos, publicPhotos, photoFallback, mapImage],
+  );
+  const queue = React.useMemo(
+    // 公共实拍与官方实景按优先级排进图片队列；影像/街道图只用于兜底分支
+    () => ordered.filter((item) => item.kind === 'public_photo' || item.kind === 'amap_official').map((item) => item.url),
+    [ordered],
+  );
+  const creditOf = React.useCallback(
+    (url: string) => ordered.find((item) => item.url === url)?.credit || '',
+    [ordered],
+  );
 
   const [currentIdx, setCurrentIdx] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -77,6 +91,7 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
   );
 
   const currentUrl = !allFailed && currentIdx < queue.length ? queue[currentIdx] : '';
+  const credit = currentUrl ? creditOf(currentUrl) : '';
 
   const handleError = React.useCallback(() => {
     setLoaded(false);
@@ -225,6 +240,12 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
         loading="lazy"
         referrerPolicy="no-referrer"
       />
+      {/* 署名：这张图是"别人实拍/官方实景"，必须写清楚，不能与用户自己的实拍混为一谈 */}
+      {credit && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 to-transparent px-2 pb-1 pt-3">
+          <p className="text-white/90 text-[9px] font-bold leading-tight" data-testid="poi-photo-credit">{credit}</p>
+        </div>
+      )}
     </div>
   );
 }
