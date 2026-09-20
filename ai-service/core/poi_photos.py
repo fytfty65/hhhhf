@@ -22,6 +22,9 @@ STREET_CAPTION = "位置示意：街道地图（非实景照片）"
 ESRI_IMAGERY_EXPORT = (
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export"
 )
+# 维基图片通道：默认关闭（见 fetch_wikimedia_photo 的说明：robot policy 403 + commons TLS 被断）
+WIKIMEDIA_ENABLED = False
+WIKIMEDIA_USER_AGENT = "OminRoute/1.0 (personal research project; contact: set-your-email-here)"
 
 
 def parse_lnglat(value: Any) -> Optional[list]:
@@ -94,8 +97,126 @@ def photo_fallback_for(node: Mapping[str, Any], street_map_url: str = "") -> Opt
     return None
 
 
+def wikimedia_api_url(name: str) -> str:
+    """维基百科按标题取主图（pageimages）+ 授权信息（imageinfo/extmetadata）的 API URL。"""
+    from urllib.parse import quote
+
+    title = quote(str(name or "").strip())
+    return (
+        "https://zh.wikipedia.org/w/api.php?action=query&format=json&prop=pageimages|images"
+        "&piprop=original&titles=" + title
+    )
+
+
+def wikimedia_file_info_url(file_title: str) -> str:
+    """取某个维基文件（File:xxx）的作者与许可：extmetadata 里的 Artist/LicenseShortName。"""
+    from urllib.parse import quote
+
+    return (
+        "https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo"
+        "&iiprop=url|extmetadata&titles=" + quote(str(file_title or "").strip())
+    )
+
+
+def parse_wikimedia_photo(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """从 pageimages 响应里取出原图 URL（没有图时返回 None）。纯函数，便于离线单测。"""
+    if not isinstance(payload, Mapping):
+        return None
+    pages = ((payload.get("query") or {}).get("pages")) or {}
+    if not isinstance(pages, Mapping):
+        return None
+    for page in pages.values():
+        if not isinstance(page, Mapping):
+            continue
+        original = page.get("original") or {}
+        url = str(original.get("source") or "").strip()
+        if url.startswith("http"):
+            return {"url": url, "title": str(page.get("title") or ""), "width": original.get("width")}
+    return None
+
+
+def parse_wikimedia_credit(payload: Mapping[str, Any], photo_url: str = "") -> Dict[str, str]:
+    """从 imageinfo/extmetadata 里取作者与许可，拼成人话署名（CC 授权要求必须显示）。
+
+    取不到作者或许可时返回空 dict —— 调用方**据此拒绝使用这张图**（宁可没有图，
+    也不能用一张授权不明的图，这跟"价格来源不明就不算可核实"是同一条规矩）。
+    """
+    if not isinstance(payload, Mapping):
+        return {}
+    pages = ((payload.get("query") or {}).get("pages")) or {}
+    if not isinstance(pages, Mapping):
+        return {}
+    for page in pages.values():
+        if not isinstance(page, Mapping):
+            continue
+        infos = page.get("imageinfo") or []
+        if not infos:
+            continue
+        info = infos[0] or {}
+        meta = info.get("extmetadata") or {}
+        artist = _strip_html(str(((meta.get("Artist") or {}).get("value")) or ""))
+        license_name = _strip_html(str(((meta.get("LicenseShortName") or {}).get("value")) or ""))
+        if not license_name:
+            return {}
+        credit = f"图片：Wikimedia Commons{(' · ' + artist) if artist else ''} · {license_name}"
+        return {
+            "credit": credit,
+            "author": artist,
+            "license": license_name,
+            "source_url": str(info.get("descriptionurl") or info.get("url") or ""),
+            "photo_url": str(info.get("url") or photo_url or ""),
+        }
+    return {}
+
+
+def _strip_html(text: str) -> str:
+    import re
+
+    return re.sub(r"<[^>]+>", "", text or "").strip()
+
+
+async def fetch_wikimedia_photo(name: str, timeout: float = 6.0) -> Optional[Dict[str, Any]]:
+    """按名称找一张**有明确授权**的维基实景照片；失败/无图/授权不明一律返回 None。
+
+    ⚠️ 默认关闭（`WIKIMEDIA_ENABLED = False`），实测两个硬阻塞（2026-09-19，本机网络）：
+    1. `zh.wikipedia.org` 直接返回 **403 + robot policy**（"Please respect our robot policy …
+       Contact bot-traffic@wikimedia.org"）—— 它有明确的机器人访问政策，不按它的要求来就是不合规抓取，
+       这跟我们不做大众点评抓取是同一条底线；
+    2. `commons.wikimedia.org` **TLS 层就被断**（SSL: UNEXPECTED_EOF_WHILE_READING），典型网络环境封锁；
+       即使元数据取到了，浏览器也大概率加载不了 `upload.wikimedia.org` 的图。
+    所以这条路**不在默认链路上**：真要用，先确认网络可达 + 按官方 UA 政策配置并留联系方式，
+    再显式打开这个开关，并且节点上必须带署名与授权（`parse_wikimedia_credit` 的 `credit`）。
+    """
+    if not WIKIMEDIA_ENABLED:
+        return None
+    import httpx
+
+    title = str(name or "").strip()
+    if not title:
+        return None
+    headers = {"User-Agent": WIKIMEDIA_USER_AGENT, "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(wikimedia_api_url(title), headers=headers)
+            if response.status_code != 200:
+                return None  # 403 robot policy 等一律当作"拿不到"，不退化成不合规抓取
+            photo = parse_wikimedia_photo(response.json())
+            if not photo:
+                return None
+            # 主图 URL 反查文件页，拿作者与许可
+            file_title = "File:" + str(photo["url"]).rsplit("/", 1)[-1].replace("_", " ")
+            credit_response = await client.get(wikimedia_file_info_url(file_title), headers=headers)
+            if credit_response.status_code != 200:
+                return None
+            credit = parse_wikimedia_credit(credit_response.json(), photo_url=str(photo["url"]))
+            if not credit:
+                return None  # 授权不明 → 不用这张图
+            return {"url": credit.get("photo_url") or photo["url"], **credit}
+    except Exception:
+        return None
+
+
 def has_real_photo(node: Mapping[str, Any]) -> bool:
-    """节点是否已有**真实照片**（高德返回的 photos 或其它带授权的实景图）。"""
     if not isinstance(node, Mapping):
         return False
     photos = node.get("photos")
