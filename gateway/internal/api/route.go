@@ -71,6 +71,17 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/room/create", handlers.RoomRateLimitMiddleware(), handlers.CreateRoomHandler)
 		apiGroup.POST("/room/join", handlers.RoomRateLimitMiddleware(), handlers.JoinRoomHandler)
 
+		// ==========================================
+		// 用户实拍照片（⑥ 网络版）：上传 / 我的列表 / 取图 / 删除
+		// ⚠️ 路径刻意避开 `/photos/mine` 与 `/photos/:id` 的静态+通配同级冲突
+		//    （gin 在这类组合上会 panic，整个 gateway 起不来），列表走 /my/photos。
+		// 新上传一律 pending：只有上传者自己可见，审核通过才公开（见 internal/photos）。
+		// ==========================================
+		apiGroup.POST("/photos", handlers.UploadPhotoHandler)
+		apiGroup.GET("/my/photos", handlers.ListMyPhotosHandler)
+		apiGroup.GET("/photos/:id", handlers.GetPhotoHandler)
+		apiGroup.DELETE("/photos/:id", handlers.DeletePhotoHandler)
+
 		// 房间与协同相关路由 (WebSocket 核心)
 		// ⚠️ 前端连接示例: ws://localhost:8080/api/v1/room/你的RoomID/ws?userId=你的UserID
 		apiGroup.GET("/room/:id/ws", handlers.RoomWebSocketHandler)
