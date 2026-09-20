@@ -48,6 +48,12 @@ const IMG_HOSTS = [
   // 👑 高德 POI 的**实景图**挂在 CDN `aos-comment.amap.com` 上（2026-09-19 实测：
   // 博斯腾湖/民俗文化博物馆的官方实景图都来自这个域名）。少一个域名就等于照片全被 CSP 拦掉 —— 见 F24。
   'https://*.amap.com',
+  // 👑 用户实拍（P3）：图片由 gateway 提供，**跨源**（前端 3000 / 网关 8080）。
+  // 跨源取图同样受 img-src 管，漏了就是"图全被拦、只剩占位"——这个坑已经踩过两次。
+  // 注意：这里**不能**写 `...API_TARGETS`：API_TARGETS 定义在本文件更下面（const 的 TDZ），
+  // 会变成"整个 next.config 加载即抛错"→ 单测/build/E2E 全红。用等价的字面量最稳。
+  'http://localhost:8080',
+  'http://127.0.0.1:8080',
   'https://api.dicebear.com',
   'https://unpkg.com',
   'https://cdn.jsdelivr.net',

@@ -63,6 +63,16 @@ test('高德实景图 CDN 在 img-src 里（POI 官方照片挂在 *.amap.com �
   assert.ok(imgSrc.includes('https://*.amap.com'), 'img-src 缺少 https://*.amap.com（高德实景图 CDN）');
 });
 
+test('gateway 源在 img-src 里（用户实拍图跨源取，走 <img>）', async () => {
+  // 用户实拍（P3）由 gateway 提供，前端在 3000、网关在 8080 —— 跨源取图受 img-src 管。
+  // 这条契约防止有人"顺手清理白名单"时把用户实拍一起拦掉。
+  const imgSrc = directive(await cspHeader(), 'img-src');
+  assert.ok(
+    imgSrc.includes('http://localhost:8080') || imgSrc.includes('http://127.0.0.1:8080'),
+    'img-src 缺少 gateway 源（用户实拍图会被 CSP 拦掉）',
+  );
+});
+
 test('CSP 仍然锁住脚本与框架来源（不要为了修地图把安全基线放开）', async () => {
   const csp = await cspHeader();
   assert.ok(!directive(csp, 'script-src').includes('http://'), 'script-src 不得引入明文 http 来源');
