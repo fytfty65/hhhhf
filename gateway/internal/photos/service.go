@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -73,8 +74,8 @@ func (i *Index) Add(photo Photo) error {
 	return i.flushLocked()
 }
 
-// SetStatus 审核状态流转（P2 管理端用；现在就把状态机固定下来）。
-func (i *Index) SetStatus(id, status string) (Photo, error) {
+// SetStatus 审核状态流转（P2 管理端用）。`reason` 只在拒绝时有意义，会回传给上传者。
+func (i *Index) SetStatus(id, status, reason string) (Photo, error) {
 	if status != StatusPending && status != StatusApproved && status != StatusRejected {
 		return Photo{}, fmt.Errorf("非法状态: %s", status)
 	}
@@ -83,6 +84,29 @@ func (i *Index) SetStatus(id, status string) (Photo, error) {
 	for position := range i.records {
 		if i.records[position].ID == id {
 			i.records[position].Status = status
+			if status == StatusRejected {
+				i.records[position].RejectReason = strings.TrimSpace(reason)
+			} else {
+				i.records[position].RejectReason = ""
+			}
+			if err := i.flushLocked(); err != nil {
+				return Photo{}, err
+			}
+			return i.records[position], nil
+		}
+	}
+	return Photo{}, ErrNotFound
+}
+
+// Report 举报：**立刻退回 pending**（等于先下架），并累加举报计数等人工复核。
+// 这样即便审核有疏漏，其他用户也有一个立刻生效的止损手段。
+func (i *Index) Report(id string) (Photo, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for position := range i.records {
+		if i.records[position].ID == id {
+			i.records[position].Status = StatusPending
+			i.records[position].ReportedCount++
 			if err := i.flushLocked(); err != nil {
 				return Photo{}, err
 			}
@@ -204,12 +228,55 @@ func (s *Service) Open(id, viewerID string) (Photo, string, error) {
 	return photo, path, nil
 }
 
-// Moderate 审核（P2 管理端调用）：通过/拒绝。
-func (s *Service) Moderate(id, status string) (Photo, error) {
+// Moderate 审核（P2 管理端调用）：通过 / 拒绝（拒绝必须给理由，理由会回传给上传者）。
+func (s *Service) Moderate(id, status, reason string) (Photo, error) {
 	if !s.Enabled() {
 		return Photo{}, ErrDisabled
 	}
-	return s.index.SetStatus(id, status)
+	if status == StatusRejected && strings.TrimSpace(reason) == "" {
+		return Photo{}, errors.New("拒绝必须给出理由（要回传给上传者）")
+	}
+	return s.index.SetStatus(id, status, reason)
+}
+
+// Report 用户举报：先把照片退回 pending（立刻对其他用户不可见），再等人工复核。
+// 上传者自己举报自己无意义，直接忽略。
+func (s *Service) Report(id, reporterID string) (Photo, error) {
+	if !s.Enabled() {
+		return Photo{}, ErrDisabled
+	}
+	photo, ok := s.index.ByID(id)
+	if !ok {
+		return Photo{}, ErrNotFound
+	}
+	if reporterID != "" && reporterID == photo.UploaderID {
+		return photo, nil
+	}
+	return s.index.Report(id)
+}
+
+// ListForReview 管理端待复核列表（默认只看 pending）。
+func (s *Service) ListForReview(status string) []Photo {
+	if !s.Enabled() {
+		return nil
+	}
+	if status == "" {
+		status = StatusPending
+	}
+	var items []Photo
+	for _, item := range s.index.All() {
+		if item.Status == status {
+			items = append(items, item)
+		}
+	}
+	sort.Slice(items, func(a, b int) bool {
+		// 被举报过的排前面（更需要人看），再按时间
+		if items[a].ReportedCount != items[b].ReportedCount {
+			return items[a].ReportedCount > items[b].ReportedCount
+		}
+		return items[a].CreatedAt.Before(items[b].CreatedAt)
+	})
+	return items
 }
 
 // Delete 删除照片：先删记录再删文件（反之会留下无主的图，占着磁盘还查不到）。

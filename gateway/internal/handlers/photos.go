@@ -157,6 +157,85 @@ func GetPhotoHandler(c *gin.Context) {
 	c.File(path)
 }
 
+// ReportPhotoHandler：任何登录用户都能举报；**举报立刻把照片退回待审**（对其他用户不可见），
+// 等人工复核。这是"审核有疏漏时用户也能立刻止损"的那条通道。
+func ReportPhotoHandler(c *gin.Context) {
+	service, err := getPhotoService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "照片服务不可用", "code": "PHOTO_ERROR"})
+		return
+	}
+	photo, err := service.Report(c.Param("id"), c.GetString("user_id"))
+	if err != nil {
+		photoError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"reported": true, "status": photo.Status, "message": "已收到举报，这张照片已先下架等待复核"})
+}
+
+// isPhotoAdmin：管理端身份来自服务端配置（ADMIN_USER_IDS 逗号分隔），不信任请求里自报的角色。
+func isPhotoAdmin(c *gin.Context) bool {
+	userID := strings.TrimSpace(c.GetString("user_id"))
+	if userID == "" {
+		return false
+	}
+	for _, candidate := range strings.Split(os.Getenv("ADMIN_USER_IDS"), ",") {
+		if strings.TrimSpace(candidate) == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// ReviewPhotosHandler（管理员）：待复核列表，被举报过的排最前。
+func ReviewPhotosHandler(c *gin.Context) {
+	if !isPhotoAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "需要管理员身份", "code": "PHOTO_FORBIDDEN"})
+		return
+	}
+	service, err := getPhotoService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "照片服务不可用", "code": "PHOTO_ERROR"})
+		return
+	}
+	items := service.ListForReview(c.Query("status"))
+	if items == nil {
+		items = []photos.Photo{}
+	}
+	c.JSON(http.StatusOK, gin.H{"photos": items})
+}
+
+// ModeratePhotoHandler（管理员）：通过 / 拒绝（拒绝必须给理由，理由回传给上传者）。
+func ModeratePhotoHandler(c *gin.Context) {
+	if !isPhotoAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "需要管理员身份", "code": "PHOTO_FORBIDDEN"})
+		return
+	}
+	service, err := getPhotoService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "照片服务不可用", "code": "PHOTO_ERROR"})
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体格式不对", "code": "PHOTO_REJECTED"})
+		return
+	}
+	photo, err := service.Moderate(c.Param("id"), body.Status, body.Reason)
+	if err != nil {
+		if strings.Contains(err.Error(), "理由") || strings.Contains(err.Error(), "非法状态") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "PHOTO_REJECTED"})
+			return
+		}
+		photoError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"photo": photo})
+}
+
 // DeletePhotoHandler：上传者本人（或管理员）可删；记录与文件一起清掉。
 func DeletePhotoHandler(c *gin.Context) {
 	service, err := getPhotoService()
@@ -165,7 +244,7 @@ func DeletePhotoHandler(c *gin.Context) {
 		return
 	}
 	userID := c.GetString("user_id")
-	isAdmin := strings.EqualFold(strings.TrimSpace(c.GetString("role")), "admin")
+	isAdmin := isPhotoAdmin(c)
 	if err := service.Delete(c.Param("id"), userID, isAdmin); err != nil {
 		photoError(c, err)
 		return

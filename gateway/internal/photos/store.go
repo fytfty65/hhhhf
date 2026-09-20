@@ -62,7 +62,10 @@ type Photo struct {
 	Width      int       `json:"width"`
 	Height     int       `json:"height"`
 	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
+	// RejectReason 拒绝理由**必须回传给上传者**（不做黑箱审核）；举报会先退回复审。
+	RejectReason  string `json:"reject_reason,omitempty"`
+	ReportedCount int    `json:"reported_count,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // DetectMime 按文件头判断类型；不是受支持的图片就返回 ErrUnsupportedType。

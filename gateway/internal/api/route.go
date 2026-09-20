@@ -81,6 +81,12 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/my/photos", handlers.ListMyPhotosHandler)
 		apiGroup.GET("/photos/:id", handlers.GetPhotoHandler)
 		apiGroup.DELETE("/photos/:id", handlers.DeletePhotoHandler)
+		// 举报：任何登录用户可用，**立刻把照片退回待审**（对其他用户不可见）等人工复核
+		apiGroup.POST("/photos/:id/report", handlers.ReportPhotoHandler)
+		// 管理端：待复核列表 / 通过 / 拒绝（拒绝必须给理由，理由回传上传者）。
+		// 身份来自服务端配置 ADMIN_USER_IDS（逗号分隔），不信任请求里自报的角色。
+		apiGroup.GET("/admin/photos", handlers.ReviewPhotosHandler)
+		apiGroup.POST("/admin/photos/:id/moderate", handlers.ModeratePhotoHandler)
 
 		// 房间与协同相关路由 (WebSocket 核心)
 		// ⚠️ 前端连接示例: ws://localhost:8080/api/v1/room/你的RoomID/ws?userId=你的UserID
