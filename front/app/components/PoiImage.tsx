@@ -10,6 +10,7 @@
 import React, { useState } from 'react';
 import { Camera, ExternalLink } from 'lucide-react';
 import { getCleanPhotoUrl } from '../lib/lobbyUtils';
+import { clearUserPhoto, fileToDataUrl, readUserPhoto, saveUserPhoto } from '../lib/userPhotos';
 import type { PoiImageProps } from '../types';
 
 // 👑 智能POI图片组件：5级兜底链保证100%视觉覆盖，永不空白
@@ -31,6 +32,49 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
   const [currentIdx, setCurrentIdx] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [allFailed, setAllFailed] = useState(queue.length === 0);
+  // ⑥ 用户自己的实拍：真归属的图片来源。只存在这台设备（localStorage），不上传服务器。
+  const [userPhoto, setUserPhoto] = useState(() => readUserPhoto(name));
+  const [photoNotice, setPhotoNotice] = useState('');
+  const photoInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const handlePickPhoto = React.useCallback(async (file?: File) => {
+    const dataUrl = await fileToDataUrl(file as File);
+    if (!dataUrl) {
+      setPhotoNotice('只支持图片文件');
+      return;
+    }
+    const result = saveUserPhoto(name, dataUrl);
+    if (result.ok !== true) {
+      setPhotoNotice((result as { reason?: string }).reason || '保存失败，请重试');
+      return;
+    }
+    setUserPhoto(dataUrl);
+    setPhotoNotice('已存为「我的实拍」（仅本机保存）');
+  }, [name]);
+
+  const renderPicker = (label: string) => (
+    <span className="inline-flex items-center gap-2">
+      <input
+        ref={photoInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        data-testid="poi-photo-input"
+        onChange={(event) => void handlePickPhoto(event.target.files?.[0])}
+      />
+      <button
+        type="button"
+        data-testid="poi-photo-upload"
+        onClick={(event) => {
+          event.stopPropagation();
+          photoInputRef.current?.click();
+        }}
+        className="rounded-full bg-white/25 px-2.5 py-1 text-[10px] font-bold text-white backdrop-blur-sm hover:bg-white/40"
+      >
+        {label}
+      </button>
+    </span>
+  );
 
   const currentUrl = !allFailed && currentIdx < queue.length ? queue[currentIdx] : '';
 
@@ -42,6 +86,41 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
       setAllFailed(true);
     }
   }, [currentIdx, queue.length]);
+
+  // ⑥ 用户自己上传的实拍优先展示（这是"这个地点"最可信的图：你自己拍的）
+  if (userPhoto) {
+    return (
+      <div className={`relative overflow-hidden group ${className}`}>
+        <img src={userPhoto} alt={`${name}（我的实拍）`} className="absolute inset-0 h-full w-full object-cover" data-testid="poi-user-photo" />
+        {typeof index === 'number' && (
+          <div className="absolute top-2 left-2 w-6 h-6 rounded-full bg-black/45 backdrop-blur-sm flex items-center justify-center text-white text-[11px] font-black">{index + 1}</div>
+        )}
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-4">
+          <p className="text-white text-[11px] font-bold leading-tight line-clamp-1 drop-shadow">{name}</p>
+          <div className="mt-0.5 flex items-center justify-between gap-2">
+            <span className="text-white/85 text-[9px] font-bold" data-testid="poi-user-photo-credit">我的实拍 · 仅本机保存</span>
+            <span className="flex items-center gap-2">
+              {renderPicker('换一张')}
+              <button
+                type="button"
+                data-testid="poi-user-photo-clear"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  clearUserPhoto(name);
+                  setUserPhoto('');
+                  setPhotoNotice('已删除我的实拍');
+                }}
+                className="rounded-full bg-white/25 px-2.5 py-1 text-[10px] font-bold text-white backdrop-blur-sm hover:bg-white/40"
+              >
+                删除
+              </button>
+            </span>
+          </div>
+          {photoNotice && <p className="mt-0.5 text-white/80 text-[9px]">{photoNotice}</p>}
+        </div>
+      </div>
+    );
+  }
 
   // 全部失败时：有**真实地理影像**兜底就显示它（并如实标注"位置示意，非实景照片"）；
   // 没有才显示地点卡片（无实景照片时绝不用别的景点照片/通用图库图冒充）
@@ -111,6 +190,11 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
               <ExternalLink className="w-3 h-3" /> 去搜实景照片
             </div>
           )}
+          {/* ⑥ 官方/网络都没有这个地点的照片时，让用户放一张自己拍的：真归属、真有用 */}
+          <div className="mt-1" onClick={(event) => event.stopPropagation()}>
+            {renderPicker('传我的实拍')}
+          </div>
+          {photoNotice && <p className="text-white/85 text-[9px] text-center">{photoNotice}</p>}
           {!onPhotoClick && amapUrl && (
             <a
               href={amapUrl}
