@@ -2540,6 +2540,17 @@ async def run_negotiate(msg: GatewayMessage):
                     # 👑 终极图片保证：即使候选POI没有预生成静态图，也按坐标现场生成，确保map_image永不为空
                     if not r.get("map_image") and isinstance(r.get("lnglat"), list) and len(r["lnglat"]) >= 2:
                         r["map_image"] = _make_static_map(r["lnglat"])
+                    # 👑 实景图兜底链：没有实景照片时给**真实地理影像**（Esri 卫星 → 高德街道图），
+                    # 并如实标注"位置示意，非实景照片"——绝不用别的景点照片或通用图库图冒充。
+                    try:
+                        from core.poi_photos import photo_fallback_for
+
+                        if "photo_fallback" not in r:
+                            _fallback = photo_fallback_for(r, str(r.get("map_image") or ""))
+                            if _fallback:
+                                r["photo_fallback"] = _fallback
+                    except Exception:
+                        pass
                     used_pool_names.add(_norm_name(str(match.get("name") or "")))
 
                 def _rebind(route_nodes):
