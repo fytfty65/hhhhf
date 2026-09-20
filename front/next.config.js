@@ -45,6 +45,9 @@ const IMG_HOSTS = [
   ...TILE_HOSTS,
   // 高德静态地图（节点配图兜底，走 <img>）
   'https://restapi.amap.com',
+  // 👑 高德 POI 的**实景图**挂在 CDN `aos-comment.amap.com` 上（2026-09-19 实测：
+  // 博斯腾湖/民俗文化博物馆的官方实景图都来自这个域名）。少一个域名就等于照片全被 CSP 拦掉 —— 见 F24。
+  'https://*.amap.com',
   'https://api.dicebear.com',
   'https://unpkg.com',
   'https://cdn.jsdelivr.net',

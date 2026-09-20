@@ -93,5 +93,44 @@ class TestWikimediaChannel(unittest.TestCase):
         self.assertEqual(parse_wikimedia_credit({"query": {"pages": {"1": {"imageinfo": [{"extmetadata": {}}]}}}}), {})
 
 
+class TestAmapPhotoChannel(unittest.TestCase):
+    """③ 高德官方实景图通道：URL 构造与图片 URL 清洗（离线可测）。"""
+
+    def test_place_text_url_uses_exact_name_and_extensions(self):
+        from core.poi_photos import amap_place_text_url
+
+        url = amap_place_text_url("博斯腾湖", "库尔勒", "KEY123")
+        self.assertIn("/place/text", url)
+        self.assertIn("extensions=all", url)  # 不加 extensions=all 就没有 photos 字段
+        self.assertIn("keywords=", url)
+        self.assertIn("KEY123", url)
+
+    def test_photo_urls_normalize_and_filter(self):
+        from core.poi_photos import amap_photo_urls
+
+        poi = {
+            "photos": [
+                {"url": "http://aos-comment.amap.com/x.jpg"},   # http → 必须升级成 https
+                {"url": "https://aos-comment.amap.com/y.jpg"},
+                {"url": "https://aos-comment.amap.com/y.jpg"},   # 重复要去掉
+                {"url": "javascript:alert(1)"},                  # 非 http(s) 丢掉
+                {"title": "没有 url"},                            # 缺 url 丢掉
+                "https://aos-comment.amap.com/z.png",            # 也接受裸字符串
+            ]
+        }
+        urls = amap_photo_urls(poi)
+        self.assertEqual(urls[0], "https://aos-comment.amap.com/x.jpg")
+        self.assertEqual(len(urls), len(set(urls)))
+        self.assertTrue(all(item.startswith("https://") for item in urls))
+        self.assertNotIn("javascript:alert(1)", urls)
+
+    def test_no_photos_returns_empty(self):
+        from core.poi_photos import amap_photo_urls
+
+        self.assertEqual(amap_photo_urls({}), [])
+        self.assertEqual(amap_photo_urls({"photos": []}), [])
+        self.assertEqual(amap_photo_urls({"photos": "https://x/1.jpg"}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

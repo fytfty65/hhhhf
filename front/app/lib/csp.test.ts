@@ -56,6 +56,13 @@ test('高德静态地图域名在 img-src 里（节点配图兜底，走 <img>�
   assert.ok(imgSrc.includes('https://restapi.amap.com'), 'img-src 缺少 https://restapi.amap.com');
 });
 
+test('高德实景图 CDN 在 img-src 里（POI 官方照片挂在 *.amap.com 上）', async () => {
+  // 2026-09-19 实测：博斯腾湖/库尔勒民俗文化博物馆的官方实景图来自 aos-comment.amap.com；
+  // 少了这个域名照片会被 CSP 全拦掉，页面上又只剩占位图（与 F24 瓦片事故同一类问题）。
+  const imgSrc = directive(await cspHeader(), 'img-src');
+  assert.ok(imgSrc.includes('https://*.amap.com'), 'img-src 缺少 https://*.amap.com（高德实景图 CDN）');
+});
+
 test('CSP 仍然锁住脚本与框架来源（不要为了修地图把安全基线放开）', async () => {
   const csp = await cspHeader();
   assert.ok(!directive(csp, 'script-src').includes('http://'), 'script-src 不得引入明文 http 来源');

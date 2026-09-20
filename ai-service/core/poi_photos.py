@@ -118,6 +118,51 @@ def wikimedia_file_info_url(file_title: str) -> str:
     )
 
 
+def amap_place_text_url(keyword: str, city: str, key: str, limit: int = 5) -> str:
+    """高德 place/text（extensions=all）——按**精确名称**搜同一个地点，为的是把它自己的实景图取回来。"""
+    from urllib.parse import quote
+
+    return (
+        "https://restapi.amap.com/v3/place/text"
+        f"?key={quote(str(key or ''))}&keywords={quote(str(keyword or '').strip())}"
+        f"&city={quote(str(city or '').strip())}&offset={int(limit)}&page=1&extensions=all"
+    )
+
+
+def amap_photo_urls(poi: Mapping[str, Any], limit: int = 3) -> list:
+    """从高德 POI 里取出实景图 URL（官方数据，可直接用）。
+
+    只接受 http(s) 且能识别的图片扩展名；`http` 一律升级成 `https`（页面是 https，
+    混用会被浏览器按混合内容拦掉）。没有任何实景图时返回空列表 —— 不编、不凑。
+    """
+    if not isinstance(poi, Mapping):
+        return []
+    photos = poi.get("photos")
+    if not isinstance(photos, (list, tuple)):
+        return []
+    urls: list = []
+    for item in photos:
+        raw = ""
+        if isinstance(item, Mapping):
+            raw = str(item.get("url") or "")
+        elif isinstance(item, str):
+            raw = item
+        raw = raw.strip()
+        if not raw:
+            continue
+        if raw.startswith("http://"):
+            raw = "https://" + raw[len("http://"):]
+        if not raw.startswith("https://"):
+            continue
+        if not any(ext in raw.lower() for ext in (".jpg", ".jpeg", ".png", ".webp", "/pic")):
+            continue
+        if raw not in urls:
+            urls.append(raw)
+        if len(urls) >= max(1, int(limit)):
+            break
+    return urls
+
+
 def parse_wikimedia_photo(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     """从 pageimages 响应里取出原图 URL（没有图时返回 None）。纯函数，便于离线单测。"""
     if not isinstance(payload, Mapping):

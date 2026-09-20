@@ -994,6 +994,45 @@ class ExpertToolbox:
             return ""
 
     # 👑 精准文旅分类码：110000(风景名胜) | 141200(博物馆展览馆) | 060400(特色步行街) | 060100(综合商场)
+    async def get_place_photos(self, name: str, city: str = "") -> List[str]:
+        """③ 按**精确名称**再查一次高德，把它自己的实景图取回来（官方接口、配额内）。
+
+        为什么要单独查：`get_dynamic_pois` 是按"城市+关键词"批量搜，回来的 POI 未必就是行程里
+        这个节点；而实景图只挂在**具体那个 POI** 上。这里用节点原名精确搜一次，取 photos 字段。
+        失败/无图一律返回空列表 —— 配图永远不能拖垮出方案。
+        """
+        if not self.amap_key or not str(name or "").strip():
+            return []
+        from core.poi_photos import amap_photo_urls, amap_place_text_url
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as http_client:
+                resp = await http_client.get(amap_place_text_url(str(name), city, self.amap_key))
+                data = resp.json()
+        except Exception:
+            return []
+        if not isinstance(data, dict) or data.get("status") != "1":
+            return []
+        target = self._norm_place_name(str(name))
+        for poi in data.get("pois") or []:
+            if not isinstance(poi, dict):
+                continue
+            # 只认同名/同前缀的那一个，避免把别家的图挂到这个节点上
+            candidate = self._norm_place_name(str(poi.get("name") or ""))
+            if not candidate:
+                continue
+            if candidate.startswith(target[:6]) or target.startswith(candidate[:6]):
+                urls = amap_photo_urls(poi)
+                if urls:
+                    return urls
+        return []
+
+    @staticmethod
+    def _norm_place_name(value: str) -> str:
+        import re as _re
+
+        return _re.sub(r"[\s（）()\-·]", "", str(value or "")).lower()
+
     async def get_dynamic_pois(self, city: str, keywords: str, types: str = "110000|141200|060400|060100", limit: int = 40) -> List[Dict]:
         if not self.amap_key:
             return []
@@ -2234,6 +2273,8 @@ async def run_negotiate(msg: GatewayMessage):
                 )
 
             # —— 👑 候选池合成兜底：LLM 彻底失败时仍能给前端一份完整路线（防死锁）——
+            # 实景图补齐的收集区（Post-Route 里逐节点收集，最后统一并发查询 + 兜底图）
+            _photo_targets: List[Dict[str, Any]] = []
             def _synthesize_from_pool(reason: str = ""):
                 """从 poi_pool_data 确定性合成完整 trip_days 天 * actual_daily_count 节点路线。"""
                 if not poi_pool_data:
@@ -2540,15 +2581,11 @@ async def run_negotiate(msg: GatewayMessage):
                     # 👑 终极图片保证：即使候选POI没有预生成静态图，也按坐标现场生成，确保map_image永不为空
                     if not r.get("map_image") and isinstance(r.get("lnglat"), list) and len(r["lnglat"]) >= 2:
                         r["map_image"] = _make_static_map(r["lnglat"])
-                    # 👑 实景图兜底链：没有实景照片时给**真实地理影像**（Esri 卫星 → 高德街道图），
-                    # 并如实标注"位置示意，非实景照片"——绝不用别的景点照片或通用图库图冒充。
+                    # 👑 ③ 实景图补齐：高德按**节点原名**再查一次，把官方实景图取回来
+                    # （最多 8 个节点、并发 + 整体超时；取不到就用上一段的卫星影像兜底）
                     try:
-                        from core.poi_photos import photo_fallback_for
-
-                        if "photo_fallback" not in r:
-                            _fallback = photo_fallback_for(r, str(r.get("map_image") or ""))
-                            if _fallback:
-                                r["photo_fallback"] = _fallback
+                        if not has_real_photo(r):
+                            _photo_targets.append(r)
                     except Exception:
                         pass
                     used_pool_names.add(_norm_name(str(match.get("name") or "")))
@@ -3634,6 +3671,41 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["degradations"] = collect_degradations(final_data)
                         except Exception as _degrade_exc:  # 登记失败绝不影响出方案
                             final_data["degradations"] = {"error": str(_degrade_exc)[:200]}
+
+                    # 👑 ③ 实景图补齐 + ①② 影像兜底（放在下发前最后一步）
+                    # 顺序很重要：先尽力拿**真照片**（高德官方，最多 8 个节点、并发 + 整体超时），
+                    # 拿不到的才给卫星影像/街道图兜底，并如实标注"位置示意，非实景照片"。
+                    try:
+                        from core.poi_photos import attach_photo_fallbacks, has_real_photo
+
+                        _targets = [node for node in _photo_targets if isinstance(node, dict)][:8]
+                        if _targets and getattr(toolbox, "amap_key", None):
+                            async def _fetch_photos(_node: Dict[str, Any]) -> None:
+                                try:
+                                    urls = await toolbox.get_place_photos(
+                                        str(_node.get("name") or ""), str(final_data.get("city") or "")
+                                    )
+                                except Exception:
+                                    urls = []
+                                if urls:
+                                    _node["photos"] = urls
+                                    _node["photo_source"] = "amap"
+
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.gather(*[_fetch_photos(node) for node in _targets]), timeout=8.0
+                                )
+                            except Exception:
+                                pass  # 超时也要继续：没取到的走影像兜底
+                        _with_fallback = attach_photo_fallbacks(final_data)
+                        final_data["route"] = _with_fallback["route"]
+                        if _with_fallback["filled"]:
+                            final_data["photo_fallback_stats"] = {
+                                "filled": _with_fallback["filled"],
+                                "kinds": _with_fallback["kinds"],
+                            }
+                    except Exception as _photo_exc:  # 配图失败绝不影响出方案
+                        print(f"⚠️ [配图] 补齐失败，继续下发: {_photo_exc}", flush=True)
 
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
