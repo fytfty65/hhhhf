@@ -1,5 +1,32 @@
 # ContextualLobby.tsx 拆分计划（跨会话交接单）
 
+## ⚠️ 未解决的现场问题（下次接手先看这里）
+
+**用户实拍照片（P1/P2/P3）真实 HTTP 链路验收：上传成功，但"上传者自己看不到自己"**
+
+2026-09-19 用 `work/probe_photo_api.py` 打真实 gateway（用户已重启）：
+- `POST /api/v1/photos` → **200**，文件真的落盘（`data/photos/d263dedc….jpg` + `index.json`），
+  响应 `uploader_id` 与注册返回的 `user.id`（`3859896c-…`）一致；
+- `GET /api/v1/my/photos` → 200 但 **0 张**；
+- `GET /api/v1/photos/:id`（本人）→ **403 PHOTO_FORBIDDEN**；
+- 他人 → 403、匿名 → 401（这两条**符合预期**）。
+
+推断：`/my/photos` 与 `/photos/:id` 解析出的 `user_id` 与上传时**不一致**（空值恰好同时造成
+"列表 0 张 + 本人取图 403"；`Open` 返回 403 而非 404，说明记录找到了、只是可见性判定失败）。
+⚠️ 读代码时 `AuthMiddleware`（`c.Set("user_id", …)`）与 `LookupSessionUserID`
+（Redis `omni:session:<token>` → userID）**看起来是自洽的** —— 所以必须用**运行时证据**定位，别再推理。
+
+下一步（按代价排序）：
+1. 在 `/my/photos` 响应里临时加 `debug_user_id` + 记录里的 `uploader_id`，让用户重启一次 gateway，
+   跑同一个探针，一次就能看出哪一步身份不同；
+2. 或者我在**自己的**进程里另起一个 gateway 实例（换端口 + 独立 SQLite/PHOTOS_DIR），可自由重启加日志，
+   不打扰用户正在跑的实例。
+
+在它变绿之前**不要**做前端"上传到服务器"（否则会把用户导到一个传上去自己都看不见的功能上）。
+`work/probe_photo_api.py` 已就绪：打印注册/登录状态码 → 上传响应 → 我的列表张数 →
+本人/他人/匿名取图状态码与缓存头 → 落盘文件；修好后重跑即可。
+
+
 > 这份文件是拆分任务的**唯一持久记忆**。任何新会话接手时：先读本文件 → 跑一次门禁确认基线是绿的 → 按「批次路线图」继续。
 > 目标文件：`front/app/ContextualLobby.tsx`（拆分前 **3,991 行 / 218,225 B**，含 21 个顶层定义、25 个本地组件）。
 

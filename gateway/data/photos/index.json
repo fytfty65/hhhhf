@@ -1,0 +1,15 @@
+[
+  {
+    "id": "d263dedca9b8431fcc3d1bbfa1b9f1b509f512872e7cbf94999747cd75ca9a00",
+    "node_name": "博斯腾湖",
+    "trip_id": "probe-trip",
+    "uploader_id": "7f16a3fa-6056-4346-89b6-977106592e13",
+    "sha256": "d263dedca9b8431fcc3d1bbfa1b9f1b509f512872e7cbf94999747cd75ca9a00",
+    "mime": "image/jpeg",
+    "bytes": 376,
+    "width": 1,
+    "height": 1,
+    "status": "pending",
+    "created_at": "2026-09-20T14:42:39.0695871Z"
+  }
+]
