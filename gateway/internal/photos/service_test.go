@@ -144,7 +144,7 @@ func TestQuotaBlocksUploads(t *testing.T) {
 	// 直接预置满额记录，避免真的编码 20 张图
 	for i := 0; i < DailyQuota; i++ {
 		fake := Photo{ID: hashOf(string(rune('a' + i))), UploaderID: "u1", Status: StatusApproved, CreatedAt: now}
-		if err := service.index.Add(fake); err != nil {
+		if _, err := service.index.Add(fake); err != nil {
 			t.Fatalf("预置失败: %v", err)
 		}
 	}
@@ -190,6 +190,54 @@ func TestDisabledServiceRejectsEverything(t *testing.T) {
 		t.Fatalf("关闭时取图应 ErrDisabled，得到 %v", err)
 	}
 }
+
+func TestSecondUploaderOfSameImageKeepsAccess(t *testing.T) {
+	// 实测 bug（2026-09-19）：内容寻址去重下，第二个上传同一张图的人被告知"uploader 是你"，
+	// 但索引里那条记录仍属第一个上传者 → 他看不到也取不到"自己"的照片。这里钉死正确行为。
+	service := newTestService(t, true)
+	same := solidJPEG(t, 16, 12)
+	first, err := service.Upload("u1", "博斯腾湖", "trip-1", same)
+	if err != nil {
+		t.Fatalf("第一个人上传失败: %v", err)
+	}
+	second, err := service.Upload("u2", "博斯腾湖", "trip-1", same)
+	if err != nil {
+		t.Fatalf("第二个人上传失败: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("同一内容应命中同一 id（去重）: %s vs %s", first.ID, second.ID)
+	}
+	// 两个人都能在"我的照片"里看到它
+	if len(service.ListMine("u1")) != 1 || len(service.ListMine("u2")) != 1 {
+		t.Fatalf("两个上传者都应看得到: u1=%d u2=%d", len(service.ListMine("u1")), len(service.ListMine("u2")))
+	}
+	// 两个人也都取得到（仍是待审，第三人看不到）
+	if _, _, err := service.Open(first.ID, "u2"); err != nil {
+		t.Fatalf("第二个上传者应能取到自己上传的图: %v", err)
+	}
+	if _, _, err := service.Open(first.ID, "u3"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("没上传过的人仍不该看到待审图，得到 %v", err)
+	}
+	// 只留一份文件（去重的收益不能丢）
+	entries, _ := os.ReadDir(service.dir)
+	files := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && entry.Name() != "index.json" {
+			files++
+		}
+	}
+	if files != 1 {
+		t.Fatalf("去重后应只有一份图片文件，实际 %d", files)
+	}
+	// 删除：上传者之一删掉后，另一个人仍应看得到（不能把别人的图一起删掉）
+	if err := service.Delete(first.ID, "u1", false); err != nil {
+		t.Fatalf("上传者删除失败: %v", err)
+	}
+	if len(service.ListMine("u2")) != 1 {
+		t.Fatal("一个人删除不该把另一个上传者也一并抹掉")
+	}
+}
+
 
 func TestIndexPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()

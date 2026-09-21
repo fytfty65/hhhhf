@@ -62,10 +62,25 @@ type Photo struct {
 	Width      int       `json:"width"`
 	Height     int       `json:"height"`
 	Status     string    `json:"status"`
+	// UploaderIDs 所有上传过这份内容的人。内容寻址去重时**别的用户上传同一张图就追加进来**，
+	// 而不是被当成"不存在"丢给第一个上传者 —— 否则第二个上传者既看不到也取不到"自己"的照片
+	// （实测 2026-09-19：同一张图两次上传得到同一个 id，第二个人的 /my/photos 是空的、取图 403）。
+	UploaderIDs []string `json:"uploader_ids,omitempty"`
 	// RejectReason 拒绝理由**必须回传给上传者**（不做黑箱审核）；举报会先退回复审。
 	RejectReason  string `json:"reject_reason,omitempty"`
 	ReportedCount int    `json:"reported_count,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// OwnerIDs 返回这份内容的所有上传者（兼容只有 UploaderID 的旧记录）。
+func (p Photo) OwnerIDs() []string {
+	if len(p.UploaderIDs) > 0 {
+		return p.UploaderIDs
+	}
+	if p.UploaderID != "" {
+		return []string{p.UploaderID}
+	}
+	return nil
 }
 
 // DetectMime 按文件头判断类型；不是受支持的图片就返回 ErrUnsupportedType。
@@ -170,7 +185,15 @@ func VisibleTo(photo Photo, viewerID string) bool {
 	if photo.Status == StatusApproved {
 		return true
 	}
-	return viewerID != "" && viewerID == photo.UploaderID
+	if viewerID == "" {
+		return false
+	}
+	for _, owner := range photo.OwnerIDs() {
+		if owner == viewerID {
+			return true
+		}
+	}
+	return false
 }
 
 // Save 规范化并落盘，返回记录（状态固定为 pending）。filename 用 sha256，天然去重。

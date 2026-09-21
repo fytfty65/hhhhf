@@ -62,16 +62,42 @@ func (i *Index) ByID(id string) (Photo, bool) {
 }
 
 // Add 追加一条记录并原子落盘（先写临时文件再 rename，避免半截 JSON）。
-func (i *Index) Add(photo Photo) error {
+// 命中已有内容（同 sha256）时**把新上传者追加进 UploaderIDs**，而不是丢弃 ——
+// 内容只存一份（去重收益保留），但"谁上传过"必须记全，否则第二个人会被锁在"自己"的照片外面。
+// 返回最终生效的记录（调用方要用它，不能再用入参那份）。
+func (i *Index) Add(photo Photo) (Photo, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	for _, item := range i.records {
-		if item.ID == photo.ID {
-			return nil // 内容寻址：同一张图重复上传不重复记账
+	for position := range i.records {
+		if i.records[position].ID != photo.ID {
+			continue
 		}
+		existing := &i.records[position]
+		if photo.UploaderID != "" {
+			known := false
+			for _, owner := range existing.OwnerIDs() {
+				if owner == photo.UploaderID {
+					known = true
+					break
+				}
+			}
+			if !known {
+				existing.UploaderIDs = append(existing.OwnerIDs(), photo.UploaderID)
+				if existing.UploaderID == "" {
+					existing.UploaderID = photo.UploaderID
+				}
+				if err := i.flushLocked(); err != nil {
+					return Photo{}, err
+				}
+			}
+		}
+		return *existing, nil
+	}
+	if photo.UploaderID != "" && len(photo.UploaderIDs) == 0 {
+		photo.UploaderIDs = []string{photo.UploaderID}
 	}
 	i.records = append(i.records, photo)
-	return i.flushLocked()
+	return photo, i.flushLocked()
 }
 
 // SetStatus 审核状态流转（P2 管理端用）。`reason` 只在拒绝时有意义，会回传给上传者。
@@ -107,6 +133,25 @@ func (i *Index) Report(id string) (Photo, error) {
 		if i.records[position].ID == id {
 			i.records[position].Status = StatusPending
 			i.records[position].ReportedCount++
+			if err := i.flushLocked(); err != nil {
+				return Photo{}, err
+			}
+			return i.records[position], nil
+		}
+	}
+	return Photo{}, ErrNotFound
+}
+
+// SetOwners 改写拥有者列表（删除时"某个上传者退出"用）。
+func (i *Index) SetOwners(id string, owners []string) (Photo, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for position := range i.records {
+		if i.records[position].ID == id {
+			i.records[position].UploaderIDs = owners
+			if len(owners) > 0 {
+				i.records[position].UploaderID = owners[0]
+			}
 			if err := i.flushLocked(); err != nil {
 				return Photo{}, err
 			}
@@ -183,10 +228,11 @@ func (s *Service) Upload(uploaderID, nodeName, tripID string, data []byte) (Phot
 	if err != nil {
 		return Photo{}, err
 	}
-	if err := s.index.Add(photo); err != nil {
+	stored, err := s.index.Add(photo)
+	if err != nil {
 		return Photo{}, err
 	}
-	return photo, nil
+	return stored, nil
 }
 
 // ListMine 只返回上传者自己的照片（含待审），按时间倒序。
@@ -196,8 +242,11 @@ func (s *Service) ListMine(uploaderID string) []Photo {
 	}
 	var mine []Photo
 	for _, item := range s.index.All() {
-		if item.UploaderID == uploaderID {
-			mine = append(mine, item)
+		for _, owner := range item.OwnerIDs() {
+			if owner == uploaderID {
+				mine = append(mine, item)
+				break
+			}
 		}
 	}
 	sort.Slice(mine, func(a, b int) bool { return mine[a].CreatedAt.After(mine[b].CreatedAt) })
@@ -279,7 +328,10 @@ func (s *Service) ListForReview(status string) []Photo {
 	return items
 }
 
-// Delete 删除照片：先删记录再删文件（反之会留下无主的图，占着磁盘还查不到）。
+// Delete 删除照片。语义（内容可能被多个人上传过）：
+//   - 上传者删除 = **自己退出**：从拥有者列表移除自己；若还有别的上传者，记录与文件都保留
+//     （否则一个人就能把别人上传的图一起删掉 —— 这是实测抓出来的 bug）；
+//   - 最后一个拥有者（或管理员）删除 = 记录与文件一起清掉，不留"占着磁盘但查不到"的无主文件。
 func (s *Service) Delete(id, requesterID string, isAdmin bool) error {
 	if !s.Enabled() {
 		return ErrDisabled
@@ -288,9 +340,37 @@ func (s *Service) Delete(id, requesterID string, isAdmin bool) error {
 	if !ok {
 		return ErrNotFound
 	}
-	if !isAdmin && photo.UploaderID != requesterID {
+	owners := photo.OwnerIDs()
+	isOwner := false
+	for _, owner := range owners {
+		if owner == requesterID {
+			isOwner = true
+			break
+		}
+	}
+	if !isAdmin && !isOwner {
 		return ErrForbidden
 	}
+
+	// 管理员且不是上传者 → 整条下架（内容治理需要）
+	if isAdmin && !isOwner {
+		return s.removeEverywhere(id)
+	}
+
+	remaining := make([]string, 0, len(owners))
+	for _, owner := range owners {
+		if owner != requesterID {
+			remaining = append(remaining, owner)
+		}
+	}
+	if len(remaining) > 0 {
+		_, err := s.index.SetOwners(id, remaining)
+		return err
+	}
+	return s.removeEverywhere(id)
+}
+
+func (s *Service) removeEverywhere(id string) error {
 	if err := s.index.Remove(id); err != nil {
 		return err
 	}
