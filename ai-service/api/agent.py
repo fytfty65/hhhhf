@@ -3329,13 +3329,13 @@ async def run_negotiate(msg: GatewayMessage):
                                 _long_context = {"days": trip_days, "budget": total_calc_budget}
                                 _long_deadline = _time.monotonic() + LONG_TRIP_GENERATION_SECONDS
                                 # 👑 B-1：分段调用不能重发整份路书的巨型 prompt（实测 30 天行程
-                                # 会调 6 次、每次 8,932 字符、97% 的输入都是这段的重复）。裁成
-                                # "规则 + 只输出节点数组"的紧凑 prompt，并顺手修掉"系统提示要对象、
-                                # 真实任务要数组"的语义打架。
-                                from core.prompts import compact_system_prompt
+                                # 调 6 次、每次 8,932 字符，其中 **8.4k 是候选池 JSON**，97% 的输入
+                                # 都是这段的重复）。分段只带"规则 + 输出契约 + 候选池最小索引"，
+                                # 并顺手修掉"系统提示要对象、真实任务要数组"的语义打架。
+                                from core.prompts import segment_system_prompt
 
                                 try:
-                                    _segment_system_prompt = compact_system_prompt(system_prompt)
+                                    _segment_system_prompt = segment_system_prompt(system_prompt, prompt_pool_data)
                                 except Exception:
                                     _segment_system_prompt = system_prompt  # 裁剪失败就用原文，绝不因此失败
 

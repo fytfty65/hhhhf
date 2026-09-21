@@ -33,14 +33,40 @@ SEGMENT_OUTPUT_CONTRACT = """【分段任务的输出契约（与整份路书不
    自然型目的地每天至少 1 个自然景观等）**照常遵守**。"""
 
 
+def _strip_pool_block(text: str) -> str:
+    """删掉内嵌的候选池区块（【候选…POI…】+ 紧随其后的 JSON 行）。
+
+    这一步是**关键**：候选池 JSON 夹在规则段中间（agent.py 里 规则零…规则六 与池子块交错），
+    所以"只取规则段"会把 8.4k 的池子一起带上 —— 实测正是因此分段 prompt 只降了 455 字符。
+    """
+    lines = str(text or "").splitlines()
+    kept = []
+    skip_next_json = False
+    for line in lines:
+        stripped = line.strip()
+        if "候选" in stripped and "POI" in stripped and stripped.startswith("【"):
+            skip_next_json = True
+            continue
+        if skip_next_json:
+            # 池子块后面紧跟的就是那段 JSON（可能一行，也可能多行）
+            if stripped.startswith("[") or stripped.startswith("{"):
+                if stripped.endswith("]") or stripped.endswith("}"):
+                    skip_next_json = False
+                continue
+            skip_next_json = False
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _rules_block(system_prompt: str) -> str:
-    """取出规则段：从第一个【🔴 规则 起到 [FINAL_JSON] 之前。找不到就返回空串。"""
+    """取出规则段：从第一个【🔴 规则 起到 [FINAL_JSON] 之前；并**剔除内嵌的候选池区块**。"""
     text = str(system_prompt or "")
     start = text.find("【🔴 规则")
     end = text.find("[FINAL_JSON]")
     if start < 0:
         return ""
-    return text[start:end].strip() if end > start else text[start:].strip()
+    block = text[start:end].strip() if end > start else text[start:].strip()
+    return _strip_pool_block(block)
 
 
 def compact_system_prompt(system_prompt: str, extra_rules: str = "") -> str:
@@ -89,10 +115,57 @@ def prompt_stats(system_prompt: str) -> Mapping[str, Any]:
     return {"original": original_len, "compact": compact_len, "saved_ratio": saved}
 
 
+def compact_pool_index(pool: Any) -> list:
+    """把候选池投影成**最小索引**：只留 name / lnglat / type。
+
+    为什么（实测，30 天新疆行程 6 次分段调用）：8,932 字符的 system prompt 里 **8.4k 是候选池 JSON**，
+    而它每次分段都被原样重发 —— 那才是 97% 重复的真身（不是规则段、也不是 [FINAL_JSON] schema）。
+    分段真正需要底座数据的部分是"逐字照抄 name 与坐标"，因此 cost/rating/open_time/photos/amap_url
+    这些字段对分段没用，全部投影掉（主推演那一轮仍然拿完整字段，用于估价与核对）。
+    """
+    items = pool
+    if isinstance(pool, Mapping):
+        items = pool.get("route") or pool.get("items") or pool.get("candidates") or []
+    result = []
+    for entry in items or []:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        item = {"name": name}
+        for key in ("lnglat", "location"):
+            value = entry.get(key)
+            if value:
+                item[key] = value
+        kind = entry.get("type")
+        if kind:
+            item["type"] = str(kind)
+        result.append(item)
+    return result
+
+
+def segment_system_prompt(system_prompt: str, pool: Any = None) -> str:
+    """分段生成用的 system prompt：**规则 + 输出契约 + 候选池最小索引**。"""
+    base = compact_system_prompt(system_prompt)
+    index = compact_pool_index(pool)
+    if not index:
+        return base
+    import json
+
+    return (
+        base
+        + "\n\n【本段可用候选（仅名称/坐标/类型；location 与 lnglat 必须逐字照抄）】\n"
+        + json.dumps(index, ensure_ascii=False)
+    )
+
+
 __all__ = [
     "MIN_COMPACT_CHARS",
     "SEGMENT_OUTPUT_CONTRACT",
+    "compact_pool_index",
     "compact_system_prompt",
     "prompt_stats",
+    "segment_system_prompt",
     "segments_prompt_note",
 ]
