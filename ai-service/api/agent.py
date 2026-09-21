@@ -26,6 +26,7 @@ from core.optimization import fairness_report, pareto_frontier, repair_route, se
 from core.constraints import resolve_conflicts
 from core.contextual_bandit import ContextualThompsonBandit, derive_reward, stable_arm_id
 from core.simulation import member_utilities_for, simulate_plan
+from core.llm_config import model_name  # LLM 默认值单一来源（曾与 conflict.py 各写一套）
 
 
 def _simulate_final_plan(
@@ -97,7 +98,7 @@ client = AsyncOpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     timeout=httpx.Timeout(180.0, connect=15.0, read=180.0, write=30.0)
 )
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen-turbo")
+MODEL_NAME = model_name()  # 单一来源：core/llm_config（曾与 conflict.py 各写一套兜底值）
 
 # LLM 调用重试次数（网络抖动/限流时自动重试）
 LLM_MAX_RETRIES = 2

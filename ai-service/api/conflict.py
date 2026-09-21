@@ -5,16 +5,19 @@ from fastapi import APIRouter, HTTPException
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from models.schemas import GatewayMessage, ConflictResponse # 🚨 核心修复：引入 GatewayMessage
+from core.llm_config import api_key as llm_api_key
+from core.llm_config import base_url as llm_base_url
+from core.llm_config import model_name  # 单一来源：模型名兜底值（曾与 agent.py 各写一套）
 
 load_dotenv()
 
 router = APIRouter()
 
 client = AsyncOpenAI(
-    base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
-    api_key=os.getenv("LLM_API_KEY", "ollama")
+    base_url=llm_base_url(),
+    api_key=llm_api_key()
 )
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen2.5:0.5b")
+MODEL_NAME = model_name()  # 单一来源：core/llm_config（曾与 agent.py 各写一套兜底值）
 
 CONFLICT_PROMPT = """
 你是一个多用户旅游行程冲突检测专家。
