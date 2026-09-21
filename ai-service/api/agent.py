@@ -26,6 +26,7 @@ from core.optimization import fairness_report, pareto_frontier, repair_route, se
 from core.constraints import resolve_conflicts
 from core.contextual_bandit import ContextualThompsonBandit, derive_reward, stable_arm_id
 from core.simulation import member_utilities_for, simulate_plan
+from core import llm_config as llm_cfg  # LLM 调用参数单一来源（模型/端点/temperature/max_tokens）
 from core.llm_config import model_name  # LLM 默认值单一来源（曾与 conflict.py 各写一套）
 
 
@@ -2386,8 +2387,8 @@ async def run_negotiate(msg: GatewayMessage):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.2,
-                    max_tokens=4096,
+                    temperature=llm_cfg.temperature(),
+                    max_tokens=llm_cfg.max_tokens(),
                 )
                 content = (resp.choices[0].message.content if resp.choices else "") or ""
                 arr_match = re.search(r'\[[\s\S]*\]', content)
@@ -2426,7 +2427,7 @@ async def run_negotiate(msg: GatewayMessage):
                         ],
                         stream=True,
                         temperature=llm_temperature,
-                        max_tokens=16384
+                        max_tokens=llm_cfg.max_tokens(long_output=True)
                     )
 
                     yield json.dumps({"token": "[神经链路已建立] 开始接收流式推演 tokens...\n"}, ensure_ascii=False) + "\n"
@@ -3339,8 +3340,8 @@ async def run_negotiate(msg: GatewayMessage):
                                                 {"role": "system", "content": system_prompt},
                                                 {"role": "user", "content": segment_prompt(_target)},
                                             ],
-                                            temperature=0.2,
-                                            max_tokens=4096,
+                                            temperature=llm_cfg.temperature(),
+                                            max_tokens=llm_cfg.max_tokens(),
                                         ),
                                         timeout=45.0,
                                     )
@@ -3386,8 +3387,8 @@ async def run_negotiate(msg: GatewayMessage):
                                                 {"role": "system", "content": system_prompt},
                                                 {"role": "user", "content": segment_prompt(_target)},
                                             ],
-                                            temperature=0.2,
-                                            max_tokens=4096,
+                                            temperature=llm_cfg.temperature(),
+                                            max_tokens=llm_cfg.max_tokens(),
                                         )
                                         _seg_content = (_seg_resp.choices[0].message.content if _seg_resp.choices else "") or ""
                                         _seg_match = re.search(r"\[[\s\S]*\]", _seg_content)
