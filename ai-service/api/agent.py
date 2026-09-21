@@ -3328,6 +3328,16 @@ async def run_negotiate(msg: GatewayMessage):
 
                                 _long_context = {"days": trip_days, "budget": total_calc_budget}
                                 _long_deadline = _time.monotonic() + LONG_TRIP_GENERATION_SECONDS
+                                # 👑 B-1：分段调用不能重发整份路书的巨型 prompt（实测 30 天行程
+                                # 会调 6 次、每次 8,932 字符、97% 的输入都是这段的重复）。裁成
+                                # "规则 + 只输出节点数组"的紧凑 prompt，并顺手修掉"系统提示要对象、
+                                # 真实任务要数组"的语义打架。
+                                from core.prompts import compact_system_prompt
+
+                                try:
+                                    _segment_system_prompt = compact_system_prompt(system_prompt)
+                                except Exception:
+                                    _segment_system_prompt = system_prompt  # 裁剪失败就用原文，绝不因此失败
 
                                 async def _generate_segment(_target: Dict[str, Any]) -> List[Any]:
                                     """只生成该段的节点数组（越界天数由 core 丢弃）。"""
@@ -3337,7 +3347,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         client.chat.completions.create(
                                             model=MODEL_NAME,
                                             messages=[
-                                                {"role": "system", "content": system_prompt},
+                                                {"role": "system", "content": _segment_system_prompt},
                                                 {"role": "user", "content": segment_prompt(_target)},
                                             ],
                                             temperature=llm_cfg.temperature(),
@@ -3384,7 +3394,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         _seg_resp = await client.chat.completions.create(
                                             model=MODEL_NAME,
                                             messages=[
-                                                {"role": "system", "content": system_prompt},
+                                                {"role": "system", "content": _segment_system_prompt},
                                                 {"role": "user", "content": segment_prompt(_target)},
                                             ],
                                             temperature=llm_cfg.temperature(),
