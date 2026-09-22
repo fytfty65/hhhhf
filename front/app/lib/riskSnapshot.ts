@@ -67,6 +67,26 @@ export interface FetchRiskSnapshotOptions {
   force?: boolean;
 }
 
+export interface GlobalRiskCityRequest {
+  city: string;
+  coordinate?: [number, number] | null;
+  baseline?: unknown;
+}
+
+export interface GlobalRiskBatchResult {
+  city: string;
+  snapshot: RiskSnapshot | null;
+  changes: unknown[];
+  available: boolean;
+  error?: string;
+}
+
+export interface GlobalRiskBatchResponse {
+  results: GlobalRiskBatchResult[];
+  errors: Array<{ code?: string; message?: string; city?: string }>;
+  limits?: { max_cities?: number; concurrency?: number };
+}
+
 /**
  * Resolve the latest risk snapshot for a city.
  *
@@ -134,6 +154,32 @@ export async function fetchRiskSnapshot(
   }
 }
 
+/** Query only explicitly selected global cities through the bounded batch API. */
+export async function fetchGlobalRiskSnapshots(
+  cities: GlobalRiskCityRequest[],
+): Promise<GlobalRiskBatchResponse> {
+  const selected = cities
+    .filter((item) => item && typeof item.city === 'string' && item.city.trim())
+    .slice(0, 6)
+    .map((item) => ({ ...item, city: item.city.trim() }));
+  if (!selected.length) return { results: [], errors: [{ code: 'CITIES_REQUIRED', message: '请选择城市' }] };
+  const response = await fetch(`${apiBase()}/api/v1/risk/global`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ cities: selected }),
+  });
+  const payload = (await response.json().catch(() => null)) as GlobalRiskBatchResponse | null;
+  if (!response.ok) {
+    const error = payload?.errors?.[0] || { code: 'GLOBAL_RISK_UNAVAILABLE', message: '全球情报服务暂不可用' };
+    throw new Error(error.message || error.code || 'GLOBAL_RISK_UNAVAILABLE');
+  }
+  return {
+    results: Array.isArray(payload?.results) ? payload!.results : [],
+    errors: Array.isArray(payload?.errors) ? payload!.errors : [],
+    limits: payload?.limits,
+  };
+}
+
 /** Drop memoised snapshots, e.g. when the user explicitly switches city. */
 export function invalidateRiskSnapshot(city?: string): void {
   if (!city) {
@@ -150,4 +196,3 @@ export function invalidateRiskSnapshot(city?: string): void {
 export function riskSnapshotCacheSize(): number {
   return cache.size;
 }
-

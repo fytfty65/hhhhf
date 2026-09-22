@@ -68,6 +68,8 @@ async def amap_poi(payload: Dict[str, Any]):
 _RISK_TTL_SECONDS = float(os.getenv("RISK_SNAPSHOT_TTL_SECONDS", "45"))
 _risk_cache: Dict[str, tuple] = {}
 _risk_cache_lock = asyncio.Lock()
+_GLOBAL_RISK_MAX_CITIES = 6
+_GLOBAL_RISK_CONCURRENCY = 3
 
 
 def _risk_cache_key(city: str, coord_str: str) -> str:
@@ -138,6 +140,68 @@ async def risk_realtime(payload: Dict[str, Any]):
         payload.get("baseline"),
     )
     return {"snapshot": snapshot, "changes": changes, "ts": int(datetime.datetime.now().timestamp() * 1000)}
+
+
+@router.post("/risk/global")
+async def risk_global(payload: Dict[str, Any]):
+    """按需查询有限数量的全球城市风险快照。
+
+    全球城市目录本身是静态坐标，不应被当作实时情报。此端点只查询调用方
+    明确选中的城市，最多 6 个且并发最多 3 个；每个结果仍复用实时风险端点
+    的 TTL 缓存，并保留 source / risk_ts / estimated 契约。
+    """
+    raw_cities = payload.get("cities") if isinstance(payload, dict) else None
+    if not isinstance(raw_cities, list) or not raw_cities:
+        return {"results": [], "errors": [{"code": "CITIES_REQUIRED", "message": "cities 必须为非空数组"}], "limits": {"max_cities": _GLOBAL_RISK_MAX_CITIES, "concurrency": _GLOBAL_RISK_CONCURRENCY}}
+
+    errors = []
+    requests = []
+    seen = set()
+    for index, item in enumerate(raw_cities):
+        if not isinstance(item, dict):
+            errors.append({"index": index, "code": "CITY_INVALID", "message": "城市项必须为对象"})
+            continue
+        city = str(item.get("city") or "").strip()
+        if not city:
+            errors.append({"index": index, "code": "CITY_REQUIRED", "message": "城市名称不能为空"})
+            continue
+        if len(city) > 100:
+            errors.append({"index": index, "city": city[:32], "code": "CITY_TOO_LONG", "message": "城市名称过长"})
+            continue
+        key = city.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(requests) >= _GLOBAL_RISK_MAX_CITIES:
+            continue
+        requests.append({
+            "city": city,
+            "coordinate": item.get("coordinate") or item.get("lnglat") or item.get("coord"),
+            "baseline": item.get("baseline"),
+        })
+
+    if len(raw_cities) > _GLOBAL_RISK_MAX_CITIES:
+        errors.append({"code": "CITY_LIMIT", "message": f"单次最多查询 {_GLOBAL_RISK_MAX_CITIES} 个城市"})
+
+    semaphore = asyncio.Semaphore(_GLOBAL_RISK_CONCURRENCY)
+
+    async def resolve(item: Dict[str, Any]) -> Dict[str, Any]:
+        async with semaphore:
+            try:
+                snapshot, changes = await _risk_snapshot(item["city"], item["coordinate"], item["baseline"])
+                return {"city": item["city"], "snapshot": snapshot, "changes": changes, "available": bool(snapshot)}
+            except Exception as exc:
+                # Provider failures are isolated to one city; never fabricate a
+                # risk value for the remaining cities.
+                return {"city": item["city"], "snapshot": None, "changes": [], "available": False, "error": "CITY_SNAPSHOT_UNAVAILABLE"}
+
+    results = await asyncio.gather(*(resolve(item) for item in requests))
+    return {
+        "results": results,
+        "errors": errors,
+        "limits": {"max_cities": _GLOBAL_RISK_MAX_CITIES, "concurrency": _GLOBAL_RISK_CONCURRENCY},
+        "ts": int(datetime.datetime.now().timestamp() * 1000),
+    }
 
 
 @router.post("/risk/subscriptions/refresh")

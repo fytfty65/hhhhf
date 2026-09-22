@@ -978,3 +978,30 @@ func RiskRealtimeHandler(c *gin.Context) {
 	}
 	c.Data(status, "application/json; charset=utf-8", data)
 }
+
+// RiskGlobalHandler 将有限数量的全球城市情报查询转发到 AI 服务。
+// AI 服务负责数量上限、并发控制、TTL 缓存和来源契约；网关只做边界校验与统一错误协议。
+func RiskGlobalHandler(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整", "results": []interface{}{}, "errors": []interface{}{}})
+		return
+	}
+	cities, ok := req["cities"].([]interface{})
+	if !ok || len(cities) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cities 必须为非空数组", "results": []interface{}{}, "errors": []map[string]interface{}{{"code": "CITIES_REQUIRED"}}})
+		return
+	}
+	if len(cities) > 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "单次最多查询 6 个城市", "results": []interface{}{}, "errors": []map[string]interface{}{{"code": "CITY_LIMIT"}}})
+		return
+	}
+	reqBody, _ := json.Marshal(req)
+	data, status, err := callAI(c, "/api/v1/risk/global", reqBody)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "AI 服务不可用", "results": []interface{}{}, "errors": []map[string]interface{}{{"code": "AI_UNAVAILABLE"}}})
+		return
+	}
+	c.Data(status, "application/json; charset=utf-8", data)
+}

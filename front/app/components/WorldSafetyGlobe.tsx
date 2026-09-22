@@ -21,7 +21,7 @@ import {
   radarSharedCss,
   radarGlobeImage,
 } from '../lib/radarTheme';
-import { fetchRiskSnapshot } from '../lib/riskSnapshot';
+import { fetchGlobalRiskSnapshots, fetchRiskSnapshot } from '../lib/riskSnapshot';
 import { validLngLat } from '../lib/mapTiles';
 import RiskRadarChart from './RiskRadarChart';
 import DraggablePanel from './DraggablePanel';
@@ -253,6 +253,9 @@ export default function WorldSafetyGlobe({
   const [liveSafety, setLiveSafety] = useState<SafetyInfo | undefined>(safetyInfo);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<number>(Date.now());
+  const [globalSnapshots, setGlobalSnapshots] = useState<Record<string, SafetyInfo>>({});
+  const [globalLoadingCity, setGlobalLoadingCity] = useState<string | null>(null);
+  const [globalError, setGlobalError] = useState('');
 
   // Render the immersive radar at the document root. The map workspace uses
   // its own isolated stacking context, which otherwise lets sibling panels
@@ -407,6 +410,30 @@ export default function WorldSafetyGlobe({
     return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
   }, [dynamicGlobalCities]);
 
+  const inspectGlobalCity = useCallback(async (city: typeof GLOBAL_CITIES[number]) => {
+    setGlobalLoadingCity(city.name);
+    setGlobalError('');
+    try {
+      const response = await fetchGlobalRiskSnapshots([{
+        city: city.name,
+        coordinate: [city.lng, city.lat],
+      }]);
+      const result = response.results.find((item) => item.city === city.name);
+      if (result?.snapshot) {
+        setGlobalSnapshots((previous) => ({ ...previous, [city.name]: result.snapshot as SafetyInfo }));
+      } else {
+        setGlobalError(`${city.name} 暂无可用供应商快照`);
+      }
+      if (response.errors.length && !result?.snapshot) {
+        setGlobalError(response.errors[0]?.message || `${city.name} 情报暂不可用`);
+      }
+    } catch {
+      setGlobalError('全球情报服务暂不可用，请稍后重试');
+    } finally {
+      setGlobalLoadingCity(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (globeRef.current) {
       globeRef.current.pointOfView(
@@ -488,11 +515,18 @@ export default function WorldSafetyGlobe({
   const globalRiskPoints = useMemo(() => dynamicGlobalCities
     .filter(c => !safeRoutePoints.some(rp => rp.lnglat[0] === c.lng && rp.lnglat[1] === c.lat))
     .filter(c => !contextCityNames.has(c.name))
-    .map(c => ({
-      lat: c.lat, lng: c.lng, name: c.name, region: c.region,
-      color: '#64748b',
-      size: 0.2, isGlobalCity: true,
-    })), [dynamicGlobalCities, safeRoutePoints, contextCityNames]);
+    .map(c => {
+      const snapshot = globalSnapshots[c.name];
+      const level = snapshot?.risk_level;
+      return {
+        lat: c.lat, lng: c.lng, name: c.name, region: c.region,
+        color: level === 'HIGH' ? COLORS.danger : level === 'MEDIUM' ? COLORS.warn : level === 'LOW' ? COLORS.safe : '#64748b',
+        size: snapshot ? 0.32 : 0.2,
+        isGlobalCity: true,
+        snapshotAvailable: Boolean(snapshot),
+        riskLevel: level,
+      };
+    }), [dynamicGlobalCities, safeRoutePoints, contextCityNames, globalSnapshots, COLORS.danger, COLORS.warn, COLORS.safe]);
 
   // 👑 航线弧线
   const arcsData: any[] = [];
@@ -937,15 +971,21 @@ export default function WorldSafetyGlobe({
             <div className="mt-1.5 flex flex-wrap gap-1">{globalRegionSummary.map(([region, count]) => <span key={region} className="rounded bg-slate-300/60 px-1.5 py-0.5 text-[9px] text-slate-600 dark:bg-white/10 dark:text-slate-400">{region} {count}</span>)}</div>
             <p className="mt-2 text-[10px] leading-4 text-slate-500">城市点是全球地理目录，不等同于实时风险。只有带供应商、时间戳的信号才进入风险判断。</p>
           </div>
-          {dynamicGlobalCities.slice(0, 10).map(city => (
-            <div key={city.name} className="flex items-center justify-between py-1.5 border-b border-slate-300/50 dark:border-white/5 last:border-0">
+          {globalError && <div className="rounded border border-amber-400/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">{globalError}</div>}
+          {dynamicGlobalCities.slice(0, 10).map(city => {
+            const snapshot = globalSnapshots[city.name];
+            const source = snapshot?.source || snapshot?.signal_sources?.safety?.provider;
+            return (
+            <button type="button" key={city.name} onClick={() => void inspectGlobalCity(city)} className="w-full flex items-center justify-between py-1.5 border-b border-slate-300/50 dark:border-white/5 last:border-0 text-left hover:bg-slate-200/50 dark:hover:bg-white/5 rounded px-1 transition-colors">
               <div className="flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                <div className={`w-1.5 h-1.5 rounded-full ${snapshot ? (snapshot.risk_level === 'HIGH' ? 'bg-rose-500' : snapshot.risk_level === 'MEDIUM' ? 'bg-amber-500' : 'bg-emerald-500') : 'bg-slate-500'}`} />
                 <span className="text-xs text-slate-700 dark:text-slate-300">{city.name}</span>
               </div>
-              <span className="text-[11px] text-slate-500">{city.region}</span>
-            </div>
-          ))}
+              <span className="text-[10px] text-slate-500">{globalLoadingCity === city.name ? '查询中…' : snapshot ? `${snapshot.risk_level || '已同步'} · ${source || '来源未知'}` : `${city.region} · 点击查询`}</span>
+            </button>
+            );
+          })}
+          {Object.keys(globalSnapshots).length > 0 && <p className="text-[10px] leading-4 text-slate-500">已查询城市的风险等级来自后端快照；未点击城市仍只是地理目录。</p>}
         </div>
       </DraggablePanel>
 
@@ -1077,7 +1117,7 @@ export default function WorldSafetyGlobe({
                   <div style="background:rgba(8,15,30,0.95);border:1px solid ${color}50;border-radius:8px;padding:6px 10px;box-shadow:0 8px 32px rgba(0,0,0,0.6);backdrop-filter:blur(16px);">
                     <div style="font-size:10px;font-weight:900;color:${color};line-height:1.2;font-family:${RADAR_FONT.display};margin-bottom:2px;">${safeName}</div>
                     ${isContext ? `<div style="font-size:8px;color:#94a3b8;font-family:${RADAR_FONT.data};">${safeRegion} · 周边城市</div>` :
-                    isGlobal ? `<div style="font-size:8px;color:#94a3b8;font-family:${RADAR_FONT.data};">${safeRegion} · 参考城市</div>` :
+                    isGlobal ? `<div style="font-size:8px;color:#94a3b8;font-family:${RADAR_FONT.data};">${safeRegion} · ${d.snapshotAvailable ? `后端快照 ${escapeHtml(d.riskLevel || '已同步')}` : '点击查询真实快照'}</div>` :
                     `<div style="font-size:8px;color:#94a3b8;font-family:${RADAR_FONT.data};">${safeDesc.slice(0, 25) || '航点'}${safeTime ? ' · ' + safeTime : ''}${safeCost ? ' · ' + safeCost : ''}</div>`}
                   </div>
                 </div>
@@ -1086,6 +1126,10 @@ export default function WorldSafetyGlobe({
             el.onclick = (e: Event) => {
               e.stopPropagation?.();
               if (d.index !== undefined && d.isRoutePoint) focusOnPoint(d.index);
+              if (d.isGlobalCity) {
+                const city = GLOBAL_CITIES.find((item) => item.name === d.name);
+                if (city) void inspectGlobalCity(city);
+              }
             };
             return el;
           }}

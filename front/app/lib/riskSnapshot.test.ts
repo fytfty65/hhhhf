@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchRiskSnapshot, invalidateRiskSnapshot, riskSnapshotCacheSize } from './riskSnapshot.ts';
+import { fetchGlobalRiskSnapshots, fetchRiskSnapshot, invalidateRiskSnapshot, riskSnapshotCacheSize } from './riskSnapshot.ts';
 
 // The bug these tests lock down: WorldSafetyGlobe and RiskPushCenter each ran
 // their own 30s timer against /api/v1/risk/realtime, so with the 3D radar open
@@ -145,5 +145,22 @@ test('invalidateRiskSnapshot drops only the requested city', async () => {
   } finally {
     stub.restore();
     invalidateRiskSnapshot();
+  }
+});
+
+test('global batch query sends selected cities and preserves source evidence', async () => {
+  const stub = stubFetch(() => ({ json: {
+    results: [{ city: '东京', available: true, changes: [], snapshot: { source: 'provider-x', risk_ts: 1770000000000 } }],
+    errors: [],
+    limits: { max_cities: 6, concurrency: 3 },
+  } }));
+  try {
+    const response = await fetchGlobalRiskSnapshots([{ city: '东京', coordinate: [139.7, 35.6] }]);
+    assert.equal(stub.calls.length, 1);
+    assert.equal(stub.calls[0].url.endsWith('/api/v1/risk/global'), true);
+    assert.deepEqual((stub.calls[0].body as { cities: unknown[] }).cities[0], { city: '东京', coordinate: [139.7, 35.6] });
+    assert.equal(response.results[0].snapshot?.source, 'provider-x');
+  } finally {
+    stub.restore();
   }
 });

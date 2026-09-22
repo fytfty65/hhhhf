@@ -200,6 +200,8 @@ func RegisterRoutes(r *gin.Engine) {
 
 		// 旅中风险推送中心：实时重取风险快照 + 变更事件检测
 		apiGroup.POST("/risk/realtime", handlers.AIRateLimitMiddleware(), handlers.RiskRealtimeHandler)
+		// 全球情报：仅查询用户明确选中的少量城市，不轮询静态城市目录
+		apiGroup.POST("/risk/global", handlers.AIRateLimitMiddleware(), handlers.RiskGlobalHandler)
 
 		// ==========================================
 		// 功能8：目的地风险订阅 + 碳足迹评估（P5）
