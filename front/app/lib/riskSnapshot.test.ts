@@ -182,4 +182,10 @@ test('global risk summary reports evidence and never invents missing CII', () =>
   assert.equal(summary.totalSignals, 3);
   assert.equal(summary.estimated, true);
   assert.equal(summary.freshness, '30 秒前');
+  assert.deepEqual(summary.signals.map((signal) => [signal.key, signal.available, signal.estimated]), [
+    ['safety', true, false],
+    ['weather', true, true],
+    ['traffic', false, false],
+  ]);
+  assert.equal(summary.signals[1].provider, 'weather-provider');
 });

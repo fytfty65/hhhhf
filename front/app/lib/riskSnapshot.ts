@@ -95,6 +95,16 @@ export interface GlobalRiskSummary {
   totalSignals: number;
   estimated: boolean;
   freshness: string;
+  signals: GlobalRiskSignalSummary[];
+}
+
+export interface GlobalRiskSignalSummary {
+  key: string;
+  label: string;
+  provider: string;
+  available: boolean;
+  estimated: boolean;
+  freshness: string;
 }
 
 /** Convert a provider snapshot into display-safe evidence without inventing missing values. */
@@ -114,6 +124,23 @@ export function summarizeGlobalRiskSnapshot(snapshot: RiskSnapshot | null, now =
   const ageSeconds = Number.isFinite(timestampNumber) && timestampNumber > 0
     ? Math.max(0, Math.round((now - timestampNumber) / 1000))
     : null;
+  const signalLabels: Record<string, string> = { safety: '安全', weather: '天气', traffic: '路况' };
+  const signalsSummary = Object.entries(signalLabels).map(([key, label]) => {
+    const signal = sourceMap[key];
+    const retrieved = signal && typeof signal === 'object' ? (signal as { retrieved_at?: unknown }).retrieved_at : undefined;
+    const signalTimestamp = typeof retrieved === 'string' ? Date.parse(retrieved) : Number(retrieved);
+    const fallbackTimestamp = Number(snapshot?.risk_ts);
+    const timestamp = Number.isFinite(signalTimestamp) && signalTimestamp > 0 ? signalTimestamp : fallbackTimestamp;
+    const ageSeconds = Number.isFinite(timestamp) && timestamp > 0 ? Math.max(0, Math.round((now - timestamp) / 1000)) : null;
+    return {
+      key,
+      label,
+      provider: typeof signal?.provider === 'string' && signal.provider.trim() ? signal.provider.trim() : '来源未提供',
+      available: signal?.available === true,
+      estimated: signal?.estimated === true,
+      freshness: ageSeconds === null ? '无时间戳' : ageSeconds < 60 ? `${ageSeconds} 秒前` : `${Math.round(ageSeconds / 60)} 分钟前`,
+    };
+  });
   return {
     cii: Number.isFinite(ciiNumber) ? ciiNumber.toFixed(1) : 'N/A',
     riskLevel: typeof snapshot?.risk_level === 'string' && snapshot.risk_level ? snapshot.risk_level : '未评估',
@@ -122,6 +149,7 @@ export function summarizeGlobalRiskSnapshot(snapshot: RiskSnapshot | null, now =
     totalSignals: signals.length,
     estimated: snapshot?.is_estimated === true || signals.some((signal) => signal?.estimated === true),
     freshness: ageSeconds === null ? '无时间戳' : ageSeconds < 60 ? `${ageSeconds} 秒前` : `${Math.round(ageSeconds / 60)} 分钟前`,
+    signals: signalsSummary,
   };
 }
 

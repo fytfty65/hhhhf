@@ -39,6 +39,40 @@ func TestPlanningContextRequiresTripID(t *testing.T) {
 	}
 }
 
+func TestRiskGlobalRejectsEmptyCities(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/risk/global", RiskGlobalHandler)
+	req := httptest.NewRequest(http.MethodPost, "/risk/global", strings.NewReader(`{"cities":[]}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["error"] != "cities 必须为非空数组" {
+		t.Fatalf("unexpected payload: %s", rec.Body.String())
+	}
+}
+
+func TestRiskGlobalRejectsTooManyCitiesBeforeAI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/risk/global", RiskGlobalHandler)
+	req := httptest.NewRequest(http.MethodPost, "/risk/global", strings.NewReader(`{"cities":[{"city":"a"},{"city":"b"},{"city":"c"},{"city":"d"},{"city":"e"},{"city":"f"},{"city":"g"}]}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "CITY_LIMIT") {
+		t.Fatalf("expected CITY_LIMIT, got %s", rec.Body.String())
+	}
+}
+
 func TestPlanningDataEnvelopeIncludesContractMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
