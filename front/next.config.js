@@ -67,6 +67,16 @@ const FRAME_HOSTS = [
   'https://www.bing.com',
 ];
 
+// FCM Web Push 必需的连接目标（B 方案）：
+//  - fcmregistrations / firebaseinstallations：`getToken()` 注册设备拿 token 走这两处；
+//  - gstatic：firebase-messaging-sw.js 用 importScripts 拉 compat SDK。
+// 少一个的表现就是"授权成功却永远拿不到 token / 收不到推送"——与瓦片那次同一类坑，所以写进契约测试。
+const PUSH_HOSTS = [
+  'https://fcmregistrations.googleapis.com',
+  'https://firebaseinstallations.googleapis.com',
+  'https://www.gstatic.com',
+];
+
 const API_TARGETS = [
   'http://localhost:8080',
   'http://127.0.0.1:8080',
@@ -78,7 +88,7 @@ function contentSecurityPolicy() {
   const scriptSrc = isDev
     ? "'self' 'unsafe-inline' 'unsafe-eval' blob:"
     : "'self' 'unsafe-inline' blob:";
-  const connectSrc = ["'self'", ...API_TARGETS, ...TILE_HOSTS];
+  const connectSrc = ["'self'", ...API_TARGETS, ...TILE_HOSTS, ...PUSH_HOSTS];
   if (isDev) {
     connectSrc.push('ws://localhost:3001', 'ws://127.0.0.1:3001');
   }

@@ -81,6 +81,14 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/my/photos", handlers.ListMyPhotosHandler)
 		apiGroup.GET("/photos/:id", handlers.GetPhotoHandler)
 		apiGroup.DELETE("/photos/:id", handlers.DeletePhotoHandler)
+
+		// ==========================================
+		// FCM Web Push 设备 token（B 方案）
+		// 与既有的 /api/v1/notifications/push/subscription（原生 Web Push 订阅）并存：
+		// 这里是新的运输层（FCM），既有那条保持不动以免破坏现有前端与测试。
+		// ==========================================
+		apiGroup.POST("/notifications/push/fcm-token", handlers.RegisterFCMTokenHandler)
+		apiGroup.DELETE("/notifications/push/fcm-token", handlers.UnregisterFCMTokenHandler)
 		// 举报：任何登录用户可用，**立刻把照片退回待审**（对其他用户不可见）等人工复核
 		apiGroup.POST("/photos/:id/report", handlers.ReportPhotoHandler)
 		// 管理端：待复核列表 / 通过 / 拒绝（拒绝必须给理由，理由回传上传者）。

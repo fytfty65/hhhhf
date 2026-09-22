@@ -43,24 +43,65 @@ export async function requestWebPushSubscription(): Promise<{ state: WebPushStat
     if (permission !== 'granted') return { state: 'permission-denied', message: '你拒绝了浏览器通知，仍可在站内查看风险提醒' };
   }
   if (Notification.permission !== 'granted') return { state: 'permission-denied', message: '浏览器通知权限未开启，仍可在站内查看风险提醒' };
-  const registration = await navigator.serviceWorker.ready;
-  const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToUint8Array(vapidPublicKey()) });
-  const json = subscription.toJSON();
-  if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth) return { state: 'available', message: '浏览器未返回完整推送凭据，已保留站内通知' };
-  await pushApiJson(`${API_BASE}/api/v1/notifications/push/subscription`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, user_agent: navigator.userAgent }),
-  });
-  return { state: 'subscribed', message: '浏览器通知已开启，重大风险会提醒你' };
+
+  // —— B 方案：运输层改用 FCM（VAPID 公钥 = Firebase 控制台 → Cloud Messaging → Web Push 证书那串 B...）——
+  // 状态机、文案与降级行为都保持原样：拿不到凭据就退回"站内通知"，绝不假装订阅成功。
+  try {
+    const configResponse = await fetch('/api/push/config', { cache: 'no-store' });
+    const publicConfig = await configResponse.json().catch(() => null);
+    if (!publicConfig || publicConfig.enabled !== true) {
+      return { state: 'disabled', message: '尚未配置 Web Push 公钥，将继续使用站内通知' };
+    }
+    const [{ initializeApp, getApps }, messagingModule] = await Promise.all([
+      import('firebase/app'),
+      import('firebase/messaging'),
+    ]);
+    const supported = await messagingModule.isSupported().catch(() => false);
+    if (!supported) return { state: 'unsupported', message: '当前浏览器不支持推送，将继续使用站内通知' };
+
+    const app = getApps().length > 0 ? getApps()[0] : initializeApp(publicConfig);
+    const registration = await navigator.serviceWorker.ready;
+    const deviceToken = await messagingModule.getToken(messagingModule.getMessaging(app), {
+      vapidKey: vapidPublicKey(),
+      serviceWorkerRegistration: registration,
+    });
+    if (!deviceToken) return { state: 'available', message: '未能取得推送凭据，已保留站内通知' };
+
+    await pushApiJson(`${API_BASE}/api/v1/notifications/push/fcm-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: deviceToken, platform: String(navigator.userAgent || '').slice(0, 32) }),
+    });
+    return { state: 'subscribed', message: '浏览器通知已开启，重大风险会提醒你' };
+  } catch {
+    return { state: 'available', message: '推送登记未完成（可能是网络或浏览器限制），已保留站内通知' };
+  }
 }
 
 export async function disableWebPushSubscription() {
-  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-    const registration = await navigator.serviceWorker.ready;
-    const subscription = await registration.pushManager.getSubscription();
-    const endpoint = subscription?.endpoint || '';
-    await subscription?.unsubscribe();
-    await pushApiJson(`${API_BASE}/api/v1/notifications/push/subscription${endpoint ? `?endpoint=${encodeURIComponent(endpoint)}` : ''}`, { method: 'DELETE' });
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  let deviceToken = '';
+  try {
+    const [{ getApps }, messagingModule] = await Promise.all([import('firebase/app'), import('firebase/messaging')]);
+    const apps = getApps();
+    if (apps.length > 0) {
+      const messaging = messagingModule.getMessaging(apps[0]);
+      const registration = await navigator.serviceWorker.ready;
+      deviceToken = (await messagingModule.getToken(messaging, {
+        vapidKey: vapidPublicKey(),
+        serviceWorkerRegistration: registration,
+      }).catch(() => '')) || '';
+      await messagingModule.deleteToken(messaging).catch(() => undefined);
+    }
+  } catch {
+    /* 取消订阅失败不能卡住用户，下面仍然尝试服务端注销 */
+  }
+  try {
+    await pushApiJson(
+      `${API_BASE}/api/v1/notifications/push/fcm-token${deviceToken ? `?token=${encodeURIComponent(deviceToken)}` : ''}`,
+      { method: 'DELETE' },
+    );
+  } catch {
+    /* 服务端注销失败也保持安静：本地已 deleteToken，之后不会再收到 */
   }
 }
