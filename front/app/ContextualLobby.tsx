@@ -14,7 +14,7 @@ import {
   Activity, Radio, Wifi, Zap, Signal, Share2, Link2, Download, Train, MoreHorizontal
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { API_BASE, WS_BASE, apiFetch, getAuthToken, installApiFetchInterceptor } from './lib/utils';
+import { API_BASE, WS_BASE, apiFetch, apiJson, getAuthToken, installApiFetchInterceptor } from './lib/utils';
 import { shortenRegionName, tryExtractJson, normalizeLnglat, extractStreamingRoutes } from './lib/lobbyUtils';
 import type { Phase, RoomMember, UserProfile } from './types';
 
@@ -65,6 +65,8 @@ import PreTripPlanningPanel from './components/PreTripPlanningPanel';
 import BookingHub from './components/BookingHub';
 import TripExecutionPanel from './components/TripExecutionPanel';
 import ReplanProposalPanel from './components/ReplanProposalPanel';
+
+type WorkspaceLayer = 'plan' | 'evidence' | 'execution' | 'professional';
 
 // 目的地图谱数据（用于主页灵感目的地推荐）
 import { PROVINCE_DATA } from './data/provinceData';
@@ -850,13 +852,57 @@ export default function ContextualLobby() {
 // ================= 工作区区域 =================
 function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, initialDestination, onBack }: { mode: string, role: string, roomCode: string, roomMembers: RoomMember[], currentUser: UserProfile, initialDestination?: string | null, onBack: () => void }) {
   const [phase, setPhase] = useState<Phase>('drafting');
+  // Keep the decision workspace focused. Advanced evidence and diagnostics are
+  // still available, but are no longer rendered as a wall of panels by default.
+  const [workspaceLayer, setWorkspaceLayer] = useState<WorkspaceLayer>('plan');
+  const [agentCapabilities, setAgentCapabilities] = useState<any[]>([]);
+  const [agentEvaluation, setAgentEvaluation] = useState<Record<string, any>>({});
+  const [providerRegistry, setProviderRegistry] = useState<any[]>([]);
+  const [featureSnapshot, setFeatureSnapshot] = useState<any | null>(null);
+  const [qualitySummary, setQualitySummary] = useState<any | null>(null);
+  const [agentDiagnosticsLoading, setAgentDiagnosticsLoading] = useState(false);
+  const [savedTripId, setSavedTripId] = useState('');
+  const planningResourceId = savedTripId || roomCode;
+  useEffect(() => {
+    if (phase !== 'decision') setWorkspaceLayer('plan');
+  }, [phase]);
+  useEffect(() => {
+    if (phase !== 'decision' || workspaceLayer !== 'professional') return;
+    let active = true;
+    setAgentDiagnosticsLoading(true);
+    Promise.all([
+      apiJson<any>(`${API_BASE}/api/v1/planning/agents/capabilities`),
+      apiJson<any>(`${API_BASE}/api/v1/planning/agents/evaluation?trip_id=${encodeURIComponent(planningResourceId)}`),
+      apiJson<any>(`${API_BASE}/api/v1/planning/providers/registry`),
+      apiJson<any>(`${API_BASE}/api/v1/planning/features?trip_id=${encodeURIComponent(planningResourceId)}`),
+      apiJson<any>(`${API_BASE}/api/v1/planning/quality?trip_id=${encodeURIComponent(planningResourceId)}`),
+    ]).then(([capabilityPayload, evaluationPayload, registryPayload, featurePayload, qualityPayload]) => {
+      if (!active) return;
+      const capabilities = capabilityPayload?.data?.agents || capabilityPayload?.agents;
+      const evaluation = evaluationPayload?.data?.agents || evaluationPayload?.agents;
+      setAgentCapabilities(Array.isArray(capabilities) ? capabilities : []);
+      setAgentEvaluation(evaluation && typeof evaluation === 'object' ? evaluation : {});
+      const registry = registryPayload?.data?.providers || registryPayload?.providers;
+      setProviderRegistry(Array.isArray(registry) ? registry : []);
+      setFeatureSnapshot(featurePayload?.data || featurePayload || null);
+      setQualitySummary(qualityPayload?.data || qualityPayload || null);
+    }).catch(() => {
+      if (!active) return;
+      setAgentCapabilities([]);
+      setAgentEvaluation({});
+      setProviderRegistry([]);
+      setFeatureSnapshot(null);
+      setQualitySummary(null);
+    }).finally(() => {
+      if (active) setAgentDiagnosticsLoading(false);
+    });
+    return () => { active = false; };
+  }, [phase, workspaceLayer, planningResourceId]);
   const [intentsReady, setIntentsReady] = useState(false);
   const [showBlackboard, setShowBlackboard] = useState(false);
   const [tripSaved, setTripSaved] = useState(false);
   // Use the live room as the resource key while drafting, then switch to the
   // persisted trip ID after saving. City names are display data, not IDs.
-  const [savedTripId, setSavedTripId] = useState('');
-  const planningResourceId = savedTripId || roomCode;
 
   // 👑 交互页内可实时切换的出行方式 / 偏好定位（与后端 user_preferences.mode / role 对齐）
   const [activeMode, setActiveMode] = useState<string>(mode);
@@ -893,6 +939,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   // 动态团队满意度矩阵
   const [teamSatisfaction, setTeamSatisfaction] = useState<Record<string, number>>({});
   const [fairnessAudit, setFairnessAudit] = useState<any>(null);
+  const [agentContractAudits, setAgentContractAudits] = useState<any[]>([]);
   // 概率化数字孪生结果（P50/P90 时长、超预算概率、成员满意度分布）。
   // 这些是采样得到的分布，而不是单点估计，因此可用于表达不确定度。
   const [simulation, setSimulation] = useState<{
@@ -1166,6 +1213,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   applyPlanGovernance(finalData);
                   if (finalData.arbitration_records) setArbitrationRecords(finalData.arbitration_records);
                   if (finalData.fairness && typeof finalData.fairness === 'object') setFairnessAudit(finalData.fairness);
+                  if (Array.isArray(finalData.agent_contracts)) setAgentContractAudits(finalData.agent_contracts);
                   // Capture the bandit arm the planner actually used. Without
                   // this the satisfaction form posts an empty bandit_arm_id, the
                   // gateway drops the reward, and the policy accumulates no
@@ -1258,6 +1306,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               if (fd.team_satisfaction) setTeamSatisfaction(fd.team_satisfaction);
               if (fd.arbitration_records) setArbitrationRecords(fd.arbitration_records);
               if (fd.fairness && typeof fd.fairness === 'object') setFairnessAudit(fd.fairness);
+              if (Array.isArray(fd.agent_contracts)) setAgentContractAudits(fd.agent_contracts);
               // final_route 是权威 payload：只收到它（重连、回放、流式 token 丢了）时
               // 核对面板同样要有数据。
               applyPlanGovernance(fd);
@@ -1517,26 +1566,26 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         const reasons = Array.isArray(validation?.violations) ? validation.violations.join('、') : '硬约束未通过';
         throw new Error(`候选未通过应用校验：${reasons}`);
       }
-      const nextRoutes = [...dynamicRoutes];
-      nextRoutes[targetIndex] = {
-        ...target,
-        ...candidate,
-        name: candidate.name || candidate.location || target.name,
-        location: candidate.location || candidate.name || target.location,
-        lnglat: candidate.lnglat || candidate.coordinate || target.lnglat,
-        coordinate_status: candidate.lnglat || candidate.coordinate ? 'verified' : target.coordinate_status,
-        source: candidate.source || target.source,
-        replacement_reason: replanProposal.action?.reason || '应急重规划替换',
-      };
-      setDynamicRoutes(nextRoutes);
-      const saved = await persistTripRoutes(nextRoutes);
-      if (!saved) throw new Error('替代节点已在当前页面更新，但行程保存失败');
-      await apiFetch(`${API_BASE}/api/v1/planning/events`, {
+      // The gateway is the single commit point. The browser only previews and
+      // validates candidates; it must not overwrite the trip or emit an
+      // accepted/applied event before the server confirms the transaction.
+      const confirmResponse = await apiFetch(`${API_BASE}/api/v1/planning/replan/confirm`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trip_id: planningResourceId, event_type: 'replan_applied', payload: { proposal_id: replanProposal.proposalId || '', action_id: replanProposal.action?.id || '', candidate_id: candidate.id || '', candidate_name: candidate.name || candidate.location || '' } }),
+        body: JSON.stringify({
+          trip_id: planningResourceId,
+          proposal_id: replanProposal.proposalId || '',
+          affected_nodes: affected,
+          candidate,
+          confirmation: 'user_confirmed',
+        }),
       });
+      const confirmPayload = await confirmResponse.json();
+      if (!confirmResponse.ok) throw new Error(confirmPayload?.error?.message || confirmPayload?.error || '服务端未确认重规划');
+      const confirmed = confirmPayload?.data || confirmPayload;
+      const nextRoutes = Array.isArray(confirmed?.route) ? confirmed.route : [...dynamicRoutes];
+      setDynamicRoutes(nextRoutes);
       setReplanProposal(null);
-      setApiError('应急替代节点已应用并保存，未受影响节点保持不变');
+      setApiError(`应急替代节点已由服务端确认并保存，保留 ${confirmed?.preserved_nodes ?? Math.max(0, dynamicRoutes.length - affected.length)} 个未受影响节点`);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : '应用应急提案失败');
     } finally {
@@ -1843,6 +1892,28 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               {planQuality.dailyCounts.length > 0 && <span className="text-slate-400">白天节点 {planQuality.dailyCounts.map((item: any) => `D${item.day}:${item.count}`).join(' · ')}</span>}
             </div>
           )}
+          {phase === 'decision' && (
+            <nav className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1 sm:grid-cols-4" aria-label="工作区层级">
+              {([
+                ['plan', '主方案', '路线、天数与预算'],
+                ['evidence', '证据', '来源、时效与约束'],
+                ['execution', '旅中执行', '状态、风险与重规划'],
+                ['professional', '专业诊断', '公平、策略与模型'],
+              ] as const).map(([key, label, hint]) => (
+                <button
+                  key={key}
+                  type="button"
+                  data-testid={`workspace-layer-${key}`}
+                  aria-pressed={workspaceLayer === key}
+                  onClick={() => setWorkspaceLayer(key)}
+                  className={`min-h-12 rounded-lg px-2 py-1.5 text-left transition-colors ${workspaceLayer === key ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200' : 'text-slate-500 hover:bg-white/70'}`}
+                >
+                  <span className="block text-[11px] font-black">{label}</span>
+                  <span className="mt-0.5 block truncate text-[9px] font-medium text-slate-400">{hint}</span>
+                </button>
+              ))}
+            </nav>
+          )}
         </header>
 
         <div className="flex-1 overflow-y-auto bg-white custom-scrollbar relative">
@@ -1851,7 +1922,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               （预算核对/已作调整/行程规模/本次调整/价格核对/跨城怎么走/长途分段/还需要你留意
               共 8 段）就把整列顶到 1200px 以上：正文区被压成 0 高、面板最后几段滚不到
               （1440×900 实测 header 1210px、正文 clientHeight 0、文档不可滚）。 */}
-          {phase === 'decision' && (
+          {phase === 'decision' && workspaceLayer === 'evidence' && (
             <div className="px-5 pt-2 sm:px-8">
               <PlanGovernancePanel data={planGovernance} />
             </div>
@@ -1886,31 +1957,86 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
             {phase === 'decision' && (
               <motion.div key="workspace-decision-panel" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 <div className="px-4 pt-4 sm:px-8">
-                  <TripExecutionPanel
-                    tripId={planningResourceId}
-                    planId={savedTripId || undefined}
-                    routes={dynamicRoutes}
-                    onRequestReplan={(node) => {
-                      setUserIntent(`保持未完成节点不变，仅因“${node.name}”执行状态变化而重排剩余路线，目标是最小修改。`);
-                      setPhase('drafting');
-                      setIntentsReady(false);
-                    }}
-                  />
-                  <ReplanProposalPanel
-                    proposal={replanProposal}
-                    busy={replanBusy}
-                    onApply={(candidate) => { void applyReplanCandidate(candidate); }}
-                    onReject={() => { void rejectReplanProposal(); }}
-                  />
-                  <PreTripPlanningPanel
-                    userId={currentUser.id}
-                    tripId={planningResourceId}
-                    destination={targetCityInfo?.name || initialDestination || ''}
-                    baseNodes={currentDayRoutes}
-                    budget={Number(budgetData?.total_budget || 0)}
-                    days={totalDays.length}
-                    travelers={Math.max(1, roomMembers.length)}
-                  />
+                  {workspaceLayer === 'execution' && <>
+                    <TripExecutionPanel
+                      tripId={planningResourceId}
+                      planId={savedTripId || undefined}
+                      routes={dynamicRoutes}
+                      onRequestReplan={(node) => {
+                        setUserIntent(`保持未完成节点不变，仅因“${node.name}”执行状态变化而重排剩余路线，目标是最小修改。`);
+                        setPhase('drafting');
+                        setIntentsReady(false);
+                      }}
+                    />
+                    <ReplanProposalPanel
+                      proposal={replanProposal}
+                      busy={replanBusy}
+                      onApply={(candidate) => { void applyReplanCandidate(candidate); }}
+                      onReject={() => { void rejectReplanProposal(); }}
+                    />
+                  </>}
+                  {workspaceLayer === 'plan' && <PreTripPlanningPanel
+                      userId={currentUser.id}
+                      tripId={planningResourceId}
+                      destination={targetCityInfo?.name || initialDestination || ''}
+                      baseNodes={currentDayRoutes}
+                      budget={Number(budgetData?.total_budget || 0)}
+                      days={totalDays.length}
+                      travelers={Math.max(1, roomMembers.length)}
+                    />}
+                  {workspaceLayer === 'professional' && <section className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4" data-testid="professional-diagnostics">
+                    <div className="flex items-start justify-between gap-3">
+                      <div><h3 className="text-sm font-black text-slate-800">专业诊断</h3><p className="mt-1 text-[11px] text-slate-500">把公平性、策略选择和模型状态放在诊断层，主方案保持清晰。</p></div>
+                      <button type="button" onClick={() => setShowBlackboard(true)} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100">查看协作日志</button>
+                    </div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">成员最低满意度</p><p className="mt-1 text-lg font-black text-slate-800">{fairnessAudit?.minimum_satisfaction != null ? `${Math.round(Number(fairnessAudit.minimum_satisfaction) * 100)}%` : '待评估'}</p></div>
+                      <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">满意度方差</p><p className="mt-1 text-lg font-black text-slate-800">{fairnessAudit?.satisfaction_variance != null ? Number(fairnessAudit.satisfaction_variance).toFixed(3) : '待评估'}</p></div>
+                      <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">策略状态</p><p className="mt-1 text-sm font-black text-slate-800">{banditDecision ? (banditDecision.explored ? '探索' : '择优') : '样本不足'}</p></div>
+                    </div>
+                    <div className="mt-4 border-t border-slate-200 pt-3">
+                      <div className="flex items-center justify-between gap-2"><p className="text-[11px] font-black text-slate-700">智能体能力矩阵</p><span className="text-[10px] text-slate-400">{agentDiagnosticsLoading ? '同步中' : `${agentCapabilities.length} 个已注册`}</span></div>
+                      {agentCapabilities.length > 0 ? <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        {agentCapabilities.map((capability: any) => {
+                          const runtime = agentEvaluation[capability.agent_id] || agentEvaluation[capability.domain];
+                          const events = Number(runtime?.events || 0);
+                          const errors = Number(runtime?.errors || 0);
+                          const status = events === 0 ? '无样本' : errors > 0 ? '有错误事件' : '有运行记录';
+                          const statusClass = events === 0 ? 'text-amber-700 bg-amber-50' : errors > 0 ? 'text-rose-700 bg-rose-50' : 'text-emerald-700 bg-emerald-50';
+                          return <article key={capability.agent_id} className="rounded-lg border border-slate-200 bg-white p-3" data-testid={`agent-capability-${capability.agent_id}`}>
+                            <div className="flex items-start justify-between gap-2"><div><h4 className="text-xs font-black text-slate-800">{capability.label || capability.agent_id}</h4><p className="mt-1 text-[10px] leading-4 text-slate-500">{capability.responsibility}</p></div><span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold ${statusClass}`}>{status}</span></div>
+                            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-slate-400"><span>超时 {Math.round(Number(capability.timeout_ms || 0) / 1000)}s</span><span>事件 {events}</span><span>错误 {errors}</span></div>
+                            <p className="mt-1 text-[9px] text-slate-400">降级：{capability.fallback || '未声明'} · 证据：{capability.evidence_required ? '必需' : '可选'}</p>
+                          </article>;
+                        })}
+                      </div> : <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-700">能力矩阵暂不可用或尚无运行样本，当前不显示稳定性结论。</p>}
+                      {agentContractAudits.length > 0 && <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3" data-testid="agent-contract-audit"><p className="text-[10px] font-bold text-slate-500">本次方案提案审计</p><div className="mt-2 flex flex-wrap gap-2">{agentContractAudits.map((audit: any) => <span key={audit.agent_id || audit.domain} className={`rounded px-2 py-1 text-[10px] font-bold ${audit.status === 'ok' ? 'bg-emerald-50 text-emerald-700' : audit.status === 'degraded' ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700'}`}>{audit.agent_id || '提案'} · {audit.status} · 证据 {audit.evidence_count ?? 0}</span>)}</div></div>}
+                      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3" data-testid="feature-snapshot-summary">
+                          <div className="flex items-center justify-between"><p className="text-[10px] font-black text-slate-500">特征分层</p><span className="text-[9px] text-slate-400">{featureSnapshot?.feature_version || 'features-v1'}</span></div>
+                          <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
+                            {['long_term', 'journey', 'realtime', 'behavior'].map((key) => <div key={key} className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">{key === 'long_term' ? '长期画像' : key === 'journey' ? '当前旅程' : key === 'realtime' ? '实时信号' : '行为统计'}<span className="ml-1 text-slate-400">{key === 'realtime' ? (featureSnapshot?.groups?.realtime?.status || '未持久化') : featureSnapshot?.groups?.[key] ? '可查看' : '待采集'}</span></div>)}
+                          </div>
+                          <p className="mt-2 text-[9px] leading-4 text-slate-400">原始反馈与提示词不直接暴露，实时天气、客流和延误仅接受供应商快照。</p>
+                        </div>
+                        <div className="rounded-lg border border-slate-200 bg-white p-3" data-testid="provider-registry-summary">
+                          <div className="flex items-center justify-between"><p className="text-[10px] font-black text-slate-500">供应商字段注册</p><span className="text-[9px] text-slate-400">{providerRegistry.length} 个领域</span></div>
+                          <div className="mt-2 flex flex-wrap gap-1.5">{providerRegistry.map((provider: any) => <span key={provider.kind} className={`rounded px-2 py-1 text-[9px] font-bold ${provider.configured ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{provider.kind} · {provider.configured ? provider.provider : '未配置'}</span>)}</div>
+                          <p className="mt-2 text-[9px] leading-4 text-slate-400">字段必须带来源、observed_at 和估算标记，注册表不返回密钥或原始响应。</p>
+                        </div>
+                      </div>
+                      <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3" data-testid="quality-evaluation-summary">
+                        <div className="flex items-center justify-between"><p className="text-[10px] font-black text-slate-500">持续评估</p><span className={`rounded px-2 py-1 text-[9px] font-bold ${qualitySummary?.training_ready ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{qualitySummary?.training_ready ? '可进入离线复核' : '样本不足'}</span></div>
+                        <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px] sm:grid-cols-4">
+                          <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">事件<span className="ml-1 font-black text-slate-800">{qualitySummary?.events ?? 0}</span></div>
+                          <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">采纳率<span className="ml-1 font-black text-slate-800">{qualitySummary?.rates?.adoption != null ? `${Math.round(Number(qualitySummary.rates.adoption) * 100)}%` : '—'}</span></div>
+                          <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">漂移<span className="ml-1 font-black text-slate-800">{qualitySummary?.drift?.status || '无样本'}</span></div>
+                          <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">反事实<span className="ml-1 font-black text-slate-800">{qualitySummary?.counterfactual?.status || '待采集'}</span></div>
+                        </div>
+                        <p className="mt-2 text-[9px] leading-4 text-slate-400">质量指标只接受注册指标和带数值的智能体事件；样本不足时不会显示“模型已学会”。</p>
+                      </div>
+                    </div>
+                  </section>}
                 </div>
                 {planVariants.length > 1 && (
                   <div className="px-8 pt-4 flex items-center gap-2 flex-wrap">
@@ -1930,7 +2056,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                     {planSwitchNotice && <span role="status" className="basis-full text-[11px] font-bold text-emerald-600">{planSwitchNotice}</span>}
                   </div>
                 )}
-                <MafengwoStylePanel 
+                {workspaceLayer === 'plan' && <MafengwoStylePanel
                   routes={currentDayRoutes} 
                   totalDays={totalDays}
                   activeDayIndex={activeDayIndex}
@@ -1972,7 +2098,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                     setPhotoModalOpen(true);
                    }}
                    onSecondaryPlan={(poi: any) => setSecondaryPoi({ ...poi, city: targetCityInfo?.name || '' })}
-                 />
+                 />}
               </motion.div>
             )}
           </AnimatePresence>
@@ -2054,15 +2180,6 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                 if (!replanResponse.ok) {
                   throw new Error(replanPayload?.error?.message || replanPayload?.error || '结构化重规划失败');
                 }
-                const proposalId = proposal?.proposal_id || payload?.data?.proposal_id || payload?.proposal_id;
-                await apiFetch(`${API_BASE}/api/v1/planning/events`, {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    trip_id: planningResourceId,
-                    event_type: 'replan_proposal_accepted',
-                    payload: { proposal_id: proposalId || '', action_id: action.id, action_type: action.type, affected_nodes: action.affected_nodes || [], preserve_nodes: action.preserve_nodes || [] },
-                  }),
-                });
                 const data = replanPayload?.data || replanPayload;
                 const candidateCount = Array.isArray(data?.replacement_candidates) ? data.replacement_candidates.length : 0;
                 setReplanProposal({

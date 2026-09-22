@@ -104,10 +104,12 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/planning/packing/checklist", handlers.PackingChecklistHandler)
 		apiGroup.POST("/planning/secondary", handlers.SecondaryItineraryHandler)
 		apiGroup.POST("/planning/replan", handlers.MinimalPerturbationReplanHandler)
+		apiGroup.POST("/planning/replan/confirm", handlers.ConfirmReplanHandler)
 		apiGroup.POST("/planning/replan/validate", handlers.ValidateReplanCandidateHandler)
 		apiGroup.GET("/planning/features", handlers.FeatureSnapshotHandler)
 		apiGroup.POST("/planning/knowledge/graph", handlers.KnowledgeGraphHandler)
 		apiGroup.GET("/planning/agents/evaluation", handlers.AgentEvaluationHandler)
+		apiGroup.GET("/planning/agents/capabilities", handlers.AgentCapabilitiesHandler)
 		apiGroup.POST("/planning/specialists/evaluate", handlers.SpecialistAdviceHandler)
 		apiGroup.POST("/planning/crowd/predict", handlers.CrowdForecastHandler)
 		apiGroup.POST("/planning/guide/multilingual", handlers.MultilingualGuideHandler)
@@ -126,6 +128,7 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/planning/quality", handlers.PlanningQualityHandler)
 		apiGroup.GET("/planning/dataset/export", handlers.ExportPlanningDatasetHandler)
 		apiGroup.GET("/planning/providers/health", handlers.PlanningProviderHealthHandler)
+		apiGroup.GET("/planning/providers/registry", handlers.ProviderRegistryHandler)
 		apiGroup.GET("/planning/providers/probe", handlers.PlanningProviderProbeHandler)
 		apiGroup.GET("/planning/providers/tools", handlers.MCPToolsSchemaHandler)
 		apiGroup.POST("/planning/signals", handlers.PlanningSignalsHandler)
@@ -144,7 +147,9 @@ func RegisterRoutes(r *gin.Engine) {
 		// 功能1：个性化旅行画像 + 推荐引擎 + A/B 测试
 		// ==========================================
 		apiGroup.GET("/user/preference", handlers.GetUserPreferenceHandler)
+		apiGroup.PUT("/user/preference", handlers.UpdateUserPreferenceHandler)
 		apiGroup.POST("/user/preference/refresh", handlers.RefreshUserPreferenceHandler)
+		apiGroup.DELETE("/user/preference", handlers.DeleteUserPreferenceHandler)
 		apiGroup.POST("/recommendation/track", handlers.TrackRecommendationEventHandler)
 		apiGroup.GET("/recommendation/metrics", handlers.RecommendationMetricsHandler)
 		// P6：埋点 A/B 漏斗（曝光 → 点击 → 采纳 → 满意）
@@ -210,6 +215,11 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/risk/unsubscribe", handlers.AIRateLimitMiddleware(), handlers.UnsubscribeRiskHandler)
 		apiGroup.GET("/risk/subscriptions", handlers.ListRiskSubscriptionsHandler)
 		apiGroup.POST("/risk/subscriptions/check", handlers.AIRateLimitMiddleware(), handlers.CheckRiskSubscriptionsHandler)
+		apiGroup.GET("/risk/notifications", handlers.ListRiskNotificationsHandler)
+		apiGroup.POST("/risk/notifications/:id/read", handlers.AcknowledgeRiskNotificationHandler)
+		apiGroup.GET("/notifications/push/status", handlers.GetPushSubscriptionStatusHandler)
+		apiGroup.POST("/notifications/push/subscription", handlers.SavePushSubscriptionHandler)
+		apiGroup.DELETE("/notifications/push/subscription", handlers.DeletePushSubscriptionHandler)
 		apiGroup.POST("/carbon/footprint", handlers.AIRateLimitMiddleware(), handlers.CarbonFootprintHandler)
 	}
 }

@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -31,7 +34,45 @@ func FeatureSnapshotHandler(c *gin.Context) {
 	var feedback, events int64
 	database.DB.Model(&models.FeedbackLog{}).Where("user_id = ?", userID).Count(&feedback)
 	database.DB.Model(&models.PlanningEvent{}).Where("user_id = ?", userID).Count(&events)
-	planningData(c, gin.H{"user_id": userID, "trip_id": tripID, "profile": planningService.ProfilePayload(userID), "aggregates": gin.H{"feedback_events": feedback, "planning_events": events}, "feature_policy": gin.H{"raw_text_excluded": true, "future_feedback": "explicit_and_implicit_separate"}, "generated_at": time.Now().UTC()})
+	profile := planningService.ProfilePayload(userID)
+	delete(profile, "prompt_hint")
+	behavior := map[string]int{}
+	var behaviorEvents []models.PlanningEvent
+	behaviorQuery := database.DB.Where("user_id = ?", userID)
+	if tripID != "" {
+		behaviorQuery = behaviorQuery.Where("trip_id = ?", tripID)
+	}
+	_ = behaviorQuery.Find(&behaviorEvents).Error
+	for _, event := range behaviorEvents {
+		if planningEventTrainableTypes[event.EventType] {
+			behavior[event.EventType]++
+		}
+	}
+	journey := map[string]any{"status": "not_selected", "trip_id": tripID}
+	if tripID != "" {
+		journey["status"] = "available"
+		var run models.PlanningRun
+		if err := database.DB.Where("user_id = ? AND trip_id = ?", userID, tripID).Order("created_at desc").First(&run).Error; err == nil {
+			var stored map[string]any
+			if json.Unmarshal([]byte(run.Features), &stored) == nil {
+				journey["features"] = stored
+			}
+			journey["model_version"] = run.ModelVersion
+			journey["observed_at"] = run.CreatedAt
+		}
+	}
+	planningData(c, gin.H{
+		"user_id": userID, "trip_id": tripID, "feature_version": "features-v1",
+		"groups": gin.H{
+			"long_term": gin.H{"values": profile, "source": "preference_profile", "observed_at": time.Now().UTC()},
+			"journey":   journey,
+			"realtime":  gin.H{"status": "not_persisted", "fields": []string{"weather", "crowd", "delay", "open_status"}, "policy": "provider_snapshot_only"},
+			"behavior":  gin.H{"counts": behavior, "source": "planning_events", "raw_payload_excluded": true},
+		},
+		"aggregates":     gin.H{"feedback_events": feedback, "planning_events": events},
+		"feature_policy": gin.H{"raw_text_excluded": true, "prompt_injection": "disabled", "future_feedback": "explicit_and_implicit_separate", "retention_days": 730},
+		"generated_at":   time.Now().UTC(),
+	})
 }
 
 // KnowledgeGraphHandler builds a lightweight route knowledge graph from
@@ -66,6 +107,8 @@ func KnowledgeGraphHandler(c *gin.Context) {
 	}
 	nodes := make([]gin.H, 0, len(req.Nodes))
 	edges := make([]gin.H, 0)
+	rejectedFacts := make([]gin.H, 0)
+	allowedRelations := map[string]bool{"city_attraction": true, "attraction_theme": true, "attraction_opening": true, "attraction_season": true, "attraction_audience": true, "attraction_transport": true, "attraction_risk": true, "dining_cuisine": true, "dining_allergen": true, "lodging_commute": true, "supplier_field": true}
 	for index, raw := range req.Nodes {
 		name := strings.TrimSpace(fmt.Sprint(raw["name"]))
 		if name == "" || name == "<nil>" {
@@ -75,12 +118,43 @@ func KnowledgeGraphHandler(c *gin.Context) {
 			continue
 		}
 		id := fmt.Sprintf("node-%d", index)
-		nodes = append(nodes, gin.H{"id": id, "name": name, "day": raw["day"], "type": raw["type"], "source": "user_route_structure"})
+		nodes = append(nodes, gin.H{"id": id, "name": name, "day": raw["day"], "type": raw["type"], "source": "user_route_structure", "observed_at": time.Now().UTC(), "confidence": 1.0, "estimated": false})
 		if index > 0 {
-			edges = append(edges, gin.H{"from": fmt.Sprintf("node-%d", index-1), "to": id, "relation": "route_sequence"})
+			edges = append(edges, gin.H{"from": fmt.Sprintf("node-%d", index-1), "to": id, "relation": "route_sequence", "source": "user_route_structure", "observed_at": time.Now().UTC(), "confidence": 1.0, "estimated": false})
+		}
+		// Facts are accepted only through an explicit verified_facts array. This
+		// prevents an LLM-generated description from silently becoming graph truth.
+		if facts, ok := raw["verified_facts"].([]any); ok {
+			for factIndex, item := range facts {
+				fact, ok := item.(map[string]any)
+				if !ok {
+					rejectedFacts = append(rejectedFacts, gin.H{"node": name, "index": factIndex, "reason": "fact_not_object"})
+					continue
+				}
+				relation := strings.TrimSpace(fmt.Sprint(fact["relation"]))
+				target := strings.TrimSpace(fmt.Sprint(fact["target"]))
+				source := strings.TrimSpace(fmt.Sprint(fact["source"]))
+				confidence, confidenceOK := numericPlanningValue(fact["confidence"])
+				if relation == "" || !allowedRelations[relation] || target == "" || source == "" || strings.EqualFold(source, "llm") || !confidenceOK || confidence < 0 || confidence > 1 {
+					rejectedFacts = append(rejectedFacts, gin.H{"node": name, "index": factIndex, "reason": "missing_or_untrusted_source_fields"})
+					continue
+				}
+				rawObserved := strings.TrimSpace(fmt.Sprint(fact["observed_at"]))
+				if rawObserved == "" || rawObserved == "<nil>" {
+					rejectedFacts = append(rejectedFacts, gin.H{"node": name, "index": factIndex, "reason": "observed_at_required"})
+					continue
+				}
+				observedAt, err := time.Parse(time.RFC3339, rawObserved)
+				if err != nil {
+					rejectedFacts = append(rejectedFacts, gin.H{"node": name, "index": factIndex, "reason": "observed_at_invalid"})
+					continue
+				}
+				observedAt = observedAt.UTC()
+				edges = append(edges, gin.H{"from": id, "to": target, "relation": relation, "source": source, "observed_at": observedAt, "confidence": confidence, "estimated": fact["estimated"] == true})
+			}
 		}
 	}
-	planningData(c, gin.H{"trip_id": ctx.TripID, "nodes": nodes, "edges": edges, "fact_policy": "structural_only_until_sourced_knowledge", "source": candidateSource("omniroute-route-graph", true), "updated_at": time.Now().UTC()})
+	planningData(c, gin.H{"trip_id": ctx.TripID, "graph_version": "knowledge-graph-v1", "nodes": nodes, "edges": edges, "rejected_facts": rejectedFacts, "fact_policy": "verified_facts_only_no_llm_writes", "source": candidateSource("omniroute-route-graph", true), "updated_at": time.Now().UTC()})
 }
 
 // AgentEvaluationHandler reports observable success/error counts by agent or
@@ -101,6 +175,7 @@ func AgentEvaluationHandler(c *gin.Context) {
 	var events []models.PlanningEvent
 	_ = query.Find(&events).Error
 	metrics := map[string]map[string]int{}
+	quality := map[string]map[string]any{}
 	for _, event := range events {
 		var payload map[string]any
 		_ = json.Unmarshal([]byte(event.Payload), &payload)
@@ -120,13 +195,98 @@ func AgentEvaluationHandler(c *gin.Context) {
 		} else {
 			metrics[name]["success"]++
 		}
+		metric := strings.TrimSpace(fmt.Sprint(payload["metric"]))
+		if metric != "" && metric != "<nil>" {
+			if quality[name] == nil {
+				quality[name] = map[string]any{}
+			}
+			entry, _ := quality[name][metric].(map[string]any)
+			if entry == nil {
+				entry = map[string]any{"samples": 0, "sum": 0.0}
+			}
+			if value, ok := numericPlanningValue(payload["value"]); ok {
+				entry["samples"] = entry["samples"].(int) + 1
+				entry["sum"] = entry["sum"].(float64) + value
+				entry["mean"] = entry["sum"].(float64) / float64(entry["samples"].(int))
+			}
+			quality[name][metric] = entry
+		}
 	}
-	planningData(c, gin.H{"agents": metrics, "sample_count": len(events), "quality_policy": "aggregate_observability_only", "status": func() string {
+	planningData(c, gin.H{"agents": metrics, "quality_metrics": quality, "sample_count": len(events), "quality_policy": "aggregate_observability_only_no_inferred_scores", "status": func() string {
 		if len(events) == 0 {
 			return "insufficient_data"
 		}
 		return "ready_for_offline_review"
 	}()})
+}
+
+// ProviderRegistryHandler exposes configured supplier capabilities without
+// returning endpoints' credentials or raw responses. Field freshness is a
+// policy contract; a provider response must carry its own observed_at/source.
+func ProviderRegistryHandler(c *gin.Context) {
+	definitions := []struct {
+		kind   string
+		fields []string
+		fresh  int
+	}{
+		{"destination", []string{"name", "address", "opening_hours", "season", "audience", "url"}, 86400},
+		{"scenic", []string{"name", "opening_hours", "ticket_url", "crowd_level", "url"}, 3600},
+		{"transport", []string{"origin", "destination", "departure_time", "arrival_time", "availability", "price", "booking_url"}, 300},
+		{"lodging", []string{"name", "room_type", "availability", "nightly_price", "commute_minutes", "booking_url"}, 900},
+		{"dining", []string{"name", "cuisine", "allergens", "opening_hours", "price", "url"}, 3600},
+		{"weather", []string{"observed_at", "condition", "temperature", "precipitation", "alert"}, 900},
+		{"crowd", []string{"observed_at", "level", "score", "forecast_hour"}, 900},
+	}
+	providers := make([]gin.H, 0, len(definitions))
+	for _, definition := range definitions {
+		key := strings.ToUpper(definition.kind)
+		base, token, label := resolveProviderConfig(key)
+		providers = append(providers, gin.H{
+			"kind":                     definition.kind,
+			"provider":                 firstNonEmpty(label, providerName(key, base), "unconfigured"),
+			"configured":               base != "",
+			"endpoint_count":           len(resolveProviderConfigs(key)),
+			"authenticated":            token != "",
+			"fields":                   definition.fields,
+			"freshness_policy_seconds": definition.fresh,
+			"source_required":          true,
+			"observed_at_required":     true,
+			"estimated_explicit":       true,
+		})
+	}
+	planningData(c, gin.H{"registry_version": "provider-registry-v1", "providers": providers, "privacy": gin.H{"credentials_excluded": true, "raw_payload_excluded": true}, "generated_at": time.Now().UTC()})
+}
+
+// AgentCapabilitiesHandler proxies the AI service's canonical capability
+// registry. The gateway remains the browser-facing boundary and strips any
+// accidental upstream envelope before returning the secret-free contract.
+func AgentCapabilitiesHandler(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(aiServiceBaseURL(), "/")+"/api/v1/agent/capabilities", nil)
+	if err != nil {
+		planningError(c, http.StatusBadGateway, "AGENT_CAPABILITIES_UNAVAILABLE", "智能体能力矩阵暂不可用", nil)
+		return
+	}
+	if token := strings.TrimSpace(os.Getenv("AI_SERVICE_INTERNAL_TOKEN")); token != "" {
+		request.Header.Set("X-Omni-Internal-Token", token)
+	}
+	response, err := (&http.Client{Timeout: 3 * time.Second}).Do(request)
+	if err != nil {
+		planningError(c, http.StatusBadGateway, "AGENT_CAPABILITIES_UNAVAILABLE", "智能体能力矩阵暂不可用", nil)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		planningError(c, http.StatusBadGateway, "AGENT_CAPABILITIES_UNAVAILABLE", "智能体能力矩阵暂不可用", map[string]string{"upstream_status": fmt.Sprint(response.StatusCode)})
+		return
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&payload); err != nil {
+		planningError(c, http.StatusBadGateway, "AGENT_CAPABILITIES_INVALID", "智能体能力矩阵格式无法识别", nil)
+		return
+	}
+	planningData(c, payload)
 }
 
 // SpecialistAdviceHandler provides deterministic, explainable specialist
@@ -194,7 +354,7 @@ func CrowdForecastHandler(c *gin.Context) {
 		return
 	}
 	if options, source, available := fetchPlanningProvider(c.Request.Context(), "CROWD", ctx); available {
-		planningData(c, gin.H{"forecast": options, "source": source, "estimated": false, "policy": "provider_first"})
+		planningData(c, gin.H{"forecast": options, "source": source, "estimated": false, "policy": "provider_first", "explanation": crowdForecastExplanation(req.Hour, req.Weekend, false)})
 		return
 	}
 	level := "medium"
@@ -205,7 +365,30 @@ func CrowdForecastHandler(c *gin.Context) {
 	if req.Hour >= 10 && req.Hour <= 15 {
 		score += 0.1
 	}
-	planningData(c, gin.H{"forecast": gin.H{"level": level, "score": score, "confidence": 0.35, "date": req.Date, "hour": req.Hour}, "source": candidateSource("historical_calendar_estimator", true), "estimated": true, "policy": "provider_first_fallback_estimate"})
+	if score >= 0.75 {
+		level = "high"
+	} else if score <= 0.4 {
+		level = "low"
+	}
+	planningData(c, gin.H{"forecast": gin.H{"level": level, "score": score, "confidence": 0.35, "date": req.Date, "hour": req.Hour}, "source": candidateSource("historical_calendar_estimator", true), "estimated": true, "policy": "provider_first_fallback_estimate", "explanation": crowdForecastExplanation(req.Hour, req.Weekend, true)})
+}
+
+func crowdForecastExplanation(hour int, weekend, estimated bool) gin.H {
+	window := "09:00-11:00"
+	if hour >= 10 && hour <= 15 {
+		window = "08:00-09:30 或 16:00 后"
+	}
+	if !weekend && (hour < 10 || hour > 15) {
+		window = "当前时段可优先考虑"
+	}
+	reasons := []string{"根据日期类型与时段规则生成"}
+	if weekend {
+		reasons = append(reasons, "周末通常存在更高到访压力")
+	}
+	if hour >= 10 && hour <= 15 {
+		reasons = append(reasons, "日间核心时段通常更拥挤")
+	}
+	return gin.H{"recommended_window": window, "diversion_strategy": "优先错峰；无合适窗口时选择同主题替代点", "reasons": reasons, "alternative_required": true, "estimated": estimated}
 }
 
 func MultilingualGuideHandler(c *gin.Context) {

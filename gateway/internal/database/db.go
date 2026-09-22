@@ -20,7 +20,7 @@ var DB *gorm.DB
 // Increment this value when a schema change needs an explicit, auditable
 // migration step. Migrations are applied one version at a time so a partially
 // upgraded deployment can resume safely on the next start.
-const schemaVersion = 8
+const schemaVersion = 11
 
 func migrateSchema(tx *gorm.DB, version int) error {
 	switch version {
@@ -69,6 +69,12 @@ func migrateSchema(tx *gorm.DB, version int) error {
 			return err
 		}
 		return tx.Exec("CREATE INDEX IF NOT EXISTS idx_post_favorites_user_id ON post_favorites(user_id)").Error
+	case 9:
+		return tx.AutoMigrate(&models.RiskNotification{})
+	case 10:
+		return tx.AutoMigrate(&models.RiskNotification{})
+	case 11:
+		return tx.AutoMigrate(&models.WebPushSubscription{})
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}

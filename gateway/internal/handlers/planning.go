@@ -1075,6 +1075,8 @@ func runShadowDeployments(parent context.Context, ctx contracts.PlanningContext,
 				item["error"] = err.Error()
 			} else if output == nil {
 				item["status"] = "skipped"
+			} else {
+				item["prediction_summary"] = shadowPredictionSummary(output)
 			}
 			results <- result{item: item}
 		}()
@@ -1087,4 +1089,45 @@ func runShadowDeployments(parent context.Context, ctx contracts.PlanningContext,
 	}
 	sort.SliceStable(output, func(i, j int) bool { return output[i]["version"].(string) < output[j]["version"].(string) })
 	return output
+}
+
+// shadowPredictionSummary keeps shadow observability useful without storing
+// raw model output, prompts, member details, or supplier credentials.
+func shadowPredictionSummary(output map[string]any) map[string]any {
+	summary := map[string]any{}
+	if route, ok := output["route"].([]any); ok {
+		summary["route_node_count"] = len(route)
+	}
+	if plan, ok := output["plan"].(map[string]any); ok {
+		if value, valid := numericPlanningValue(plan["estimated_cost"]); valid && value >= 0 {
+			summary["estimated_cost"] = value
+		}
+		if value, ok := plan["hard_satisfied"].(bool); ok {
+			summary["hard_constraints_satisfied"] = value
+		}
+	}
+	if constraints, ok := output["constraints"].(map[string]any); ok {
+		if value, ok := constraints["hard_satisfied"].(bool); ok {
+			summary["hard_constraints_satisfied"] = value
+		}
+		if violations, ok := constraints["violations"].([]any); ok {
+			summary["constraint_violation_count"] = len(violations)
+		}
+	}
+	if fairness, ok := output["fairness"].(map[string]any); ok {
+		for _, key := range []string{"minimum_utility", "utility_variance", "utility_stddev", "max_regret", "threshold_exceeded"} {
+			if value, exists := fairness[key]; exists {
+				summary[key] = value
+			}
+		}
+	}
+	if objective, ok := output["objective_scores"].(map[string]any); ok {
+		summary["objective_scores"] = objective
+	}
+	if len(summary) == 0 {
+		summary["available"] = false
+	} else {
+		summary["available"] = true
+	}
+	return summary
 }

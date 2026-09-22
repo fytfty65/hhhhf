@@ -53,8 +53,11 @@ func JourneyStateHandler(c *gin.Context) {
 		var payload map[string]any
 		if json.Unmarshal([]byte(latestRisk.Payload), &payload) == nil {
 			status := "pending_confirmation"
+			if expires, err := time.Parse(time.RFC3339, strings.TrimSpace(fmt.Sprint(payload["expires_at"]))); err == nil && expires.Before(time.Now().UTC()) {
+				status = "expired"
+			}
 			proposalID := strings.TrimSpace(fmt.Sprint(payload["proposal_id"]))
-			if proposalID != "" {
+			if proposalID != "" && status != "expired" {
 				var lifecycle []models.PlanningEvent
 				_ = database.DB.Where("user_id = ? AND trip_id = ? AND event_type IN ?", userID, tripID, []string{"replan_proposal_accepted", "replan_proposal_rejected", "replan_applied"}).Order("created_at desc").Find(&lifecycle).Error
 				for _, event := range lifecycle {

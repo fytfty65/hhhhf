@@ -300,6 +300,10 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
     await reachDecision(page);
 
+    // Governance is intentionally kept in the evidence layer so the default
+    // plan view stays focused. Open that layer before asserting its details.
+    await page.getByTestId('workspace-layer-evidence').click();
+
     const panel = page.getByLabel('行程核对说明');
     await expect(panel).toBeVisible({ timeout: 10_000 });
 

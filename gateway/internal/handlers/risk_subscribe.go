@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -248,6 +249,7 @@ func CheckRiskSubscriptionsHandler(c *gin.Context) {
 		// A high-severity change creates a persisted replan proposal. The
 		// current route is never overwritten; clients must explicitly accept it.
 		replan := createRiskReplanProposal(req.UserID, r.City, r.Changes, r.Snapshot)
+		createRiskNotifications(req.UserID, r.City, r.Changes, r.Snapshot, replan)
 		if replan != nil {
 			for i := range alerts {
 				if alerts[i]["city"] == r.City {
@@ -277,17 +279,148 @@ func createRiskReplanProposal(userID, city string, changes []map[string]interfac
 	if database.DB.Where("user_id = ? AND dest_city = ?", userID, city).Order("created_at desc").First(&trip).Error != nil {
 		return gin.H{"status": "needs_user_context", "reason": "trip_not_found", "city": city}
 	}
+	var recent []models.PlanningEvent
+	if database.DB.Where("user_id = ? AND trip_id = ? AND event_type = ?", userID, trip.ID, "replan_triggered").Order("created_at desc").Limit(20).Find(&recent).Error == nil {
+		for _, event := range recent {
+			var prior map[string]any
+			if json.Unmarshal([]byte(event.Payload), &prior) != nil || prior["status"] != "pending_confirmation" {
+				continue
+			}
+			if expires, err := time.Parse(time.RFC3339, strings.TrimSpace(fmt.Sprint(prior["expires_at"]))); err == nil && expires.Before(time.Now().UTC()) {
+				prior["status"] = "expired"
+				encoded, _ := json.Marshal(prior)
+				_ = database.DB.Model(&event).Update("payload", string(encoded)).Error
+				continue
+			}
+			return gin.H{"proposal_id": prior["proposal_id"], "status": "pending_confirmation", "trip_id": trip.ID, "city": city, "deduplicated": true, "expires_at": prior["expires_at"]}
+		}
+	}
 	var document map[string]interface{}
 	_ = json.Unmarshal([]byte(trip.Content), &document)
 	route, _ := document["routes"].([]interface{})
 	if route == nil {
 		route, _ = document["route"].([]interface{})
 	}
-	proposal := gin.H{"proposal_id": fmt.Sprintf("risk-%d", time.Now().UTC().UnixNano()), "status": "pending_confirmation", "trip_id": trip.ID, "reason": "risk_signal_changed", "changed_signals": changes, "preserved_nodes": len(route), "generated_at": time.Now().UTC()}
+	// A city-level risk signal affects only nodes that have not been visited or
+	// skipped. Completed nodes remain immutable and are explicitly listed in the
+	// proposal for auditability.
+	var states []models.TripExecutionState
+	_ = database.DB.Where("user_id = ? AND trip_id = ?", userID, trip.ID).Find(&states).Error
+	stateByKey := map[string]string{}
+	for _, state := range states {
+		stateByKey[state.NodeKey] = state.Status
+	}
+	affectedNodes := []string{}
+	preservedNodes := []string{}
+	for _, raw := range route {
+		node, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name := strings.TrimSpace(fmt.Sprint(node["name"]))
+		if name == "" || name == "<nil>" {
+			name = strings.TrimSpace(fmt.Sprint(node["location"]))
+		}
+		if name == "" || name == "<nil>" {
+			continue
+		}
+		day := strings.TrimSpace(fmt.Sprint(node["day"]))
+		key := day + ":" + name
+		if status := stateByKey[key]; status == "visited" || status == "skipped" {
+			preservedNodes = append(preservedNodes, name)
+		} else {
+			affectedNodes = append(affectedNodes, name)
+		}
+	}
+	if len(route) == 0 {
+		// Without a persisted route, the proposal must remain explicit rather
+		// than pretending that all nodes were preserved.
+		return gin.H{"status": "needs_user_context", "reason": "route_not_found", "city": city, "trip_id": trip.ID}
+	}
+	replacementKind := riskReplacementKind(changes)
+	expiresAt := time.Now().UTC().Add(30 * time.Minute)
+	proposal := gin.H{"proposal_id": fmt.Sprintf("risk-%d", time.Now().UTC().UnixNano()), "status": "pending_confirmation", "trip_id": trip.ID, "city": city, "reason": "risk_signal_changed", "changed_signals": changes, "affected_nodes": affectedNodes, "preserved_nodes": preservedNodes, "changed_node_count": len(affectedNodes), "preserved_node_count": len(preservedNodes), "perturbation_ratio": roundRatio(float64(len(affectedNodes)) / float64(len(route))), "replacement_kind": replacementKind, "confirmation_required": true, "generated_at": time.Now().UTC(), "expires_at": expiresAt, "official_links": amapOfficialLinks(city)}
 	payload, _ := json.Marshal(proposal)
 	_ = database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: trip.ID, EventType: "replan_triggered", Payload: string(payload)}).Error
 	_ = snapshot
 	return proposal
+}
+
+func amapOfficialLinks(city string) map[string]string {
+	query := url.QueryEscape(strings.TrimSpace(city))
+	return map[string]string{
+		"map_search":    "https://www.amap.com/search?query=" + query,
+		"route_planner": "https://ditu.amap.com/dir?city=" + query,
+	}
+}
+
+func createRiskNotifications(userID, city string, changes []map[string]interface{}, snapshot map[string]interface{}, proposal gin.H) {
+	if database.DB == nil {
+		return
+	}
+	source := strings.TrimSpace(fmt.Sprint(snapshot["source"]))
+	if source == "" || source == "<nil>" {
+		source = "risk_snapshot"
+	}
+	estimated, _ := snapshot["is_estimated"].(bool)
+	observedAt := time.Now().UTC()
+	if raw, ok := snapshot["risk_ts"].(float64); ok && raw > 0 {
+		observedAt = time.UnixMilli(int64(raw)).UTC()
+	}
+	if raw, ok := snapshot["risk_ts"].(int64); ok && raw > 0 {
+		observedAt = time.UnixMilli(raw).UTC()
+	}
+	signalSources := ""
+	if raw, ok := snapshot["signal_sources"]; ok {
+		if encoded, err := json.Marshal(raw); err == nil {
+			signalSources = string(encoded)
+		}
+	}
+	replanProposal := ""
+	if proposal != nil {
+		if encoded, err := json.Marshal(proposal); err == nil {
+			replanProposal = string(encoded)
+		}
+	}
+	tripID := ""
+	if proposal != nil {
+		tripID = strings.TrimSpace(fmt.Sprint(proposal["trip_id"]))
+	}
+	for _, change := range changes {
+		title := strings.TrimSpace(fmt.Sprint(change["title"]))
+		if title == "" || title == "<nil>" {
+			title = "目的地风险发生变化"
+		}
+		detail := strings.TrimSpace(fmt.Sprint(change["detail"]))
+		if detail == "" || detail == "<nil>" {
+			detail = "请查看风险详情并确认是否需要调整剩余行程。"
+		}
+		severity := strings.ToUpper(strings.TrimSpace(fmt.Sprint(change["severity"])))
+		if severity == "" || severity == "<NIL>" {
+			severity = "MEDIUM"
+		}
+		typeName := strings.TrimSpace(fmt.Sprint(change["type"]))
+		if typeName == "<nil>" {
+			typeName = ""
+		}
+		_ = database.DB.Create(&models.RiskNotification{ID: uuid.NewString(), UserID: userID, TripID: tripID, City: city, Type: typeName, Severity: severity, Title: title, Detail: detail, Source: source, Estimated: estimated, ObservedAt: &observedAt, SignalSources: signalSources, ReplanProposal: replanProposal, Status: "unread", CreatedAt: time.Now().UTC()}).Error
+	}
+}
+
+func riskReplacementKind(changes []map[string]interface{}) string {
+	for _, change := range changes {
+		text := strings.ToLower(fmt.Sprint(change["type"], " ", change["field"], " ", change["reason"]))
+		if strings.Contains(text, "delay") || strings.Contains(text, "交通") || strings.Contains(text, "traffic") {
+			return "TRANSPORT"
+		}
+		if strings.Contains(text, "hotel") || strings.Contains(text, "住宿") {
+			return "LODGING"
+		}
+		if strings.Contains(text, "dining") || strings.Contains(text, "餐饮") {
+			return "DINING"
+		}
+	}
+	return "DESTINATION"
 }
 
 func riskChangesRequireReplan(changes []map[string]interface{}) bool {

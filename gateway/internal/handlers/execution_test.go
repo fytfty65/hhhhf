@@ -86,3 +86,43 @@ func TestUpdateExecutionStateRejectsInvalidStatus(t *testing.T) {
 		t.Fatalf("expected 400, got %d", c.Writer.Status())
 	}
 }
+
+func TestDelayedExecutionCreatesDeduplicatedReplanProposal(t *testing.T) {
+	old := database.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	t.Cleanup(func() { database.DB = old })
+	if err := db.AutoMigrate(&models.TripPlan{}, &models.TripExecutionState{}, &models.PlanningEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.TripPlan{ID: "trip-delay", UserID: "user-delay", DestCity: "杭州"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r := gin.New()
+	r.POST("/planning/execution", func(c *gin.Context) { c.Set("user_id", "user-delay"); UpdateExecutionStateHandler(c) })
+	body := `{"trip_id":"trip-delay","node_key":"1:西湖","status":"delayed","delay_minutes":45}`
+	for attempt := 0; attempt < 2; attempt++ {
+		response := httptest.NewRecorder()
+		r.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/planning/execution", strings.NewReader(body)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected update 200, got %d: %s", response.Code, response.Body.String())
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		data := envelope["data"].(map[string]any)
+		proposal := data["replan_proposal"].(map[string]any)
+		if proposal["status"] != "pending_confirmation" {
+			t.Fatalf("unexpected proposal: %#v", proposal)
+		}
+	}
+	var count int64
+	db.Model(&models.PlanningEvent{}).Where("event_type = ?", "replan_triggered").Count(&count)
+	if count != 1 {
+		t.Fatalf("expected one deduplicated proposal, got %d", count)
+	}
+}

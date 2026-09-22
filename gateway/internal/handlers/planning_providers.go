@@ -227,7 +227,12 @@ func normalizeProviderCandidates(payload any, provider string) []contracts.Candi
 		score = math.Max(0, math.Min(1, score))
 		price := providerPrice(row)
 		duration := normalizeProviderDuration(row)
-		candidate := contracts.Candidate{ID: firstStringOrNumber(row, "id", "hotelId", "hotel_id", "productId", "product_id", "resId", "resourceId", "resource_id", "scenicId", "offerId", "offer_id", "provider_id"), Name: name, Score: score, Price: price, Duration: duration, Tags: firstStrings(row, "tags", "labels", "features"), Reasons: firstStrings(row, "reasons", "highlights"), Constraints: firstStrings(row, "constraints", "warnings"), Source: contracts.Source{Provider: provider, Retrieved: time.Now().UTC(), Estimated: false}, Extra: map[string]any{}}
+		observedAt, observed := providerObservedAt(row)
+		if !observed {
+			observedAt = time.Now().UTC()
+		}
+		candidate := contracts.Candidate{ID: firstStringOrNumber(row, "id", "hotelId", "hotel_id", "productId", "product_id", "resId", "resourceId", "resource_id", "scenicId", "offerId", "offer_id", "provider_id"), Name: name, Score: score, Price: price, Duration: duration, Tags: firstStrings(row, "tags", "labels", "features"), Reasons: firstStrings(row, "reasons", "highlights"), Constraints: firstStrings(row, "constraints", "warnings"), Source: contracts.Source{Provider: provider, Retrieved: observedAt, Estimated: false}, Extra: map[string]any{}}
+		candidate.Extra["observed_at_provided"] = observed
 		if candidate.ID == "" {
 			candidate.ID = uuid.NewString()
 		}
@@ -248,6 +253,32 @@ func normalizeProviderCandidates(payload any, provider string) []contracts.Candi
 	return out
 }
 
+// providerObservedAt extracts a supplier timestamp without guessing. A
+// missing timestamp is treated as "retrieved now" for compatibility, but the
+// candidate is explicitly marked so callers can distinguish it from a
+// field-level observation supplied by the vendor.
+func providerObservedAt(row map[string]any) (time.Time, bool) {
+	for _, key := range []string{"observed_at", "observedAt", "retrieved_at", "retrievedAt", "updated_at", "updatedAt", "timestamp"} {
+		value := strings.TrimSpace(firstString(row, key))
+		if value == "" {
+			if number, ok := toFloat(row[key]); ok && number > 0 {
+				if number > 1e12 {
+					number /= 1000
+				}
+				return time.Unix(int64(number), 0).UTC(), true
+			}
+			continue
+		}
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			return parsed.UTC(), true
+		}
+		if parsed, err := time.Parse("2006-01-02 15:04:05", value); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
 // annotateCandidates gives every recommendation the same evidence contract.
 // It is intentionally derived only from fields present in the candidate and
 // its source, so estimated fallbacks remain visibly estimated.
@@ -266,6 +297,10 @@ func annotateCandidates(candidates []contracts.Candidate, domain string) []contr
 			age = 0
 		}
 		candidate.FreshnessSeconds = age
+		candidate.Extra = ensureCandidateExtra(candidate.Extra)
+		freshnessLimit := providerFreshnessLimitSeconds(domain)
+		candidate.Extra["freshness_limit_seconds"] = freshnessLimit
+		candidate.Extra["freshness_status"] = freshnessStatus(age, freshnessLimit, candidate.Source.Estimated)
 		if candidate.Confidence <= 0 {
 			candidate.Confidence = 0.82
 			if candidate.Source.Estimated {
@@ -287,9 +322,7 @@ func annotateCandidates(candidates []contracts.Candidate, domain string) []contr
 		if candidate.FieldSources == nil {
 			candidate.FieldSources = map[string]string{}
 		}
-		if candidate.Extra == nil {
-			candidate.Extra = map[string]any{}
-		}
+		candidate.Extra = ensureCandidateExtra(candidate.Extra)
 		candidate.Extra["freshness_seconds"] = candidate.FreshnessSeconds
 		candidate.Extra["confidence"] = candidate.Confidence
 	}
@@ -302,6 +335,38 @@ func annotateCandidates(candidates []contracts.Candidate, domain string) []contr
 		}
 	}
 	return candidates
+}
+
+func ensureCandidateExtra(extra map[string]any) map[string]any {
+	if extra == nil {
+		return map[string]any{}
+	}
+	return extra
+}
+
+func providerFreshnessLimitSeconds(domain string) int {
+	switch strings.ToLower(strings.TrimSpace(domain)) {
+	case "transport":
+		return 300
+	case "lodging":
+		return 900
+	case "weather", "crowd":
+		return 900
+	case "scenic", "dining":
+		return 3600
+	default:
+		return 86400
+	}
+}
+
+func freshnessStatus(age, limit int, estimated bool) string {
+	if estimated {
+		return "estimated"
+	}
+	if age > limit {
+		return "stale"
+	}
+	return "fresh"
 }
 
 func fieldSource(candidate *contracts.Candidate, field string) string {

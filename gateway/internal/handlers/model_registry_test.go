@@ -42,13 +42,17 @@ func TestInvokeModelEndpointWithoutEndpointIsExplicitNoop(t *testing.T) {
 }
 
 func TestDeploymentPassesRuntimeGateFailsLowQualityCanary(t *testing.T) {
-	if deploymentPassesRuntimeGate(models.ModelDeployment{Metrics: `{"offline_score":0.79,"drift_score":0.1}`}) {
+	base := `{"offline_score":0.9,"drift_score":0.1,"evaluation_samples":20,"validation_samples":5,"rollback_seconds":60}`
+	if deploymentPassesRuntimeGate(models.ModelDeployment{Metrics: `{"offline_score":0.79,"drift_score":0.1,"evaluation_samples":20,"validation_samples":5,"rollback_seconds":60}`}) {
 		t.Fatal("low offline score must fail the runtime gate")
 	}
-	if deploymentPassesRuntimeGate(models.ModelDeployment{Metrics: `{"offline_score":0.9,"drift_score":0.21}`}) {
+	if deploymentPassesRuntimeGate(models.ModelDeployment{Metrics: `{"offline_score":0.9,"drift_score":0.21,"evaluation_samples":20,"validation_samples":5,"rollback_seconds":60}`}) {
 		t.Fatal("high drift must fail the runtime gate")
 	}
-	if !deploymentPassesRuntimeGate(models.ModelDeployment{Metrics: `{"offline_score":0.9,"drift_score":0.2}`}) {
+	if !deploymentPassesRuntimeGate(models.ModelDeployment{Metrics: base}) {
 		t.Fatal("deployment at the gate should remain eligible")
+	}
+	if deploymentPassesRuntimeGate(models.ModelDeployment{Metrics: `{"offline_score":0.9,"drift_score":0.1,"evaluation_samples":19,"validation_samples":5,"rollback_seconds":60}`}) {
+		t.Fatal("insufficient evaluation samples must fail the runtime gate")
 	}
 }

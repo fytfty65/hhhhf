@@ -25,6 +25,7 @@ from core.time_intelligence import analyze_pace, monday_closure_notes
 from core.optimization import fairness_report, pareto_frontier, repair_route, select_fair_route, validate_candidate, validate_route
 from core.constraints import resolve_conflicts
 from core.contextual_bandit import ContextualThompsonBandit, derive_reward, stable_arm_id
+from core.agent_contracts import capability_registry, validate_agent_proposal, proposal_timestamp
 from core.simulation import member_utilities_for, simulate_plan
 from core import llm_config as llm_cfg  # LLM 调用参数单一来源（模型/端点/temperature/max_tokens）
 from core.llm_config import model_name  # LLM 默认值单一来源（曾与 conflict.py 各写一套）
@@ -122,7 +123,9 @@ planning_bandit = ContextualThompsonBandit(
     enabled=_bandit_enabled(),
     exploration_budget=float(os.getenv("AI_BANDIT_EXPLORATION_BUDGET", "0.10")),
 )
-for _arm in filter(None, (item.strip() for item in os.getenv("AI_BANDIT_ARMS", "builtin-joint-v1").split(","))):
+# Keep two stable policy arms available by default. The flag remains opt-in;
+# registering arms does not change behavior while AI_BANDIT_ENABLED is false.
+for _arm in filter(None, (item.strip() for item in os.getenv("AI_BANDIT_ARMS", "builtin-joint-v1:balanced,builtin-joint-v1:relaxed").split(","))):
     planning_bandit.register(_arm)
 _bandit_state_file = os.getenv("AI_BANDIT_STATE_FILE", "").strip()
 if _bandit_state_file:
@@ -511,6 +514,43 @@ def build_reasoning_step(agent: str, action: str, claim: str, basis: str) -> dic
         "basis": basis,
         "ts": datetime.datetime.now().strftime("%H:%M:%S"),
     }
+
+
+def audit_route_agent_proposal(route: list[dict], *, agent_id: str = "route-planner") -> dict:
+    """Run the generated route through the coordinator-facing proposal gate.
+
+    This audit is non-blocking during migration: invalid or unsourced output is
+    marked degraded and remains visible to the coordinator/UI, but it cannot be
+    mistaken for a fully evidenced specialist proposal.
+    """
+    evidence = []
+    for node in route if isinstance(route, list) else []:
+        if not isinstance(node, dict):
+            continue
+        sources = node.get("data_sources") or {}
+        if not isinstance(sources, dict):
+            continue
+        for field, provider in sources.items():
+            provider_name = provider.get("provider") if isinstance(provider, dict) else provider
+            if provider_name in (None, "", "unavailable", "estimated"):
+                continue
+            evidence.append({"field": str(field), "provider": str(provider_name), "observed_at": proposal_timestamp(), "estimated": bool(node.get("estimated", False))})
+    payload = {
+        "agent_id": agent_id,
+        "domain": "itinerary",
+        "status": "ok" if route and evidence else "degraded",
+        "degraded": not bool(route and evidence),
+        "candidates": [{"name": node.get("name") or node.get("location")} for node in route[:50] if isinstance(node, dict)],
+        "hard_constraint_results": {"route_present": bool(route)},
+        "evidence": evidence[:200],
+        "confidence": 0.75 if evidence else 0.0,
+        "failure": None if route and evidence else {"code": "evidence_missing", "message": "路线存在但缺少可核验来源", "retryable": False, "fallback": "supplier_refresh"},
+    }
+    try:
+        proposal = validate_agent_proposal(payload)
+        return {"agent_id": proposal.agent_id, "status": proposal.status, "evidence_count": len(proposal.evidence), "candidate_count": len(proposal.candidates), "degraded": proposal.degraded}
+    except Exception as error:
+        return {"agent_id": agent_id, "status": "failed", "evidence_count": len(evidence), "candidate_count": len(payload["candidates"]), "degraded": True, "error": str(error)}
 
 
 # ==========================================
@@ -3111,6 +3151,10 @@ async def run_negotiate(msg: GatewayMessage):
 
                     # 👑 覆协校验：验证用户所有输入偏好是否都已被覆盖
                     final_data["preference_validation"] = validate_preference_coverage(llm_routes, pref_signals)
+                    # Structured proposal audit: arbitration receives an
+                    # explicit evidence/degradation status alongside the
+                    # human-readable reasoning stream.
+                    final_data["agent_contracts"] = [audit_route_agent_proposal(llm_routes)]
                     print(f"🔍 [偏好覆协校验] {final_data['preference_validation']}", flush=True)
 
                     # 👑 多方案生成：同一候选池产出 2 套差异化风格的完整方案，供用户对比选择
@@ -3925,3 +3969,18 @@ async def record_bandit_feedback(payload: Dict[str, Any]):
 @router.get("/agent/bandit")
 async def bandit_status():
     return planning_bandit.snapshot()
+
+
+@router.get("/agent/capabilities")
+async def agent_capabilities():
+    """Return the canonical, secret-free specialist capability matrix."""
+    return {
+        "version": "agent-contract-v1",
+        "agents": [capability.model_dump(mode="json") for capability in capability_registry()],
+        "proposal_gate": {
+            "schema": "AgentProposal",
+            "hard_constraints_required": True,
+            "evidence_required": True,
+            "natural_language_decides": False,
+        },
+    }

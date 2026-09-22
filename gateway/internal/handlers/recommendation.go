@@ -83,9 +83,11 @@ func GetUserPreferenceHandler(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"profile": service.ProfilePayload(userID),
-	})
+	profile := service.ProfilePayload(userID)
+	// The prompt projection is an internal planning artifact. Client-facing
+	// profile APIs expose structured, editable features only.
+	delete(profile, "prompt_hint")
+	c.JSON(http.StatusOK, gin.H{"profile": profile, "feature_version": "features-v1", "raw_feedback_excluded": true})
 }
 
 // RefreshUserPreferenceHandler 手动触发画像重聚合（行为数据实时采集后动态更新）。
@@ -109,11 +111,71 @@ func RefreshUserPreferenceHandler(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "画像已更新",
-		"profile": service.ProfilePayload(req.UserID),
-		"variant": profile.ABVariant,
-	})
+	publicProfile := service.ProfilePayload(req.UserID)
+	delete(publicProfile, "prompt_hint")
+	c.JSON(http.StatusOK, gin.H{"message": "画像已更新", "profile": publicProfile, "variant": profile.ABVariant, "feature_version": "features-v1", "raw_feedback_excluded": true})
+}
+
+// DeleteUserPreferenceHandler lets a user remove the derived profile view.
+// Raw event retention follows the platform's audit/learning retention policy
+// and is never exposed by this endpoint.
+func DeleteUserPreferenceHandler(c *gin.Context) {
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	if err := service.DeleteStoredProfile(userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "画像删除失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "feature_version": "features-v1", "raw_feedback_retained": true})
+}
+
+// UpdateUserPreferenceHandler stores explicit, structured preferences. It
+// never accepts prompt text, model hints, or client-controlled sample counts.
+func UpdateUserPreferenceHandler(c *gin.Context) {
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		LikedTags      []string `json:"liked_tags"`
+		DislikedTags   []string `json:"disliked_tags"`
+		CuisinePrefs   []string `json:"cuisine_prefs"`
+		BudgetTendency string   `json:"budget_tendency"`
+		NatureRatio    float64  `json:"nature_ratio"`
+		CultureRatio   float64  `json:"culture_ratio"`
+		FoodRatio      float64  `json:"food_ratio"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "画像字段格式不正确"})
+		return
+	}
+	if req.BudgetTendency == "" {
+		req.BudgetTendency = "mid"
+	}
+	if req.BudgetTendency != "low" && req.BudgetTendency != "mid" && req.BudgetTendency != "high" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "预算偏好必须为 low、mid 或 high"})
+		return
+	}
+	if req.NatureRatio < 0 || req.CultureRatio < 0 || req.FoodRatio < 0 || req.NatureRatio > 1 || req.CultureRatio > 1 || req.FoodRatio > 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "偏好比例必须在 0 到 1 之间"})
+		return
+	}
+	total := req.NatureRatio + req.CultureRatio + req.FoodRatio
+	if total == 0 {
+		req.NatureRatio, req.CultureRatio, req.FoodRatio = 1.0/3, 1.0/3, 1.0/3
+	} else if total < 0.99 || total > 1.01 {
+		req.NatureRatio, req.CultureRatio, req.FoodRatio = req.NatureRatio/total, req.CultureRatio/total, req.FoodRatio/total
+	}
+	profile := service.Profile{LikedTags: req.LikedTags, DislikedTags: req.DislikedTags, CuisinePrefs: req.CuisinePrefs, BudgetTendency: req.BudgetTendency, NatureRatio: req.NatureRatio, CultureRatio: req.CultureRatio, FoodRatio: req.FoodRatio, ABVariant: service.AssignABVariant(userID)}
+	if err := service.UpsertProfile(userID, profile); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "画像保存失败"})
+		return
+	}
+	publicProfile := service.ProfilePayload(userID)
+	delete(publicProfile, "prompt_hint")
+	c.JSON(http.StatusOK, gin.H{"profile": publicProfile, "feature_version": "features-v1", "source": "explicit_user_preferences"})
 }
 
 // TrackRecommendationEventHandler 记录推荐曝光/点击埋点，支撑 A/B 实验效果评估与准确率验证。

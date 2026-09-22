@@ -229,6 +229,17 @@ test.describe('refactor regression', () => {
     await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
     await reachDecision(page);
 
+    // The decision workspace exposes four focused layers instead of mounting
+    // every specialist panel at once.
+    await expect(page.getByTestId('workspace-layer-plan')).toHaveAttribute('aria-pressed', 'true');
+    await page.getByTestId('workspace-layer-evidence').click();
+    await expect(page.getByLabel('行程核对说明')).toBeVisible();
+    await page.getByTestId('workspace-layer-execution').click();
+    await expect(page.getByText('旅中执行模式')).toBeVisible();
+    await page.getByTestId('workspace-layer-professional').click();
+    await expect(page.getByTestId('professional-diagnostics')).toBeVisible();
+    await page.getByTestId('workspace-layer-plan').click();
+
     // Toolbar: 常用 4 个在外面，其余收进「更多」（10 个按钮挤成一团太乱）
     await expect(page.getByTestId('save-trip')).toBeVisible();
     await expect(page.getByTestId('open-diary')).toBeVisible();

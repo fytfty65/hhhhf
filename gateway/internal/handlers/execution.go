@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -103,5 +104,35 @@ func UpdateExecutionStateHandler(c *gin.Context) {
 	if database.DB != nil {
 		_ = database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: req.TripID, PlanID: req.PlanID, EventType: eventType, Value: float64(req.DelayMinutes), Payload: string(payloadBytes), CreatedAt: time.Now().UTC()}).Error
 	}
-	planningData(c, gin.H{"state": state, "event_type": eventType})
+	response := gin.H{"state": state, "event_type": eventType}
+	if req.Status == "delayed" && req.DelayMinutes >= 30 {
+		if proposal := createExecutionReplanProposal(userID, req.TripID, req.NodeKey, req.DelayMinutes); proposal != nil {
+			response["replan_proposal"] = proposal
+		}
+	}
+	planningData(c, response)
+}
+
+// createExecutionReplanProposal turns a material execution delay into a
+// pending confirmation. It never mutates the generated route and suppresses
+// duplicate pending proposals for the same trip/node.
+func createExecutionReplanProposal(userID, tripID, nodeKey string, delayMinutes int) gin.H {
+	if database.DB == nil {
+		return nil
+	}
+	var events []models.PlanningEvent
+	if err := database.DB.Where("user_id = ? AND trip_id = ? AND event_type = ?", userID, tripID, "replan_triggered").Order("created_at desc").Limit(20).Find(&events).Error; err == nil {
+		for _, event := range events {
+			var payload map[string]any
+			if json.Unmarshal([]byte(event.Payload), &payload) == nil && payload["status"] == "pending_confirmation" && strings.TrimSpace(fmt.Sprint(payload["node_key"])) == nodeKey {
+				return gin.H{"proposal_id": payload["proposal_id"], "status": "pending_confirmation", "trip_id": tripID, "node_key": nodeKey, "reason": "execution_delay", "delay_minutes": delayMinutes, "deduplicated": true}
+			}
+		}
+	}
+	proposal := gin.H{"proposal_id": fmt.Sprintf("execution-%d", time.Now().UTC().UnixNano()), "status": "pending_confirmation", "trip_id": tripID, "node_key": nodeKey, "reason": "execution_delay", "delay_minutes": delayMinutes, "changed_signals": []string{"delay_minutes"}, "confirmation_required": true, "generated_at": time.Now().UTC()}
+	payload, _ := json.Marshal(proposal)
+	if err := database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: tripID, EventType: "replan_triggered", Payload: string(payload), CreatedAt: time.Now().UTC()}).Error; err != nil {
+		return nil
+	}
+	return proposal
 }

@@ -61,16 +61,31 @@ func planningModelDecision(userID string) map[string]any {
 
 func deploymentPassesRuntimeGate(deployment models.ModelDeployment) bool {
 	if strings.TrimSpace(deployment.Metrics) == "" {
-		return true
+		return false
 	}
 	var metrics map[string]float64
 	if json.Unmarshal([]byte(deployment.Metrics), &metrics) != nil {
-		return true
+		return false
+	}
+	if metrics["evaluation_samples"] < 20 || metrics["validation_samples"] < 5 {
+		return false
+	}
+	if metrics["rollback_seconds"] <= 0 {
+		return false
 	}
 	if score, ok := metrics["offline_score"]; ok && score < 0.80 {
 		return false
 	}
 	if drift, ok := metrics["drift_score"]; ok && drift > 0.20 {
+		return false
+	}
+	if value, ok := metrics["constraint_satisfaction_rate"]; ok && value < 0.99 {
+		return false
+	}
+	if value, ok := metrics["fairness_min_utility"]; ok && value < 0.60 {
+		return false
+	}
+	if value, ok := metrics["fairness_utility_variance"]; ok && value > 0.10 {
 		return false
 	}
 	return true
@@ -244,8 +259,8 @@ func PromoteModelDeploymentHandler(c *gin.Context) {
 	}
 	var metrics map[string]float64
 	_ = json.Unmarshal([]byte(deployment.Metrics), &metrics)
-	if metrics["offline_score"] < 0.80 || metrics["drift_score"] > 0.20 || metrics["rollback_seconds"] <= 0 {
-		planningError(c, http.StatusConflict, "MODEL_GATE_FAILED", "模型未通过离线质量、漂移或回滚门禁", map[string]string{"required_offline_score": "0.80", "max_drift_score": "0.20", "rollback_seconds": "must_be_positive"})
+	if !deploymentPassesRuntimeGate(deployment) {
+		planningError(c, http.StatusConflict, "MODEL_GATE_FAILED", "模型未通过离线质量、样本量、公平性、漂移或回滚门禁", map[string]string{"required_offline_score": "0.80", "max_drift_score": "0.20", "minimum_evaluation_samples": "20", "minimum_validation_samples": "5", "rollback_seconds": "must_be_positive"})
 		return
 	}
 	var active models.ModelDeployment
@@ -339,11 +354,33 @@ func EvaluateModelDeploymentHandler(c *gin.Context) {
 	drift := eventTypeDrift(versioned, time.Now().Add(-14*24*time.Hour))
 	driftScore, _ := drift["score"].(float64)
 	counterfactual := modelCounterfactualEstimate(versioned)
-	metrics := map[string]float64{"offline_score": offlineScore, "train_score": trainScore, "validation_score": validationScore, "drift_score": driftScore, "rollback_seconds": 60, "generated": float64(generated), "adopted": float64(adopted), "rejected": float64(rejected), "validation_generated": float64(validationGenerated), "validation_adopted": float64(validationAdopted), "counterfactual_samples": float64(counterfactual["samples"].(int)), "evaluated_at_unix": float64(time.Now().Unix())}
+	quality := qualityMetricSummary(versioned)
+	metrics := map[string]float64{"offline_score": offlineScore, "train_score": trainScore, "validation_score": validationScore, "drift_score": driftScore, "rollback_seconds": 60, "generated": float64(generated), "adopted": float64(adopted), "rejected": float64(rejected), "validation_generated": float64(validationGenerated), "validation_adopted": float64(validationAdopted), "evaluation_samples": float64(len(versioned)), "validation_samples": float64(len(versioned) - validationStart), "counterfactual_samples": float64(counterfactual["samples"].(int)), "evaluated_at_unix": float64(time.Now().Unix())}
+	for _, key := range []string{"constraint_satisfaction_rate", "candidate_validity_rate", "fact_citation_rate", "latency_ms", "adoption_rate", "replacement_rate", "replan_success_rate", "fairness_min_utility", "fairness_utility_variance", "provider_stale_rate", "error_rate"} {
+		if entry, ok := quality[key].(map[string]any); ok {
+			if mean, ok := numericPlanningValue(entry["mean"]); ok {
+				metrics[key] = mean
+			}
+		}
+	}
 	encoded, _ := json.Marshal(metrics)
 	deployment.Metrics = string(encoded)
 	_ = database.DB.Save(&deployment).Error
-	planningData(c, gin.H{"model": deployment, "evaluation": metrics, "temporal_split": gin.H{"policy": "oldest_80_percent_train_newest_20_percent_validation", "train_generated": trainGenerated, "validation_generated": validationGenerated}, "counterfactual": counterfactual, "promotion_ready": offlineScore >= 0.80 && driftScore <= 0.20})
+	gateReady := deploymentPassesRuntimeGate(deployment)
+	reasons := []string{}
+	if len(versioned) < 20 {
+		reasons = append(reasons, "评估样本不足")
+	}
+	if len(versioned)-validationStart < 5 {
+		reasons = append(reasons, "验证集样本不足")
+	}
+	if offlineScore < 0.80 {
+		reasons = append(reasons, "离线分数低于 0.80")
+	}
+	if driftScore > 0.20 {
+		reasons = append(reasons, "数据漂移超过 0.20")
+	}
+	planningData(c, gin.H{"model": deployment, "evaluation": metrics, "quality_metrics": quality, "temporal_split": gin.H{"policy": "oldest_80_percent_train_newest_20_percent_validation", "train_generated": trainGenerated, "validation_generated": validationGenerated}, "counterfactual": counterfactual, "gate": gin.H{"ready": gateReady, "reasons": reasons, "automatic_rollback": true}, "promotion_ready": gateReady})
 }
 
 func modelCounterfactualEstimate(events []models.PlanningEvent) map[string]any {

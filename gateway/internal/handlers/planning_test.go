@@ -141,6 +141,27 @@ func TestProviderMappingUnwrapsNestedPayloadAndSeconds(t *testing.T) {
 	}
 }
 
+func TestProviderMappingPreservesObservationTimeAndFreshnessPolicy(t *testing.T) {
+	payload := map[string]any{"results": []any{map[string]any{
+		"id": "flight-1", "name": "航班 A", "price": 420,
+		"observed_at": "2026-09-22T08:00:00Z",
+	}}}
+	options := normalizeProviderCandidates(payload, "supplier")
+	if len(options) != 1 {
+		t.Fatalf("expected one option, got %d", len(options))
+	}
+	if options[0].Source.Retrieved.Format(time.RFC3339) != "2026-09-22T08:00:00Z" {
+		t.Fatalf("supplier timestamp was not preserved: %+v", options[0].Source)
+	}
+	annotated := annotateCandidates(options, "transport")
+	if annotated[0].Extra["freshness_limit_seconds"] != 300 {
+		t.Fatalf("unexpected transport freshness limit: %+v", annotated[0].Extra)
+	}
+	if annotated[0].Extra["freshness_status"] != "stale" {
+		t.Fatalf("old supplier data must be marked stale: %+v", annotated[0].Extra)
+	}
+}
+
 func TestAnnotateCandidatesProvidesEvidenceFreshnessAndAlternatives(t *testing.T) {
 	retrieved := time.Now().UTC().Add(-2 * time.Minute)
 	items := []contracts.Candidate{
@@ -495,7 +516,7 @@ func TestExportPlanningDatasetIsDeidentifiedAndVersioned(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := envelope["data"].(map[string]any)
-	if data["dataset_version"] != "planning-events-v2" {
+	if data["dataset_version"] != "planning-events-v3" {
 		t.Fatalf("unexpected dataset version: %v", data["dataset_version"])
 	}
 	sample := data["samples"].([]any)[0].(map[string]any)

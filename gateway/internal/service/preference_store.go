@@ -166,7 +166,7 @@ var budgetSignalCategories = []string{"住宿", "交通", "门票"}
 // 避免固定阈值对高/低消费人群的失准。
 var (
 	highEndHotelCnyThreshold = getEnvAsFloat("HIGH_END_HOTEL_THRESHOLD_CNY", 1000.0) // 绝对高档锚点：单笔支出 ≥阈值 倾向高档
-	budgetHotelCnyThreshold  = getEnvAsFloat("BUDGET_HOTEL_THRESHOLD_CNY", 300.0)   // 绝对经济锚点：单笔支出 ≤阈值 倾向经济
+	budgetHotelCnyThreshold  = getEnvAsFloat("BUDGET_HOTEL_THRESHOLD_CNY", 300.0)    // 绝对经济锚点：单笔支出 ≤阈值 倾向经济
 )
 
 // getEnvAsFloat 读取环境变量并解析为 float64；缺失、格式非法或为负值时回退默认值，保证服务不因配置错误而 panic。
@@ -444,6 +444,16 @@ func GetStoredProfile(userID string) (Profile, bool) {
 		ABVariant:      pref.ABVariant,
 		FeedbackCount:  pref.FeedbackCount,
 	}, true
+}
+
+// DeleteStoredProfile removes only the derived profile projection. Raw
+// feedback and audit events remain append-only so model evaluation history is
+// not silently rewritten; the profile can be rebuilt from the retained events.
+func DeleteStoredProfile(userID string) error {
+	if database.DB == nil {
+		return nil
+	}
+	return database.DB.Where("user_id = ?", userID).Delete(&models.UserPreference{}).Error
 }
 
 // RefreshProfile 重聚合画像并持久化，用于「实时采集 → 动态更新」闭环。

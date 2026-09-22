@@ -276,6 +276,42 @@ type RiskSubscription struct {
 	CreatedAt  time.Time
 }
 
+// RiskNotification is an in-app delivery record for a verified risk change.
+// It deliberately stores source metadata and lifecycle state, not provider
+// credentials or the full upstream payload.
+type RiskNotification struct {
+	ID             string     `gorm:"primaryKey" json:"id"`
+	UserID         string     `gorm:"index" json:"user_id"`
+	TripID         string     `gorm:"index" json:"trip_id,omitempty"`
+	City           string     `gorm:"index" json:"city"`
+	Type           string     `json:"type,omitempty"`
+	Severity       string     `gorm:"index" json:"severity"`
+	Title          string     `json:"title"`
+	Detail         string     `json:"detail"`
+	Source         string     `json:"source"`
+	Estimated      bool       `json:"estimated"`
+	ObservedAt     *time.Time `json:"observed_at,omitempty"`
+	SignalSources  string     `json:"signal_sources,omitempty"`
+	ReplanProposal string     `json:"replan_proposal,omitempty"`
+	Status         string     `gorm:"index" json:"status"` // unread/read/acknowledged
+	CreatedAt      time.Time  `gorm:"index" json:"created_at"`
+	ReadAt         *time.Time `json:"read_at,omitempty"`
+}
+
+// WebPushSubscription stores a user-consented browser endpoint. The private
+// subscription keys are write-only from the API perspective and are never
+// returned to the browser after registration.
+type WebPushSubscription struct {
+	ID        string    `gorm:"primaryKey" json:"id"`
+	UserID    string    `gorm:"index" json:"-"`
+	Endpoint  string    `gorm:"uniqueIndex;size:2048" json:"-"`
+	P256DH    string    `json:"-"`
+	Auth      string    `json:"-"`
+	UserAgent string    `json:"user_agent,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // TravelOrder is the gateway-owned execution record. Provider payloads are
 // intentionally not persisted; only the auditable identifiers and lifecycle
 // state are retained.
