@@ -21,7 +21,7 @@ import {
   radarSharedCss,
   radarGlobeImage,
 } from '../lib/radarTheme';
-import { fetchGlobalRiskSnapshots, fetchRiskSnapshot } from '../lib/riskSnapshot';
+import { fetchGlobalRiskSnapshots, fetchRiskSnapshot, summarizeGlobalRiskSnapshot } from '../lib/riskSnapshot';
 import { validLngLat } from '../lib/mapTiles';
 import RiskRadarChart from './RiskRadarChart';
 import DraggablePanel from './DraggablePanel';
@@ -256,6 +256,8 @@ export default function WorldSafetyGlobe({
   const [globalSnapshots, setGlobalSnapshots] = useState<Record<string, SafetyInfo>>({});
   const [globalLoadingCity, setGlobalLoadingCity] = useState<string | null>(null);
   const [globalError, setGlobalError] = useState('');
+  const [globalSelection, setGlobalSelection] = useState<string[]>([]);
+  const [globalCompareLoading, setGlobalCompareLoading] = useState(false);
 
   // Render the immersive radar at the document root. The map workspace uses
   // its own isolated stacking context, which otherwise lets sibling panels
@@ -433,6 +435,35 @@ export default function WorldSafetyGlobe({
       setGlobalLoadingCity(null);
     }
   }, []);
+
+  const toggleGlobalSelection = useCallback((cityName: string) => {
+    setGlobalSelection((current) => current.includes(cityName)
+      ? current.filter((name) => name !== cityName)
+      : current.length >= 4 ? current : [...current, cityName]);
+  }, []);
+
+  const compareGlobalCities = useCallback(async () => {
+    const selected = dynamicGlobalCities.filter((city) => globalSelection.includes(city.name));
+    if (selected.length < 2) return;
+    setGlobalCompareLoading(true);
+    setGlobalError('');
+    try {
+      const response = await fetchGlobalRiskSnapshots(selected.map((city) => ({
+        city: city.name,
+        coordinate: [city.lng, city.lat],
+      })));
+      const nextSnapshots: Record<string, SafetyInfo> = {};
+      response.results.forEach((result) => {
+        if (result.snapshot) nextSnapshots[result.city] = result.snapshot as SafetyInfo;
+      });
+      setGlobalSnapshots((current) => ({ ...current, ...nextSnapshots }));
+      if (response.errors.length) setGlobalError(response.errors[0]?.message || '部分城市没有返回有效快照');
+    } catch {
+      setGlobalError('全球对比服务暂不可用，请稍后重试');
+    } finally {
+      setGlobalCompareLoading(false);
+    }
+  }, [dynamicGlobalCities, globalSelection]);
 
   useEffect(() => {
     if (globeRef.current) {
@@ -956,7 +987,7 @@ export default function WorldSafetyGlobe({
 
       {/* ========== 右下角：全球情报网络（风险等级以后端情报为准，前端不自行标定） ========== */}
       <DraggablePanel
-        className="radar-network-panel absolute bottom-8 right-6 z-20 w-[280px] hidden md:flex pointer-events-auto radar-panel"
+        className="radar-network-panel absolute bottom-8 right-6 z-20 w-[360px] hidden md:flex pointer-events-auto radar-panel"
         style={panelStyle}
         icon={<Globe2 className="w-3.5 h-3.5" style={{ color: COLORS.accent }} />}
         title={<span className="text-[13px] font-bold" style={{ color: COLORS.accent }}>全球情报网络</span>}
@@ -965,27 +996,44 @@ export default function WorldSafetyGlobe({
           <span className="text-[11px] text-slate-500 font-mono">风险等级以后端情报为准</span>
           <span className="text-[11px] text-slate-500 font-mono">{globalRegionCount} 区域 · {dynamicGlobalCities.length} 城市</span>
         </div>
-        <div className="p-3 space-y-2 max-h-[250px] overflow-y-auto custom-scrollbar">
+        <div className="p-3 space-y-2 max-h-[390px] overflow-y-auto custom-scrollbar">
           <div className="bg-slate-200/60 dark:bg-slate-800/20 border border-dashed border-slate-700/50 rounded-lg p-2.5">
             <div className="flex items-center justify-between text-[10px] font-bold text-slate-500"><span>全球目录覆盖</span><span>{globalRegionCount} 个区域</span></div>
             <div className="mt-1.5 flex flex-wrap gap-1">{globalRegionSummary.map(([region, count]) => <span key={region} className="rounded bg-slate-300/60 px-1.5 py-0.5 text-[9px] text-slate-600 dark:bg-white/10 dark:text-slate-400">{region} {count}</span>)}</div>
             <p className="mt-2 text-[10px] leading-4 text-slate-500">城市点是全球地理目录，不等同于实时风险。只有带供应商、时间戳的信号才进入风险判断。</p>
           </div>
           {globalError && <div className="rounded border border-amber-400/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">{globalError}</div>}
+          <div className="flex items-center justify-between gap-2 rounded border border-slate-300/50 bg-slate-100/50 px-2 py-1.5 dark:border-white/10 dark:bg-white/5">
+            <span className="text-[10px] text-slate-500">选择城市进行真实信号对比（最多 4 个）</span>
+            <button type="button" disabled={globalSelection.length < 2 || globalCompareLoading} onClick={() => void compareGlobalCities()} className="shrink-0 rounded bg-sky-500/15 px-2 py-1 text-[10px] font-bold text-sky-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-sky-300">{globalCompareLoading ? '查询中…' : `对比 ${globalSelection.length || ''}`}</button>
+          </div>
           {dynamicGlobalCities.slice(0, 10).map(city => {
             const snapshot = globalSnapshots[city.name];
             const source = snapshot?.source || snapshot?.signal_sources?.safety?.provider;
             return (
-            <button type="button" key={city.name} onClick={() => void inspectGlobalCity(city)} className="w-full flex items-center justify-between py-1.5 border-b border-slate-300/50 dark:border-white/5 last:border-0 text-left hover:bg-slate-200/50 dark:hover:bg-white/5 rounded px-1 transition-colors">
+            <div key={city.name} className="flex items-center gap-2 border-b border-slate-300/50 py-1.5 last:border-0 dark:border-white/5">
+              <input type="checkbox" aria-label={`选择${city.name}进行对比`} checked={globalSelection.includes(city.name)} onChange={() => toggleGlobalSelection(city.name)} className="h-3 w-3 accent-sky-500" />
               <div className="flex items-center gap-2">
                 <div className={`w-1.5 h-1.5 rounded-full ${snapshot ? (snapshot.risk_level === 'HIGH' ? 'bg-rose-500' : snapshot.risk_level === 'MEDIUM' ? 'bg-amber-500' : 'bg-emerald-500') : 'bg-slate-500'}`} />
                 <span className="text-xs text-slate-700 dark:text-slate-300">{city.name}</span>
               </div>
-              <span className="text-[10px] text-slate-500">{globalLoadingCity === city.name ? '查询中…' : snapshot ? `${snapshot.risk_level || '已同步'} · ${source || '来源未知'}` : `${city.region} · 点击查询`}</span>
-            </button>
+              <button type="button" onClick={() => void inspectGlobalCity(city)} className="ml-auto rounded px-1.5 py-1 text-[10px] text-slate-500 hover:bg-slate-200/70 hover:text-sky-700 dark:hover:bg-white/10 dark:hover:text-sky-300">{globalLoadingCity === city.name ? '查询中…' : snapshot ? `${snapshot.risk_level || '已同步'} · ${source || '来源未知'}` : `${city.region} · 查询`}</button>
+            </div>
             );
           })}
           {Object.keys(globalSnapshots).length > 0 && <p className="text-[10px] leading-4 text-slate-500">已查询城市的风险等级来自后端快照；未点击城市仍只是地理目录。</p>}
+          {globalSelection.length >= 2 && (
+            <div className="rounded border border-sky-400/30 bg-sky-500/5 p-2">
+              <div className="mb-1.5 flex items-center justify-between"><span className="text-[10px] font-bold text-sky-700 dark:text-sky-300">城市信号对比</span><span className="text-[9px] text-slate-500">仅展示已有快照</span></div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {globalSelection.map((name) => {
+                  const snapshot = globalSnapshots[name];
+                  const summary = summarizeGlobalRiskSnapshot(snapshot ? (snapshot as unknown as Record<string, unknown>) : null, currentTime.getTime());
+                  return <div key={name} className="rounded bg-white/60 p-1.5 dark:bg-slate-950/30"><div className="truncate text-[10px] font-bold text-slate-700 dark:text-slate-200">{name}</div><div className="mt-1 flex items-baseline justify-between"><span className="text-sm font-black text-slate-900 dark:text-white">{summary.cii}</span><span className="text-[9px] text-slate-500">{summary.riskLevel}</span></div><div className="mt-1 text-[9px] leading-4 text-slate-500">信号 {summary.availableSignals}/{summary.totalSignals} · {summary.estimated ? '估算' : '实测'}<br />{summary.source} · {summary.freshness}</div></div>;
+                })}
+              </div>
+            </div>
+          )}
         </div>
       </DraggablePanel>
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchGlobalRiskSnapshots, fetchRiskSnapshot, invalidateRiskSnapshot, riskSnapshotCacheSize } from './riskSnapshot.ts';
+import { fetchGlobalRiskSnapshots, fetchRiskSnapshot, invalidateRiskSnapshot, riskSnapshotCacheSize, summarizeGlobalRiskSnapshot } from './riskSnapshot.ts';
 
 // The bug these tests lock down: WorldSafetyGlobe and RiskPushCenter each ran
 // their own 30s timer against /api/v1/risk/realtime, so with the 3D radar open
@@ -163,4 +163,23 @@ test('global batch query sends selected cities and preserves source evidence', a
   } finally {
     stub.restore();
   }
+});
+
+test('global risk summary reports evidence and never invents missing CII', () => {
+  const summary = summarizeGlobalRiskSnapshot({
+    risk_level: 'MEDIUM',
+    source: 'risk-provider',
+    risk_ts: 1_770_000_000_000,
+    is_estimated: false,
+    signal_sources: {
+      safety: { provider: 'risk-provider', available: true, estimated: false },
+      weather: { provider: 'weather-provider', available: true, estimated: true },
+      traffic: { provider: 'none', available: false, estimated: false },
+    },
+  }, 1_770_000_030_000);
+  assert.equal(summary.cii, 'N/A');
+  assert.equal(summary.availableSignals, 2);
+  assert.equal(summary.totalSignals, 3);
+  assert.equal(summary.estimated, true);
+  assert.equal(summary.freshness, '30 秒前');
 });

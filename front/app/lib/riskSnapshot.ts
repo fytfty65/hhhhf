@@ -87,6 +87,44 @@ export interface GlobalRiskBatchResponse {
   limits?: { max_cities?: number; concurrency?: number };
 }
 
+export interface GlobalRiskSummary {
+  cii: string;
+  riskLevel: string;
+  source: string;
+  availableSignals: number;
+  totalSignals: number;
+  estimated: boolean;
+  freshness: string;
+}
+
+/** Convert a provider snapshot into display-safe evidence without inventing missing values. */
+export function summarizeGlobalRiskSnapshot(snapshot: RiskSnapshot | null, now = Date.now()): GlobalRiskSummary {
+  const sourceMap = snapshot?.signal_sources && typeof snapshot.signal_sources === 'object'
+    ? snapshot.signal_sources as Record<string, { provider?: unknown; available?: unknown; estimated?: unknown }>
+    : {};
+  const signals = Object.values(sourceMap);
+  const safetyProvider = sourceMap.safety?.provider;
+  const source = typeof snapshot?.source === 'string' && snapshot.source.trim()
+    ? snapshot.source.trim()
+    : typeof safetyProvider === 'string' && safetyProvider.trim() ? safetyProvider.trim() : '来源未提供';
+  const ciiNumber = Number(snapshot?.cii_score);
+  const timestampNumber = typeof snapshot?.risk_ts === 'string'
+    ? Date.parse(snapshot.risk_ts)
+    : Number(snapshot?.risk_ts);
+  const ageSeconds = Number.isFinite(timestampNumber) && timestampNumber > 0
+    ? Math.max(0, Math.round((now - timestampNumber) / 1000))
+    : null;
+  return {
+    cii: Number.isFinite(ciiNumber) ? ciiNumber.toFixed(1) : 'N/A',
+    riskLevel: typeof snapshot?.risk_level === 'string' && snapshot.risk_level ? snapshot.risk_level : '未评估',
+    source,
+    availableSignals: signals.filter((signal) => signal?.available === true).length,
+    totalSignals: signals.length,
+    estimated: snapshot?.is_estimated === true || signals.some((signal) => signal?.estimated === true),
+    freshness: ageSeconds === null ? '无时间戳' : ageSeconds < 60 ? `${ageSeconds} 秒前` : `${Math.round(ageSeconds / 60)} 分钟前`,
+  };
+}
+
 /**
  * Resolve the latest risk snapshot for a city.
  *
