@@ -1484,7 +1484,8 @@ class SemanticItineraryCache:
 
     def _key(self, city: str, days: int, profile_text: str) -> str:
         # 👑 版本号参与哈希：修复生成逻辑后 bump 版本即可让旧缓存（缺美食/酒店）自动失效
-        raw = f"v3|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v4 invalidates plans cached before the final daily-balance gate.
+        raw = f"v4|{city}|{days}|{''.join(str(profile_text or '').split())}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     async def _embed(self, text: str) -> Optional[List[float]]:
@@ -1802,8 +1803,17 @@ async def run_negotiate(msg: GatewayMessage):
     if not is_refinement:
         cached_hit = await _semantic_cache.lookup(target_city, trip_days, profile_text)
         if cached_hit:
-            print(f"✅ [语义缓存] {target_city}/{trip_days}天命中，秒回", flush=True)
-            return StreamingResponse(cached_stream(cached_hit), media_type="application/x-ndjson")
+            cached_route = ((cached_hit.get("final_data") or {}).get("route") if isinstance(cached_hit, dict) else None)
+            try:
+                from core.itinerary_balance import is_daily_balance_acceptable
+
+                cache_ok = is_daily_balance_acceptable(cached_route or [], trip_days, target_daily_count)
+            except Exception:
+                cache_ok = False
+            if cache_ok:
+                print(f"✅ [语义缓存] {target_city}/{trip_days}天命中，秒回", flush=True)
+                return StreamingResponse(cached_stream(cached_hit), media_type="application/x-ndjson")
+            print(f"♻️ [语义缓存] {target_city}/{trip_days}天命中但每日密度不达标，跳过旧方案", flush=True)
         # Seed templates are intentionally limited to short cold-start trips.
         # Long/deep itineraries must use the supplier-backed candidate pool so
         # every requested day receives a balanced set of unique nodes.
@@ -3718,6 +3728,27 @@ async def run_negotiate(msg: GatewayMessage):
                             }
                     except Exception as _photo_exc:  # 配图失败绝不影响出方案
                         print(f"⚠️ [配图] 补齐失败，继续下发: {_photo_exc}", flush=True)
+
+                    # Final daily-density gate.  Fairness, bandit, review and
+                    # long-trip stages may replace the route after the first
+                    # balance pass; run the same deterministic check immediately
+                    # before emitting and caching the result.
+                    try:
+                        from core.itinerary_balance import rebalance_daily_route
+
+                        _final_target = target_daily_count if role == "深度探索" else min(target_daily_count, 5)
+                        _balanced = rebalance_daily_route(
+                            final_data.get("route") or [],
+                            poi_pool_data,
+                            days=trip_days,
+                            target_daytime=_final_target,
+                        )
+                        final_data["route"] = _balanced["route"]
+                        llm_routes = final_data["route"]
+                        final_data["daily_balance"] = _balanced["audit"]
+                        final_data["daily_balance"]["gate"] = "final_pre_emit"
+                    except Exception as _final_balance_exc:
+                        final_data["daily_balance"] = {"gate": "final_pre_emit", "error": str(_final_balance_exc)[:200]}
 
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
