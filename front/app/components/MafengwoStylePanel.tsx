@@ -22,7 +22,7 @@ export default function MafengwoStylePanel({
   routes, totalDays, activeDayIndex, onSelectDay, travelDetails, selectedPoiIndex, 
   onSelectPoi, weatherInfo, trafficInfo, onReset, consensusSummary, budgetData, 
   onSwapPoi, onMarkVisited, visitedNodes = [], roomCode, roomMembers, teamSatisfaction, arbitrationRecords, nodeVotes, onVote,
-  wsConnected = true,
+  wsConnected = true, fairnessAudit,
   safetyInfo, safetyBrief, briefLoading, onGenerateSafetyBrief, targetCity,
   onPhotoClick, currentUser, onApplyScenario, onSecondaryPlan
 }: any) {
@@ -58,6 +58,7 @@ export default function MafengwoStylePanel({
         <ConsensusExplainability
           route={routes || []}
           members={(roomMembers || []).map((member: any) => ({ id: member.id, name: member.name, interestTags: member.intent ? [member.intent] : [] }))}
+          fairnessAudit={fairnessAudit}
         />
         <ScenarioSimulator
           route={routes || []}

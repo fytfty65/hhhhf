@@ -3189,6 +3189,10 @@ async def run_negotiate(msg: GatewayMessage):
                         ("intense", "特种兵暴走", "节奏紧凑、覆盖更多景点，适合打卡达人"),
                         ("niche", "小众探索", "偏爱文化与小众去处，避开热门人流"),
                     ]
+                    fairness_members = [
+                        {"id": str(member.get("id") or member.get("name") or f"member-{index}"), "interestTags": [str(member.get("intent") or "")]}
+                        for index, member in enumerate(room_members) if isinstance(member, dict)
+                    ]
                     try:
                         plan_variants = []
                         for _i, (_st, _name, _desc) in enumerate(_variant_styles):
@@ -3218,10 +3222,12 @@ async def run_negotiate(msg: GatewayMessage):
                                 _feasible_routes = [fair_routes[i] for i in _feasible_indices]
                                 fair_selection = select_fair_route(_feasible_routes, fairness_members)
                                 selected_index = _feasible_indices[int(fair_selection.get("index", 0))]
+                                _report_route_indices = _feasible_indices
                                 _selection_method = "hard_constraint_filter_then_maximin"
                             else:
                                 fair_selection = select_fair_route(fair_routes, fairness_members)
                                 selected_index = int(fair_selection.get("index", 0))
+                                _report_route_indices = list(range(len(fair_routes)))
                                 _selection_method = "maximin_fallback_all_infeasible"
                             final_data["constraints_engine"] = {
                                 "infeasible_count": _constraint_resolution.get("infeasible_count", 0),
@@ -3233,7 +3239,18 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["route"] = llm_routes
                             selected_variant_index = selected_index - 1 if selected_index > 0 else None
                             fairness_base = fair_selection.get("report") or fairness_report(llm_routes, fairness_members)
-                            final_data["fairness"] = dict(fairness_base, selected_variant_index=selected_variant_index, selection_method=_selection_method, candidate_reports=fair_selection.get("reports", []))
+                            _candidate_reports = []
+                            for _report_index, _report in enumerate(fair_selection.get("reports", [])):
+                                _report_copy = dict(_report)
+                                _route_index = _report_route_indices[_report_index] if _report_index < len(_report_route_indices) else _report_index
+                                _report_copy["candidate_name"] = "AI 主方案" if _route_index == 0 else str(plan_variants[_route_index - 1].get("name") or f"候选方案 {_route_index}") if _route_index - 1 < len(plan_variants) else f"候选方案 {_route_index}"
+                                _report_copy["candidate_index"] = _route_index
+                                _candidate_reports.append(_report_copy)
+                            try:
+                                _fairness_threshold = float(os.getenv("PLANNING_FAIRNESS_MAX_STD", "0.15"))
+                            except (TypeError, ValueError):
+                                _fairness_threshold = 0.15
+                            final_data["fairness"] = dict(fairness_base, selected_variant_index=selected_variant_index, selection_method=_selection_method, candidate_reports=_candidate_reports, threshold=_fairness_threshold, threshold_exceeded=float(fairness_base.get("utility_stddev", 0)) > _fairness_threshold)
                             if selected_index > 0:
                                 llm_routes = repair_route(llm_routes, max_nodes_per_day=actual_daily_count + 1)
                                 final_data["route"] = llm_routes
@@ -3296,7 +3313,7 @@ async def run_negotiate(msg: GatewayMessage):
                                 "propensity": _decision.get("propensity"),
                                 "candidate_count": _decision.get("candidate_count"),
                             }
-                            final_data["fairness"] = fairness_report(_selected_route, fairness_members)
+                            final_data["fairness"] = {**(final_data.get("fairness") or {}), **fairness_report(_selected_route, fairness_members)}
 
                     # 回发校正后的最终路线，前端以 final_route 为准（真实图片/坐标/完整天数）
                     # 🧠 智能时间管理：注入节奏判断 + 周一闭馆感知
@@ -3747,6 +3764,25 @@ async def run_negotiate(msg: GatewayMessage):
                         llm_routes = final_data["route"]
                         final_data["daily_balance"] = _balanced["audit"]
                         final_data["daily_balance"]["gate"] = "final_pre_emit"
+                        _final_fairness = fairness_report(final_data["route"], fairness_members or room_members)
+                        _fairness_meta = final_data.get("fairness") or {}
+                        _threshold = float(_fairness_meta.get("threshold", 0.15) or 0.15)
+                        final_data["fairness"] = {
+                            **_fairness_meta,
+                            **_final_fairness,
+                            "threshold": _threshold,
+                            "threshold_exceeded": float(_final_fairness.get("utility_stddev", 0)) > _threshold,
+                        }
+                        try:
+                            final_data["constraints"] = validate_route(
+                                final_data["route"],
+                                budget=total_calc_budget if budget_mode == "EXACT_AMOUNT" else None,
+                                days=trip_days,
+                                max_nodes_per_day=_final_target + 1,
+                                unique_locations=True,
+                            )
+                        except Exception:
+                            pass
                         try:
                             from core.price_sources import pending_price_report, price_coverage
 

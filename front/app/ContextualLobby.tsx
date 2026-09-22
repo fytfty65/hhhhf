@@ -892,6 +892,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
 
   // 动态团队满意度矩阵
   const [teamSatisfaction, setTeamSatisfaction] = useState<Record<string, number>>({});
+  const [fairnessAudit, setFairnessAudit] = useState<any>(null);
   // 概率化数字孪生结果（P50/P90 时长、超预算概率、成员满意度分布）。
   // 这些是采样得到的分布，而不是单点估计，因此可用于表达不确定度。
   const [simulation, setSimulation] = useState<{
@@ -1164,6 +1165,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   // 后端可能只给其中一部分（例如未超预算时没有 fallback），缺什么就渲染什么。
                   applyPlanGovernance(finalData);
                   if (finalData.arbitration_records) setArbitrationRecords(finalData.arbitration_records);
+                  if (finalData.fairness && typeof finalData.fairness === 'object') setFairnessAudit(finalData.fairness);
                   // Capture the bandit arm the planner actually used. Without
                   // this the satisfaction form posts an empty bandit_arm_id, the
                   // gateway drops the reward, and the policy accumulates no
@@ -1255,6 +1257,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               if (fd.negotiation_summary) setConsensusSummary(fd.negotiation_summary);
               if (fd.team_satisfaction) setTeamSatisfaction(fd.team_satisfaction);
               if (fd.arbitration_records) setArbitrationRecords(fd.arbitration_records);
+              if (fd.fairness && typeof fd.fairness === 'object') setFairnessAudit(fd.fairness);
               // final_route 是权威 payload：只收到它（重连、回放、流式 token 丢了）时
               // 核对面板同样要有数据。
               applyPlanGovernance(fd);
@@ -1939,6 +1942,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   trafficInfo={trafficInfo}
                   onReset={handleResetIntent}
                   consensusSummary={consensusSummary}
+                  fairnessAudit={fairnessAudit}
                   budgetData={budgetData}
                   onSwapPoi={handleSinglePoiSwap}
                   onMarkVisited={handleNodeVisited}

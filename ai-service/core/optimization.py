@@ -205,8 +205,9 @@ def fairness_report(route: Sequence[Mapping[str, Any]], members: Sequence[Mappin
     values = list(utilities.values())
     mean = sum(values) / max(1, len(values))
     variance = sum((value - mean) ** 2 for value in values) / max(1, len(values))
+    stddev = variance ** 0.5
     regret = max(values) - min(values) if values else 0.0
-    return {"utilities": utilities, "minimum_utility": round(min(values), 6) if values else 0.0, "mean_utility": round(mean, 6), "utility_variance": round(variance, 6), "max_regret": round(regret, 6), "nash_welfare": round(sum(__import__("math").log(max(value, 1e-6)) for value in values), 6) if values else 0.0}
+    return {"utilities": utilities, "minimum_utility": round(min(values), 6) if values else 0.0, "mean_utility": round(mean, 6), "utility_variance": round(variance, 6), "utility_stddev": round(stddev, 6), "max_regret": round(regret, 6), "nash_welfare": round(sum(__import__("math").log(max(value, 1e-6)) for value in values), 6) if values else 0.0}
 
 
 def select_fair_route(routes: Sequence[Sequence[Mapping[str, Any]]], members: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:

@@ -399,6 +399,11 @@ export default function WorldSafetyGlobe({
     () => new Set(dynamicGlobalCities.map((city) => city.regionGroup)).size,
     [dynamicGlobalCities],
   );
+  const globalRegionSummary = useMemo(() => {
+    const counts = new Map<string, number>();
+    dynamicGlobalCities.forEach((city) => counts.set(city.region, (counts.get(city.region) || 0) + 1));
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [dynamicGlobalCities]);
 
   useEffect(() => {
     if (globeRef.current) {
@@ -918,8 +923,10 @@ export default function WorldSafetyGlobe({
           <span className="text-[11px] text-slate-500 font-mono">{globalRegionCount} 区域 · {dynamicGlobalCities.length} 城市</span>
         </div>
         <div className="p-3 space-y-2 max-h-[250px] overflow-y-auto custom-scrollbar">
-          <div className="bg-slate-200/60 dark:bg-slate-800/20 border border-dashed border-slate-700/50 rounded-lg p-2 text-center">
-            <span className="text-[11px] text-slate-500 font-mono">仅展示地理位置，风险等级以后端情报为准</span>
+          <div className="bg-slate-200/60 dark:bg-slate-800/20 border border-dashed border-slate-700/50 rounded-lg p-2.5">
+            <div className="flex items-center justify-between text-[10px] font-bold text-slate-500"><span>全球目录覆盖</span><span>{globalRegionCount} 个区域</span></div>
+            <div className="mt-1.5 flex flex-wrap gap-1">{globalRegionSummary.map(([region, count]) => <span key={region} className="rounded bg-slate-300/60 px-1.5 py-0.5 text-[9px] text-slate-600 dark:bg-white/10 dark:text-slate-400">{region} {count}</span>)}</div>
+            <p className="mt-2 text-[10px] leading-4 text-slate-500">城市点是全球地理目录，不等同于实时风险。只有带供应商、时间戳的信号才进入风险判断。</p>
           </div>
           {dynamicGlobalCities.slice(0, 10).map(city => (
             <div key={city.name} className="flex items-center justify-between py-1.5 border-b border-slate-300/50 dark:border-white/5 last:border-0">
