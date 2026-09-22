@@ -47,6 +47,8 @@ export interface SafetyInfo {
   traffic_score?: number;
   source?: string;
   is_estimated?: boolean;
+  risk_ts?: number;
+  signal_sources?: Record<string, { provider?: string; available?: boolean; estimated?: boolean; retrieved_at?: string | number }>;
 }
 
 export interface RoutePoint {
@@ -577,7 +579,13 @@ export default function WorldSafetyGlobe({
   const alertCount = liveSafety?.active_alerts?.length || 0;
   const hasSafetyData = !!liveSafety;
   const safetySource = String(liveSafety?.source || '').trim();
-  const freshnessLabel = lastRefreshed ? `${Math.max(0, Math.round((Date.now() - lastRefreshed) / 1000))} 秒前` : '未同步';
+  const requestFreshnessLabel = lastRefreshed ? `${Math.max(0, Math.round((currentTime.getTime() - lastRefreshed) / 1000))} 秒前` : '未同步';
+  const snapshotTimestamp = Number(liveSafety?.risk_ts);
+  const snapshotFreshnessLabel = Number.isFinite(snapshotTimestamp) && snapshotTimestamp > 0
+    ? `${Math.max(0, Math.round((currentTime.getTime() - snapshotTimestamp) / 1000))} 秒前`
+    : '无时间戳';
+  const signalSources = liveSafety?.signal_sources || {};
+  const availableSignalCount = Object.values(signalSources).filter((signal) => signal?.available).length;
 
   // 底部滚动条
   const tickerItems = [
@@ -673,7 +681,7 @@ export default function WorldSafetyGlobe({
           <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-500">
             <span className="flex items-center gap-1.5">
               <RotateCw className={`w-3 h-3 ${refreshing ? 'animate-spin text-sky-500' : ''}`} />
-              <span>{refreshing ? '正在同步实时情报…' : `上次同步 ${new Date(lastRefreshed).toLocaleTimeString('zh-CN')} · ${freshnessLabel}`}</span>
+              <span>{refreshing ? '正在同步实时情报…' : `本次请求 ${new Date(lastRefreshed).toLocaleTimeString('zh-CN')} · ${requestFreshnessLabel}`}</span>
             </span>
             {liveSafety?.is_estimated && (
               <span className="px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400">估算值</span>
@@ -710,7 +718,7 @@ export default function WorldSafetyGlobe({
 
               <div className="rounded-lg border border-slate-300/50 bg-slate-100/60 p-2.5 dark:border-white/10 dark:bg-slate-900/30">
                 <div className="mb-2 flex items-center justify-between text-[10px] font-bold text-slate-500">
-                  <span>数据边界</span><span>{safetySource || '暂无风控供应商'}</span>
+                  <span>数据边界</span><span>{availableSignalCount}/3 信号源 · 快照 {snapshotFreshnessLabel}</span>
                 </div>
                 <div className="grid grid-cols-3 gap-1.5">
                   <button type="button" onClick={() => setShowRouteLayer((value) => !value)} aria-pressed={showRouteLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showRouteLayer ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>路线 {showRouteLayer ? '开' : '关'}</button>
@@ -718,6 +726,7 @@ export default function WorldSafetyGlobe({
                   <button type="button" onClick={() => setShowSignalLayer((value) => !value)} aria-pressed={showSignalLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showSignalLayer ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>风险 {showSignalLayer ? '开' : '关'}</button>
                 </div>
                 <div className="mt-1.5 grid grid-cols-2 gap-1.5"><button type="button" onClick={toggleGlobalNetwork} aria-pressed={showGlobalNetwork} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showGlobalNetwork ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>全球城市 {showGlobalNetwork ? '开' : '关'}</button><span className="rounded bg-slate-200/60 px-1.5 py-1 text-center text-[10px] text-slate-500">信号点 {signalPoints.length}</span></div>
+                <div className="mt-2 grid grid-cols-3 gap-1">{(['safety', 'weather', 'traffic'] as const).map((key) => { const signal = signalSources[key]; return <span key={key} className={`rounded px-1.5 py-1 text-center text-[9px] ${signal?.available ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-slate-200/70 text-slate-400 dark:bg-slate-800'}`}>{key === 'safety' ? '安全' : key === 'weather' ? '天气' : '路况'} · {signal?.available ? (signal.provider || '已接入') : '无数据'}</span>; })}</div>
                 <p className="mt-2 text-[10px] leading-4 text-slate-400">全球城市点为坐标目录，不代表实时天气、路况或客流；实时字段仅在接入供应商且带时间戳时展示。</p>
               </div>
 

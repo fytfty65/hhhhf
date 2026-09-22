@@ -419,6 +419,24 @@ class TestBuildSnapshot(unittest.TestCase):
         self.assertEqual(snapshot["weather"], {"condition": "晴"})
         self.assertEqual(snapshot["traffic"], {"status_code": "1"})
         self.assertEqual(snapshot["cii_decomposition"], {"method": "weighted_composite"})
+        self.assertEqual(snapshot["signal_sources"]["safety"]["provider"], "local_baseline")
+        self.assertTrue(snapshot["signal_sources"]["safety"]["available"])
+        self.assertTrue(snapshot["signal_sources"]["safety"]["estimated"])
+        self.assertTrue(snapshot["signal_sources"]["weather"]["available"])
+        self.assertTrue(snapshot["signal_sources"]["traffic"]["available"])
+
+    def test_snapshot_preserves_provider_freshness_metadata(self):
+        snapshot = self.service.build_snapshot(
+            {"city": "成都", "source": "risk-feed", "retrieved_at": "2026-09-22T08:00:00Z"},
+            weather={"provider": "weather-feed", "updated_at": 1770000000000},
+            traffic={"source": "traffic-feed", "timestamp": "2026-09-22T08:01:00Z", "estimated": True},
+        )
+
+        self.assertEqual(snapshot["signal_sources"]["safety"]["retrieved_at"], "2026-09-22T08:00:00Z")
+        self.assertEqual(snapshot["signal_sources"]["weather"]["provider"], "weather-feed")
+        self.assertEqual(snapshot["signal_sources"]["weather"]["retrieved_at"], 1770000000000)
+        self.assertEqual(snapshot["signal_sources"]["traffic"]["provider"], "traffic-feed")
+        self.assertTrue(snapshot["signal_sources"]["traffic"]["estimated"])
 
     def test_snapshot_defaults_are_neutral(self):
         snapshot = self.service.build_snapshot({})
@@ -427,6 +445,10 @@ class TestBuildSnapshot(unittest.TestCase):
         self.assertFalse(snapshot["is_estimated"])
         self.assertEqual(snapshot["active_alerts"], [])
         self.assertEqual(snapshot["source"], "")
+        for source in snapshot["signal_sources"].values():
+            self.assertFalse(source["available"])
+            self.assertFalse(source["estimated"])
+            self.assertIsNone(source["retrieved_at"])
 
 
 class TestRiskServiceCache(unittest.TestCase):

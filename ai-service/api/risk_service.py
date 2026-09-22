@@ -71,6 +71,7 @@ class RiskReport:
     weather: Optional[Dict[str, Any]] = None
     traffic: Optional[Dict[str, Any]] = None
     cii_decomposition: Optional[Dict[str, Any]] = None
+    signal_sources: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -715,6 +716,28 @@ class RiskService:
         traffic: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """基于聚合后的情报构建统一 RiskReport 快照，注入 source / risk_ts 溯源元数据。"""
+        def source_meta(value: Optional[Dict[str, Any]], fallback: str) -> Dict[str, Any]:
+            if not isinstance(value, dict) or not value:
+                return {
+                    "provider": fallback,
+                    "available": False,
+                    "estimated": False,
+                    "retrieved_at": None,
+                }
+            provider = str(value.get("source") or value.get("provider") or fallback)
+            retrieved = value.get("retrieved_at") or value.get("updated_at") or value.get("timestamp")
+            return {
+                "provider": provider,
+                "available": True,
+                "estimated": bool(value.get("estimated") or value.get("is_estimated")),
+                "retrieved_at": retrieved,
+            }
+
+        signal_sources = {
+            "safety": source_meta(safety_intel, "safety_unavailable"),
+            "weather": source_meta(weather, "weather_unavailable"),
+            "traffic": source_meta(traffic, "traffic_unavailable"),
+        }
         return RiskReport(
             city=str(safety_intel.get("city") or ""),
             cii_score=float(safety_intel.get("cii_score") or 10.0),
@@ -731,4 +754,5 @@ class RiskService:
             weather=weather,
             traffic=traffic,
             cii_decomposition=safety_intel.get("cii_decomposition"),
+            signal_sources=signal_sources,
         ).to_dict()
