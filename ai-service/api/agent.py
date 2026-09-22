@@ -3747,6 +3747,19 @@ async def run_negotiate(msg: GatewayMessage):
                         llm_routes = final_data["route"]
                         final_data["daily_balance"] = _balanced["audit"]
                         final_data["daily_balance"]["gate"] = "final_pre_emit"
+                        try:
+                            from core.price_sources import pending_price_report, price_coverage
+
+                            _final_coverage = price_coverage(final_data)
+                            _final_pending = pending_price_report(final_data)
+                            final_data["price_audit"] = {
+                                **(final_data.get("price_audit") or {}),
+                                **_final_coverage,
+                                "pending": _final_pending["pending"],
+                                "pending_summary": _final_pending["summary"],
+                            }
+                        except Exception:
+                            pass
                     except Exception as _final_balance_exc:
                         final_data["daily_balance"] = {"gate": "final_pre_emit", "error": str(_final_balance_exc)[:200]}
 

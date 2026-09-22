@@ -65,6 +65,9 @@ export default function TripMacroDashboard({
   const verifiedCount = routes.filter((route: any) => Array.isArray(route.lnglat) && route.lnglat.length >= 2 && route.lnglat.every((value: any) => Number.isFinite(Number(value)) && Number(value) !== 0)).length;
   const estimatedCount = routes.filter((route: any) => route.estimated || route.data_sources?.cost_estimate === 'unavailable').length;
   const dayCounts = timelineDays.map((day) => routes.filter((route: any) => Number(route.day) === day && !route.is_hotel && !route.tags?.includes('住宿')).length);
+  const minDayCount = dayCounts.length ? Math.min(...dayCounts) : 0;
+  const maxDayCount = dayCounts.length ? Math.max(...dayCounts) : 0;
+  const daySpread = maxDayCount - minDayCount;
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -125,12 +128,17 @@ export default function TripMacroDashboard({
         </DraggablePanel>
 
         <DraggablePanel className="radar-panel" style={panelStyle} icon={<BarChart3 className="w-3.5 h-3.5" style={{ color: COLORS.cyan }} />} title={<span className="text-[13px] font-bold" style={{ color: COLORS.cyan }}>计划健康度</span>}>
-          <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-5">
             <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>节点总数</p><p className="mt-1 text-lg font-black" style={{ color: COLORS.accent }}>{routes.length}</p></div>
             <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>坐标覆盖</p><p className="mt-1 text-lg font-black" style={{ color: COLORS.safe }}>{routes.length ? Math.round(verifiedCount / routes.length * 100) : 0}%</p></div>
             <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>估算字段</p><p className="mt-1 text-lg font-black" style={{ color: estimatedCount ? COLORS.warn : COLORS.safe }}>{estimatedCount}</p></div>
             <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>每日白天节点</p><p className="mt-1 truncate text-xs font-black" style={{ color: COLORS.origin }}>{dayCounts.map((count, index) => `D${timelineDays[index]}:${count}`).join(' · ') || '—'}</p></div>
+            <div className="rounded-lg border p-2" style={{ borderColor: daySpread > 1 ? COLORS.warn : COLORS.borderSoft, background: daySpread > 1 ? 'rgba(245,158,11,0.10)' : COLORS.deep }}>
+              <p className="text-[10px]" style={{ color: daySpread > 1 ? COLORS.warn : COLORS.muted }}>日程均衡</p>
+              <p className="mt-1 text-xs font-black" style={{ color: daySpread > 1 ? COLORS.warn : COLORS.safe }}>{dayCounts.length ? (daySpread > 1 ? `差 ${daySpread} 个` : '均衡') : '—'}</p>
+            </div>
           </div>
+          {daySpread > 1 && <div className="border-t px-3 py-2 text-[11px]" style={{ borderColor: COLORS.divider, color: COLORS.warn }}>部分日期的白天节点明显偏少。已在最终规划门禁中尝试从真实候选池补齐；仍不足时会明确标记候选池缺口。</div>}
         </DraggablePanel>
 
         {/* 预算累计曲线 + 节点成本条形图 */}
