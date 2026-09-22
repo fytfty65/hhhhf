@@ -380,6 +380,31 @@ func candidateSource(provider string, estimated bool) contracts.Source {
 	return contracts.Source{Provider: provider, Retrieved: time.Now().UTC(), Estimated: estimated}
 }
 
+// priceEvidence keeps fallback prices honest.  A fallback is a planning hint,
+// never a quote: the UI can show the status, source and a direct verification
+// link without allowing an estimate to enter hard budget validation.
+func priceEvidence(status, label, url, estimate string) map[string]any {
+	return map[string]any{
+		"price_status":          status,
+		"price_label":           label,
+		"estimated_price_range": estimate,
+		"verification_url":      url,
+		"retrieved_at":          time.Now().UTC(),
+		"disclaimer":            "仅供规划参考，最终价格、余票和开放状态以官方页面为准",
+	}
+}
+
+func mergeMaps(base, overlay map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(overlay))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range overlay {
+		merged[key] = value
+	}
+	return merged
+}
+
 // TransportOptionsHandler returns explainable multimodal candidates. Supplier
 // adapters can replace these estimates without changing the contract.
 func TransportOptionsHandler(c *gin.Context) {
@@ -394,10 +419,13 @@ func TransportOptionsHandler(c *gin.Context) {
 		return
 	}
 	amapQuery := url.QueryEscape(strings.TrimSpace(ctx.Origin + " 到 " + ctx.Destination))
+	trainURL := "https://www.12306.cn/index/"
+	flightURL := "https://flights.trip.com/"
+	driveURL := "https://www.amap.com/search?query=" + amapQuery
 	options := []contracts.Candidate{
-		{ID: uuid.NewString(), Name: "铁路 + 城市公共交通", Score: 0.91, Duration: 285, Tags: []string{"低碳", "稳定"}, Reasons: []string{"换乘次数少", "到达后接驳成本低"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"segments": []string{"铁路", "地铁/公交"}, "transfer_buffer_minutes": 45, "carbon_kg_estimate": 32, "estimated_price_range": "¥200–500/人", "price_status": "estimated", "booking_url": "https://www.12306.cn/index/", "booking_label": "前往 12306 核验车次"}},
-		{ID: uuid.NewString(), Name: "航班 + 地铁", Score: 0.86, Duration: 210, Tags: []string{"快速"}, Reasons: []string{"换乘次数少", "预留机场安检时间"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"segments": []string{"航班", "地铁"}, "transfer_buffer_minutes": 90, "carbon_kg_estimate": 128, "estimated_price_range": "¥500–1200/人", "price_status": "estimated", "booking_url": "https://flights.trip.com/", "booking_label": "前往 Trip.com 核验航班"}},
-		{ID: uuid.NewString(), Name: "自驾 + 景区接驳", Score: 0.78, Duration: 330, Tags: []string{"灵活"}, Reasons: []string{"适合多人同行", "可携带更多行李"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"segments": []string{"自驾", "景区接驳"}, "transfer_buffer_minutes": 20, "carbon_kg_estimate": 96, "estimated_price_range": "¥300–800/车", "price_status": "estimated", "booking_url": "https://www.amap.com/search?query=" + amapQuery, "booking_label": "在高德核验路线"}},
+		{ID: uuid.NewString(), Name: "铁路 + 城市公共交通", Score: 0.91, Duration: 285, Tags: []string{"低碳", "稳定"}, Reasons: []string{"换乘次数少", "到达后接驳成本低"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"segments": []string{"铁路", "地铁/公交"}, "transfer_buffer_minutes": 45, "carbon_kg_estimate": 32, "booking_url": trainURL, "booking_label": "前往 12306 核验车次"}, priceEvidence("estimated", "区间估算", trainURL, "¥200–500/人"))},
+		{ID: uuid.NewString(), Name: "航班 + 地铁", Score: 0.86, Duration: 210, Tags: []string{"快速"}, Reasons: []string{"换乘次数少", "预留机场安检时间"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"segments": []string{"航班", "地铁"}, "transfer_buffer_minutes": 90, "carbon_kg_estimate": 128, "booking_url": flightURL, "booking_label": "前往 Trip.com 核验航班"}, priceEvidence("estimated", "区间估算", flightURL, "¥500–1200/人"))},
+		{ID: uuid.NewString(), Name: "自驾 + 景区接驳", Score: 0.78, Duration: 330, Tags: []string{"灵活"}, Reasons: []string{"适合多人同行", "可携带更多行李"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"segments": []string{"自驾", "景区接驳"}, "transfer_buffer_minutes": 20, "carbon_kg_estimate": 96, "booking_url": driveURL, "booking_label": "在高德核验路线"}, priceEvidence("unknown", "暂无可核实价格", driveURL, "未提供"))},
 	}
 	if pref, exists := ctx.Preferences["low_carbon"]; exists && pref == true {
 		sort.SliceStable(options, func(i, j int) bool { return options[i].Tags[0] == "低碳" })
@@ -418,9 +446,10 @@ func LodgingOptionsHandler(c *gin.Context) {
 		planningData(c, gin.H{"context": ctx, "options": options, "ranking": []string{"通勤成本", "价格", "安全", "用户偏好"}, "source": source})
 		return
 	}
+	hotelURL := "https://www.amap.com/search?query=" + url.QueryEscape(ctx.Destination+" 酒店")
 	options := []contracts.Candidate{
-		{ID: uuid.NewString(), Name: ctx.Destination + "核心景区附近精品酒店", Score: 0.90, Duration: 12, Tags: []string{"步行友好", "安静"}, Reasons: []string{"平均通勤短", "适合连续多日行程"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"area": "景区周边", "estimated_price_range": "¥350–600/晚", "price_status": "estimated"}},
-		{ID: uuid.NewString(), Name: ctx.Destination + "交通枢纽商圈酒店", Score: 0.84, Duration: 20, Tags: []string{"性价比", "换乘方便"}, Reasons: []string{"公共交通覆盖好", "预算压力较低"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"area": "交通枢纽", "estimated_price_range": "¥220–420/晚", "price_status": "estimated"}},
+		{ID: uuid.NewString(), Name: ctx.Destination + "核心景区附近精品酒店", Score: 0.90, Duration: 12, Tags: []string{"步行友好", "安静"}, Reasons: []string{"平均通勤短", "适合连续多日行程"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"area": "景区周边", "booking_url": hotelURL, "booking_label": "打开高德核验房价"}, priceEvidence("unknown", "房价待核验", hotelURL, "未提供"))},
+		{ID: uuid.NewString(), Name: ctx.Destination + "交通枢纽商圈酒店", Score: 0.84, Duration: 20, Tags: []string{"性价比", "换乘方便"}, Reasons: []string{"公共交通覆盖好", "预算压力较低"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"area": "交通枢纽", "booking_url": hotelURL, "booking_label": "打开高德核验房价"}, priceEvidence("unknown", "房价待核验", hotelURL, "未提供"))},
 	}
 	options = planningService.RankCandidates(options, ctx.Preferences)
 	options = annotateCandidates(options, "lodging")
@@ -438,10 +467,11 @@ func DiningOptionsHandler(c *gin.Context) {
 		planningData(c, gin.H{"context": ctx, "options": options, "ranking": []string{"营业时间", "距离", "口味偏好", "人均预算"}, "source": source})
 		return
 	}
+	diningURL := "https://www.amap.com/search?query=" + url.QueryEscape(ctx.Destination+" 美食")
 	options := []contracts.Candidate{
-		{ID: uuid.NewString(), Name: ctx.Destination + "本地风味小馆", Score: 0.92, Duration: 70, Tags: []string{"本地特色", "可预约"}, Reasons: []string{"靠近当日景点", "人均价格适中"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"estimated_price_range": "¥60–120/人", "price_status": "estimated"}},
-		{ID: uuid.NewString(), Name: ctx.Destination + "错峰早午餐路线", Score: 0.87, Duration: 50, Tags: []string{"错峰", "轻食"}, Reasons: []string{"避开晚餐排队", "适合紧凑行程"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"estimated_price_range": "¥35–80/人", "price_status": "estimated"}},
-		{ID: uuid.NewString(), Name: ctx.Destination + "夜间特色街区", Score: 0.83, Duration: 100, Tags: []string{"夜游", "美食"}, Reasons: []string{"与夜间路线衔接", "可分散客流"}, Source: candidateSource("omniroute-estimator", true), Extra: map[string]any{"estimated_price_range": "¥80–180/人", "price_status": "estimated"}},
+		{ID: uuid.NewString(), Name: ctx.Destination + "本地风味小馆", Score: 0.92, Duration: 70, Tags: []string{"本地特色", "可预约"}, Reasons: []string{"靠近当日景点", "人均价格适中"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"booking_url": diningURL, "booking_label": "打开高德核验店铺"}, priceEvidence("unknown", "人均待核验", diningURL, "未提供"))},
+		{ID: uuid.NewString(), Name: ctx.Destination + "错峰早午餐路线", Score: 0.87, Duration: 50, Tags: []string{"错峰", "轻食"}, Reasons: []string{"避开晚餐排队", "适合紧凑行程"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"booking_url": diningURL, "booking_label": "打开高德核验店铺"}, priceEvidence("unknown", "人均待核验", diningURL, "未提供"))},
+		{ID: uuid.NewString(), Name: ctx.Destination + "夜间特色街区", Score: 0.83, Duration: 100, Tags: []string{"夜游", "美食"}, Reasons: []string{"与夜间路线衔接", "可分散客流"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"booking_url": diningURL, "booking_label": "打开高德核验店铺"}, priceEvidence("unknown", "人均待核验", diningURL, "未提供"))},
 	}
 	options = planningService.RankCandidates(options, ctx.Preferences)
 	options = annotateCandidates(options, "dining")

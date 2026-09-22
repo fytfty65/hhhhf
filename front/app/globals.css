@@ -8,6 +8,9 @@
   --bg-body: #f1f5f9;
   --bg-card: #ffffff;
   --text-primary: #0f172a;
+  --surface-muted: #f7f7f5;
+  --line-subtle: #e2e2de;
+  --brand-accent: #c85a22;
   /* 3D 雷达 HUD 字体：展示数字用科幻字体，中文回退系统字体 */
   --font-radar-display: 'Orbitron', 'Rajdhani', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-radar-data: 'Rajdhani', 'JetBrains Mono', 'SF Mono', Consolas, 'PingFang SC', monospace;
@@ -772,4 +775,85 @@ html, body, #__next {
 .workspace-toolbar > button:focus-visible {
   outline: 2px solid #fb923c;
   outline-offset: 2px;
+}
+
+/* Planning workbench: information-dense and calm. Colour communicates state,
+   while navigation and actions remain neutral. */
+.planning-workbench {
+  border-radius: 8px !important;
+  box-shadow: none;
+  background: #fff;
+}
+
+.planning-tabs {
+  overflow-x: auto;
+}
+
+.planning-tab {
+  border-radius: 6px;
+  color: #64748b;
+  transition: background-color .15s ease, color .15s ease;
+}
+
+.planning-tab:hover {
+  background: var(--surface-muted);
+  color: #1f2937;
+}
+
+.planning-tab.is-active {
+  background: #1f2937;
+  color: #fff;
+}
+
+.planning-option {
+  border-radius: 8px !important;
+  box-shadow: none;
+  transition: border-color .15s ease;
+}
+
+.planning-option:hover {
+  border-color: #a8a8a2;
+}
+
+.planning-detail-button,
+.planning-verify-link {
+  min-height: 30px;
+  border: 1px solid #d7d7d2;
+  border-radius: 6px;
+  background: #fff;
+  padding: .35rem .6rem;
+  color: #374151;
+  font-size: .68rem;
+  font-weight: 700;
+}
+
+.planning-detail-button:hover,
+.planning-verify-link:hover {
+  border-color: #9ca3af;
+  background: var(--surface-muted);
+}
+
+.planning-tag,
+.planning-price-status {
+  border: 1px solid var(--line-subtle);
+  border-radius: 4px;
+  background: var(--surface-muted);
+  padding: .16rem .38rem;
+  color: #64748b;
+  font-size: .62rem;
+  font-weight: 700;
+}
+
+.planning-price-verified { border-color: #a7d7bd; background: #effaf3; color: #18724a; }
+.planning-price-estimated { border-color: #ead2a7; background: #fff9eb; color: #8a5a14; }
+.planning-price-unknown,
+.planning-price-stale { border-color: #d9dce1; background: #f6f7f8; color: #667085; }
+
+.dark .planning-workbench,
+.dark .planning-option,
+.dark .planning-detail-button,
+.dark .planning-verify-link {
+  background: #111827;
+  border-color: #334155;
+  color: #cbd5e1;
 }
