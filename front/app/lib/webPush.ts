@@ -73,7 +73,14 @@ export async function requestWebPushSubscription(): Promise<{ state: WebPushStat
       body: JSON.stringify({ token: deviceToken, platform: String(navigator.userAgent || '').slice(0, 32) }),
     });
     return { state: 'subscribed', message: '浏览器通知已开启，重大风险会提醒你' };
-  } catch {
+  } catch (error) {
+    // 不许把"依赖没装"糊成"网络或浏览器限制" —— 实测就是这么被藏起来的：
+    // front 里没装 firebase 时 `import('firebase/app')` 抛 module-not-found，
+    // 被笼统的 catch 吞掉后只显示"可能是网络问题"，排查方向被带偏。
+    const text = String((error as { message?: string })?.message || error || '');
+    if (/cannot find module|failed to resolve|module not found/i.test(text)) {
+      return { state: 'disabled', message: '推送依赖未安装（front 目录缺少 firebase），已保留站内通知' };
+    }
     return { state: 'available', message: '推送登记未完成（可能是网络或浏览器限制），已保留站内通知' };
   }
 }
