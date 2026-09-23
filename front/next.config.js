@@ -163,4 +163,12 @@ const nextConfig = {
   },
 };
 
+// 根治一类"dev server 起不来 / 端口在监听但页面打不开"的问题（2026-09-19 实测）：
+// Turbopack 会向外寻找 lockfile 来推断 workspace root；仓库外层（D:\OminRoute_2）一旦存在
+// package-lock.json，它就以外层为 root，进而认为 front/app 属于"项目目录之外"，报
+//   "We couldn't find the Next.js package (next/package.json) from the project directory: …front\app"
+// 于是构建直接失败、dev 起不来（现象是端口在监听但请求超时，极难定位）。
+// 显式钉住 root 后，外层 lockfile / node_modules 都不再影响本项目构建。
+nextConfig.turbopack = { root: __dirname };
+
 module.exports = nextConfig;
