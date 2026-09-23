@@ -60,7 +60,10 @@ export async function requestWebPushSubscription(): Promise<{ state: WebPushStat
     if (!supported) return { state: 'unsupported', message: '当前浏览器不支持推送，将继续使用站内通知' };
 
     const app = getApps().length > 0 ? getApps()[0] : initializeApp(publicConfig);
-    const registration = await navigator.serviceWorker.ready;
+    // ⚠️ 必须显式注册并用**这个** SW：`navigator.serviceWorker.ready` 可能解析到别的注册
+    //    （旧代码在 layout 里注册了 /sw.js，同作用域会把 FCM 的 SW 顶掉）。
+    const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+    await navigator.serviceWorker.ready;
     const deviceToken = await messagingModule.getToken(messagingModule.getMessaging(app), {
       vapidKey: vapidPublicKey(),
       serviceWorkerRegistration: registration,
@@ -93,7 +96,8 @@ export async function disableWebPushSubscription() {
     const apps = getApps();
     if (apps.length > 0) {
       const messaging = messagingModule.getMessaging(apps[0]);
-      const registration = await navigator.serviceWorker.ready;
+      const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+      await navigator.serviceWorker.ready;
       deviceToken = (await messagingModule.getToken(messaging, {
         vapidKey: vapidPublicKey(),
         serviceWorkerRegistration: registration,

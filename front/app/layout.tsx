@@ -31,12 +31,17 @@ const themeInitScript = `
 })();
 `;
 
-// PWA Service Worker 注册（离线缓存已生成的行程，cache-first）
+// Service Worker 注册。
+// ⚠️ 这里必须注册 **/firebase-messaging-sw.js**，而不是旧的 /sw.js：
+//    同一个作用域（/）只能有一个 SW 注册，后注册的会**替换**前一个。之前每次页面加载都注册
+//    /sw.js，于是 FCM 的 SW 被顶掉，`getToken()` 拿到的不是它自己的 SW → 表现就是
+//    "用户点了开关、看着是开的，但网关一个设备 token 都没收到"（实测 2026-09-19）。
+//    这个 SW 同时承担 FCM 推送与离线缓存两类职责。
 const swRegisterScript = `
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () {
-    navigator.serviceWorker.register('/sw.js').catch(function (e) {
-      console.warn('[PWA] Service Worker 注册失败:', e);
+    navigator.serviceWorker.register('/firebase-messaging-sw.js').catch(function (e) {
+      console.warn('[SW] Service Worker 注册失败:', e);
     });
   });
 }
