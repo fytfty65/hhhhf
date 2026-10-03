@@ -65,6 +65,8 @@ import PreTripPlanningPanel from './components/PreTripPlanningPanel';
 import BookingHub from './components/BookingHub';
 import TripExecutionPanel from './components/TripExecutionPanel';
 import ReplanProposalPanel from './components/ReplanProposalPanel';
+import RiskPerturbationPanel from './components/RiskPerturbationPanel';
+import { normalizeRiskAlert, type RiskAlertView } from './lib/riskPerturbation';
 
 type WorkspaceLayer = 'plan' | 'evidence' | 'execution' | 'professional';
 
@@ -1040,6 +1042,9 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   const [showAgentRuntimeDetail, setShowAgentRuntimeDetail] = useState(false);
   // 规划核对信息（预算三级模型 / 兜底调整说明 / 超长行程建议 / 门禁问题），随 final_route 下发
   const [planGovernance, setPlanGovernance] = useState<PlanGovernance | null>(null);
+  // 旅中风险告警（gateway 广播 risk_subscription_alert，可带最小扰动范围）：
+  // 只提示与提案，**用户确认前不改动现有方案**
+  const [riskAlert, setRiskAlert] = useState<RiskAlertView | null>(null);
   // 👑 多方案：后端返回的多套行程方案与当前选中方案
   const [planVariants, setPlanVariants] = useState<any[]>([]);
   const [activePlanId, setActivePlanId] = useState<string>('primary');
@@ -1341,6 +1346,16 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               setPvpPriceLoading(false);
             } else if (msg.type === "actual_path") {
               setRealPath(Array.isArray(msg.payload) ? msg.payload : []);
+            } else if (msg.type === "risk_subscription_alert") {
+              // 旅中风险：gateway 向房间广播风险变化，可能附带"最小扰动范围"提案。
+              // 解析交给 lib/riskPerturbation（纯函数、有单测）：算不出来就说算不出来，
+              // 绝不在这里凭空推断"影响哪几个节点"。有可执行范围时才把用户带到旅中执行层，
+              // 否则提示留在原地（避免无谓跳层打断阅读）。
+              const alert = normalizeRiskAlert(msg.payload);
+              if (alert) {
+                setRiskAlert(alert);
+                if (alert.perturbation) setWorkspaceLayer('execution');
+              }
             } else if (msg.type === "final_route") {
               const fd = msg.payload || {};
               const fr = Array.isArray(fd.route) ? fd.route : [];
@@ -2115,6 +2130,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               <motion.div key="workspace-decision-panel" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 <div className="px-4 pt-4 sm:px-8">
                   {workspaceLayer === 'execution' && <>
+                    <RiskPerturbationPanel alert={riskAlert} />
                     <TripExecutionPanel
                       tripId={planningResourceId}
                       planId={savedTripId || undefined}
