@@ -59,15 +59,7 @@ EVENT_TYPES: Dict[str, str] = {
 # 比留在 EVENT_TYPES 里假装体系完整、或者直接删掉假装不需要，都要诚实。
 # `tests/test_event_producers.py` 会强制：EVENT_TYPES == 代码里真有发点的类型 ∪ 本台账 ∪ EXTERNAL_EMITTERS。
 PENDING_WIRING: Dict[str, str] = {
-    "trip.created": "coordinator｜推演入口已发 negotiation_started，语义重叠，需先定口径再发",
-    "intent.parsed": "intent-agent｜需求解析目前内联在 api/agent.py，未独立成组件",
-    "candidate.proposed": "各专业智能体｜specialist runtime 目前只汇总提案，未逐条发事件",
-    "candidate.rejected": "validator｜淘汰原因目前只在 gate_audits 里，未进事件流",
-    "constraint.failed": "validator｜硬约束失败目前只在约束核对面板里",
-    "route.drafted": "route-planner｜草案生成阶段未发事件",
-    "route.validated": "validator｜validate_route 结果只回填到 final_data.constraints",
-    "route.repaired": "coordinator｜自动复核/长行程修补已实现，但未发事件",
-    "route.selected": "coordinator｜裁决选出主方案时未发事件（多方案对比是真实存在的）",
+    "route.repaired": "coordinator｜自动复核 / 长行程修补（repair_route / review_plan）已实现，但还没有发点",
 }
 
 # 由**其他服务**发出的事件类型（本仓库里是 Go 网关）。
@@ -76,6 +68,7 @@ PENDING_WIRING: Dict[str, str] = {
 # 它们不在 Python 扫描范围内，所以单列一类，并由 Go 侧测试（plan_audit_events_test.go）
 # 证明发点真实存在 —— 台账里的路径会被 tests/test_event_producers.py 校验是否存在。
 EXTERNAL_EMITTERS: Dict[str, str] = {
+    "trip.created": "gateway/internal/handlers/http_api.go｜SaveTripHandler（保存行程才是行程真正诞生的时刻）",
     "user.accepted": "gateway/internal/handlers/plan_audit_events.go｜AdoptVariantHandler（采纳方案）",
     "user.rejected": "gateway/internal/handlers/plan_audit_events.go｜RejectReplanHandler（拒绝重规划）",
     "replan.confirmed": "gateway/internal/handlers/plan_audit_events.go｜ConfirmReplanHandler（确认重规划）",

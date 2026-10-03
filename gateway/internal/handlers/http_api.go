@@ -314,6 +314,16 @@ func SaveTripHandler(c *gin.Context) {
 		return
 	}
 
+	// 事件流：行程**真正诞生**的时刻是"保存"，不是推演开始 ——
+	// 推演可能被放弃、可能失败，用户也可能看完根本不保存。此前这个区分在事件流里不存在。
+	emitTripActionEvent("trip.created", "web-client", trip.ID, req.UserID, "", map[string]any{
+		"city":          trip.DestCity,
+		"days":          trip.Days,
+		"travelers":     trip.Travelers,
+		"title":         trip.Title,
+		"content_chars": len([]rune(trip.Content)),
+	})
+
 	c.JSON(http.StatusOK, gin.H{"message": "行程已保存", "trip_id": trip.ID})
 }
 

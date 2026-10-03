@@ -16,7 +16,7 @@ import uuid
 import numpy as np
 import networkx as nx
 from sklearn.cluster import DBSCAN
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Mapping
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI, BadRequestError
@@ -1745,6 +1745,15 @@ async def run_negotiate(msg: GatewayMessage):
     # 👑 抽取用户偏好信号（住宿/餐饮/景点/购物），用于偏好权重、提示词与覆盖校验
     pref_signals = extract_preference_signals(full_text_context)
     print(f"🎯 [偏好信号] {pref_signals}", flush=True)
+    # 事件流：需求解析完成。解析出的信号是后面所有取舍的依据 —— 只留在日志里，
+    # 事后就说不清"为什么给他排了这么多住宿"。producer=coordinator（解析目前内联在协调器里）。
+    await event_bus.emit(OMNI_EVENTS_STREAM, "intent.parsed", {
+        "room_id": room_id, "user_id": user_id,
+        "signals": pref_signals,
+        "intent_chars": len(intent_str),
+        "member_count": len(room_members),
+        "correlation_id": plan_correlation_id,
+    }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
 
     # 🎯 个性化旅行画像注入：读取网关注入的画像，A/B 分组决定是否应用个性化提示词
     personalized_profile = user_prefs.get("personalized_profile") or {}
@@ -2159,6 +2168,32 @@ async def run_negotiate(msg: GatewayMessage):
             unique_foods = _gated["pools"].get("dining", [])
             cleaned_hotels = _gated["pools"].get("lodging", [])
             specialist_runtime_result["gate_audits"] = _gated["audits"]
+            # 事件流：**逐个智能体**提出候选（producer=该智能体），这是"地点从哪来"的源头。
+            # 只发聚合数量，不逐条展开 —— 一次规划几十个候选会把流刷满，审计反而看不清。
+            for _proposal in specialist_runtime_result.get("proposals") or []:
+                if not isinstance(_proposal, Mapping):
+                    continue
+                await event_bus.emit(OMNI_EVENTS_STREAM, "candidate.proposed", {
+                    "room_id": room_id, "city": target_city,
+                    "domain": _proposal.get("domain"),
+                    "status": _proposal.get("status"),
+                    "candidates": len(_proposal.get("candidates") or []),
+                    "correlation_id": plan_correlation_id,
+                }, room_id, correlation_id=plan_correlation_id,
+                    producer=str(_proposal.get("agent_id") or "coordinator"))
+            # 事件流：候选被淘汰的**聚合口径**（gate audits 里只有计数与状态/原因，
+            # 那就如实发计数，不编"某某因为什么被淘汰"的明细）
+            for _pool, _audit in (specialist_runtime_result.get("gate_audits") or {}).items():
+                if not isinstance(_audit, Mapping) or not _audit.get("rejected"):
+                    continue
+                await event_bus.emit(OMNI_EVENTS_STREAM, "candidate.rejected", {
+                    "room_id": room_id, "city": target_city, "pool": _pool,
+                    "accepted": _audit.get("accepted"),
+                    "rejected": _audit.get("rejected"),
+                    "status": _audit.get("status"),
+                    "reason": _audit.get("reason"),
+                    "correlation_id": plan_correlation_id,
+                }, room_id, correlation_id=plan_correlation_id, producer="validator")
             await event_bus.emit(OMNI_EVENTS_STREAM, "specialist_proposals_ready", {
                 "room_id": room_id,
                 "city": target_city,
@@ -3063,6 +3098,14 @@ async def run_negotiate(msg: GatewayMessage):
                 llm_routes = final_data.get("route", []) if isinstance(final_data, dict) else []
                 if not isinstance(llm_routes, list):
                     llm_routes = []
+                # 事件流：路线草案（模型这一轮到底吐了几个节点；0 表示要走兜底合成，
+                # 这条事件能让"为什么这次是候选池拼的"一眼可查，而不用去翻日志）
+                await event_bus.emit(OMNI_EVENTS_STREAM, "route.drafted", {
+                    "room_id": room_id, "city": target_city, "days": trip_days,
+                    "nodes": len(llm_routes),
+                    "source": "llm" if llm_routes else "empty_draft",
+                    "correlation_id": plan_correlation_id,
+                }, room_id, correlation_id=plan_correlation_id, producer="route-planner")
 
                 if not llm_routes:
                     # 👑 终极兜底：LLM 输出漏标记/被截断/完全不可解析时，用候选池真实 POI 合成全部天数，
@@ -4155,6 +4198,29 @@ async def run_negotiate(msg: GatewayMessage):
                             )
                         except Exception:
                             pass
+                        # 事件流：路线校验结果 + 硬约束失败。此前这两件事只回填到
+                        # final_data.constraints 给面板看，事件流里查不到 —— 事后无法回答
+                        # "这次方案到底过没过硬约束、卡在哪一条"。
+                        _constraint_report = final_data.get("constraints") if isinstance(final_data.get("constraints"), dict) else {}
+                        _violations = _constraint_report.get("violations") or _constraint_report.get("hard_failures") or []
+                        # validate_route 的真实字段是 feasible（不是 passed）：取不到就按"有没有违规"推，
+                        # 不硬编一个"通过"出来
+                        _passes = _constraint_report.get("feasible")
+                        if not isinstance(_passes, bool):
+                            _passes = not _violations
+                        await event_bus.emit(OMNI_EVENTS_STREAM, "route.validated", {
+                            "room_id": room_id, "city": target_city,
+                            "passed": _passes,
+                            "violations": len(_violations) if isinstance(_violations, list) else 0,
+                            "correlation_id": plan_correlation_id,
+                        }, room_id, correlation_id=plan_correlation_id, producer="validator")
+                        if isinstance(_violations, list) and _violations:
+                            await event_bus.emit(OMNI_EVENTS_STREAM, "constraint.failed", {
+                                "room_id": room_id, "city": target_city,
+                                "violations": _violations[:10],
+                                "total": len(_violations),
+                                "correlation_id": plan_correlation_id,
+                            }, room_id, correlation_id=plan_correlation_id, producer="validator")
                         # 住宿联合评估（P2）：路线定型后，把"住哪"的连锁影响（通勤/费用/体力/
                         # 碳排/可玩节点/预算）一并交给用户，而不是只报房价。
                         try:
@@ -4189,6 +4255,15 @@ async def run_negotiate(msg: GatewayMessage):
                     await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {
                         "room_id": room_id, "user_id": user_id, "city": target_city,
                         "variants": len(final_data.get("plan_variants", [])),
+                        "correlation_id": plan_correlation_id,
+                    }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
+                    # 事件流：这次规划最终选中的是哪一套。与 route.drafted 对照，
+                    # 就能回答"草案 → 定稿"之间到底发生了什么（而不是只看一个结果）
+                    await event_bus.emit(OMNI_EVENTS_STREAM, "route.selected", {
+                        "room_id": room_id, "city": target_city,
+                        "nodes": len(final_data.get("route") or []),
+                        "variants": len(final_data.get("plan_variants", [])),
+                        "status": final_data.get("status"),
                         "correlation_id": plan_correlation_id,
                     }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
 
