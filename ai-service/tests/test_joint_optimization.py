@@ -17,6 +17,7 @@ from core.joint_optimization import (  # noqa: E402
     LODGING_SWITCH_PENALTY_YUAN,
     evaluate_lodging,
     haversine_km,
+    lodging_joint_payload,
     rank_lodging_options,
 )
 
@@ -154,6 +155,43 @@ class TestParetoRanking(unittest.TestCase):
         ranked = rank_lodging_options(options, plan, nights=2)
         # 两者地理位置相同 → 在其余维度上打平；成本维度因未知被排除比较，因此两者都不支配对方
         self.assertEqual(len(ranked["pareto"]), 2, "未知价格不能成为'更便宜'的理由")
+
+
+class TestLodgingJointPayload(unittest.TestCase):
+    """前端/网关拿到的联合评估载荷：算过就说算过，缺数据就说不算，绝不装作算过。"""
+
+    def test_route_and_candidates_produce_evaluated_payload(self):
+        payload = lodging_joint_payload(
+            [{"name": "近", "lnglat": [86.151, 41.761], "cost": "¥300"},
+             {"name": "远", "lnglat": [86.6, 42.2], "cost": "¥300"}],
+            route(),
+            nights=2,
+            budget_total=3000,
+        )
+        self.assertEqual(payload["status"], "evaluated")
+        self.assertTrue(payload["candidates"], "至少要留下一个住宿候选")
+        self.assertIn("远", payload["dominated"], "全面更差的候选应被支配并说明")
+        self.assertTrue(payload["tradeoffs"])
+        self.assertIn("methodology", payload)
+        first = payload["candidates"][0]
+        for key in ("total_cost_known", "commute_minutes_total", "carbon_kg", "budget_remaining"):
+            self.assertIn(key, first)
+
+    def test_missing_route_is_skipped_with_reason_not_fake_zero_commute(self):
+        payload = lodging_joint_payload([{"name": "近", "lnglat": [86.151, 41.761]}], [])
+        self.assertEqual(payload["status"], "skipped")
+        self.assertEqual(payload["reason"], "no_route")
+        self.assertNotIn("candidates", payload)
+
+    def test_missing_candidates_is_skipped_with_reason(self):
+        payload = lodging_joint_payload([], route())
+        self.assertEqual(payload["status"], "skipped")
+        self.assertEqual(payload["reason"], "no_lodging_candidates")
+
+    def test_non_mapping_rows_are_ignored_not_crashed(self):
+        payload = lodging_joint_payload(["垃圾数据", None], route())  # type: ignore[list-item]
+        self.assertEqual(payload["status"], "skipped")
+        self.assertEqual(payload["reason"], "no_lodging_candidates")
 
 
 if __name__ == "__main__":

@@ -258,6 +258,36 @@ def rank_lodging_options(
     }
 
 
+def lodging_joint_payload(
+    lodging_rows: Sequence[Mapping[str, Any]],
+    route_rows: Sequence[Mapping[str, Any]],
+    *,
+    nights: Optional[int] = None,
+    budget_total: Optional[float] = None,
+) -> Dict[str, Any]:
+    """给前端/网关的住宿联合评估载荷（纯函数，可离线测试）。
+
+    诚实口径：缺路线或缺住宿候选时返回 `skipped` + 原因，绝不返回一个"看起来算过"的空结果。
+    """
+    route_ok = [item for item in (route_rows or []) if isinstance(item, Mapping)]
+    lodging_ok = [item for item in (lodging_rows or []) if isinstance(item, Mapping)]
+    if not route_ok:
+        return {"status": "skipped", "reason": "no_route", "note": "缺少路线，未做通勤联合评估（不臆造通勤数据）。"}
+    if not lodging_ok:
+        return {"status": "skipped", "reason": "no_lodging_candidates", "note": "缺少住宿候选，未做联合评估（不臆造房价）。"}
+
+    ranking = rank_lodging_options(lodging_ok, route_ok, nights=nights, budget_total=budget_total)
+    kept = ranking["pareto"] or ranking["evaluated"]
+    return {
+        "status": "evaluated",
+        "candidates": kept,
+        "dominated": ranking["dominated"],
+        "tradeoffs": ranking["tradeoffs"],
+        "note": ranking["note"],
+        "methodology": (kept[0].get("methodology") if kept else {}) or {},
+    }
+
+
 __all__ = [
     "COMMUTE_COST_PER_KM_YUAN",
     "COMMUTE_MINUTES_PER_KM",

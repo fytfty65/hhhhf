@@ -4134,6 +4134,16 @@ async def run_negotiate(msg: GatewayMessage):
                             )
                         except Exception:
                             pass
+                        # 住宿联合评估（P2）：路线定型后，把"住哪"的连锁影响（通勤/费用/体力/
+                        # 碳排/可玩节点/预算）一并交给用户，而不是只报房价。
+                        try:
+                            from core.joint_optimization import lodging_joint_payload
+
+                            final_data["lodging_joint"] = lodging_joint_payload(
+                                cleaned_hotels, final_data.get("route")
+                            )
+                        except Exception as _joint_exc:
+                            final_data["lodging_joint"] = {"status": "failed", "error": str(_joint_exc)[:200]}
                         try:
                             from core.price_sources import pending_price_report, price_coverage
 

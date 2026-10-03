@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Sequence
 
 from .agent_contracts import AgentInput, AgentProposal, capability_registry, validate_agent_proposal
+from .joint_optimization import rank_lodging_options  # 联合优化（P2）：住宿 ↔ 通勤/费用/体力/碳排/预算
 
 AgentHandler = Callable[[AgentInput], Awaitable[Mapping[str, Any] | AgentProposal]]
 
@@ -471,6 +472,109 @@ def emergency_handler() -> AgentHandler:
     return handle
 
 
+def lodging_handler(
+    *,
+    route: Sequence[Mapping[str, Any]] = (),
+    nights: int | None = None,
+    budget_total: float | None = None,
+) -> AgentHandler:
+    """住宿智能体（**联合评估版**）：不再只看房价，而是把通勤/费用/体力/碳排/可玩节点一起算。
+
+    与通用 pool_handler 的区别：候选会经过 `core.joint_optimization.rank_lodging_options`，
+    每个保留的候选带上 `joint_evaluation`（通勤分钟、通勤费用、时间折价、换酒店损失、总成本、
+    未知分项、可玩节点、体力、碳排、预算余额），并在 explanation 里说明取舍。
+
+    诚实口径：
+    - **没有路线**时不做通勤联合评估，如实说明"仅按候选池给出"，不假装算过；
+    - 缺坐标的天会出现在 `unmeasured_days`，不臆造零通勤；
+    - 联合评估失败 → degraded + FailureInfo（fallback=area_level_recommendation），不悄悄退回假结果。
+    """
+
+    async def handle(request: AgentInput) -> Mapping[str, Any]:
+        candidates = request.context.get("candidates")
+        rows = [dict(item) for item in candidates if isinstance(item, Mapping)] if isinstance(candidates, Sequence) and not isinstance(candidates, (str, bytes)) else []
+        if not rows:
+            return {
+                "agent_id": "lodging-agent",
+                "domain": "lodging",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("lodging.provider", "lodging_candidates")],
+                "confidence": 0.0,
+                "failure": {"code": "candidate_pool_empty", "message": "供应商没有返回可用住宿候选", "retryable": True, "fallback": "area_level_recommendation"},
+                "explanation": "候选池为空，未编造推荐。",
+            }
+        if not route:
+            return {
+                "agent_id": "lodging-agent",
+                "domain": "lodging",
+                "status": "ok",
+                "degraded": False,
+                "candidates": rows[:50],
+                "hard_constraint_results": request.hard_constraints,
+                "evidence": [_evidence("lodging.provider", "lodging_candidates")],
+                "confidence": 0.6,
+                "explanation": f"已读取 {len(rows)} 个住宿候选；**没有路线，未做通勤联合评估**（仅按候选池给出）。",
+            }
+
+        try:
+            ranking = rank_lodging_options(rows, route, nights=nights, budget_total=budget_total)
+        except Exception as exc:
+            return {
+                "agent_id": "lodging-agent",
+                "domain": "lodging",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("joint-optimization", "commute_minutes_total", estimated=True)],
+                "confidence": 0.0,
+                "failure": {"code": "joint_evaluation_failed", "message": f"联合评估失败: {type(exc).__name__}", "retryable": True, "fallback": "area_level_recommendation"},
+                "explanation": "联合评估不可用，未给出住宿建议。",
+            }
+
+        by_name = {str(item.get("name") or ""): item for item in rows}
+        kept = ranking["pareto"] or ranking["evaluated"]
+        enriched: list[dict[str, Any]] = []
+        for evaluated in kept:
+            base = by_name.get(evaluated["lodging_name"])
+            if base is None:
+                continue
+            merged = dict(base)
+            merged["joint_evaluation"] = {
+                key: evaluated[key]
+                for key in (
+                    "lodging_total", "lodging_price_unknown",
+                    "commute_minutes_total", "commute_cost", "commute_time_value", "switch_penalty",
+                    "total_cost_known", "unknown_components", "planned_nodes", "playable_nodes",
+                    "unmeasured_days", "fatigue_index", "carbon_kg", "carbon_source",
+                    "budget_remaining", "estimated",
+                )
+            }
+            enriched.append(merged)
+
+        tradeoffs = "；".join(ranking["tradeoffs"])
+        return {
+            "agent_id": "lodging-agent",
+            "domain": "lodging",
+            "status": "ok",
+            "degraded": False,
+            "candidates": enriched,
+            "hard_constraint_results": request.hard_constraints,
+            "evidence": [
+                _evidence("lodging.provider", "lodging_candidates"),
+                _evidence("joint-optimization", "commute_minutes_total", estimated=True),
+            ],
+            "confidence": 0.7,
+            "explanation": (
+                f"对 {len(rows)} 个住宿候选做了通勤联合评估，保留 {len(enriched)} 个（Pareto）。{tradeoffs}"
+                f"（成本只统计已知分项；{ranking['note']}）"
+            ),
+        }
+
+    return handle
+
+
 class SpecialistRuntime:
     def __init__(self, handlers: Mapping[str, AgentHandler]):
         self.handlers = dict(handlers)
@@ -538,6 +642,8 @@ def build_pool_runtime(
     daily_nodes: int | None = None,
     route: Sequence[Mapping[str, Any]] = (),
     risk_event: Mapping[str, Any] | None = None,
+    nights: int | None = None,
+    budget_total: float | None = None,
 ) -> tuple[SpecialistRuntime, list[AgentInput]]:
     sources = {
         "route-planner": ("itinerary", attractions, "amap", "attraction_candidates"),
@@ -550,7 +656,13 @@ def build_pool_runtime(
     handlers: dict[str, AgentHandler] = {}
     requests: list[AgentInput] = []
     for agent_id, (domain, candidates, provider, field) in sources.items():
-        handlers[agent_id] = pool_handler(agent_id, domain, provider=provider, field=field)
+        if agent_id == "lodging-agent":
+            # 住宿不再只看房价：走联合评估（通勤/费用/体力/碳排/可玩节点/预算一起算）
+            handlers[agent_id] = lodging_handler(
+                route=route, nights=nights, budget_total=budget_total
+            )
+        else:
+            handlers[agent_id] = pool_handler(agent_id, domain, provider=provider, field=field)
         requests.append(AgentInput(
             request_id=f"runtime-{agent_id}", agent_id=agent_id, domain=domain,
             context={"candidates": list(candidates)}, hard_constraints={},
