@@ -259,18 +259,122 @@ func CheckRiskSubscriptionsHandler(c *gin.Context) {
 				}
 			}
 		}
+		// 最小扰动重规划范围（旅中闭环）：由 ai-service 的 emergency-agent 产出
+		// "受影响节点 / 保留节点 / 保留率 / 动作"，并让 ai-service 顺势发出带 correlation_id 的
+		// risk.changed → replan.requested 事件链（可追踪、可重放）。
+		// ⚠️ 这是增强：调用失败**绝不能影响风险告警本身**（告警是主链路），失败时如实标注 unavailable。
+		var minimumPerturbation any
+		if len(r.Changes) > 0 {
+			minimumPerturbation = requestMinimumPerturbationScope(req.UserID, r.City, req.RoomID, r.Changes)
+		}
 		// 定向房间广播风险变更通知（多人协作场景下实时同步）
 		if req.RoomID != "" && GlobalHub != nil {
+			payload := gin.H{"city": r.City, "snapshot": r.Snapshot, "changes": r.Changes}
+			if minimumPerturbation != nil {
+				payload["minimum_perturbation"] = minimumPerturbation
+			}
 			GlobalHub.Broadcast <- models.WSMessage{
 				Type:    "risk_subscription_alert",
 				RoomID:  req.RoomID,
 				UserID:  req.UserID,
-				Payload: gin.H{"city": r.City, "snapshot": r.Snapshot, "changes": r.Changes},
+				Payload: payload,
 			}
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"alerts": alerts, "snapshots": resp.Results})
+}
+
+// requestMinimumPerturbationScope 调用 ai-service 的旅中闭环入口 `/api/v1/risk/replan-scope`。
+//
+// 返回 ai-service 的原样响应（含 proposal 与已发出的事件链），或一个**如实标注**的失败对象：
+//   {"status": "unavailable" | "rejected" | "unparsable" | "needs_user_context", ...}
+// 调用方（风险告警广播）把它当作可选增强 —— 失败不影响告警本身。
+func requestMinimumPerturbationScope(userID, city, roomID string, changes []map[string]interface{}) any {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("AI_SERVICE_URL")), "/")
+	if base == "" {
+		base = "http://127.0.0.1:8000"
+	}
+
+	// 取该用户该城市最近一份行程作为"当前路线"与 correlation_id（与 createRiskReplanProposal 同口径）
+	route := []map[string]any{}
+	correlationID := ""
+	if database.DB != nil {
+		var trip models.TripPlan
+		if err := database.DB.Where("user_id = ? AND dest_city = ?", userID, city).Order("created_at desc").First(&trip).Error; err == nil {
+			correlationID = trip.ID
+			if content := strings.TrimSpace(trip.Content); content != "" {
+				var parsed map[string]any
+				if json.Unmarshal([]byte(content), &parsed) == nil {
+					if nodes, ok := parsed["route"].([]any); ok {
+						for _, node := range nodes {
+							if entry, ok := node.(map[string]any); ok {
+								route = append(route, entry)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if correlationID == "" {
+		// 没有行程就无法判断"影响哪些节点"——如实说明，让前端走站内提醒
+		return gin.H{"status": "needs_user_context", "reason": "trip_not_found", "city": city}
+	}
+
+	// 风险事件：优先用第一条变化；受影响范围（affected_days/affected_nodes）有就带上，
+	// 没有则交给 ai-service 如实降级（它会拒绝整条重生成）
+	event := gin.H{"event": "risk_changed", "changes": changes}
+	if len(changes) > 0 {
+		first := changes[0]
+		if value, ok := first["type"]; ok {
+			event["event"] = value
+		}
+		if value, ok := first["severity"]; ok {
+			event["severity"] = value
+		}
+		for _, key := range []string{"affected_days", "affected_nodes", "recommended_action"} {
+			if value, ok := first[key]; ok {
+				event[key] = value
+			}
+		}
+	}
+
+	body, err := json.Marshal(gin.H{
+		"correlation_id": correlationID,
+		"room_id":        roomID,
+		"route":          route,
+		"risk_event":     event,
+	})
+	if err != nil {
+		return gin.H{"status": "unavailable", "reason": "payload_encode_failed"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/v1/risk/replan-scope", bytes.NewReader(body))
+	if err != nil {
+		return gin.H{"status": "unavailable", "reason": "request_build_failed"}
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if token := strings.TrimSpace(os.Getenv("AI_SERVICE_INTERNAL_TOKEN")); token != "" {
+		request.Header.Set("X-Omni-Internal-Token", token)
+	}
+
+	response, err := (&http.Client{Timeout: 8 * time.Second}).Do(request)
+	if err != nil {
+		return gin.H{"status": "unavailable", "reason": "ai_service_unreachable"}
+	}
+	defer response.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode != http.StatusOK {
+		return gin.H{"status": "rejected", "http_status": response.StatusCode}
+	}
+	var parsed gin.H
+	if json.Unmarshal(raw, &parsed) != nil {
+		return gin.H{"status": "unparsable"}
+	}
+	return parsed
 }
 
 func createRiskReplanProposal(userID, city string, changes []map[string]interface{}, snapshot map[string]interface{}) gin.H {
