@@ -177,7 +177,7 @@ test.describe('旅中风险 · 最小扰动范围', () => {
     await expect(scope.getByText(/只在受影响的那几个节点里替换/)).toBeVisible();
     await expect(scope.getByText(/需要你确认后才会改，现在不改/)).toBeVisible();
     // 只说"要确认"不够：必须指出确认入口在哪，否则面板看起来点不动
-    await expect(panel.getByText(/确认入口：右上角「旅中风险推送中心」/)).toBeVisible();
+    await expect(panel.getByText(/确认入口：本层下方的「应急重规划提案」/)).toBeVisible();
 
     // 面板里不得出现这类"AI 腔"措辞
     const text = (await panel.innerText()).toLowerCase();

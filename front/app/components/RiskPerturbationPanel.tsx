@@ -110,11 +110,11 @@ export default function RiskPerturbationPanel({ alert }: { alert?: RiskAlertView
       {perturbation?.correlationId && (
         <p className="mt-2 font-mono text-[10px] text-stone-400">行程关联：{perturbation.correlationId}</p>
       )}
-      {/* 只提示"要确认"是不够的：确认入口在右上角的旅中风险推送中心里，
-          不写出路径用户会以为这块面板点不动（此前"看板没用"就是这么来的）。 */}
+      {/* 只提示"要确认"是不够的：不写清楚在哪确认，用户会以为这块面板点不动
+          （"看板没用"就是这么来的）。真实入口有两个，都写上，别让人猜。 */}
       {perturbation && (
         <p className="mt-2 text-[12px] leading-relaxed text-stone-500">
-          确认入口：右上角「旅中风险推送中心」里的重规划提案（在那里点「应用」才会改动方案）。
+          确认入口：本层下方的「应急重规划提案」里选一个候选点「应用」（右上角「旅中风险推送中心」里是同一条提案）。
         </p>
       )}
     </section>

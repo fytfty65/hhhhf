@@ -12,6 +12,12 @@
     首屏 JS               1,116.0 KB（13 chunk）（2026-09-18 更新：核对面板新增「数据降级」
                            一节；面板本体按需加载，差额来自宿主接线）
     首屏 CSS              141.1 KB
+  最新记录（2026-10-03，本机实测；逐次运行有 ±0.5 KB 抖动）：
+    首屏 JS               1,137.5 KB（13 chunk）
+    首屏 CSS              147.2 KB
+    增长原因（都写在对应提交信息里）：①住宿联合评估「住哪更划算」区块；
+    ②旅中风险「最小扰动范围」面板与其 WS/轮询接线。
+    体积只打印不拦截，但基线数字必须跟着真实值更新，否则这道对比就成了"狼来了"。
   验收标准：拆分后首屏不得变差，且所有门禁全绿。
 
 .USAGE
@@ -72,7 +78,7 @@ if (-not $Quick -and -not $SkipBuild -and -not $SkipE2E) {
 
 # ---- 体积与行数对比（与拆分基线同一算法） ----
 Write-Log ""
-Write-Log "=== 体积 / 行数对比（基线：3,991 行 / 1,116.0 KB JS / 141.1 KB CSS） ==="
+Write-Log "=== 体积 / 行数对比（基线：3,991 行 / 1,137.5 KB JS / 147.2 KB CSS，2026-10-03 实测） ==="
 $lobby = Join-Path $front 'app\ContextualLobby.tsx'
 if (Test-Path $lobby) {
   $lines = [System.IO.File]::ReadAllLines($lobby).Length
@@ -99,7 +105,7 @@ if (Test-Path $indexHtml) {
     if ($p) { $cssTotal += $p.Length }
   }
   Write-Log ("  首屏 CSS 合计: {0:N1} KB" -f ($cssTotal / 1KB))
-  Write-Log "  （首屏 JS 不得超过基线 1,116.0 KB；变大即为劣化，需回滚该批）"
+  Write-Log "  （首屏 JS 基线 1,137.5 KB，2026-10-03 实测记录；变大即为劣化，需说明原因或回滚该批）"
 } else {
   Write-Log "  （未找到 .next/server/app/index.html，跳过一次构建产物体积对比）"
 }

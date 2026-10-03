@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"gateway/internal/database"
 	"gateway/internal/models"
+	"gateway/internal/service"
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -304,5 +306,230 @@ func TestRiskTriggerTypesNormalizeSignals(t *testing.T) {
 		if !want[typeName] {
 			t.Fatalf("unexpected trigger type %q", typeName)
 		}
+	}
+}
+
+// riskCheckHarness 起一个"内存库 + 桩 AI 服务 + 假 Hub"的巡检环境。
+// 之前这条接缝（巡检变更 → 房间广播 → 带最小扰动）没有任何测试，属于长期裸奔。
+type riskCheckHarness struct {
+	router *gin.Engine
+	hub    *service.Hub
+}
+
+func newRiskCheckHarness(t *testing.T, aiHandler http.HandlerFunc) *riskCheckHarness {
+	t.Helper()
+	oldDB := database.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	t.Cleanup(func() { database.DB = oldDB })
+	if err := db.AutoMigrate(&models.RiskSubscription{}, &models.RiskNotification{}, &models.TripPlan{}, &models.RoomMember{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.RoomMember{RoomID: "room-1", UserID: "user-risk"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.RiskSubscription{
+		ID: "sub-1", UserID: "user-risk", City: "杭州", Coordinate: "120.15,30.28", Baseline: `{"risk_level":"low"}`,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 巡检要先找到"这个用户在这个城市的行程"才会去问 ai-service 影响哪些节点
+	// （没有行程时 `requestMinimumPerturbationScope` 会如实返回 needs_user_context）。
+	route, _ := json.Marshal(map[string]any{"route": []map[string]any{
+		{"day": 1, "name": "西湖"},
+		{"day": 1, "name": "灵隐寺"},
+	}})
+	if err := db.Create(&models.TripPlan{
+		ID: "trip-1", UserID: "user-risk", DestCity: "杭州", Content: string(route),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	ai := httptest.NewServer(aiHandler)
+	t.Cleanup(ai.Close)
+	t.Setenv("AI_SERVICE_URL", ai.URL)
+
+	hub := &service.Hub{Broadcast: make(chan models.WSMessage, 8)}
+	oldHub := GlobalHub
+	GlobalHub = hub
+	t.Cleanup(func() { GlobalHub = oldHub })
+
+	router := gin.New()
+	router.POST("/risk/subscriptions/check", func(c *gin.Context) {
+		c.Set("user_id", "user-risk")
+		CheckRiskSubscriptionsHandler(c)
+	})
+	return &riskCheckHarness{router: router, hub: hub}
+}
+
+func (h *riskCheckHarness) check(t *testing.T, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	response := httptest.NewRecorder()
+	h.router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/risk/subscriptions/check", strings.NewReader(body)))
+	return response
+}
+
+func (h *riskCheckHarness) nextBroadcast(t *testing.T) models.WSMessage {
+	t.Helper()
+	select {
+	case message := <-h.hub.Broadcast:
+		return message
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a risk_subscription_alert broadcast")
+		return models.WSMessage{}
+	}
+}
+
+func decodeBroadcastPayload(t *testing.T, message models.WSMessage) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(message.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded
+}
+
+func TestCheckRiskSubscriptionsBroadcastsMinimumPerturbation(t *testing.T) {
+	harness := newRiskCheckHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/risk/subscriptions/refresh":
+			_, _ = io.WriteString(w, `{"results":[{"city":"杭州","snapshot":{"risk_level":"high"},"changes":[{"type":"weather","severity":"high","affected_nodes":["灵隐寺"]}]}]}`)
+		case "/api/v1/risk/replan-scope":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"correlation_id": "trip-1",
+				"status":         "ok",
+				"proposal": map[string]any{
+					"agent_id": "emergency-agent",
+					"status":   "ok",
+					"candidates": []map[string]any{{
+						"action":                     "replace_affected_nodes",
+						"affected_nodes":             []string{"灵隐寺"},
+						"preserved_nodes":            []string{"西湖"},
+						"preserved_ratio":            0.75,
+						"requires_user_confirmation": true,
+					}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	response := harness.check(t, `{"user_id":"user-risk","room_id":"room-1"}`)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "灵隐寺") {
+		t.Fatalf("expected ok response carrying the change: %d %s", response.Code, response.Body.String())
+	}
+
+	message := harness.nextBroadcast(t)
+	if message.Type != "risk_subscription_alert" || message.RoomID != "room-1" || message.UserID != "user-risk" {
+		t.Fatalf("unexpected broadcast envelope: %+v", message)
+	}
+	payload := decodeBroadcastPayload(t, message)
+	if payload["city"] != "杭州" {
+		t.Fatalf("broadcast must carry the city: %#v", payload)
+	}
+	perturbation, ok := payload["minimum_perturbation"].(map[string]any)
+	if !ok {
+		t.Fatalf("minimum_perturbation missing from the broadcast: %#v", payload)
+	}
+	if perturbation["status"] != "ok" || perturbation["correlation_id"] != "trip-1" {
+		t.Fatalf("unexpected perturbation: %#v", perturbation)
+	}
+	proposal, ok := perturbation["proposal"].(map[string]any)
+	if !ok {
+		t.Fatalf("proposal missing: %#v", perturbation)
+	}
+	candidates, ok := proposal["candidates"].([]any)
+	if !ok || len(candidates) == 0 {
+		t.Fatalf("candidates missing: %#v", proposal)
+	}
+	candidate := candidates[0].(map[string]any)
+	if candidate["preserved_ratio"] != 0.75 {
+		t.Fatalf("preserved_ratio must survive the gateway hop: %#v", candidate)
+	}
+	affected, _ := candidate["affected_nodes"].([]any)
+	if len(affected) != 1 || affected[0] != "灵隐寺" {
+		t.Fatalf("affected nodes must survive the gateway hop: %#v", candidate)
+	}
+}
+
+// 增强（最小扰动范围）失败时，风险告警本身必须照发 —— 并且失败原因要如实标注，
+// 不能悄悄换成一个"看起来正常"的空结果。
+func TestRiskAlertSurvivesMinimumPerturbationFailure(t *testing.T) {
+	harness := newRiskCheckHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/risk/subscriptions/refresh" {
+			_, _ = io.WriteString(w, `{"results":[{"city":"杭州","snapshot":{"risk_level":"high"},"changes":[{"type":"closure","severity":"high","affected_nodes":["西湖"]}]}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	})
+
+	response := harness.check(t, `{"user_id":"user-risk","room_id":"room-1"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("alert must not fail because the enhancement failed: %d %s", response.Code, response.Body.String())
+	}
+
+	payload := decodeBroadcastPayload(t, harness.nextBroadcast(t))
+	if payload["changes"] == nil {
+		t.Fatalf("the alert itself must still carry the changes: %#v", payload)
+	}
+	perturbation, ok := payload["minimum_perturbation"].(map[string]any)
+	if !ok {
+		t.Fatalf("failure must be reported, not omitted: %#v", payload)
+	}
+	if perturbation["status"] != "rejected" || perturbation["http_status"] != float64(http.StatusBadGateway) {
+		t.Fatalf("failure must be labelled honestly: %#v", perturbation)
+	}
+	if _, hasProposal := perturbation["proposal"]; hasProposal {
+		t.Fatalf("a failed enhancement must not carry a proposal: %#v", perturbation)
+	}
+}
+
+// 没有该城市的行程时，绝不去"猜"影响哪些节点：如实返回 needs_user_context，
+// 并且**不调用** ai-service（省掉一次没有依据的重规划计算）。
+func TestMinimumPerturbationWithoutTripDoesNotInventScope(t *testing.T) {
+	aiCalls := 0
+	harness := newRiskCheckHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		aiCalls++
+		if r.URL.Path == "/api/v1/risk/subscriptions/refresh" {
+			_, _ = io.WriteString(w, `{"results":[{"city":"杭州","snapshot":{"risk_level":"high"},"changes":[{"type":"weather","severity":"high"}]}]}`)
+			return
+		}
+		// 如果这条路径被调到，说明网关在没有行程的情况下也去要了范围 —— 那是错的
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"proposal": map[string]any{"status": "ok", "candidates": []map[string]any{{
+				"action": "replace_affected_nodes", "preserved_ratio": 1,
+			}}},
+		})
+	})
+	if err := database.DB.Where("user_id = ?", "user-risk").Delete(&models.TripPlan{}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	response := harness.check(t, `{"user_id":"user-risk","room_id":"room-1"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("alert must still be delivered: %d %s", response.Code, response.Body.String())
+	}
+	payload := decodeBroadcastPayload(t, harness.nextBroadcast(t))
+	perturbation, ok := payload["minimum_perturbation"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing minimum_perturbation: %#v", payload)
+	}
+	if perturbation["status"] != "needs_user_context" || perturbation["reason"] != "trip_not_found" {
+		t.Fatalf("must report the missing context honestly: %#v", perturbation)
+	}
+	if _, hasProposal := perturbation["proposal"]; hasProposal {
+		t.Fatalf("no scope may be invented without a trip: %#v", perturbation)
+	}
+	if aiCalls != 1 {
+		t.Fatalf("only the refresh call is expected without a trip, got %d AI calls", aiCalls)
 	}
 }
