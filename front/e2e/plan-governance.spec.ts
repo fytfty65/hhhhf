@@ -181,6 +181,75 @@ const GOVERNANCE_PAYLOAD = {
       { source: 'llm_plan', label: '多智能体推演', status: 'degraded', reason: '大模型不可用，本次方案改由高德候选池合成', impact: '本次方案是候选池保底合成（不是模型推演结果），可稍后重新推演一次' },
     ],
   },
+  // 住宿联合评估（core/joint_optimization.lodging_joint_payload，agent.py 在路线定型后挂上）：
+  // "住哪"不只看房价，还要看每天往返的通勤时间/费用/体力/碳排/预算余额，且各有取舍的选项都保留。
+  lodging_joint: {
+    status: 'evaluated',
+    note: '成本只统计已知分项；未知分项不参与“更便宜”的比较。',
+    tradeoffs: [
+      '最省：钟楼青旅（已知成本 ¥461）',
+      '最少通勤：钟楼酒店（42 分钟）',
+      '碳排最低：钟楼酒店（3.1 kg，方法学估算）',
+    ],
+    dominated: {},
+    candidates: [
+      {
+        lodging_name: '钟楼酒店',
+        nights: 2,
+        lodging_total: 600,
+        lodging_price_unknown: false,
+        commute_minutes_total: 42,
+        commute_cost: 26,
+        commute_time_value: 50.4,
+        switch_penalty: 0,
+        total_cost_known: 676.4,
+        unknown_components: [],
+        playable_nodes: 6,
+        fatigue_index: 4.2,
+        carbon_kg: 3.1,
+        carbon_source: 'fallback_constant',
+        budget_remaining: 523.6,
+        estimated: true,
+      },
+      {
+        lodging_name: '钟楼青旅',
+        nights: 2,
+        lodging_total: 300,
+        lodging_price_unknown: false,
+        commute_minutes_total: 96,
+        commute_cost: 46,
+        commute_time_value: 115.2,
+        switch_penalty: 0,
+        total_cost_known: 461.2,
+        unknown_components: [],
+        playable_nodes: 5,
+        fatigue_index: 7.8,
+        carbon_kg: 5.4,
+        carbon_source: 'fallback_constant',
+        budget_remaining: 738.8,
+        estimated: true,
+      },
+      {
+        // 房价取不到：必须显示成"未取到"，不能当成 0 元，也不能拿它去比"更便宜"
+        lodging_name: '城西远郊酒店',
+        nights: 2,
+        lodging_total: null,
+        lodging_price_unknown: true,
+        commute_minutes_total: 168,
+        commute_cost: 92,
+        commute_time_value: 201.6,
+        switch_penalty: 120,
+        total_cost_known: 413.6,
+        unknown_components: ['lodging_price'],
+        playable_nodes: 4,
+        fatigue_index: 12.6,
+        carbon_kg: 9.2,
+        carbon_source: 'fallback_constant',
+        budget_remaining: 786.4,
+        estimated: true,
+      },
+    ],
+  },
 };
 
 async function installMocks(page: Page) {
@@ -245,6 +314,7 @@ async function installMocks(page: Page) {
                     review: payload.governance.review,
                     constraints: payload.governance.constraints,
                     degradations: payload.governance.degradations,
+                    lodging_joint: payload.governance.lodging_joint,
                   }),
               }),
             });
@@ -340,6 +410,20 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByRole('link', { name: '去核价' }).first()).toHaveAttribute('href', /^https:\/\//);
     await expect(panel.getByText(/还需补价：城墙南门门票、永兴坊美食/)).toBeVisible();
     await expect(panel.getByText(/补上 1 个价格/)).toBeVisible();
+
+    // 住哪更划算：房价之外的连锁影响（每天往返通勤/交通费/体力/碳排/预算余额）
+    // 取不到的房价必须写成"未取到"，不能当成 0 元，也不能拿它去比"更便宜"。
+    await expect(panel.getByText('住哪更划算')).toBeVisible();
+    await expect(page.getByTestId('lodging-joint')).toBeVisible();
+    await expect(panel.getByText('住 2 晚 ¥600').first()).toBeVisible();
+    await expect(panel.getByText(/每天往返/).first()).toBeVisible();
+    await expect(panel.getByText('42 分钟').first()).toBeVisible();
+    await expect(panel.getByText(/交通约 ¥26/).first()).toBeVisible();
+    await expect(panel.getByText(/预算余额 ¥524/).first()).toBeVisible();
+    await expect(panel.getByText('房价未取到').first()).toBeVisible();
+    await expect(panel.getByText(/未取到：房价（不计入总价，也不当成 0 元）/).first()).toBeVisible();
+    await expect(panel.getByText(/最省：钟楼青旅/).first()).toBeVisible();
+    await expect(panel.getByText(/最少通勤：钟楼酒店/).first()).toBeVisible();
 
     // 跨城怎么走：出行建议 + 备选 + 票价未核实
     await expect(panel.getByText('跨城怎么走')).toBeVisible();

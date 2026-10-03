@@ -16,6 +16,9 @@ async function expectNoHorizontalOverflow(page: import('@playwright/test').Page)
 }
 
 test('注册/登录、建房、入房、AI 推演、预算与导出主链路', async ({ page }) => {
+  // 全链路用例（注册→建房→入房→推演→预算→导出→雷达/地图），步骤多，
+  // 默认 45s 在机器有负载时不够（本机实测：同时跑构建时会卡在最后几步）。
+  test.setTimeout(240_000);
   const renderLifecycleErrors: string[] = [];
   page.on('console', message => {
     if (message.type() === 'error' && /synchronously unmount a root|React was already rendering/i.test(message.text())) {
@@ -130,9 +133,9 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   expect(desktopBox?.width).toBeGreaterThan(300);
   expect(desktopBox?.height).toBeGreaterThan(300);
   expect((await globeCanvas.screenshot()).byteLength).toBeGreaterThan(2_000);
-  const globalIntel = page.getByRole('button', { name: '打开全球情报视图' });
+  const globalIntel = page.getByRole('button', { name: '打开全球视野' });
   await globalIntel.click();
-  await expect(page.getByRole('button', { name: '退出全球情报视图' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: '退出全球视野' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByText(/区域 · \d+ 城市/)).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   const mobileBox = await globeCanvas.boundingBox();
@@ -140,7 +143,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   expect(mobileBox?.height).toBeGreaterThan(300);
   expect((await globeCanvas.screenshot()).byteLength).toBeGreaterThan(2_000);
   await expectNoHorizontalOverflow(page);
-  await page.getByRole('button', { name: '退出雷达' }).click();
+  await page.getByRole('button', { name: '关闭全球风险视图' }).click();
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.getByTestId('vote-up-0').click();
   await page.getByTestId('save-trip').click();

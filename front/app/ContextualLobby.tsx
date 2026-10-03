@@ -1169,7 +1169,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
       const hasGovernance = Boolean(
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
-          fd.review || fd.constraints || fd.degradations || fd.daily_balance,
+          fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
+          fd.lodging_joint,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1187,6 +1188,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         review: fd.review ?? prev?.review,
         constraints: fd.constraints ?? prev?.constraints,
         degradations: fd.degradations ?? prev?.degradations,
+        // 住哪的联合评估：房价之外的连锁影响（通勤 / 交通费 / 体力 / 碳排 / 可玩节点 / 预算余额）
+        lodgingJoint: fd.lodging_joint ?? prev?.lodgingJoint,
       }));
     };
 

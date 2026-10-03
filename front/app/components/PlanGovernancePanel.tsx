@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
@@ -96,6 +96,34 @@ export type PlanGovernance = {
     /** 需要你确认的清单（后端给出原因 + 可点开的核价入口） */
     pending?: { name?: string; kind?: string; reason?: string; url?: string }[];
     pending_summary?: string;
+  };
+  /** 住哪更划算：房价之外的连锁影响（通勤 / 交通费 / 体力 / 碳排 / 可玩节点 / 预算余额） */
+  lodgingJoint?: {
+    status?: string;
+    reason?: string;
+    note?: string;
+    error?: string;
+    tradeoffs?: string[];
+    /** 被淘汰的住处 → 淘汰它的那些住处（后端 rank_lodging_options 给出） */
+    dominated?: Record<string, string[]>;
+    candidates?: {
+      lodging_name?: string;
+      nights?: number;
+      lodging_total?: number | null;
+      lodging_price_unknown?: boolean;
+      commute_minutes_total?: number;
+      commute_cost?: number;
+      commute_time_value?: number;
+      switch_penalty?: number;
+      total_cost_known?: number;
+      unknown_components?: string[];
+      playable_nodes?: number;
+      fatigue_index?: number;
+      carbon_kg?: number;
+      carbon_source?: string;
+      budget_remaining?: number | null;
+      estimated?: boolean;
+    }[];
   };
   /** 跨城腿的出行建议（含"票价未核实"清单） */
   transportAudit?: { legs?: TransportLeg[]; note?: string; error?: string };
@@ -260,7 +288,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -290,10 +318,14 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
   const hasDegradationBlock = Boolean(
     degradations && ((degradations.items?.length ?? 0) > 0 || degradations.error),
   );
+  const hasLodgingJointBlock = Boolean(
+    lodgingJoint &&
+      ((lodgingJoint.candidates?.length ?? 0) > 0 || lodgingJoint.reason || lodgingJoint.error || lodgingJoint.note),
+  );
   if (
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
-    !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock
+    !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock
   ) {
     return null;
   }
@@ -508,6 +540,84 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           )}
           {priceAudit?.summary && (
             <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">{priceAudit.summary}</p>
+          )}
+        </div>
+      )}
+
+      {hasLodgingJointBlock && (
+        <div className="mt-3 border-t border-slate-200 pt-2.5" data-testid="lodging-joint">
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<BedDouble className="h-3 w-3" />}>住哪更划算</SectionLabel>
+            <span className="font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
+              {lodgingJoint?.status === 'evaluated' ? `比较了 ${lodgingJoint?.candidates?.length ?? 0} 个可选住处` : '这次没有比较'}
+            </span>
+          </div>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-slate-500">
+            住哪不只看房价：还要看每天从住处往返景点的<strong className="text-slate-700">通勤时间</strong>、
+            <strong className="text-slate-700">交通花费</strong>、<strong className="text-slate-700">体力消耗</strong>
+            与<strong className="text-slate-700">碳排放</strong>。这几项一起算，各有取舍的住处都留下。
+          </p>
+          {(lodgingJoint?.candidates?.length ?? 0) > 0 && (
+            <div className="mt-2 space-y-1.5">
+              {(lodgingJoint?.candidates || []).slice(0, 3).map((item, index) => (
+                <div key={`${item.lodging_name}-${index}`} className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-[12.5px] font-bold text-slate-700">{item.lodging_name || '未命名住处'}</span>
+                    <span className="shrink-0 font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
+                      {item.lodging_price_unknown
+                        ? '房价未取到'
+                        : `住 ${item.nights ?? 1} 晚 ¥${Math.round(item.lodging_total || 0)}`}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-slate-500">
+                    <span>
+                      每天往返 <strong className="tabular-nums text-slate-700">{item.commute_minutes_total ?? 0} 分钟</strong>
+                    </span>
+                    <span>
+                      交通约 ¥<strong className="tabular-nums text-slate-700">{Math.round(item.commute_cost || 0)}</strong>
+                    </span>
+                    <span>
+                      体力负担 <strong className="tabular-nums text-slate-700">{item.fatigue_index ?? 0}</strong>
+                    </span>
+                    <span>
+                      碳排约 <strong className="tabular-nums text-slate-700">{item.carbon_kg ?? 0}</strong> kg
+                    </span>
+                    {typeof item.budget_remaining === 'number' && (
+                      <span>
+                        预算余额 ¥<strong className="tabular-nums text-slate-700">{Math.round(item.budget_remaining)}</strong>
+                      </span>
+                    )}
+                  </div>
+                  {(item.unknown_components?.length ?? 0) > 0 && (
+                    <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
+                      未取到：
+                      {(item.unknown_components || []).map((code) => (code === 'lodging_price' ? '房价' : code)).join('、')}
+                      （不计入总价，也不当成 0 元）
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {(lodgingJoint?.tradeoffs?.length ?? 0) > 0 && (
+            <ul className="mt-2 space-y-1">
+              {(lodgingJoint?.tradeoffs || []).map((line, index) => (
+                <li key={index} className="text-[12.5px] leading-relaxed text-slate-600">
+                  · {line}
+                </li>
+              ))}
+            </ul>
+          )}
+          {lodgingJoint?.note && <p className="mt-1.5 text-[12px] leading-relaxed text-slate-500">{lodgingJoint.note}</p>}
+          {lodgingJoint?.status === 'skipped' && (
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-amber-700">
+              {lodgingJoint.note || '这次没有做住宿的联合比较，所以不给结论。'}
+            </p>
+          )}
+          {lodgingJoint?.status === 'failed' && (
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-rose-700">
+              住宿的联合比较没算成功（{lodgingJoint.error || '未知原因'}），所以这里不下结论。
+            </p>
           )}
         </div>
       )}

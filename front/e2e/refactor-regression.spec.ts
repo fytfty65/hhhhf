@@ -283,6 +283,8 @@ test.describe('refactor regression', () => {
     await page.getByTestId('workspace-layer-execution').click();
     // 「旅中执行模式」是面板的 aria-label，不是可见标题
     await expect(page.getByLabel('旅中执行模式')).toBeVisible();
+    // 「方案检查」（专业诊断）层收在「更多」菜单里 —— 先展开菜单再进层
+    await page.getByTestId('workspace-layer-more').click();
     await page.getByTestId('workspace-layer-professional').click();
     await expect(page.getByTestId('professional-diagnostics')).toBeVisible();
     // 供应商质量门禁落在「专业诊断 · 高级诊断」里，默认收起 —— 先展开再断言
@@ -348,8 +350,8 @@ test.describe('refactor regression', () => {
     const radar = page.getByRole('dialog', { name: '全球风险地图' });
     await expect(radar).toBeVisible({ timeout: 15_000 });
     await expect(radar.locator('canvas').first()).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole('button', { name: '打开全球情报视图' })).toBeVisible();
-    await page.getByRole('button', { name: '退出雷达' }).click();
+    await expect(page.getByRole('button', { name: '打开全球视野' })).toBeVisible();
+    await page.getByRole('button', { name: '关闭全球风险视图' }).click();
     await expect(radar).toBeHidden({ timeout: 10_000 });
   });
 
@@ -380,6 +382,8 @@ test.describe('refactor regression', () => {
     await reachDecision(page);
 
     // 高级诊断默认收起；展开后才出现「智能体运行明细」二级折叠
+    // 「方案检查」层收在「更多」菜单里 —— 先展开菜单再进层
+    await page.getByTestId('workspace-layer-more').click();
     await page.getByTestId('workspace-layer-professional').click();
     await expect(page.getByTestId('professional-diagnostics')).toBeVisible();
     const advanced = page.getByTestId('toggle-advanced-diagnostics');
@@ -399,18 +403,18 @@ test.describe('refactor regression', () => {
     await expect(page.getByText('每日白天节点')).toBeVisible();
     await expect(page.getByText(/D1:\d+ · D2:\d+/).first()).toBeVisible();
 
-    // 博弈裁决板：三列真正对比（保留 / 淘汰+原因 / 替代）
-    // 用右上角常驻动作条上的「博弈裁决看板」入口：MACRO 面板内嵌的「裁决看板」按钮
-    // 会被该动作条（全局 z-50 覆盖 z-20 面板）遮住，动作条入口才是真实可点路径。
-    await page.getByRole('button', { name: '博弈裁决看板' }).click();
+    // 方案取舍板（旧称「博弈裁决看板」，重构后拆成三段人话）：当前方案 / 替代方案 / 为什么没选其他方案。
+    // 真实可点入口是右上角动作条（visualizer-action-dock）上的「方案取舍」；页面上还有一处同名入口
+    // （协作记录区），所以这里按容器限定，避免 strict mode 撞名。
+    // 看板里那个旧的「裁决看板」按钮被动作条压住点不到，已作为死按钮从 FullRouteVisualizer 删除。
+    await page.locator('.visualizer-action-dock').getByRole('button', { name: '方案取舍' }).click();
     const board = page.getByTestId('plan-arbitration-board');
     await expect(board).toBeVisible({ timeout: 10_000 });
-    await expect(board.getByText('保留方案', { exact: true })).toBeVisible();
-    await expect(board.getByText('淘汰方案与原因', { exact: true })).toBeVisible();
+    await expect(board.getByText('当前方案', { exact: true })).toBeVisible();
+    await expect(board.getByText('正在使用')).toBeVisible();
     await expect(board.getByText('替代方案', { exact: true })).toBeVisible();
-    await expect(board.getByText(/被 慢游方案 支配/)).toBeVisible();
-    await expect(board.getByText('慢游方案').first()).toBeVisible();
-    // 保留方案列必须真的落到具体方案（而不是"当前只有一套方案"空态）
-    await expect(board.getByText('AI 主方案')).toBeVisible();
+    await expect(board.getByText('为什么没有选其他方案')).toBeVisible();
+    // 被放弃的候选必须给出"少了什么"的解释区，而不是只列名字
+    await expect(board.getByText(/以下是被放弃的候选/)).toBeVisible();
   });
 });

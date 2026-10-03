@@ -690,14 +690,10 @@ export default function FullRouteVisualizer({
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 pointer-events-auto">
-                  <button onClick={() => setShowArbitrationModal(true)} className="h-9 px-3 rounded-lg bg-white/75 dark:bg-white/5 border border-slate-300/70 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-white/10 transition-colors flex items-center gap-1.5 text-[11px] font-semibold cursor-pointer">
-                    <Scale className="w-3 h-3" /> 裁决看板
-                  </button>
-                  <button onClick={() => setViewState('MICRO')} className="h-9 px-3 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 hover:bg-slate-700 dark:hover:bg-slate-100 transition-colors flex items-center gap-1.5 text-[11px] font-semibold cursor-pointer">
-                    <MapIcon className="w-3 h-3" /> 2D地图
-                  </button>
-                </div>
+                {/* 右上角动作区由 visualizer-action-dock（z-50）承担。这里原本还有一排
+                    「裁决看板 / 2D地图」按钮，与 dock 的「方案取舍 / 返回地图」功能完全重复，
+                    且被 dock 压住根本点不到（点它会被 dock 的「返回地图」拦截）——
+                    属于点不动的死按钮，已删除。 */}
               </div>
 
               {/* 行程数据看板 */}
