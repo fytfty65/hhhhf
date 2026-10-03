@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.agent_contracts import AgentInput
-from core.agent_runtime import SpecialistRuntime, build_pool_runtime
+from core.agent_runtime import SpecialistRuntime, WIRED_AGENT_IDS, build_pool_runtime
 
 
 class TestSpecialistRuntime(unittest.TestCase):
@@ -19,7 +19,9 @@ class TestSpecialistRuntime(unittest.TestCase):
         )
         result = asyncio.run(runtime.execute(requests))
         self.assertTrue(result["parallel"])
-        self.assertEqual(result["completed"], 6)
+        # 用接线清单推导，而不是写死数字：以后接新智能体时这里不会变成"过期断言"，
+        # 但"清单与实现不符"仍会被 test_agent_coverage 里的对账测试抓住。
+        self.assertEqual(result["completed"], len(WIRED_AGENT_IDS))
         self.assertGreaterEqual(result["degraded"], 2)
         transport = next(item for item in result["proposals"] if item["agent_id"] == "transport-agent")
         self.assertEqual(transport["status"], "ok")
