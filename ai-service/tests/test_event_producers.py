@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 from core.agent_runtime import WIRED_AGENT_IDS, capability_registry  # noqa: E402
 from core.events import (  # noqa: E402
     EVENT_TYPES,
+    EXTERNAL_EMITTERS,
     INFRA_PRODUCERS,
     PENDING_WIRING,
     PRODUCERS,
@@ -119,9 +120,25 @@ class TestEventTypeCoverage(unittest.TestCase):
         registered = set(EVENT_TYPES)
         emitted = self._emitted_types()
         pending = set(PENDING_WIRING)
-        self.assertEqual(sorted(registered - emitted - pending), [], "登记了、没有发点、又没进缺口台账")
+        external = set(EXTERNAL_EMITTERS)
+        self.assertEqual(
+            sorted(registered - emitted - pending - external), [],
+            "登记了、没有发点、又没进台账（缺口台账或外部发点台账）",
+        )
         self.assertEqual(sorted(pending - registered), [], "缺口台账里有没登记过的类型（拼错了？）")
+        self.assertEqual(sorted(external - registered), [], "外部发点台账里有没登记过的类型（拼错了？）")
         self.assertEqual(sorted(pending & emitted), [], "已经有发点了，请从 PENDING_WIRING 里删掉")
+        self.assertEqual(sorted(external & emitted), [], "同样的类型不该既在 Python 发又在外部发")
+        self.assertEqual(sorted(pending & external), [], "同一条不该同时挂在两份台账里")
+
+    def test_external_emitters_point_at_real_files(self):
+        """外部发点台账必须指向真实存在的文件，否则只是把"没人发"改个说法。"""
+        repo_root = ROOT.parent
+        for event_type, reference in EXTERNAL_EMITTERS.items():
+            path_part = reference.split("｜")[0].strip()
+            self.assertTrue(path_part, f"{event_type} 的外部发点没写文件路径")
+            target = repo_root / path_part
+            self.assertTrue(target.exists(), f"{event_type} 指向的文件不存在：{path_part}")
 
     def test_pipeline_milestone_types_are_registered(self):
         for name in ("negotiation_started", "reasoning_step", "specialist_proposals_ready", "final_route_ready"):

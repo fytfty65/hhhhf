@@ -55,9 +55,9 @@ EVENT_TYPES: Dict[str, str] = {
 # 缺口台账：**已登记但代码里还没有发点**的事件类型。
 #
 # 为什么要写出来而不是删掉：这些类型对应的是产品上真实需要的环节（谁提出的候选、谁被淘汰、
-# 路线何时通过验证、用户何时采纳…），只是发点还没接。把它们显式登记成"待接线 + 归属 + 原因"，
+# 路线何时通过验证…），只是发点还没接。把它们显式登记成"待接线 + 归属 + 原因"，
 # 比留在 EVENT_TYPES 里假装体系完整、或者直接删掉假装不需要，都要诚实。
-# `tests/test_event_producers.py` 会强制：EVENT_TYPES == 代码里真有发点的类型 ∪ 本台账。
+# `tests/test_event_producers.py` 会强制：EVENT_TYPES == 代码里真有发点的类型 ∪ 本台账 ∪ EXTERNAL_EMITTERS。
 PENDING_WIRING: Dict[str, str] = {
     "trip.created": "coordinator｜推演入口已发 negotiation_started，语义重叠，需先定口径再发",
     "intent.parsed": "intent-agent｜需求解析目前内联在 api/agent.py，未独立成组件",
@@ -68,11 +68,19 @@ PENDING_WIRING: Dict[str, str] = {
     "route.validated": "validator｜validate_route 结果只回填到 final_data.constraints",
     "route.repaired": "coordinator｜自动复核/长行程修补已实现，但未发事件",
     "route.selected": "coordinator｜裁决选出主方案时未发事件（多方案对比是真实存在的）",
-    "user.accepted": "gateway｜用户在前端的采纳动作，属网关侧发点",
-    "user.rejected": "gateway｜用户拒绝动作，属网关侧发点",
-    "node.replaced": "gateway｜应用重规划替换节点时（ConfirmReplanHandler）未发事件",
-    "replan.confirmed": "gateway｜确认重规划时未发事件（同一处可一并补）",
-    "trip.visited": "gateway｜执行状态标记为已到访时未发事件",
+}
+
+# 由**其他服务**发出的事件类型（本仓库里是 Go 网关）。
+#
+# 这些类型只可能由网关产生：用户在前端点"采纳/拒绝/确认"、网关执行落库、旅中标记到访。
+# 它们不在 Python 扫描范围内，所以单列一类，并由 Go 侧测试（plan_audit_events_test.go）
+# 证明发点真实存在 —— 台账里的路径会被 tests/test_event_producers.py 校验是否存在。
+EXTERNAL_EMITTERS: Dict[str, str] = {
+    "user.accepted": "gateway/internal/handlers/plan_audit_events.go｜AdoptVariantHandler（采纳方案）",
+    "user.rejected": "gateway/internal/handlers/plan_audit_events.go｜RejectReplanHandler（拒绝重规划）",
+    "replan.confirmed": "gateway/internal/handlers/plan_audit_events.go｜ConfirmReplanHandler（确认重规划）",
+    "node.replaced": "gateway/internal/handlers/plan_audit_events.go｜ConfirmReplanHandler（逐节点替换）",
+    "trip.visited": "gateway/internal/handlers/plan_audit_events.go｜UpdateExecutionStateHandler（标记到访）",
 }
 
 # 事件生产者（producer）白名单。

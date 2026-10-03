@@ -247,6 +247,15 @@ func AdoptVariantHandler(c *gin.Context) {
 		}
 	}
 
+	// 事件流：用户采纳了某一套方案（含被采纳方案的名字/风格，便于回答"用户最终选了哪种玩法"）
+	emitTripActionEvent("user.accepted", "web-client", tripID, req.UserID, variant.RoomID, map[string]any{
+		"scope":           "plan_variant",
+		"variant_id":      variant.ID,
+		"variant":         variant.Name,
+		"style":           variant.Style,
+		"budget_baseline": estimated,
+	})
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "方案已采纳，预算基线已建立",
 		"variant": variantBrief(variant),

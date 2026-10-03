@@ -105,6 +105,19 @@ func UpdateExecutionStateHandler(c *gin.Context) {
 		_ = database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: req.TripID, PlanID: req.PlanID, EventType: eventType, Value: float64(req.DelayMinutes), Payload: string(payloadBytes), CreatedAt: time.Now().UTC()}).Error
 	}
 	response := gin.H{"state": state, "event_type": eventType}
+	// 事件流：真正"到访"了才发 trip.visited（计划内状态变更不进事件流，避免噪音淹没审计）。
+	// 这是"实际到访 vs 计划安排"的唯一真实来源，也是事后复盘/学习的关键信号。
+	if req.Status == "visited" {
+		payload := map[string]any{
+			"node_key": req.NodeKey,
+			"note":     req.Note,
+			"scope":    "trip_execution",
+		}
+		if req.PlanID != "" {
+			payload["plan_id"] = req.PlanID
+		}
+		emitTripActionEvent("trip.visited", "web-client", req.TripID, userID, "", payload)
+	}
 	if req.Status == "delayed" && req.DelayMinutes >= 30 {
 		if proposal := createExecutionReplanProposal(userID, req.TripID, req.NodeKey, req.DelayMinutes); proposal != nil {
 			response["replan_proposal"] = proposal

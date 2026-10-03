@@ -199,6 +199,31 @@ func ConfirmReplanHandler(c *gin.Context) {
 		_ = recordReplanFailureEvent(userID, req.TripID, req.ProposalID, "REPLAN_APPLY_FAILED")
 		return
 	}
+	// 事件流：用户确认重规划（producer=web-client，这是用户在前端做的决定），
+	// 以及网关实际执行的一次节点替换（producer=gateway）。这两个类型此前只存在于缺口台账里。
+	// 注意：candidateName / route 是事务闭包内的局部变量，这里只取作用域内可得的 req 与 result。
+	candidateLabel := strings.TrimSpace(fmt.Sprint(req.Candidate["name"]))
+	if candidateLabel == "" || candidateLabel == "<nil>" {
+		candidateLabel = strings.TrimSpace(fmt.Sprint(req.Candidate["location"]))
+	}
+	preservedNodes := 0
+	if value, ok := result["preserved_nodes"].(int); ok {
+		preservedNodes = value
+	}
+	emitTripActionEvent("replan.confirmed", "web-client", req.TripID, userID, "", map[string]any{
+		"proposal_id":     req.ProposalID,
+		"changed_nodes":   req.AffectedNodes,
+		"candidate_name":  candidateLabel,
+		"preserved_nodes": preservedNodes,
+	})
+	for _, nodeName := range req.AffectedNodes {
+		emitTripActionEvent("node.replaced", "gateway", req.TripID, userID, "", map[string]any{
+			"proposal_id":     req.ProposalID,
+			"replaced_node":   nodeName,
+			"replacement":     candidateLabel,
+			"preserved_nodes": preservedNodes,
+		})
+	}
 	planningData(c, result)
 }
 
@@ -281,6 +306,12 @@ func RejectReplanHandler(c *gin.Context) {
 		planningError(c, http.StatusInternalServerError, "REPLAN_REJECT_FAILED", "重规划拒绝记录失败", nil)
 		return
 	}
+	// 事件流：用户拒绝重规划（含受控的拒绝原因标签）
+	emitTripActionEvent("user.rejected", "web-client", req.TripID, userID, "", map[string]any{
+		"proposal_id": req.ProposalID,
+		"reason":      reason,
+		"scope":       "replan_proposal",
+	})
 	planningData(c, result)
 }
 
