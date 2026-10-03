@@ -3954,6 +3954,23 @@ async def run_negotiate(msg: GatewayMessage):
                                     "needs_data": _review.get("needs_data") or [],
                                     "used_pool": bool(_pool),
                                 }
+                                # 事件流：自动复核**真的改动了**方案才发（action_count=0 时发就是噪音）。
+                                # 带改了几处、修前修后的分、还剩几处硬失败 —— 事后能回答
+                                # "这套方案被机器改过什么、改完之后好没好"。
+                                if len(_review_actions) > 0:
+                                    await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
+                                        "room_id": room_id, "city": target_city,
+                                        "action_count": len(_review_actions),
+                                        "action_codes": sorted({
+                                            str(_item.get("code") or "unknown")
+                                            for _item in _review_actions if isinstance(_item, Mapping)
+                                        }),
+                                        "initial_score": _review.get("initial_score"),
+                                        "final_score": _review.get("final_score"),
+                                        "remaining_hard": _review.get("remaining_hard"),
+                                        "stopped_reason": _review.get("stopped_reason"),
+                                        "correlation_id": plan_correlation_id,
+                                    }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
                             except Exception as _review_exc:  # 复核失败绝不影响出方案
                                 final_data["review"] = {"error": str(_review_exc)[:200]}
 

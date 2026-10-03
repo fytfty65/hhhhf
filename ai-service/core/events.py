@@ -59,7 +59,9 @@ EVENT_TYPES: Dict[str, str] = {
 # 比留在 EVENT_TYPES 里假装体系完整、或者直接删掉假装不需要，都要诚实。
 # `tests/test_event_producers.py` 会强制：EVENT_TYPES == 代码里真有发点的类型 ∪ 本台账 ∪ EXTERNAL_EMITTERS。
 PENDING_WIRING: Dict[str, str] = {
-    "route.repaired": "coordinator｜自动复核 / 长行程修补（repair_route / review_plan）已实现，但还没有发点",
+    # 目前**为空**：16 + 4 个登记类型全部要么有真实发点、要么由网关发出（见 EXTERNAL_EMITTERS）。
+    # 保留这个字典是为了让护栏继续强制"新登记的类型必须有发点或明确归属"——
+    # 一旦有人只往 EVENT_TYPES 里加名字而不接发点，测试会立刻红。
 }
 
 # 由**其他服务**发出的事件类型（本仓库里是 Go 网关）。

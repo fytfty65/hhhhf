@@ -1682,7 +1682,14 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   };
 
   const handleSaveTrip = async () => {
-    await persistTripRoutes(dynamicRoutes);
+    const saved = await persistTripRoutes(dynamicRoutes);
+    if (!saved) return;
+    // 「保存到我的行程」= 用户明确选定了当前这套方案 → 记一次采纳（事件流里的 user.accepted）。
+    // 下面的**自动保存**刻意不走这里：那只是系统落库，不代表用户做了选择，
+    // 否则方案一生成就"被采纳"，是假信号。
+    // recordPlanAcceptance 按「方案名 + 风格」去重，重复点保存不会重复上报。
+    const activeVariant = planVariants.find((v: any) => v.id === activePlanId) || planVariants[0];
+    if (activeVariant) await recordPlanAcceptance({ ...activeVariant, nodes: dynamicRoutes });
   };
 
   const applyReplanCandidate = async (candidate: any) => {
@@ -1777,11 +1784,13 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   const downloadDiary = () => downloadTextFile(`${targetCityInfo?.name || '行程'}_旅行日记.md`, diaryMarkdown, 'text/markdown;charset=utf-8');
   const downloadJson = () => downloadTextFile(`${targetCityInfo?.name || '行程'}_路书.json`, JSON.stringify({ city: targetCityInfo?.name || '', routes: dynamicRoutes }, null, 2), 'application/json;charset=utf-8');
 
-  // 👑 自动保存到“我的路书”：首次生成完整路线后静默落库，无需手动点击
+  // 👑 自动保存到“我的路书”：首次生成完整路线后静默落库，无需手动点击。
+  // 注意：这里直接调 persistTripRoutes 而**不是** handleSaveTrip —— 自动落库不等于"用户采纳"，
+  // 采纳只在用户真的点了「保存到我的行程」或切换方案时才记录。
   useEffect(() => {
     if (phase === 'decision' && dynamicRoutes.length > 0 && !autoSavedRef.current) {
       autoSavedRef.current = true;
-      handleSaveTrip();
+      void persistTripRoutes(dynamicRoutes);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, dynamicRoutes]);

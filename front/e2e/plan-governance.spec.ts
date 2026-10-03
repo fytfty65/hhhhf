@@ -25,6 +25,9 @@ const user = {
 // 已保存的行程请求体：用来验证 ai-service 的 correlation_id 真的随行程落库
 // （不落库的话，网关侧的采纳/到访事件只能退回 trip_id，跨服务轨迹就串不起来）
 let savedTripBodies: any[] = [];
+// 采纳上报（user.accepted）与方案落库：用来验证"自动保存 ≠ 采纳"这条口径
+let adoptCalls: any[] = [];
+let variantSaves: any[] = [];
 
 // 与后端 plan_quality_snapshot / budget_report / propose_fallback 输出的字段保持一致
 const GOVERNANCE_PAYLOAD = {
@@ -258,6 +261,8 @@ const GOVERNANCE_PAYLOAD = {
 
 async function installMocks(page: Page) {
   savedTripBodies = [];
+  adoptCalls = [];
+  variantSaves = [];
   await page.addInitScript(
     (payload) => {
       localStorage.setItem('omni_user', JSON.stringify(payload.user));
@@ -361,6 +366,15 @@ async function installMocks(page: Page) {
     }
     await route.fulfill({ json: { message: '行程已保存', trip_id: 'trip-e2e' } });
   });
+  // 采纳链路：方案先落库拿服务端 id，再 adopt（会发出 user.accepted 事件）
+  await page.route('**/api/v1/plan/variant', async (route) => {
+    variantSaves.push(route.request().postDataJSON());
+    await route.fulfill({ json: { message: '方案已保存', variant: { id: 'variant-e2e', name: 'AI 主方案' } } });
+  });
+  await page.route('**/api/v1/plan/variant/adopt', async (route) => {
+    adoptCalls.push(route.request().postDataJSON());
+    await route.fulfill({ json: { message: '方案已采纳' } });
+  });
   await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
 }
 
@@ -393,6 +407,15 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
       savedWithCorrelation,
       `保存行程时应带上 correlation_id（实际收到 ${savedTripBodies.length} 次保存：${JSON.stringify(savedTripBodies.map((b) => b?.content?.slice(0, 80)))}）`,
     ).toBeTruthy();
+
+    // 自动保存 ≠ 采纳：它只是系统落库，不能上报 user.accepted（否则方案一生成就"被采纳"）
+    expect(adoptCalls.length, `自动保存不该触发采纳上报，实际 ${adoptCalls.length} 次`).toBe(0);
+
+    // 用户点「保存到我的行程」= 明确选定当前方案 → 必须上报一次采纳
+    await page.getByTestId('save-trip').click();
+    await expect.poll(() => adoptCalls.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    expect(String(adoptCalls[0]?.variant_id || '')).not.toBe('');
+    expect(String(adoptCalls[0]?.user_id || '')).not.toBe('');
 
     // Governance is intentionally kept in the evidence layer so the default
     // plan view stays focused. Open that layer before asserting its details.
