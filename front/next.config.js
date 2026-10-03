@@ -151,9 +151,12 @@ const nextConfig = {
         headers: securityHeaders,
       },
       {
-        // The service worker must be revalidated so clients pick up changes
-        // instead of running a stale cached copy indefinitely.
-        source: '/sw.js',
+        // Service Worker 必须每次校验，否则客户端会一直跑被缓存的旧副本。
+        // ⚠️ 这里必须指向**实际注册的那个** SW：应用现在注册的是
+        // /firebase-messaging-sw.js（FCM 的硬性文件名），旧的 /sw.js 已停止使用并删除。
+        // 规则指错路径的后果很隐蔽：SW 会缺 Service-Worker-Allowed 与 no-cache，
+        // 表现为"改了 SW 但浏览器一直用旧的"。
+        source: '/firebase-messaging-sw.js',
         headers: [
           { key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' },
           { key: 'Service-Worker-Allowed', value: '/' },

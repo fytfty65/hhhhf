@@ -9,12 +9,49 @@
  * 注意：这个文件名是 FCM 硬性要求的（`firebase-messaging-sw.js` 且在站点根作用域），不能改。
  */
 
+// 离线缓存：自旧的 public/sw.js 合并而来（那个文件已停止注册，直接删会永久丢掉这块能力）。
+// 只缓存**静态不可变资源**；页面导航与所有 /api 请求一律放行不拦。
+const CACHE_NAME = 'omniroute-v2';
+const PRECACHE_URLS = ['/manifest.json']; // 故意不预热 '/'：缓存 HTML 会让用户看到旧页面
+const STATIC_PREFIXES = ['/_next/static/', '/icon', '/icons/', '/favicon'];
+
 self.addEventListener('install', (event) => {
-  event.waitUntil(self.skipWaiting());
+  event.waitUntil(
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.addAll(PRECACHE_URLS))
+      .catch(() => undefined) // 预热失败不能挡住 SW 安装：离线能力降级，但推送必须可用
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+      .then(() => self.clients.claim()),
+  );
+});
+
+// ⚠️ 拦截范围必须严格受限（实测教训）：SW 里 `respondWith` 出去的请求**不受 Playwright
+// `page.route` 拦截**，一旦把 /api 纳入，E2E 的 mock 会被绕过、页面拿不到数据而整块不渲染
+// （我们就是这样把 provider-quality 那条用例跑红的）。所以：
+//   非 GET / 跨源 / `/api` / 页面导航 → 一律放行；只有静态资源走"网络优先 + 离线回退"。
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  if (request.method !== 'GET') return;
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return;
+  }
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
+  if (request.mode === 'navigate') return;
+  if (!STATIC_PREFIXES.some((prefix) => url.pathname.startsWith(prefix))) return;
+  event.respondWith(fetch(request).catch(() => caches.match(request)));
 });
 
 async function loadConfig() {
