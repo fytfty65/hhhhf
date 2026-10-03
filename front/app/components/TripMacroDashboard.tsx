@@ -1,6 +1,6 @@
 'use client';
 
-import { Wallet, TrendingUp, BarChart3, Clock } from 'lucide-react';
+import { Wallet, TrendingUp, BarChart3, Clock, MapPinned } from 'lucide-react';
 import { RadarThemeMode, radarPalette, radarPanelStyle, RADAR_FONT } from '../lib/radarTheme';
 import { RoutePoint } from '../InteractiveAmapComponent';
 import DraggablePanel from './DraggablePanel';
@@ -78,13 +78,13 @@ export default function TripMacroDashboard({
           className="radar-panel"
           style={panelStyle}
           icon={<Wallet className="w-3.5 h-3.5" style={{ color: COLORS.accent }} />}
-          title={<span className="text-[13px] font-bold" style={{ color: COLORS.accent }}>行程预算概览</span>}
+          title={<span className="text-[13px] font-bold" style={{ color: COLORS.accent }}>这趟行程花多少</span>}
         >
           <div className="p-3 sm:p-4">
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
               <div className="rounded-xl p-3 border" style={{ background: COLORS.deep, borderColor: COLORS.borderSoft }}>
-                <div className="text-[11px] mb-1" style={{ color: COLORS.muted }}>Day {timelineDay} 消费</div>
-                <div className="text-lg font-black" style={{ color: COLORS.origin, fontFamily: RADAR_FONT.data }}>¥{dayTotal}</div>
+                <div className="text-[11px] mb-1" style={{ color: COLORS.muted }}>Day {timelineDay} 已计价</div>
+                <div className="text-lg font-black" style={{ color: COLORS.origin, fontFamily: RADAR_FONT.data }}>{dayTotal > 0 ? `¥${dayTotal}` : '—'}</div>
               </div>
               <div className="rounded-xl p-3 border" style={{ background: COLORS.deep, borderColor: COLORS.borderSoft }}>
                 <div className="text-[11px] mb-1" style={{ color: COLORS.muted }}>日均预算</div>
@@ -97,7 +97,7 @@ export default function TripMacroDashboard({
                 </div>
               </div>
               <div className="rounded-xl p-3 border" style={{ background: COLORS.deep, borderColor: COLORS.borderSoft }}>
-                <div className="text-[11px] mb-1" style={{ color: COLORS.muted }}>人均估计</div>
+                <div className="text-[11px] mb-1" style={{ color: COLORS.muted }}>人均已计价</div>
                 <div className="text-lg font-black" style={{ color: COLORS.cyan, fontFamily: RADAR_FONT.data }}>
                   ¥{avgCost}<span className="text-[11px] font-normal" style={{ color: COLORS.muted }}>/{memberCount}人</span>
                 </div>
@@ -127,18 +127,18 @@ export default function TripMacroDashboard({
           </div>
         </DraggablePanel>
 
-        <DraggablePanel className="radar-panel" style={panelStyle} icon={<BarChart3 className="w-3.5 h-3.5" style={{ color: COLORS.cyan }} />} title={<span className="text-[13px] font-bold" style={{ color: COLORS.cyan }}>计划健康度</span>}>
+        <DraggablePanel className="radar-panel" style={panelStyle} icon={<MapPinned className="w-3.5 h-3.5" style={{ color: COLORS.cyan }} />} title={<span className="text-[13px] font-bold" style={{ color: COLORS.cyan }}>路线检查</span>}>
             <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-5">
             <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>节点总数</p><p className="mt-1 text-lg font-black" style={{ color: COLORS.accent }}>{routes.length}</p></div>
-            <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>坐标覆盖</p><p className="mt-1 text-lg font-black" style={{ color: COLORS.safe }}>{routes.length ? Math.round(verifiedCount / routes.length * 100) : 0}%</p></div>
-            <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>估算字段</p><p className="mt-1 text-lg font-black" style={{ color: estimatedCount ? COLORS.warn : COLORS.safe }}>{estimatedCount}</p></div>
+            <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>地图定位</p><p className="mt-1 text-lg font-black" style={{ color: COLORS.safe }}>{routes.length ? Math.round(verifiedCount / routes.length * 100) : 0}%</p></div>
+            <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>待核实节点</p><p className="mt-1 text-lg font-black" style={{ color: estimatedCount ? COLORS.warn : COLORS.safe }}>{estimatedCount}</p></div>
             <div className="rounded-lg border p-2" style={{ borderColor: COLORS.borderSoft, background: COLORS.deep }}><p className="text-[10px]" style={{ color: COLORS.muted }}>每日白天节点</p><p className="mt-1 truncate text-xs font-black" style={{ color: COLORS.origin }}>{dayCounts.map((count, index) => `D${timelineDays[index]}:${count}`).join(' · ') || '—'}</p></div>
             <div className="rounded-lg border p-2" style={{ borderColor: daySpread > 1 ? COLORS.warn : COLORS.borderSoft, background: daySpread > 1 ? 'rgba(245,158,11,0.10)' : COLORS.deep }}>
-              <p className="text-[10px]" style={{ color: daySpread > 1 ? COLORS.warn : COLORS.muted }}>日程均衡</p>
+              <p className="text-[10px]" style={{ color: daySpread > 1 ? COLORS.warn : COLORS.muted }}>每天安排</p>
               <p className="mt-1 text-xs font-black" style={{ color: daySpread > 1 ? COLORS.warn : COLORS.safe }}>{dayCounts.length ? (daySpread > 1 ? `差 ${daySpread} 个` : '均衡') : '—'}</p>
             </div>
           </div>
-          {daySpread > 1 && <div className="border-t px-3 py-2 text-[11px]" style={{ borderColor: COLORS.divider, color: COLORS.warn }}>部分日期的白天节点明显偏少。已在最终规划门禁中尝试从真实候选池补齐；仍不足时会明确标记候选池缺口。</div>}
+          {daySpread > 1 && <div className="border-t px-3 py-2 text-[11px]" style={{ borderColor: COLORS.divider, color: COLORS.warn }}>不同日期的活动数量差异较大，建议查看节点较少的日期并补充安排。</div>}
         </DraggablePanel>
 
         {/* 预算累计曲线 + 节点成本条形图 */}
@@ -147,10 +147,10 @@ export default function TripMacroDashboard({
             className="radar-panel"
             style={panelStyle}
             icon={<TrendingUp className="w-3.5 h-3.5" style={{ color: COLORS.gold }} />}
-            title={<span className="text-[13px] font-bold" style={{ color: COLORS.gold }}>多日预算累计</span>}
+            title={<span className="text-[13px] font-bold" style={{ color: COLORS.gold }}>每天花费走势</span>}
           >
             <div className="px-3 py-2 border-b flex items-center justify-between" style={{ borderColor: COLORS.divider }}>
-              <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>累计实际 vs 预算红线</span>
+              <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>已计价金额与预算上限</span>
               <span className="text-xs font-mono" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>
                 ¥{Math.round(dailyForecast.totalSpent)} / ¥{dailyForecast.totalBudget ? Math.round(dailyForecast.totalBudget) : '—'}
               </span>
@@ -164,11 +164,11 @@ export default function TripMacroDashboard({
             className="radar-panel"
             style={panelStyle}
             icon={<BarChart3 className="w-3.5 h-3.5" style={{ color: COLORS.indigo }} />}
-            title={<span className="text-[13px] font-bold" style={{ color: COLORS.indigo }}>节点成本分布</span>}
+            title={<span className="text-[13px] font-bold" style={{ color: COLORS.indigo }}>哪些节点最贵</span>}
           >
             <div className="px-3 py-2 border-b flex items-center justify-between" style={{ borderColor: COLORS.divider }}>
-              <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>TOP {costSortedNodes.length}</span>
-              <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>点击定位节点</span>
+              <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>{costSortedNodes.length ? `${costSortedNodes.length} 个已计价节点` : '暂无可核实价格'}</span>
+              <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>点击查看地点</span>
             </div>
             <div className="p-3">
               <CostBarChart
@@ -186,10 +186,10 @@ export default function TripMacroDashboard({
           className="radar-panel"
           style={panelStyle}
           icon={<Clock className="w-3.5 h-3.5" style={{ color: COLORS.purple }} />}
-          title={<span className="text-[13px] font-bold" style={{ color: COLORS.purple }}>行程时间轴</span>}
+          title={<span className="text-[13px] font-bold" style={{ color: COLORS.purple }}>每天怎么走</span>}
         >
           <div className="px-3 py-2 border-b flex items-center justify-between" style={{ borderColor: COLORS.divider }}>
-            <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>Day × 节点甘特图</span>
+            <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>按天查看路线顺序</span>
             <span className="text-[11px]" style={{ color: COLORS.muted, fontFamily: RADAR_FONT.data }}>
               高=danger / 中=warn / 普=accent · 点击回 2D
             </span>

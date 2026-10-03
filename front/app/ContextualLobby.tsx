@@ -855,6 +855,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   // Keep the decision workspace focused. Advanced evidence and diagnostics are
   // still available, but are no longer rendered as a wall of panels by default.
   const [workspaceLayer, setWorkspaceLayer] = useState<WorkspaceLayer>('plan');
+  const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false);
   const [agentCapabilities, setAgentCapabilities] = useState<any[]>([]);
   const [agentEvaluation, setAgentEvaluation] = useState<Record<string, any>>({});
   const [providerRegistry, setProviderRegistry] = useState<any[]>([]);
@@ -2022,25 +2023,49 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
             </div>
           )}
           {phase === 'decision' && (
-            <nav className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1 sm:grid-cols-4" aria-label="工作区层级">
+            <nav className="mt-4 flex items-center gap-1 rounded-xl border border-stone-200 bg-stone-50 p-1" aria-label="工作区层级">
               {([
                 ['plan', '主方案', '路线、天数与预算'],
                 ['evidence', '证据', '来源、时效与约束'],
                 ['execution', '旅中执行', '状态、风险与重规划'],
-                ['professional', '专业诊断', '公平、策略与模型'],
               ] as const).map(([key, label, hint]) => (
                 <button
                   key={key}
                   type="button"
                   data-testid={`workspace-layer-${key}`}
                   aria-pressed={workspaceLayer === key}
-                  onClick={() => setWorkspaceLayer(key)}
-                  className={`min-h-12 rounded-lg px-2 py-1.5 text-left transition-colors ${workspaceLayer === key ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200' : 'text-slate-500 hover:bg-white/70'}`}
+                  onClick={() => { setWorkspaceLayer(key); setShowWorkspaceMenu(false); }}
+                  className={`min-h-10 flex-1 rounded-lg px-3 py-1.5 text-left transition-colors ${workspaceLayer === key ? 'bg-white text-stone-900 shadow-sm ring-1 ring-stone-200' : 'text-stone-500 hover:bg-white/70'}`}
                 >
                   <span className="block text-[11px] font-black">{label}</span>
-                  <span className="mt-0.5 block truncate text-[9px] font-medium text-slate-400">{hint}</span>
+                  <span className="mt-0.5 hidden truncate text-[9px] font-medium text-stone-400 sm:block">{hint}</span>
                 </button>
               ))}
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  data-testid="workspace-layer-more"
+                  aria-expanded={showWorkspaceMenu}
+                  onClick={() => setShowWorkspaceMenu((open) => !open)}
+                  className={`min-h-10 rounded-lg px-3 py-1.5 text-left transition-colors ${workspaceLayer === 'professional' ? 'bg-white text-stone-900 shadow-sm ring-1 ring-stone-200' : 'text-stone-500 hover:bg-white/70'}`}
+                >
+                  <span className="flex items-center gap-1 text-[11px] font-black"><MoreHorizontal className="h-3.5 w-3.5" />更多</span>
+                  <span className="mt-0.5 hidden text-[9px] font-medium text-stone-400 sm:block">高级信息</span>
+                </button>
+                {showWorkspaceMenu && (
+                  <div className="absolute right-0 top-full z-40 mt-2 w-52 rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">
+                    <button
+                      type="button"
+                      data-testid="workspace-layer-professional"
+                      onClick={() => { setWorkspaceLayer('professional'); setShowWorkspaceMenu(false); }}
+                      className="w-full rounded-lg px-3 py-2 text-left hover:bg-stone-50"
+                    >
+                      <span className="block text-[11px] font-black text-stone-800">方案检查</span>
+                      <span className="mt-0.5 block text-[10px] leading-4 text-stone-500">成员体验、策略依据与系统状态</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </nav>
           )}
         </header>
@@ -2113,17 +2138,17 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                       days={totalDays.length}
                       travelers={Math.max(1, roomMembers.length)}
                     />}
-                  {workspaceLayer === 'professional' && <section className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4" data-testid="professional-diagnostics">
+                  {workspaceLayer === 'professional' && <section className="mb-4 rounded-2xl border border-stone-200 bg-[#fbfaf7] p-4 shadow-[0_8px_30px_rgba(67,45,25,0.06)]" data-testid="professional-diagnostics">
                     <div className="flex items-start justify-between gap-3">
                       <div><h3 className="text-sm font-black text-slate-800">方案检查</h3><p className="mt-1 text-[11px] text-slate-500">这里回答三个问题：路线是否可执行、谁可能不满意、下一步要不要调整。</p></div>
-                      <button type="button" onClick={() => setShowBlackboard(true)} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100">查看协作日志</button>
+                      <button type="button" onClick={() => setShowBlackboard(true)} className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-[11px] font-bold text-stone-700 hover:bg-stone-50">查看取舍记录</button>
                     </div>
                     <div className="mt-3 grid gap-2 sm:grid-cols-3">
                       <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">最低成员体验</p><p className="mt-1 text-lg font-black text-slate-800">{fairnessAudit?.minimum_satisfaction != null ? `${Math.round(Number(fairnessAudit.minimum_satisfaction) * 100)}%` : '尚未评估'}</p><p className="mt-1 text-[10px] text-slate-400">越低的成员越需要优先照顾</p></div>
                       <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">路线是否均衡</p><p className={`mt-1 text-sm font-black ${fairnessAudit?.threshold_exceeded ? 'text-rose-600' : 'text-emerald-700'}`}>{fairnessAudit ? (fairnessAudit.threshold_exceeded ? '需要调整' : '当前可接受') : '尚未评估'}</p><p className="mt-1 text-[10px] text-slate-400">比较成员之间的体验差距</p></div>
                       <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">历史依据</p><p className="mt-1 text-sm font-black text-slate-800">{banditDecision ? (banditDecision.explored ? '正在试用新策略' : '优先使用稳定策略') : '样本不足'}</p><p className="mt-1 text-[10px] text-slate-400">样本不足时不会宣称“已经学会”</p></div>
                     </div>
-                    <div className="mt-3 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2.5 text-[11px] leading-5 text-orange-900">
+                    <div className="mt-3 rounded-xl border border-[#e9d8c5] bg-[#fff8ef] px-3 py-2.5 text-[11px] leading-5 text-[#6f4527]">
                       <span className="font-black">你可以直接这样调整：</span> 换成更省钱、减少每天节点、优先某位成员，或打开路线节点查看来源与替代项。技术指标只放在下面的“高级诊断”里，不影响普通使用。
                     </div>
                     <div className="mt-4 border-t border-slate-200 pt-3">

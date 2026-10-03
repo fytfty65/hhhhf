@@ -27,7 +27,7 @@ EXCLUDE_HINTS = ("不想去", "不要去", "不去", "别安排", "不要安排"
 # 结果二次增量完全没被识别（策略层因此拿不到"该多加自然景观"的信号）。
 INCREASE_HINTS = (
     "多吃", "多安排", "多一点", "多一些", "加大", "增加", "优先", "重点", "丰富",
-    "多打卡", "多看", "多点", "多去", "想多", "主要想", "加点", "来点", "再来", "为主",
+    "多打卡", "多看", "多点", "多去", "想多", "更多", "想要更多", "更丰富", "主要想", "加点", "来点", "再来", "为主",
     "偏重", "倾向",
 )
 REDUCE_HINTS = (
@@ -43,7 +43,7 @@ DOWNGRADE_HINTS = ("省一点", "便宜", "省钱", "降级", "经济")
 # 意图的同义说法（用户不会说"cultural"，会直接说"博物馆"）
 INTENT_SYNONYMS: Dict[str, Tuple[str, ...]] = {
     "food": ("美食", "小吃", "吃", "餐厅", "地道", "苍蝇馆子", "夜市", "老字号"),
-    "cultural": ("博物馆", "历史", "古迹", "文化", "人文"),
+    "cultural": ("博物馆", "博物院", "历史馆", "展馆", "纪念馆", "美术馆", "历史", "古迹", "文化", "人文"),
     "scenic": ("风景", "自然", "山水", "公园", "山", "湖", "海"),
     "hotel": ("住宿", "酒店", "民宿", "住"),
     "shopping": ("购物", "逛街", "商场", "买东西"),
@@ -151,6 +151,13 @@ def parse_increment(
         elif any(hint in clause for hint in REDUCE_HINTS):
             quota[clause_intent] = quota.get(clause_intent, 0) - count
             matched.append(f"reduce:{clause_intent}")
+
+        # “不想去博物馆/博物院”不是一个地点偏好，而是类别级硬排除。
+        # 不能只依赖 known_names：模型可能已经生成了多个同类场馆，
+        # 也不能在最终类别门禁中再次把文化节点补回来。
+        if any(hint in clause for hint in EXCLUDE_HINTS) and clause_intent:
+            quota[clause_intent] = min(quota.get(clause_intent, 0), -MAX_STEP)
+            matched.append(f"exclude_category:{clause_intent}")
     if not quota:
         # 兜底：整句判定（老行为，覆盖"分句切不出来但整句能看出意图"的情况）
         intent = _detect_intent(raw)
@@ -384,7 +391,9 @@ def enforce_quota(
             # 减少：优先删"没有专属标签/价格偏高"的同类节点；餐饮/住宿至少各留 1 个
             targets = [node for node in nodes if intent_of(node) == intent]
             targets.sort(key=lambda node: float(0 if node.get("cost_estimate") in (None, "", "暂无供应商数据") else re.sub(r"[^0-9.]", "", str(node.get("cost_estimate"))) or 0), reverse=True)
-            floor = 0 if intent in {"shopping", "nightlife", "photo"} else 1
+            # 普通“少一点”仍保留一体化底线；类别级“不要博物馆/博物院”
+            # 会被编码为 -MAX_STEP，明确允许该类别清零。
+            floor = 0 if intent in {"shopping", "nightlife", "photo"} or abs(delta) >= MAX_STEP else 1
             removable = max(0, len(targets) - floor)
             for node in targets[: min(removable, -delta)]:
                 removed_name = node_name(node)

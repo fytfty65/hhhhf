@@ -29,6 +29,7 @@ from core.agent_contracts import capability_registry, validate_agent_proposal, p
 from core.simulation import member_utilities_for, simulate_plan
 from core import llm_config as llm_cfg  # LLM 调用参数单一来源（模型/端点/temperature/max_tokens）
 from core.llm_config import model_name  # LLM 默认值单一来源（曾与 conflict.py 各写一套）
+from core.events import new_event  # 统一事件协议信封（correlation_id / causation_id / version）
 
 
 def _fairness_limit_from_env() -> float:
@@ -271,7 +272,7 @@ def parse_budget_amount(text: str, trip_days: int = 1, member_count: int = 1) ->
 # ==========================================
 _HOTEL_NAME_KEYWORDS = ["酒店", "度假村", "民宿", "客栈", "宾馆", "公寓", "青旅", "驿站", "大酒店", "国宾馆"]
 _SCENIC_KW = ["山", "湖", "公园", "园林", "风景", "峡谷", "瀑布", "温泉", "海滩", "海岛", "草原", "森林", "湿地", "花海", "溶洞", "雪山", "冰川", "丹霞", "沙漠", "绿洲", "植物园", "动物园", "海洋馆", "栈道", "索道"]
-_CULTURAL_KW = ["博物馆", "展览馆", "纪念馆", "故居", "古城", "古镇", "古村", "遗址", "文庙", "书院", "寺庙", "道观", "清真寺", "教堂", "佛塔", "城墙", "宫殿", "陵墓", "碑林", "老街", "胡同", "美术馆", "科技馆", "天文馆", "图书馆", "大剧院", "音乐厅", "艺术中心", "非遗", "民俗", "文化园", "创意园"]
+_CULTURAL_KW = ["博物馆", "博物院", "展馆", "展览馆", "纪念馆", "故居", "古城", "古镇", "古村", "遗址", "文庙", "书院", "寺庙", "道观", "清真寺", "教堂", "佛塔", "城墙", "宫殿", "陵墓", "碑林", "老街", "胡同", "美术馆", "科技馆", "天文馆", "图书馆", "大剧院", "音乐厅", "艺术中心", "非遗", "民俗", "文化园", "创意园"]
 _FOOD_KW = ["美食", "餐厅", "酒楼", "食府", "饭庄", "菜馆", "小吃", "夜市", "老字号", "私房菜", "土菜", "农家菜", "海鲜", "早茶", "茶餐厅", "火锅", "烧烤", "面馆", "包子", "烤鸭", "米线", "羊肉", "牛肉", "拉面", "抓饭", "拌面", "大盘鸡", "馕", "三套车"]
 _SHOPPING_KW = ["步行街", "商业街", "商场", "购物中心", "百货", "商圈", "市场", "太古里", "IFS", "万象城", "大悦城", "万达", "银泰", "SKP", "奥莱", "outlets", "集市", "古玩城", "文创市集"]
 
@@ -282,12 +283,16 @@ def classify_poi_category(name: str, poi_type: str = "", is_hotel: bool = False)
         return "hotel"
     n = str(name or "").lower()
     t = str(poi_type or "").lower()
+    # 名称中的明确文化场馆词优先于“山/湖/公园”等泛自然词，
+    # 避免“天山博物院”“湖畔展馆”被误分到 scenic，导致类别门禁误判。
+    if any(k in n for k in _CULTURAL_KW) or any(k in t for k in ["博物馆", "博物院", "展馆", "展览馆", "科教", "文化"]):
+        return "cultural"
     # 高德 type 码直接映射（优先于名称）：用大类前缀覆盖全部子类（05=餐饮，10=住宿，11=风景，14=科教文化，06=购物）
     if t.startswith("10") or any(k in t for k in ["住宿", "酒店", "宾馆", "民宿"]):
         return "hotel"
     if t.startswith("11") or any(k in t for k in ["风景名胜", "风景", "公园", "景点", "景区"]):
         return "scenic"
-    if t.startswith("14") or any(k in t for k in ["博物馆", "展览馆", "科教", "文化"]):
+    if t.startswith("14") or any(k in t for k in ["博物馆", "博物院", "展馆", "展览馆", "科教", "文化"]):
         return "cultural"
     if t.startswith("05") or any(k in t for k in ["餐饮", "美食", "餐厅", "小吃"]):
         return "food"
@@ -315,9 +320,23 @@ def classify_poi_category(name: str, poi_type: str = "", is_hotel: bool = False)
 def extract_preference_signals(text: str) -> Dict[str, Any]:
     """从用户诉求文本中抽取住宿/餐饮/风景/文化/购物偏好信号，供权重与校验使用。"""
     t = str(text or "").lower()
+
+    def positive_mention(words: List[str]) -> bool:
+        """忽略“不想去/少安排”等否定上下文，避免把排除项当成偏好项。"""
+        for word in words:
+            for match in re.finditer(re.escape(word), t):
+                prefix = t[max(0, match.start() - 10):match.start()]
+                if re.search(r"(?:不想|不要|不去|别|少|减少|去掉|换掉|排除|不需要)", prefix):
+                    continue
+                return True
+        return False
+
+    cultural_words = ["博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆", "历史", "古迹", "文化", "人文"]
+    excludes_cultural = bool(re.search(r"(?:不想|不要|不去|别|少|减少|去掉|换掉|排除|不需要)[^。；，,!?！?]{0,10}(?:博物馆|博物院|展馆|展览馆|纪念馆|美术馆|文化|人文)", t))
     signals: Dict[str, Any] = {
         "wants_hotel": False, "wants_food": False, "wants_scenic": False,
         "wants_cultural": False, "wants_shopping": False, "luxury_hotel": False,
+        "exclude_cultural": excludes_cultural,
         "requirements": [],
     }
     if any(k in t for k in ["酒店", "住宿", "民宿", "度假村", "客栈", "宾馆", "入住", "五星", "豪华"]):
@@ -331,7 +350,7 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
     if any(k in t for k in ["风景", "自然风光", "公园", "景点", "景区", "户外", "峡谷", "草原", "温泉", "园林", "爬山", "雪山", "海岛", "湖边", "看海"]):
         signals["wants_scenic"] = True
         signals["requirements"].append("自然风景")
-    if any(k in t for k in ["博物馆", "文化", "古迹", "历史", "古城", "寺庙", "遗址", "文庙", "故居", "人文"]):
+    if positive_mention(cultural_words) and not excludes_cultural:
         signals["wants_cultural"] = True
         signals["requirements"].append("文化历史")
     if any(k in t for k in ["购物", "商场", "商圈", "商业街", "逛街"]):
@@ -461,17 +480,54 @@ class RedisEventStream:
         self._client = None
         self._last_error_log = 0.0
 
-    async def emit(self, stream: str, event_type: str, payload: dict, room_id: str = "", max_len: int = 1000):
-        """发布一条事件到 Redis Stream。事件结构：{type, room_id, payload, ts}。
+    async def emit(
+        self,
+        stream: str,
+        event_type: str,
+        payload: dict,
+        room_id: str = "",
+        max_len: int = 1000,
+        *,
+        correlation_id: str = "",
+        causation_id: str = "",
+        producer: str = "coordinator",
+        target: str = "coordinator",
+        evidence: list | None = None,
+        confidence: float | None = None,
+    ):
+        """发布一条事件到 Redis Stream。
 
-        room_id 注入事件信封顶层，供网关桥接按房间定向广播到 WebSocket。
+        优先使用**统一协议信封**（`core/events.py`）：带 `event_id / correlation_id /
+        causation_id / event_type / producer / target / version / occurred_at / evidence / confidence`，
+        否则事件无法回答"属于哪次请求""谁触发了谁"，重放与审计都无从谈起。
+
+        ⚠️ 迁移期兼容：未登记的 event_type 或缺少 correlation_id 时**退回旧信封**
+        （`{type, room_id, payload, ts}`）并打一条告警 —— 不允许因为协议校验把既有链路打断。
+        新信封同时保留 `type/room_id/payload/ts` 镜像字段，所以网关 WS 桥与前端无需同时改。
         """
-        event = {
-            "type": event_type,
-            "room_id": room_id or "",
-            "payload": payload or {},
-            "ts": int(datetime.datetime.now().timestamp() * 1000),
-        }
+        event = None
+        if correlation_id:
+            try:
+                event = new_event(
+                    event_type,
+                    payload or {},
+                    correlation_id=correlation_id,
+                    producer=producer,
+                    target=target,
+                    causation_id=causation_id or None,
+                    room_id=room_id,
+                    evidence=evidence,
+                    confidence=confidence,
+                )
+            except Exception as exc:  # 协议未通过：退回旧信封，绝不因此丢事件
+                print(f"⚠️ [事件流] 协议校验未通过，退回旧信封: {exc}")
+        if event is None:
+            event = {
+                "type": event_type,
+                "room_id": room_id or "",
+                "payload": payload or {},
+                "ts": int(datetime.datetime.now().timestamp() * 1000),
+            }
         try:
             r = redis.from_url(self.redis_url, decode_responses=True)
             await r.xadd(
@@ -2706,6 +2762,8 @@ async def run_negotiate(msg: GatewayMessage):
                             poi_pool_data,
                             days=trip_days,
                             target_daytime=target_daily_count,
+                            required_categories=("scenic", "food") if pref_signals.get("exclude_cultural") else ("scenic", "food", "cultural"),
+                            max_cultural_share=0 if pref_signals.get("exclude_cultural") else 0.4,
                         )
                         syn_routes = _fallback_mix["route"]
                         syn_summary = f"{syn_summary} 已执行景区、餐饮、人文类别均衡。"
@@ -4043,6 +4101,8 @@ async def run_negotiate(msg: GatewayMessage):
                                 poi_pool_data,
                                 days=trip_days,
                                 target_daytime=_final_target,
+                                required_categories=("scenic", "food") if pref_signals.get("exclude_cultural") else ("scenic", "food", "cultural"),
+                                max_cultural_share=0 if pref_signals.get("exclude_cultural") else 0.4,
                             )
                             final_data["route"] = _mixed["route"]
                             llm_routes = final_data["route"]

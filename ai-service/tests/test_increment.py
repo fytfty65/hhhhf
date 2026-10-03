@@ -63,6 +63,13 @@ class TestParseIncrement(unittest.TestCase):
         delta = parse_increment("购物安排太多了，少一点", previous_plan=PLAN)
         self.assertEqual(delta["quota"].get("shopping"), -2)
 
+    def test_increment_understands_more_scenic_and_category_exclusion(self):
+        delta = parse_increment("想要更多的自然景观，不想去博物院，想吃更多好吃的", previous_plan=PLAN)
+        self.assertGreater(delta["quota"].get("scenic", 0), 0)
+        self.assertGreater(delta["quota"].get("food", 0), 0)
+        self.assertEqual(delta["quota"].get("cultural"), -6)
+        self.assertIn("exclude_category:cultural", delta["matched"])
+
     def test_upgrade_and_downgrade(self):
         self.assertEqual(parse_increment("住宿住好一点").get("upgrade", {}).get("hotel"), "quality")
         self.assertEqual(parse_increment("整体省一点").get("downgrade", {}).get("hotel"), "economy")
@@ -103,6 +110,10 @@ class TestEnforceQuota(unittest.TestCase):
         result = enforce_quota(PLAN, {"food": -5}, pool=POOL, context={"days": 2})
         remaining_food = [n for n in result["plan"]["route"] if n["name"] in {"回民街小吃", "永兴坊美食"}]
         self.assertGreaterEqual(len(remaining_food), 1)  # 一体化底线：不能把餐全删了
+
+    def test_explicit_category_exclusion_can_remove_all_cultural_nodes(self):
+        result = enforce_quota(PLAN, {"cultural": -6}, pool={}, context={"days": 2})
+        self.assertFalse(any("博物馆" in str(n.get("name")) or "城墙" in str(n.get("name")) for n in result["plan"]["route"]))
 
     def test_added_node_has_frontend_fields(self):
         result = enforce_quota(PLAN, {"food": 1}, pool=POOL, context={"days": 2})

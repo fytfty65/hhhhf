@@ -282,7 +282,8 @@ def enforce_category_mix(
                 replaced += 1
 
         # 普通游不让文化场馆占满整天：在还有真实景区/餐饮候选时，替换尾部多余文化点。
-        cap = max(1, int(math.ceil(max_cultural_share * max(1, len(daytime)))))
+        # 显式“不想去博物馆/博物院”时，文化类上限可以为 0；普通均衡模式仍保留至少 1 个文化节点。
+        cap = 0 if max_cultural_share <= 0 else max(1, int(math.ceil(max_cultural_share * max(1, len(daytime)))))
         while sum(_category(node) == "cultural" for node in daytime) > cap:
             replacement = take("scenic") or take("food") or take("shopping")
             if replacement is None:

@@ -77,21 +77,21 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
   };
 
   return (
-    <motion.div initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} className="flex h-full flex-col p-5 sm:p-7">
-      <div className="mb-5 rounded-xl border border-orange-100 bg-gradient-to-br from-orange-50/70 to-white px-4 py-3.5 sm:px-5">
-        <h3 className="mb-1.5 text-sm font-semibold text-slate-800">
+    <motion.div initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} className="flex h-full flex-col p-5 sm:p-8">
+      <div className="mx-auto mb-6 w-full max-w-4xl rounded-2xl border border-orange-100 bg-gradient-to-br from-orange-50/70 to-white px-5 py-4 sm:px-6">
+        <h3 className="mb-1.5 text-base font-semibold text-slate-800">
           {historyLength > 0 ? `继续调整行程 · 已追加 ${historyLength} 次` : `先说说这趟旅行 · ${roomMembers.length} 位同行人`}
         </h3>
-        <p className="text-xs leading-relaxed text-slate-600">
+        <p className="text-sm leading-6 text-slate-600">
           {historyLength > 0 ? '直接描述想改的部分，例如“缩短第一天路线”或“午餐换成抓饭”，其余安排会尽量保持不变。' : '写下目的地、出行天数、必去地点和节奏偏好；预算与同行人的要求也可以一起说明。'}
         </p>
       </div>
 
       {/* 快速切换：出行方式 + 偏好定位（与后端 user_preferences 对齐，切换后重新推演即生效） */}
-      <div className="mb-5 space-y-2.5">
+      <div className="mx-auto mb-6 w-full max-w-4xl space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-[11px] font-semibold tracking-wide text-slate-600">出行方式</span>
-          <span className="text-[10px] text-slate-400">快捷键 1 / 2 / 3</span>
+          <span className="text-sm font-semibold tracking-wide text-slate-700">出行方式</span>
+          <span className="text-xs text-slate-400">快捷键 1 / 2 / 3</span>
         </div>
         <div className="grid grid-cols-3 gap-2">
           {TRAVEL_MODES.map((m) => {
@@ -120,8 +120,8 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
         </div>
 
         <div className="flex items-center justify-between pt-1">
-          <span className="text-[11px] font-semibold tracking-wide text-slate-600">偏好定位</span>
-          <span className="text-[10px] text-slate-400">快捷键 Alt+1~4</span>
+          <span className="text-sm font-semibold tracking-wide text-slate-700">偏好定位</span>
+          <span className="text-xs text-slate-400">快捷键 Alt+1~4</span>
         </div>
         <div className="grid grid-cols-2 gap-2">
           {USER_ROLES.map((r) => {
@@ -151,7 +151,7 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
       </div>
 
       {apiError && (
-        <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="mb-4 flex items-start gap-3 rounded-lg border border-rose-200 bg-rose-50 p-3">
+        <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="mx-auto mb-5 flex w-full max-w-4xl items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4">
           <AlertCircle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-bold text-rose-700">引擎连接失败</p>
@@ -160,10 +160,10 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
         </motion.div>
       )}
 
-      <div className="mb-5">
-        <div className={`flex min-h-[168px] flex-col rounded-xl border bg-white p-4 transition-colors sm:min-h-[180px] ${isReady ? 'border-emerald-300 bg-emerald-50/30' : 'border-stone-200 focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-100'}`}>
+      <div className="mx-auto mb-6 w-full max-w-4xl">
+        <div className={`flex min-h-[220px] flex-col rounded-2xl border bg-white p-5 transition-colors sm:min-h-[250px] ${isReady ? 'border-emerald-300 bg-emerald-50/30' : 'border-stone-200 focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-100'}`}>
           <div className="mb-3 flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+            <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-700">
               <MessageSquare className="w-3.5 h-3.5" /> {historyLength > 0 ? "追问/精进当前路线需求" : "你的个性化旅行诉求"}
             </span>
             <div className="flex items-center gap-2">
@@ -180,13 +180,13 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
             disabled={isReady}
             value={userIntent}
             onChange={(e) => setUserIntent(e.target.value)}
-            className="min-h-[110px] w-full flex-1 resize-y bg-transparent text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 focus-visible:outline-none sm:min-h-[120px]"
+            className="min-h-[150px] w-full flex-1 resize-y bg-transparent text-base leading-8 text-slate-800 outline-none placeholder:text-slate-400 focus-visible:outline-none sm:min-h-[170px]"
             placeholder={historyLength > 0 ? "例如：还是去那儿，但是把第二天的午餐平替成便宜一点的老字号小吃..." : "例如：我们打算去乌鲁木齐玩3天，想看大巴扎和博物馆，吃地道手抓肉，下午不能太累..."}
           ></textarea>
         </div>
       </div>
 
-      <div className="mt-auto pt-4">
+      <div className="mx-auto mt-auto w-full max-w-4xl pt-4">
         <button
           type="button"
           onClick={onSubmit} 

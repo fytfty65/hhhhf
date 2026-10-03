@@ -223,65 +223,61 @@ export function radarPanelStyle(mode: RadarThemeMode): CSSProperties {
   const p = radarPalette(mode);
   return mode === 'dark'
     ? {
-        background: p.panel,
-        border: `1px solid ${p.border}`,
-        borderRadius: '16px',
-        backdropFilter: 'blur(26px) saturate(140%)',
-        boxShadow: '0 20px 50px -12px rgba(0,0,0,0.6), 0 0 0 1px rgba(56,189,248,0.04), inset 0 1px 0 rgba(255,255,255,0.06)',
+        background: 'rgba(28, 25, 23, 0.94)',
+        border: `1px solid ${p.borderSoft}`,
+        borderRadius: '14px',
+        backdropFilter: 'blur(12px)',
+        boxShadow: '0 12px 32px -16px rgba(0,0,0,0.55)',
       }
     : {
-        background: p.panel,
-        border: `1px solid ${p.border}`,
-        borderRadius: '16px',
-        backdropFilter: 'blur(26px) saturate(140%)',
-        boxShadow: '0 20px 50px -12px rgba(15,23,42,0.18), 0 0 0 1px rgba(2,132,199,0.04), inset 0 1px 0 rgba(255,255,255,0.85)',
+        background: 'rgba(255, 253, 248, 0.97)',
+        border: `1px solid ${p.borderSoft}`,
+        borderRadius: '14px',
+        backdropFilter: 'blur(12px)',
+        boxShadow: '0 12px 32px -16px rgba(67,45,25,0.18)',
       };
 }
 
 // 深空/浅空背景径向渐变
 export function radarBackground(mode: RadarThemeMode): string {
   return mode === 'dark'
-    ? 'radial-gradient(ellipse 80% 60% at 30% 35%, #0d2040 0%, #081226 48%, #04070f 100%)'
-    : 'radial-gradient(ellipse 80% 60% at 30% 35%, #dbe7f5 0%, #edf3fa 48%, #f5f8fc 100%)';
+    ? '#171310'
+    : '#f5f1e9';
 }
 
-// 共享动画与 HUD CSS（随主题）
+// 共享动画与地图层 CSS（随主题）。
+// 这里刻意不使用“雷达角标 / 扫描线 / 强发光”作为默认装饰，
+// 让风险信息像产品页面，而不是工程监控台。
 export function radarSharedCss(mode: RadarThemeMode): string {
   const p = radarPalette(mode);
-  const scanline = mode === 'dark' ? 'rgba(125,200,255,0.032)' : 'rgba(2,132,199,0.06)';
-  const vignette = mode === 'dark' ? 'rgba(2,6,18,0.75)' : 'rgba(15,23,42,0.16)';
+  const scanline = mode === 'dark' ? 'rgba(255,255,255,0.012)' : 'rgba(120,83,45,0.018)';
+  const vignette = mode === 'dark' ? 'rgba(20,16,12,0.34)' : 'rgba(120,83,45,0.08)';
   const thumbBorder = mode === 'dark' ? '#071120' : '#ffffff';
 
   return `
   @keyframes marquee { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
   .animate-marquee { animation: marquee 36s linear infinite; }
 
-  /* HUD 玻璃面板：对角高亮括角 */
-  /* Do not set position here: callers use absolute/fixed placement for HUD panels.
-     The pseudo-corner overlays anchor to the caller's existing positioning context. */
+  /* 面板保留极轻的状态提示线，不再使用科幻 HUD 对角角标。 */
   .radar-panel::before {
-    content: ''; position: absolute; top: -1px; left: -1px; width: 16px; height: 16px;
-    border-top: 2px solid ${p.accent};
-    border-left: 2px solid ${p.accent};
-    border-top-left-radius: 6px; opacity: .85; pointer-events: none;
+    content: ''; position: absolute; top: 0; left: 16px; right: 16px; height: 1px;
+    background: linear-gradient(90deg, transparent, ${p.accent}55, transparent);
+    opacity: .65; pointer-events: none;
   }
   .radar-panel::after {
-    content: ''; position: absolute; bottom: -1px; right: -1px; width: 16px; height: 16px;
-    border-bottom: 2px solid ${p.accent};
-    border-right: 2px solid ${p.accent};
-    border-bottom-right-radius: 6px; opacity: .85; pointer-events: none;
+    content: none;
   }
 
-  /* 暗角 + 漂移扫描线 + 旋转雷达扫掠 */
+  /* 轻量暗角；默认不铺扫描线，避免“AI 控制台”视觉噪音。 */
   .radar-vignette { background: radial-gradient(ellipse at center, transparent 52%, ${vignette} 100%); }
   .radar-scanlines {
-    background-image: repeating-linear-gradient(0deg, ${scanline} 0px, ${scanline} 1px, transparent 1px, transparent 3px);
-    animation: radar-scan-drift 10s linear infinite;
+    background-image: linear-gradient(180deg, ${scanline}, transparent 45%, ${scanline});
+    animation: none;
   }
-  @keyframes radar-scan-drift { 0% { background-position: 0 0; } 100% { background-position: 0 6px; } }
+  @keyframes radar-scan-drift { from { opacity: .7; } to { opacity: 1; } }
   .radar-sweep {
-    background: conic-gradient(from 0deg, ${p.accent}00, ${p.accent}0e 14%, transparent 30%);
-    animation: radar-sweep 6s linear infinite;
+    background: conic-gradient(from 0deg, ${p.accent}00, ${p.accent}05 14%, transparent 30%);
+    animation: none;
   }
   @keyframes radar-sweep { to { transform: rotate(360deg); } }
 
@@ -302,12 +298,12 @@ export function radarSharedCss(mode: RadarThemeMode): string {
   .radar-range::-webkit-slider-thumb {
     -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%;
     background: ${p.accent}; border: 2px solid ${thumbBorder};
-    box-shadow: 0 0 0 3px ${p.accent}40, 0 0 14px ${p.accent}e6;
+    box-shadow: 0 0 0 2px ${p.accent}28;
   }
   .radar-range::-moz-range-thumb {
     width: 16px; height: 16px; border-radius: 50%;
     background: ${p.accent}; border: 2px solid ${thumbBorder};
-    box-shadow: 0 0 0 3px ${p.accent}40, 0 0 14px ${p.accent}e6;
+    box-shadow: 0 0 0 2px ${p.accent}28;
   }
 
   /* 可拖拽面板手柄 */

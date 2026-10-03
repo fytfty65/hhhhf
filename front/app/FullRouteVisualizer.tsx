@@ -249,6 +249,15 @@ export default function FullRouteVisualizer({
     .map(([category, count]) => `${category} ${count}`)
     .join(' · ');
 
+  const explainRejected = (item: any) => {
+    if (item?.reason === 'dominated') {
+      const dominators = Array.isArray(item.dominated_by) ? item.dominated_by.filter(Boolean).slice(0, 2).join('、') : '更优候选';
+      return `被${dominators || '更优候选'}淘汰：预算、体验或距离没有形成优势`;
+    }
+    const raw = String(item?.reason || '未通过路线检查').replace(/[\r\n]+/g, ' ').trim();
+    return raw.length > 72 ? `${raw.slice(0, 72)}…` : raw;
+  };
+
   // 👑 多日预算滚动预测：逐日累计花费 vs 累计预算，提前预警后期超支
   const dailyForecast = useMemo(() => {
     const days = timelineDays;
@@ -287,30 +296,30 @@ export default function FullRouteVisualizer({
         />
 
         {/* 👑 彻底解决遮挡问题：动作条置于右上角，图层优先级升至 z-50，高亮“返回大厅”按钮 */}
-        <div className="visualizer-action-dock absolute top-4 right-4 sm:top-6 sm:right-6 z-50 flex items-center gap-2.5 pointer-events-auto flex-wrap justify-end">
+        <div className="visualizer-action-dock absolute top-4 right-4 sm:top-6 sm:right-6 z-50 flex items-center gap-2 pointer-events-auto flex-wrap justify-end">
           <button
             onClick={() => setShowArbitrationModal(true)}
-            className="visualizer-action-button bg-slate-900/90 hover:bg-slate-800 text-amber-400 border border-amber-500/40 px-3.5 py-2 rounded-2xl shadow-2xl flex items-center gap-2 text-xs font-bold transition-all cursor-pointer backdrop-blur-md"
+            className="visualizer-action-button bg-white/95 hover:bg-white text-stone-700 border border-stone-200 px-3 py-2 rounded-xl shadow-lg flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer backdrop-blur-md"
           >
-            <Scale className="w-4 h-4 text-amber-400" />
-            <span>博弈裁决看板</span>
+            <Scale className="w-3.5 h-3.5 text-orange-600" />
+            <span>方案取舍</span>
           </button>
 
           <button
             onClick={() => setViewState(prev => prev === 'MACRO' ? 'MICRO' : 'MACRO')}
             aria-pressed={viewState === 'MACRO'}
             aria-label={viewState === 'MACRO' ? '返回 2D 导航' : '切换到行程数据看板'}
-            className="visualizer-action-button bg-slate-900/90 hover:bg-slate-800 text-white px-3.5 py-2 rounded-2xl border border-slate-700 shadow-2xl flex items-center gap-2 text-xs font-bold transition-all cursor-pointer backdrop-blur-md"
+            className="visualizer-action-button bg-white/95 hover:bg-white text-stone-700 px-3 py-2 rounded-xl border border-stone-200 shadow-lg flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer backdrop-blur-md"
           >
             {viewState === 'MACRO' ? (
               <>
                 <MapIcon className="w-4 h-4 text-orange-400" />
-                <span>返回 2D 导航</span>
+                <span>返回地图</span>
               </>
             ) : (
               <>
                 <BarChart3 className="w-4 h-4 text-orange-400" />
-                <span>行程数据看板</span>
+                <span>行程概览</span>
               </>
             )}
           </button>
@@ -319,7 +328,7 @@ export default function FullRouteVisualizer({
           {onExit && (
             <button 
               onClick={onExit} 
-              className="visualizer-action-button bg-orange-500 hover:bg-orange-600 text-white backdrop-blur-md px-4 py-2 rounded-2xl border border-orange-400 shadow-2xl flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer"
+              className="visualizer-action-button bg-orange-600 hover:bg-orange-700 text-white backdrop-blur-md px-3.5 py-2 rounded-xl border border-orange-500 shadow-lg flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer"
               title="返回大厅"
             >
               <ArrowLeft className="w-4 h-4" />
@@ -367,12 +376,12 @@ export default function FullRouteVisualizer({
         {/* 多智能体动态博弈裁决看板 Modal */}
         <AnimatePresence>
           {showArbitrationModal && (
-            <div className="fixed inset-0 z-[110] bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="fixed inset-0 z-[110] bg-stone-950/35 backdrop-blur-[2px] flex items-center justify-center p-4">
               <motion.div
                 initial={{ opacity: 0, scale: 0.9, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-2xl w-full shadow-2xl relative text-slate-800 dark:text-white max-h-[90vh] overflow-y-auto custom-scrollbar"
+                className="bg-[#fffdf9] dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-6 max-w-2xl w-full shadow-[0_24px_70px_rgba(67,45,25,0.18)] relative text-stone-800 dark:text-white max-h-[90vh] overflow-y-auto custom-scrollbar"
               >
                 <button
                   onClick={() => setShowArbitrationModal(false)}
@@ -386,83 +395,70 @@ export default function FullRouteVisualizer({
                     <Scale className="w-5 h-5" />
                   </div>
                   <div>
-                    <h3 className="font-black text-base">多智能体博弈裁决看板</h3>
-                    <p className="text-xs text-slate-400">黑板协作裁决：预算红线与帕累托优化</p>
+                    <h3 className="font-black text-base">为什么选这套方案</h3>
+                    <p className="text-xs text-stone-500">查看预算、体验、距离与风险之间的取舍</p>
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-orange-200 bg-orange-50/80 p-3 text-[11px] leading-relaxed text-orange-950">
-                  <p className="font-black">这个看板的作用</p>
-                  <p className="mt-1">它不是让用户阅读算法术语，而是说明路线在“花费、距离、体验类型和数据可靠性”之间如何取舍。当前 Day {timelineDay} 的节点构成为：{categorySummary || '暂无分类数据'}。</p>
-                  <p className="mt-1 font-bold">当前判断：{hasOverrun ? '预算已超过日均上限，优先建议降低高成本节点。' : unpricedNodes.length > 0 ? `还有 ${unpricedNodes.length} 个节点未核价，预算结论需要你打开官方链接确认。` : '当前没有预算冲突，保留现有方案。'}</p>
+                <div className="rounded-2xl border border-orange-200 bg-orange-50/80 p-4 text-sm leading-6 text-orange-950">
+                  <p className="font-black">帮你快速看懂选择</p>
+                  <p className="mt-1">我们会在预算、路程、体验类型和风险之间做平衡。你只需要关注当前方案是否合适，也可以直接切换到另一套路线。</p>
+                  <p className="mt-2 text-xs font-semibold text-orange-800">{hasOverrun ? '当前提醒：这一天的可核实花费已超过日均预算。' : unpricedNodes.length > 0 ? `当前提醒：还有 ${unpricedNodes.length} 个节点没有核实价格。` : '当前提醒：暂未发现明显的预算冲突。'}</p>
                 </div>
 
-                {/* 👑 方案裁决对比：保留 / 淘汰 / 淘汰原因 / 替代 —— 真正的对比界面 */}
+                {/* 用户版方案裁决：当前方案 / 可切换方案 / 为什么没选其他方案 */}
                 {hasPlanArbitration && (
-                  <div className="mb-4 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800" data-testid="plan-arbitration-board">
-                    <div className="flex items-center justify-between gap-2 bg-slate-50 px-3.5 py-2.5 dark:bg-slate-800/50">
-                      <div className="flex items-center gap-1.5 text-[11px] font-black text-slate-700 dark:text-slate-200">
-                        <Scale className="w-3.5 h-3.5 text-amber-500" /> 方案裁决对比
+                  <div className="mb-4 space-y-3" data-testid="plan-arbitration-board">
+                    <section className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/20">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2 text-sm font-black text-emerald-800 dark:text-emerald-300"><CheckCircle2 className="h-4 w-4" /> 当前方案</div>
+                          <p className="mt-1 text-xs leading-5 text-emerald-900/70 dark:text-emerald-200/70">这是系统目前认为最适合你这次约束的一套路线。</p>
+                        </div>
+                        <span className="rounded-full bg-white/80 px-2.5 py-1 text-[10px] font-bold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200">正在使用</span>
                       </div>
-                      <span className="text-[10px] text-slate-400">{optimizationAudit?.method || 'Pareto'} · 保留前沿 {optimizationAudit?.frontier_count ?? (keptPlan ? 1 : 0)} · 淘汰 {optimizationAudit?.rejected_count ?? rejectedCandidates.length}</span>
-                    </div>
-                    <div className="grid gap-px bg-slate-100 dark:bg-slate-800 sm:grid-cols-3">
-                      {/* 保留方案 */}
-                      <div className="bg-white p-3 dark:bg-slate-900">
-                        <div className="flex items-center gap-1.5 text-[10px] font-black text-emerald-700 dark:text-emerald-400"><CheckCircle2 className="w-3.5 h-3.5" /> 保留方案</div>
-                        {keptPlan ? (
-                          <div className="mt-2">
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-xs font-black text-slate-800 dark:text-white">{keptPlan.name}</span>
-                              {keptPlan.style && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">{styleLabel(keptPlan.style)}</span>}
-                            </div>
-                            {keptPlan.desc && <p className="mt-1 text-[10px] leading-4 text-slate-500">{keptPlan.desc}</p>}
-                            <p className="mt-1 text-[9px] text-slate-400">共 {Array.isArray(keptPlan.nodes) ? keptPlan.nodes.length : 0} 个节点 · 当前选中</p>
+                      {keptPlan ? (
+                        <div className="mt-3 rounded-xl border border-emerald-200/80 bg-white p-4 dark:border-emerald-900/60 dark:bg-stone-900/70">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h4 className="text-lg font-black text-slate-900 dark:text-white">{keptPlan.name}</h4>
+                            {keptPlan.style && <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-200">{styleLabel(keptPlan.style)}</span>}
                           </div>
-                        ) : <p className="mt-2 text-[10px] leading-4 text-slate-400">当前只有一套方案，未产生候选对比。</p>}
-                      </div>
-                      {/* 淘汰方案 + 原因 */}
-                      <div className="bg-white p-3 dark:bg-slate-900">
-                        <div className="flex items-center gap-1.5 text-[10px] font-black text-rose-600 dark:text-rose-400"><X className="w-3.5 h-3.5" /> 淘汰方案与原因</div>
-                        {rejectedCandidates.length > 0 ? (
-                          <div className="mt-2 space-y-1.5">
-                            {rejectedCandidates.slice(0, 4).map((item: any, index: number) => (
-                              <div key={`rej-${index}`} className="rounded-lg bg-rose-50/70 px-2 py-1.5 dark:bg-rose-950/30">
-                                <div className="text-[10px] font-bold text-slate-700 dark:text-slate-200">{item.candidate || `候选 ${index + 1}`}</div>
-                                <p className="mt-0.5 text-[9px] leading-4 text-rose-600 dark:text-rose-400">
-                                  {item.reason === 'dominated'
-                                    ? `被 ${Array.isArray(item.dominated_by) && item.dominated_by.length ? item.dominated_by.join('、') : '更优候选'} 支配：同预算下体验或距离指标全面不占优`
-                                    : (item.reason || '未通过门禁校验')}
-                                </p>
-                              </div>
-                            ))}
+                          {keptPlan.desc && <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">{keptPlan.desc}</p>}
+                          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                            <div className="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-800/70"><p className="text-[10px] text-slate-400">行程节点</p><p className="mt-0.5 text-sm font-black text-slate-800 dark:text-white">{Array.isArray(keptPlan.nodes) ? keptPlan.nodes.length : dashboardRoutes.length} 个</p></div>
+                            <div className="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-800/70"><p className="text-[10px] text-slate-400">今天重点</p><p className="mt-0.5 truncate text-sm font-black text-slate-800 dark:text-white">{categorySummary || '均衡安排'}</p></div>
+                            <div className="col-span-2 rounded-lg bg-slate-50 px-3 py-2 dark:col-span-1 dark:bg-slate-800/70"><p className="text-[10px] text-slate-400">当前提醒</p><p className="mt-0.5 text-sm font-black text-slate-800 dark:text-white">{hasOverrun ? '预算偏高' : unpricedNodes.length > 0 ? '部分待核价' : '可以出发'}</p></div>
                           </div>
-                        ) : <p className="mt-2 text-[10px] leading-4 text-slate-400">本次没有方案被淘汰，所有候选都在保留前沿内。</p>}
-                      </div>
-                      {/* 替代方案 */}
-                      <div className="bg-white p-3 dark:bg-slate-900">
-                        <div className="flex items-center gap-1.5 text-[10px] font-black text-orange-600 dark:text-orange-400"><Activity className="w-3.5 h-3.5" /> 替代方案</div>
-                        {alternatePlans.length > 0 ? (
-                          <div className="mt-2 space-y-1.5">
-                            {alternatePlans.slice(0, 4).map((v: any) => (
-                              <button
-                                key={`alt-${v.id}`}
-                                type="button"
-                                disabled={!onSelectPlanVariant}
-                                onClick={() => onSelectPlanVariant?.(v.id)}
-                                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-left transition-colors hover:border-orange-300 hover:bg-orange-50 disabled:cursor-default dark:border-slate-700 dark:bg-slate-800/40"
-                              >
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="truncate text-[10px] font-bold text-slate-700 dark:text-slate-200">{v.name}</span>
-                                  {v.style && <span className="shrink-0 text-[9px] font-bold text-orange-600 dark:text-orange-400">{styleLabel(v.style)}</span>}
-                                </div>
-                                <p className="mt-0.5 truncate text-[9px] text-slate-400">{v.desc || `共 ${Array.isArray(v.nodes) ? v.nodes.length : 0} 个节点`}</p>
-                              </button>
-                            ))}
-                          </div>
-                        ) : <p className="mt-2 text-[10px] leading-4 text-slate-400">没有其他可切换的替代方案。</p>}
-                      </div>
-                    </div>
+                        </div>
+                      ) : <p className="mt-3 rounded-xl bg-white p-4 text-sm text-slate-500 dark:bg-stone-900/70">当前路线已生成，但暂无可对比的方案名称。</p>}
+                    </section>
+
+                    <section className="rounded-2xl border border-orange-200 bg-orange-50/60 p-4 dark:border-orange-900/60 dark:bg-orange-950/20">
+                      <div className="flex items-center gap-2 text-sm font-black text-orange-800 dark:text-orange-300"><Activity className="h-4 w-4" /> 替代方案</div>
+                      <p className="mt-1 text-xs leading-5 text-orange-900/70 dark:text-orange-200/70">想换一种节奏，可以直接点击下面的卡片。</p>
+                      {alternatePlans.length > 0 ? (
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          {alternatePlans.slice(0, 4).map((v: any) => (
+                            <button key={`alt-${v.id}`} type="button" disabled={!onSelectPlanVariant} onClick={() => onSelectPlanVariant?.(v.id)} className="group rounded-xl border border-orange-200 bg-white p-3 text-left transition hover:-translate-y-0.5 hover:border-orange-400 hover:shadow-md disabled:cursor-default dark:border-orange-900/60 dark:bg-stone-900/70">
+                              <div className="flex items-start justify-between gap-2"><span className="text-sm font-black text-slate-800 dark:text-white">{v.name}</span>{v.style && <span className="shrink-0 rounded-full bg-orange-100 px-2 py-1 text-[10px] font-bold text-orange-700 dark:bg-orange-900/50 dark:text-orange-200">{styleLabel(v.style)}</span>}</div>
+                              <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500 dark:text-slate-400">{v.desc || `共 ${Array.isArray(v.nodes) ? v.nodes.length : 0} 个节点`}</p>
+                              <span className="mt-2 inline-flex text-xs font-bold text-orange-700 group-hover:underline dark:text-orange-300">切换到这套路线 →</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : <p className="mt-3 rounded-xl bg-white p-4 text-sm text-slate-500 dark:bg-stone-900/70">这次没有生成其他完整方案。</p>}
+                    </section>
+
+                    <section className="rounded-2xl border border-rose-200 bg-rose-50/60 p-4 dark:border-rose-900/60 dark:bg-rose-950/20">
+                      <div className="flex items-center gap-2 text-sm font-black text-rose-800 dark:text-rose-300"><X className="h-4 w-4" /> 为什么没有选其他方案</div>
+                      <p className="mt-1 text-xs leading-5 text-rose-900/70 dark:text-rose-200/70">以下是被放弃的候选，以及它们和当前方案相比少了什么。</p>
+                      {rejectedCandidates.length > 0 ? (
+                        <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
+                          {rejectedCandidates.slice(0, 6).map((item: any, index: number) => <div key={`rej-${index}`} className="rounded-xl border border-rose-200/80 bg-white p-3 dark:border-rose-900/60 dark:bg-stone-900/70"><div className="text-sm font-bold text-slate-800 dark:text-white">{item.candidate || `候选路线 ${index + 1}`}</div><p className="mt-1 text-xs leading-5 text-rose-700 dark:text-rose-300">{explainRejected(item)}</p></div>)}
+                          {rejectedCandidates.length > 6 && <p className="px-1 text-xs text-slate-400">还有 {rejectedCandidates.length - 6} 个候选未展开</p>}
+                        </div>
+                      ) : <p className="mt-3 rounded-xl bg-white p-4 text-sm text-slate-500 dark:bg-stone-900/70">没有发现明显不合适的候选方案。</p>}
+                    </section>
                   </div>
                 )}
 

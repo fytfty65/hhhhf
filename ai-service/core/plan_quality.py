@@ -404,7 +404,7 @@ def check_hard_constraints(
 PREFERENCE_TAXONOMY: Dict[str, Tuple[str, ...]] = {
     "food": ("餐", "食", "小吃", "夜市", "老字号", "火锅", "面", "饭", "茶", "咖啡", "甜品", "烧烤", "馍", "馆子", "饺子", "包子", "串", "粥", "米粉"),
     "scenic": ("景区", "风景", "公园", "山", "湖", "江", "河", "海", "岛", "峡", "瀑布", "草原", "森林"),
-    "cultural": ("博物馆", "古迹", "遗址", "寺", "庙", "塔", "古城", "古镇", "文化", "美术馆", "纪念馆", "书院"),
+    "cultural": ("博物馆", "博物院", "展馆", "古迹", "遗址", "寺", "庙", "塔", "古城", "古镇", "文化", "美术馆", "纪念馆", "书院"),
     "shopping": ("购物", "商场", "商圈", "步行街", "市集", "市场", "超市", "奥莱"),
     "hotel": ("酒店", "民宿", "住宿", "客栈", "旅舍"),
     "nightlife": ("夜景", "酒吧", "夜市", "灯光", "夜游", "演出"),
@@ -729,6 +729,10 @@ def _coarse_category(node: Mapping[str, Any]) -> str:
     if isinstance(tags, str):
         tags = [tags]
     text = text + " " + " ".join(str(tag) for tag in tags)
+    # 明确的文化场馆词优先于“山/湖/公园”等泛自然词，避免“天山博物院”
+    # 被误判为 scenic，进而错误满足自然景观配额。
+    if any(keyword in text for keyword in ("博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆")):
+        return "cultural"
     for label, keywords in PREFERENCE_TAXONOMY.items():
         if any(keyword in text for keyword in keywords):
             return label
