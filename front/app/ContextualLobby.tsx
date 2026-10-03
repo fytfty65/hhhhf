@@ -1042,6 +1042,10 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   const [showAgentRuntimeDetail, setShowAgentRuntimeDetail] = useState(false);
   // 规划核对信息（预算三级模型 / 兜底调整说明 / 超长行程建议 / 门禁问题），随 final_route 下发
   const [planGovernance, setPlanGovernance] = useState<PlanGovernance | null>(null);
+  // 本次规划的关联键（ai-service 在 final_route 里回填 correlation_id）。
+  // 存进行程内容后，网关侧的"采纳 / 到访 / 重规划确认"事件就能与推演事件归到同一条轨迹；
+  // 不存的话网关只能退回 trip_id，跨服务轨迹就串不起来（事件里会标 correlation_source=trip_id）。
+  const [planCorrelationId, setPlanCorrelationId] = useState('');
   // 旅中风险告警（gateway 广播 risk_subscription_alert，可带最小扰动范围）：
   // 只提示与提案，**用户确认前不改动现有方案**
   const [riskAlert, setRiskAlert] = useState<RiskAlertView | null>(null);
@@ -1168,6 +1172,11 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
     // 两条路径都要写，缺一条就会出现"方案出来了但核对面板是空的"。
     const applyPlanGovernance = (fd: any) => {
       if (!fd || typeof fd !== 'object') return;
+      // 关联键要在"有没有治理数据"的判断之前抓：保底路线那条 final_route 不带 quality 等字段，
+      // 但它同样属于这次规划，不能因此丢掉关联键。
+      if (typeof fd.correlation_id === 'string' && fd.correlation_id.trim()) {
+        setPlanCorrelationId(fd.correlation_id.trim());
+      }
       // 只合并、不整体替换：后端在**保底模式**下额外下发的那条 final_route 只带
       // status/route/simulation，不带 quality/budget_report…；早先这里整体覆盖，
       // 结果那条消息把刚拿到的核对数据（预算/门禁/诉求/降级）全清空、面板整块消失。
@@ -1646,7 +1655,9 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
       summary: consensusSummary,
       city: cityName,
       days: totalDays,
-      routes: routesToSave
+      routes: routesToSave,
+      // 带上关联键：网关侧事件（采纳/到访/重规划）才能与 ai-service 的推演事件串成一条轨迹
+      ...(planCorrelationId ? { correlation_id: planCorrelationId } : {}),
     });
     try {
       const res = await fetch(`${API_BASE}/api/user/trip`, {
@@ -1851,6 +1862,35 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   };
 
   // 👑 切换后端生成的多套方案（点击即本地即时生效，无需重新推演）
+  // 用户"采纳方案"是真实决策信号（事件流里的 user.accepted）。这里只在**用户明确切换方案**时上报：
+  // 自动保存路径不报（否则一生成方案就"被采纳"，那是假的）。同一套方案在一次会话里只报一次。
+  // 上报失败只记日志：审计是旁路，绝不能因为上报失败影响用户切方案。
+  const recordedAcceptanceRef = useRef<Set<string>>(new Set());
+  const recordPlanAcceptance = async (variant: any) => {
+    if (!variant || !currentUser?.id || !roomCode) return;
+    const key = `${variant.name || ''}|${variant.style || ''}`;
+    if (recordedAcceptanceRef.current.has(key)) return;
+    recordedAcceptanceRef.current.add(key);
+    try {
+      const route = JSON.stringify(Array.isArray(variant.nodes) ? variant.nodes : []);
+      const saved = await fetch(`${API_BASE}/api/v1/plan/variant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAuthToken()}` },
+        body: JSON.stringify({ room_id: roomCode, name: variant.name || '未命名方案', style: variant.style || '', route }),
+      });
+      const savedPayload = await saved.json().catch(() => ({}));
+      const variantId = String(savedPayload?.variant?.id || '');
+      if (!variantId) return;
+      await fetch(`${API_BASE}/api/v1/plan/variant/adopt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAuthToken()}` },
+        body: JSON.stringify({ variant_id: variantId, user_id: currentUser.id, trip_id: savedTripId || undefined }),
+      });
+    } catch (error) {
+      console.warn('采纳信号上报失败（不影响使用）', error);
+    }
+  };
+
   const handleSelectPlan = (id: string) => {
     const v = planVariants.find((x: any) => x.id === id);
     if (v && Array.isArray(v.nodes) && v.nodes.length > 0) {
@@ -1859,6 +1899,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
       setActiveDayIndex(0);
       setSelectedPoiIndex(0);
       setPlanSwitchNotice(`已切换至「${v.name || '新方案'}」：${v.desc || '路线节点与节奏已更新'}`);
+      void recordPlanAcceptance(v);
     }
   };
 

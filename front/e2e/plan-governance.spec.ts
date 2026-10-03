@@ -22,6 +22,10 @@ const user = {
   isLoggedIn: true,
 };
 
+// 已保存的行程请求体：用来验证 ai-service 的 correlation_id 真的随行程落库
+// （不落库的话，网关侧的采纳/到访事件只能退回 trip_id，跨服务轨迹就串不起来）
+let savedTripBodies: any[] = [];
+
 // 与后端 plan_quality_snapshot / budget_report / propose_fallback 输出的字段保持一致
 const GOVERNANCE_PAYLOAD = {
   quality: {
@@ -253,6 +257,7 @@ const GOVERNANCE_PAYLOAD = {
 };
 
 async function installMocks(page: Page) {
+  savedTripBodies = [];
   await page.addInitScript(
     (payload) => {
       localStorage.setItem('omni_user', JSON.stringify(payload.user));
@@ -303,6 +308,9 @@ async function installMocks(page: Page) {
                     negotiation_summary: '已按预算与偏好完成协商',
                     route,
                     team_satisfaction: { 'E2E 旅行者': 62 },
+                    // ai-service 在 final_route 里回填的关联键：前端必须随行程一起存下去，
+                    // 否则网关侧的"采纳/到访/重规划"事件只能退回 trip_id，跨服务轨迹串不起来
+                    correlation_id: 'plan-e2e-1',
                     quality: payload.governance.quality,
                     budget_report: payload.governance.budget_report,
                     fallback: payload.governance.fallback,
@@ -344,6 +352,15 @@ async function installMocks(page: Page) {
   await page.route('**/api/v1/**', (route) => route.fulfill({ json: { ok: true, success: true, data: {} } }));
   await page.route('**/api/auth/login', (route) => route.fulfill({ json: { message: '登录成功', token: user.token, user } }));
   await page.route('**/api/user/**', (route) => route.fulfill({ json: { ok: true, user, trips: [] } }));
+  // 具体路由要注册在通配路由**之后**（Playwright 后注册者优先），否则会被通配吃掉
+  await page.route('**/api/user/trip', async (route) => {
+    try {
+      savedTripBodies.push(route.request().postDataJSON());
+    } catch {
+      savedTripBodies.push(null);
+    }
+    await route.fulfill({ json: { message: '行程已保存', trip_id: 'trip-e2e' } });
+  });
   await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
 }
 
@@ -369,6 +386,13 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await page.goto('/');
     await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
     await reachDecision(page);
+
+    // 方案生成后会自动保存行程：内容里必须带 correlation_id，否则跨服务轨迹串不起来
+    const savedWithCorrelation = savedTripBodies.find((body) => String(body?.content || '').includes('plan-e2e-1'));
+    expect(
+      savedWithCorrelation,
+      `保存行程时应带上 correlation_id（实际收到 ${savedTripBodies.length} 次保存：${JSON.stringify(savedTripBodies.map((b) => b?.content?.slice(0, 80)))}）`,
+    ).toBeTruthy();
 
     // Governance is intentionally kept in the evidence layer so the default
     // plan view stays focused. Open that layer before asserting its details.
