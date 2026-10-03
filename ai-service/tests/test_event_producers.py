@@ -22,7 +22,9 @@ sys.path.insert(0, str(ROOT))
 
 from core.agent_runtime import WIRED_AGENT_IDS, capability_registry  # noqa: E402
 from core.events import (  # noqa: E402
+    EVENT_TYPES,
     INFRA_PRODUCERS,
+    PENDING_WIRING,
     PRODUCERS,
     EventValidationError,
     known_producers,
@@ -30,6 +32,8 @@ from core.events import (  # noqa: E402
 )
 
 PRODUCER_LITERAL = re.compile(r'producer\s*=\s*"([A-Za-z0-9_.:-]+)"')
+# 事件类型字面量：兼容单行与多行 emit（operations.py 里的 emit 就是多行写的）
+EMIT_TYPE_LITERAL = re.compile(r'emit\(\s*[^,()]*,\s*"([a-z][a-z_.]*)"', re.S)
 # tests/ 里会**故意**写非法 producer（就是在测"非法要被拒"），不参与静态扫描
 SKIP_DIRS = {"venv", ".venv", "site-packages", "__pycache__", ".git", "node_modules", "work", "tests"}
 
@@ -88,6 +92,40 @@ class TestProducerRegistry(unittest.TestCase):
                 if name not in known:
                     offenders.append(f"{path.relative_to(ROOT)}: producer=\"{name}\"")
         self.assertEqual(offenders, [], "发现了未登记的事件生产者：" + "; ".join(offenders))
+
+
+class TestEventTypeCoverage(unittest.TestCase):
+    """事件**类型**的覆盖护栏：登记了就要有人发，没人发就必须在缺口台账里写明归属。"""
+
+    def _emitted_types(self) -> set:
+        found = set()
+        for path in ROOT.rglob("*.py"):
+            if any(part in SKIP_DIRS for part in path.parts):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                continue
+            found.update(EMIT_TYPE_LITERAL.findall(text))
+        return found
+
+    def test_emitted_types_are_all_registered(self):
+        """事故回归：reasoning_step / negotiation_started / specialist_proposals_ready /
+        final_route_ready 曾经在发但没登记 → 走旧信封、没有 correlation_id。"""
+        unregistered = sorted(self._emitted_types() - set(EVENT_TYPES))
+        self.assertEqual(unregistered, [], f"这些类型在发但没登记（会丢 correlation_id）：{unregistered}")
+
+    def test_registered_types_are_either_emitted_or_explicitly_pending(self):
+        registered = set(EVENT_TYPES)
+        emitted = self._emitted_types()
+        pending = set(PENDING_WIRING)
+        self.assertEqual(sorted(registered - emitted - pending), [], "登记了、没有发点、又没进缺口台账")
+        self.assertEqual(sorted(pending - registered), [], "缺口台账里有没登记过的类型（拼错了？）")
+        self.assertEqual(sorted(pending & emitted), [], "已经有发点了，请从 PENDING_WIRING 里删掉")
+
+    def test_pipeline_milestone_types_are_registered(self):
+        for name in ("negotiation_started", "reasoning_step", "specialist_proposals_ready", "final_route_ready"):
+            self.assertIn(name, EVENT_TYPES)
 
 
 if __name__ == "__main__":

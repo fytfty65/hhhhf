@@ -43,6 +43,36 @@ EVENT_TYPES: Dict[str, str] = {
     "replan.requested": "请求重规划",
     "replan.confirmed": "重规划已确认",
     "trip.visited": "实际到访",
+    # 规划主链路的里程碑事件：这 4 条**此前已经在发**，只是没登记 —— 于是走旧信封、没有
+    # correlation_id，事件流成了"没法按一次规划串起来"的日志（审计/回放无从谈起）。
+    # 由 tools/trace_plan.py 的审计需求倒逼登记。
+    "negotiation_started": "推演开始",
+    "reasoning_step": "推演推理步骤",
+    "specialist_proposals_ready": "专业提案就绪",
+    "final_route_ready": "行程生成完成",
+}
+
+# 缺口台账：**已登记但代码里还没有发点**的事件类型。
+#
+# 为什么要写出来而不是删掉：这些类型对应的是产品上真实需要的环节（谁提出的候选、谁被淘汰、
+# 路线何时通过验证、用户何时采纳…），只是发点还没接。把它们显式登记成"待接线 + 归属 + 原因"，
+# 比留在 EVENT_TYPES 里假装体系完整、或者直接删掉假装不需要，都要诚实。
+# `tests/test_event_producers.py` 会强制：EVENT_TYPES == 代码里真有发点的类型 ∪ 本台账。
+PENDING_WIRING: Dict[str, str] = {
+    "trip.created": "coordinator｜推演入口已发 negotiation_started，语义重叠，需先定口径再发",
+    "intent.parsed": "intent-agent｜需求解析目前内联在 api/agent.py，未独立成组件",
+    "candidate.proposed": "各专业智能体｜specialist runtime 目前只汇总提案，未逐条发事件",
+    "candidate.rejected": "validator｜淘汰原因目前只在 gate_audits 里，未进事件流",
+    "constraint.failed": "validator｜硬约束失败目前只在约束核对面板里",
+    "route.drafted": "route-planner｜草案生成阶段未发事件",
+    "route.validated": "validator｜validate_route 结果只回填到 final_data.constraints",
+    "route.repaired": "coordinator｜自动复核/长行程修补已实现，但未发事件",
+    "route.selected": "coordinator｜裁决选出主方案时未发事件（多方案对比是真实存在的）",
+    "user.accepted": "gateway｜用户在前端的采纳动作，属网关侧发点",
+    "user.rejected": "gateway｜用户拒绝动作，属网关侧发点",
+    "node.replaced": "gateway｜应用重规划替换节点时（ConfirmReplanHandler）未发事件",
+    "replan.confirmed": "gateway｜确认重规划时未发事件（同一处可一并补）",
+    "trip.visited": "gateway｜执行状态标记为已到访时未发事件",
 }
 
 # 事件生产者（producer）白名单。
@@ -202,6 +232,7 @@ def event_types() -> List[Dict[str, str]]:
 __all__ = [
     "ENVELOPE_VERSION",
     "EVENT_TYPES",
+    "PENDING_WIRING",
     "PRODUCERS",
     "EventValidationError",
     "dedupe_key",

@@ -23,6 +23,8 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(os.path.join(ROOT, ".env"))
 
+import argparse  # noqa: E402
+
 import redis.asyncio as aioredis  # noqa: E402
 
 from api.agent import OMNI_EVENTS_STREAM, event_bus  # noqa: E402
@@ -36,7 +38,46 @@ def check(condition: bool, message: str) -> None:
         FAILURES.append(message)
 
 
+async def emit_pipeline_demo() -> str:
+    """按**真实规划链路的形状**发 4 条里程碑事件（探针合成，不是真的跑了一次推演）。
+
+    用途：验证这 4 个类型现在能通过协议校验、且能被 tools/trace_plan.py 按关联键串起来。
+    真实链路是否真的发这些事件，要靠跑一次真推演后用同一个工具看 —— 这里不做那种声称。
+    """
+    from api.agent import build_reasoning_step
+
+    correlation = f"planprobe-{uuid.uuid4().hex[:8]}"
+    await event_bus.emit(
+        OMNI_EVENTS_STREAM, "negotiation_started",
+        {"room_id": "probe-room", "user_id": "probe-user", "city": "探针城市", "days": 2,
+         "budget_mode": "EXACT_AMOUNT", "member_count": 2, "correlation_id": correlation},
+        "probe-room", correlation_id=correlation, producer="coordinator",
+    )
+    step = build_reasoning_step("探针 Agent", "claim", "探针推理步骤", "由 tools/probe_event_stream.py 合成")
+    await event_bus.emit(
+        OMNI_EVENTS_STREAM, "reasoning_step", step, "probe-room",
+        correlation_id=correlation, producer="coordinator",
+    )
+    await event_bus.emit(
+        OMNI_EVENTS_STREAM, "specialist_proposals_ready",
+        {"room_id": "probe-room", "city": "探针城市", "status": "ok", "completed": 9, "degraded": 2},
+        "probe-room", correlation_id=correlation, producer="coordinator",
+    )
+    await event_bus.emit(
+        OMNI_EVENTS_STREAM, "final_route_ready",
+        {"room_id": "probe-room", "user_id": "probe-user", "city": "探针城市", "variants": 2,
+         "correlation_id": correlation},
+        "probe-room", correlation_id=correlation, producer="coordinator",
+    )
+    return correlation
+
+
 async def main() -> int:
+    parser = argparse.ArgumentParser(description="事件流真实写入探针")
+    parser.add_argument("--keep", action="store_true", help="保留探针事件（默认跑完删除），便于用 trace_plan.py 回读")
+    parser.add_argument("--pipeline-demo", action="store_true", help="额外发一组「规划形状」的里程碑事件（探针合成，不是真推演）")
+    args = parser.parse_args()
+
     url = os.getenv("REDIS_URL", "redis://localhost:6379")
     print(f"REDIS_URL = {url}")
     client = aioredis.from_url(url, decode_responses=True)
@@ -116,9 +157,19 @@ async def main() -> int:
             check(risk_event.get("room_id") == "probe-room", "保留 room_id 镜像字段（网关 WS 桥无需同时改）")
             check((risk_event.get("payload") or {}).get("probe") is True, "payload 原样保留")
 
-    if mine:
+    print(f"correlation_id = {correlation}")
+    if mine and not args.keep:
         await client.xdel(OMNI_EVENTS_STREAM, *[entry_id for entry_id, _ in mine])
         print(f"已清理探针事件 {len(mine)} 条")
+    elif mine:
+        print(f"已保留探针事件 {len(mine)} 条（用 tools/trace_plan.py --correlation-id {correlation} 审计，"
+              f"清理：--delete）")
+
+    if args.pipeline_demo:
+        pipeline_correlation = await emit_pipeline_demo()
+        print(f"已写入「规划形状」探针事件（4 条），correlation_id = {pipeline_correlation}")
+        print(f"  → tools/trace_plan.py --correlation-id {pipeline_correlation}")
+        print(f"  → 清理：tools/trace_plan.py --correlation-id {pipeline_correlation} --delete")
 
     await client.aclose()
     print("FAILED: " + "; ".join(FAILURES) if FAILURES else "PASS - 事件链真实可追踪")

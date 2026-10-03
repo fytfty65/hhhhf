@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import urllib.parse
 import traceback
+import uuid
 import numpy as np
 import networkx as nx
 from sklearn.cluster import DBSCAN
@@ -1700,6 +1701,12 @@ async def run_negotiate(msg: GatewayMessage):
     payload = msg.payload or {}
     room_id = msg.room_id or "global"
     user_id = msg.user_id or "anonymous"
+    # 本次推演的关联键：一次规划发出的所有事件（推演开始 / 推理步骤 / 专业提案 / 生成完成）
+    # 共用它，事件流才能按"一次规划"串起来重放与审计。调用方给了就用（网关/前端将来可传），
+    # 没给就自己铸一个，并回填进 final_data 供前端与网关关联。
+    plan_correlation_id = str(
+        payload.get("correlation_id") or payload.get("plan_id") or payload.get("trip_id") or ""
+    ).strip() or f"plan-{uuid.uuid4().hex[:12]}"
 
     user_prefs = payload.get("user_preferences") or payload.get("current_request", {}).get("user_preferences", {})
     if not isinstance(user_prefs, dict):
@@ -1988,7 +1995,10 @@ async def run_negotiate(msg: GatewayMessage):
             """下发结构化推理步骤（前端回放）并写入 Redis 黑板存档 + 事件流。"""
             step = build_reasoning_step(agent, action, claim, basis)
             await blackboard.record_reasoning(f"room_{target_city}", step)
-            await event_bus.emit(OMNI_EVENTS_STREAM, "reasoning_step", step, room_id)
+            await event_bus.emit(
+                OMNI_EVENTS_STREAM, "reasoning_step", step, room_id,
+                correlation_id=plan_correlation_id, producer="coordinator",
+            )
             yield json.dumps({"type": "reasoning_step", "payload": step}, ensure_ascii=False) + "\n"
 
         yield json.dumps({"type": "budget_breakdown", "payload": budget_breakdown_payload}, ensure_ascii=False) + "\n"
@@ -1996,7 +2006,8 @@ async def run_negotiate(msg: GatewayMessage):
         await event_bus.emit(OMNI_EVENTS_STREAM, "negotiation_started", {
             "room_id": room_id, "user_id": user_id, "city": target_city,
             "days": trip_days, "budget_mode": budget_mode, "member_count": _member_count,
-        }, room_id)
+            "correlation_id": plan_correlation_id,
+        }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
 
         if is_luxury:
             yield json.dumps({"token": f"[地理精算 Agent]: 捕获到团队品质诉求，开启【臻选豪华】策略，正在为【{target_city}】排布完整 {trip_days} 天精品行程...\n"}, ensure_ascii=False) + "\n"
@@ -2154,7 +2165,7 @@ async def run_negotiate(msg: GatewayMessage):
                 "status": specialist_runtime_result.get("status"),
                 "completed": specialist_runtime_result.get("completed", 0),
                 "degraded": specialist_runtime_result.get("degraded", 0),
-            }, room_id)
+            }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
         except Exception as _runtime_error:
             specialist_runtime_result = {
                 **specialist_runtime_result,
@@ -2798,7 +2809,17 @@ async def run_negotiate(msg: GatewayMessage):
                 except Exception as _fallback_sim_exc:
                     print(f"⚠️ [兜底] 不确定度报告生成失败，仍下发保底路线: {_fallback_sim_exc}", flush=True)
                 # 直接发送 final_route，跳过 Post-Route 中依赖 LLM 输出的回填逻辑（保底路线已经带齐所有字段）
+                final_data["correlation_id"] = plan_correlation_id
                 yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
+                # 保底路线也必须进事件流：否则审计里这次规划只有"开始"、没有"结束"，
+                # 看起来像服务挂了（真实原因是走了候选池保底）。用 fallback=True 如实标注。
+                await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {
+                    "room_id": room_id, "user_id": user_id, "city": target_city,
+                    "variants": len(final_data.get("plan_variants", [])),
+                    "fallback": True,
+                    "status": final_data.get("status"),
+                    "correlation_id": plan_correlation_id,
+                }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
                 print(f"🏆 [兜底完成] 已下发 {len(syn_routes)} 个合成节点", flush=True)
                 return
 
@@ -4160,12 +4181,16 @@ async def run_negotiate(msg: GatewayMessage):
                     except Exception as _final_balance_exc:
                         final_data["daily_balance"] = {"gate": "final_pre_emit", "error": str(_final_balance_exc)[:200]}
 
+                    # 把本次规划的关联键交给前端/网关：以后用户采纳、确认重规划、标记到访
+                    # 都能带着同一个 correlation_id 回到事件流里（否则审计只能看到孤立的片段）
+                    final_data["correlation_id"] = plan_correlation_id
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
                     await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {
                         "room_id": room_id, "user_id": user_id, "city": target_city,
                         "variants": len(final_data.get("plan_variants", [])),
-                    }, room_id)
+                        "correlation_id": plan_correlation_id,
+                    }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
 
                     # 🚀 写入 LLM 语义缓存（fire-and-forget，不阻塞后续 P2P 导航推送）
                     if not is_refinement:
