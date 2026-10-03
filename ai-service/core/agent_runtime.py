@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Sequence
 
 from .agent_contracts import AgentInput, AgentProposal, capability_registry, validate_agent_proposal
 
@@ -68,6 +68,7 @@ def pool_handler(agent_id: str, domain: str, *, provider: str, field: str) -> Ag
 # 于是这里把覆盖度做成可查询的数据（诊断接口/测试都能读），新增注册项如果没被分类会立刻被测出来。
 GREEN_AGENT_ID = "green-agent"
 HEALTH_AGENT_ID = "health-agent"
+EMERGENCY_AGENT_ID = "emergency-agent"
 
 WIRED_AGENT_IDS = (
     "route-planner",
@@ -78,11 +79,11 @@ WIRED_AGENT_IDS = (
     "budget-agent",
     GREEN_AGENT_ID,
     HEALTH_AGENT_ID,
+    EMERGENCY_AGENT_ID,
 )
 
 # 已声明但**尚未接线**：必须写清原因（测试强制：注册表里出现的新 id 必须在此分类，不能默默漏掉）
 DECLARED_NOT_WIRED: Dict[str, str] = {
-    "emergency-agent": "属旅中执行闭环：replan 端点已存在，但推演阶段尚未调度（P4 一起做）",
     "culture-agent": "缺少可核实的知识来源；按注册表 fallback=omit_unsourced_fact，宁可不出提案也不编造",
     "accessibility-agent": "缺少官方无障碍数据来源；fallback=mark_unverified",
 }
@@ -300,6 +301,176 @@ def health_handler() -> AgentHandler:
     return handle
 
 
+def replan_scope(route: Sequence[Mapping[str, Any]], risk_event: Mapping[str, Any]) -> Dict[str, Any]:
+    """最小扰动重规划：算出**受影响节点 / 保留节点 / 保留率**。
+
+    这是"旅中闭环"的核心逻辑，做成纯函数以便离线单测（风险场景很难在真实数据上复现）。
+
+    诚实与最小扰动原则：
+    - 风险事件**必须给出范围**（`affected_nodes` 或 `affected_days`）。两者都没有 → `scope_unknown`，
+      绝不"整条路线重生成"（那是最大的扰动，也是最容易掩盖问题的做法）；
+    - 点名了具体节点时**只影响这些节点**，同一天的其它节点照常保留；
+    - 保留率 = 保留节点 / 全部节点，用于验收"未受影响节点保留率 ≥ 70%"。
+    """
+    nodes = [dict(item) for item in route if isinstance(item, Mapping)]
+    total = len(nodes)
+    if total == 0:
+        return {"status": "empty_route", "affected": [], "preserved": [], "preserved_ratio": 1.0, "action": None}
+
+    raw_nodes = risk_event.get("affected_nodes") if isinstance(risk_event, Mapping) else None
+    raw_days = risk_event.get("affected_days") if isinstance(risk_event, Mapping) else None
+    named = {_normalize_name(item) for item in (raw_nodes or []) if str(item).strip()}
+    day_set = set()
+    for item in raw_days or []:
+        try:
+            day_set.add(int(item))
+        except (TypeError, ValueError):
+            continue
+
+    if not named and not day_set:
+        return {
+            "status": "scope_unknown",
+            "affected": [],
+            "preserved": [node.get("name") for node in nodes],
+            "preserved_ratio": 1.0,
+            "action": None,
+            "message": "风险事件没有给出受影响范围，拒绝整条路线重生成",
+        }
+
+    affected: List[Dict[str, Any]] = []
+    preserved: List[str] = []
+    for node in nodes:
+        name_hit = _normalize_name(node.get("name")) in named if named else False
+        day_hit = False
+        if day_set and not named:
+            try:
+                day_hit = int(node.get("day")) in day_set
+            except (TypeError, ValueError):
+                day_hit = False
+        if name_hit or day_hit:
+            affected.append(node)
+        else:
+            preserved.append(str(node.get("name") or ""))
+
+    ratio = round(len(preserved) / total, 3) if total else 1.0
+    action = str(risk_event.get("recommended_action") or "").strip()
+    if not action:
+        # 没给动作就按影响范围推断（只影响少量节点 → 局部替换；整天受影响 → 顺延）
+        action = "shift_day" if (day_set and not named) else "replace_affected_nodes"
+    return {
+        "status": "scoped",
+        "affected": affected,
+        "affected_names": [str(node.get("name") or "") for node in affected],
+        "preserved": preserved,
+        "preserved_ratio": ratio,
+        "action": action,
+    }
+
+
+def _normalize_name(value: Any) -> str:
+    return "".join(str(value or "").split()).lower()
+
+
+def emergency_handler() -> AgentHandler:
+    """应急智能体：把风险事件转成**最小扰动**的重规划动作提案。
+
+    注册表定义：tools=[risk.snapshot, planning.replan]，timeout=5000，
+    fallback=manual_confirmation，metrics=[preserved_node_ratio, replan_latency]。
+
+    诚实口径：
+    - 只在风险事件给出范围时才产出动作；范围未知 → degraded + FailureInfo，**绝不整条重生成**；
+    - 提案里必须带上保留率与保留节点（用户与验收标准都要看这个数）；
+    - 强调"需用户确认后才写入"（fallback=manual_confirmation）。
+    """
+
+    async def handle(request: AgentInput) -> Mapping[str, Any]:
+        context = request.context or {}
+        route = context.get("route") or []
+        event = context.get("risk_event") if isinstance(context.get("risk_event"), Mapping) else None
+        if not isinstance(route, Sequence) or isinstance(route, (str, bytes)) or not route:
+            return {
+                "agent_id": EMERGENCY_AGENT_ID,
+                "domain": "emergency",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("risk.snapshot", "affected_nodes")],
+                "confidence": 0.0,
+                "failure": {
+                    "code": "route_missing",
+                    "message": "没有当前路线，无法判断受影响节点",
+                    "retryable": True,
+                    "fallback": "manual_confirmation",
+                },
+                "explanation": "缺当前路线，未做任何重规划。",
+            }
+        if not event:
+            return {
+                "agent_id": EMERGENCY_AGENT_ID,
+                "domain": "emergency",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("risk.snapshot", "risk_event")],
+                "confidence": 0.0,
+                "failure": {
+                    "code": "risk_event_missing",
+                    "message": "没有风险事件，不触发重规划",
+                    "retryable": True,
+                    "fallback": "manual_confirmation",
+                },
+                "explanation": "没有风险事件时不动作（避免无谓扰动）。",
+            }
+
+        scope = replan_scope(route, event)
+        if scope["status"] != "scoped":
+            return {
+                "agent_id": EMERGENCY_AGENT_ID,
+                "domain": "emergency",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("risk.snapshot", "affected_nodes")],
+                "confidence": 0.0,
+                "failure": {
+                    "code": scope["status"],
+                    "message": scope.get("message") or "风险事件范围不可判定",
+                    "retryable": False,
+                    "fallback": "manual_confirmation",
+                },
+                "explanation": "范围不可判定时拒绝整条路线重生成，交人工确认。",
+            }
+
+        candidate = {
+            "action": scope["action"],
+            "affected_nodes": scope["affected_names"],
+            "preserved_nodes": scope["preserved"],
+            "preserved_ratio": scope["preserved_ratio"],
+            "requires_user_confirmation": True,
+            "risk": {
+                "event": event.get("event") or event.get("type"),
+                "severity": event.get("severity"),
+            },
+        }
+        return {
+            "agent_id": EMERGENCY_AGENT_ID,
+            "domain": "emergency",
+            "status": "ok",
+            "degraded": False,
+            "candidates": [candidate],
+            "hard_constraint_results": request.hard_constraints,
+            "evidence": [_evidence("risk.snapshot", "affected_nodes")],
+            "confidence": 0.7,
+            "explanation": (
+                f"最小扰动重规划：受影响 {len(scope['affected_names'])} 个节点、"
+                f"保留 {len(scope['preserved'])} 个（保留率 {int(scope['preserved_ratio'] * 100)}%），"
+                f"动作 {scope['action']}，需用户确认后写入。"
+            ),
+        }
+
+    return handle
+
+
 class SpecialistRuntime:
     def __init__(self, handlers: Mapping[str, AgentHandler]):
         self.handlers = dict(handlers)
@@ -365,6 +536,8 @@ def build_pool_runtime(
     profile: Mapping[str, Any] | None = None,
     weather: Mapping[str, Any] | None = None,
     daily_nodes: int | None = None,
+    route: Sequence[Mapping[str, Any]] = (),
+    risk_event: Mapping[str, Any] | None = None,
 ) -> tuple[SpecialistRuntime, list[AgentInput]]:
     sources = {
         "route-planner": ("itinerary", attractions, "amap", "attraction_candidates"),
@@ -400,5 +573,12 @@ def build_pool_runtime(
             "daily_nodes": daily_nodes,
         },
         hard_constraints={}, soft_preferences={}, allowed_tools=[],
+    ))
+    # 应急智能体：把风险事件转成最小扰动重规划动作提案（旅中闭环的入口）
+    handlers[EMERGENCY_AGENT_ID] = emergency_handler()
+    requests.append(AgentInput(
+        request_id=f"runtime-{EMERGENCY_AGENT_ID}", agent_id=EMERGENCY_AGENT_ID, domain="emergency",
+        context={"route": list(route), "risk_event": dict(risk_event or {})}, hard_constraints={},
+        soft_preferences={}, allowed_tools=[],
     ))
     return SpecialistRuntime(handlers), requests

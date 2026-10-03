@@ -19,11 +19,14 @@ from core.agent_runtime import (  # noqa: E402
     DECLARED_NOT_WIRED,
     GREEN_AGENT_ID,
     HEALTH_AGENT_ID,
+    EMERGENCY_AGENT_ID,
     WIRED_AGENT_IDS,
     build_pool_runtime,
+    emergency_handler,
     green_handler,
     health_handler,
     registry_coverage,
+    replan_scope,
 )
 
 
@@ -183,6 +186,72 @@ class TestHealthAgent(unittest.TestCase):
         validated = validate_agent_proposal(self._run({"daily_nodes": 4, "weather": {"condition": "晴"}}))
         self.assertEqual(validated.status, "ok")
         self.assertEqual(validated.candidates[0]["daily_node_limit"], 4, "节奏本来就合理时不应无故压缩")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestEmergencyAgentClosedLoop(unittest.TestCase):
+    """旅中闭环核心：风险 -> 受影响节点 -> 保留未受影响节点 -> 最小扰动动作。
+
+    验收标准原文："未受影响节点保留率 >= 70%"、"用户确认前不自动覆盖原方案"。
+    """
+
+    def _route(self, days=3, per_day=3):
+        route = []
+        for day in range(1, days + 1):
+            for index in range(per_day):
+                route.append({"day": day, "name": f"day{day}-spot{index + 1}", "type": "culture"})
+        return route
+
+    def _run(self, route, event):
+        return validate_agent_proposal(asyncio.run(emergency_handler()(AgentInput(
+            request_id="e", agent_id=EMERGENCY_AGENT_ID, domain="emergency",
+            context={"route": route, "risk_event": event},
+        ))))
+
+    def test_single_node_risk_preserves_the_rest(self):
+        route = self._route()
+        proposal = self._run(route, {
+            "event": "weather_changed", "severity": "high",
+            "affected_days": [2], "affected_nodes": ["day2-spot1"],
+            "recommended_action": "replace_outdoor_activity",
+        })
+        self.assertEqual(proposal.status, "ok")
+        candidate = proposal.candidates[0]
+        self.assertEqual(candidate["affected_nodes"], ["day2-spot1"], "点名了节点就只影响这个节点")
+        self.assertGreaterEqual(candidate["preserved_ratio"], 0.7, "未受影响节点保留率必须 >= 70%")
+        self.assertTrue(candidate["requires_user_confirmation"], "确认前不得自动覆盖原方案")
+        self.assertEqual(candidate["action"], "replace_outdoor_activity")
+
+    def test_day_level_risk_only_touches_that_day(self):
+        proposal = self._run(self._route(days=5, per_day=3), {"event": "scenic_closed", "severity": "high", "affected_days": [3]})
+        candidate = proposal.candidates[0]
+        self.assertEqual(len(candidate["affected_nodes"]), 3, "只影响该天的 3 个节点")
+        self.assertEqual(candidate["preserved_ratio"], 0.8, "12/15 保留")
+        self.assertEqual(candidate["action"], "shift_day")
+
+    def test_unknown_scope_refuses_to_regenerate_everything(self):
+        """风险没给范围时**拒绝整条重生成**（那是最大扰动，也最掩盖问题）。"""
+        proposal = self._run(self._route(), {"event": "traffic_jam", "severity": "medium"})
+        self.assertEqual(proposal.status, "degraded")
+        self.assertEqual(proposal.candidates, [], "范围未知时不得产出任何重规划候选")
+        self.assertEqual(proposal.failure.code, "scope_unknown")
+        self.assertEqual(proposal.failure.fallback, "manual_confirmation")
+
+    def test_no_risk_event_means_no_perturbation(self):
+        proposal = self._run(self._route(), {})
+        self.assertEqual(proposal.status, "degraded")
+        self.assertEqual(proposal.failure.code, "risk_event_missing")
+
+    def test_replan_scope_is_pure_and_reusable(self):
+        scope = replan_scope(self._route(days=2, per_day=2), {"affected_nodes": ["day1-spot2"]})
+        self.assertEqual(scope["status"], "scoped")
+        self.assertEqual(scope["affected_names"], ["day1-spot2"])
+        self.assertEqual(len(scope["preserved"]), 3)
+        self.assertEqual(scope["preserved_ratio"], 0.75)
+        self.assertEqual(replan_scope([], {"affected_days": [1]})["status"], "empty_route")
 
 
 if __name__ == "__main__":
