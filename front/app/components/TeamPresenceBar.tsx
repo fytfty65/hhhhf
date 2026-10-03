@@ -58,9 +58,9 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
   };
 
   const getSatColor = (s: number) =>
-    s >= 90 ? 'text-emerald-600' : s >= 78 ? 'text-teal-600' : s >= 65 ? 'text-amber-600' : 'text-rose-500';
+    s >= 78 ? 'text-emerald-600' : s >= 65 ? 'text-amber-600' : 'text-rose-500';
   const getSatBar = (s: number) =>
-    s >= 90 ? 'from-emerald-400 to-teal-400' : s >= 78 ? 'from-teal-400 to-cyan-400' : s >= 65 ? 'from-amber-400 to-orange-400' : 'from-rose-400 to-pink-400';
+    s >= 78 ? 'from-emerald-400 to-emerald-500' : s >= 65 ? 'from-amber-400 to-orange-400' : 'from-rose-400 to-rose-500';
 
   // 👑 头像渲染：优先使用用户上传的真实头像，没有时再用 DiceBear 生成
   const getAvatarUrl = (m: any) => {
@@ -157,7 +157,7 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
             const roleColor =
               m.role?.includes('寻味') || m.role?.includes('美食') ? 'text-orange-600 bg-orange-50 border-orange-200'
               : m.role?.includes('摄影') || m.role?.includes('风景') ? 'text-emerald-600 bg-emerald-50 border-emerald-200'
-              : m.role?.includes('住宿') || m.role?.includes('品质') ? 'text-indigo-600 bg-indigo-50 border-indigo-200'
+              : m.role?.includes('住宿') || m.role?.includes('品质') ? 'text-orange-700 bg-orange-50 border-orange-200'
               : 'text-slate-600 bg-slate-50 border-slate-200';
             return (
               <div

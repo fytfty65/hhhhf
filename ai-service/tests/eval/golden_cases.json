@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated": "2026-09-18",
+  "updated": "2026-10-02",
   "how_to_use": [
     "本文件是『阶段 0：规划质量评测』的需求样本集，用于给规划结果打分（core/plan_quality.py + tools/eval_plan_quality.py）。",
     "每条包含：request（用户原话）、context（天数/预算/人数/偏好/季节天气）、signals（偏好信号，等价于 extract_preference_signals 的输出）、expectations、notes（为什么这条重要）。",
@@ -10,7 +10,8 @@
     "场景专用字段：horizon（超长行程的分段/休整日要求）、second_turn（二次规划的排他/保留要求）、anchoring_km（吃住到玩点的最大可接受距离）。这三个字段目前供人工评审与后续机器判定使用。",
     "v2 起 horizon **真正参与机器判定**（tools/eval_plan_quality.py 的 long_trip_check）：用 core/long_trip.continuity_report 检查天数断档/越界天/某段住宿夜数不足（计入 --require-hard-gates），跳段跨城/休整日不足/分段超预算只做顾问；horizon.first_round_required=true 时还要求 plan dump 里带 long_trip.first_round（首轮按 7 天一段生成的结果），缺失或有段落失败都算失败。",
     "v2 新增（目前供人工评审 + 后续判定）：second_turn.quota（配额型增量，如『多加两顿小吃』）、second_turn.tier（升降档）、second_turn.structural/must_confirm（结构性改动必须先让用户确认）、transport（跨城出行方式比较与『票价未核实』）、price_honesty（未核实不得当 0 元）。这些能力在 core/increment.py、core/transport_options.py、core/price_sources.py 里已实现，用例用来固定口径。",
-    "口径：非供应商字段一律『未核实』，评分不奖励无法核实的内容——宁可分低，也不把编造当丰富；预算判定分三级（verified 才算硬结论，estimated 必须标明，unknown 不得声称满足）。"
+    "口径：非供应商字段一律『未核实』，评分不奖励无法核实的内容——宁可分低，也不把编造当丰富；预算判定分三级（verified 才算硬结论，estimated 必须标明，unknown 不得声称满足）。",
+    "城市 × 偏好回归矩阵：乌鲁木齐/成都/三亚 × 普通游(normal, 2–4 节点/天) / 深度探索(intense, 3–6 节点/天) / 美食偏好(food 兴趣必须落到餐饮节点)。这 9 条由 tests/test_plan_quality.py 的 TestCityPreferenceRegression 固定口径，防止三种偏好被同一套排法套用。"
   ],
   "cases": [
     {
@@ -722,6 +723,168 @@
       },
       "price_honesty": { "must_label_unverified": ["酒店", "门票"], "unknown_never_zero": true },
       "notes": "口径用例：三级价格模型（verified > estimated > unknown）里 unknown **不得**计入合计、不得声称满足预算，估算值必须标明来源；实测高德对酒店一律不返回价格，所以这条很容易被违反。"
+    },
+    {
+      "id": "urumqi-normal-3d",
+      "title": "普通游三天 · 乌鲁木齐（节奏适中、覆盖经典）",
+      "request": "第一次去乌鲁木齐玩 3 天，走经典路线就行，节奏正常别太赶",
+      "context": {
+        "city": "乌鲁木齐", "days": 3, "budget": 4800, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["地标", "博物馆", "美食", "自然风光"] },
+        "season": "秋", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "wants_scenic": true, "wants_food": true, "pace": "normal" },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "should_have": ["大巴扎", "博物馆", "公园"],
+        "must_not": ["单日超过 4 个节点", "连续三天都排满", "跨城奔波到周边地州"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "城市 × 偏好矩阵基线：乌鲁木齐普通游必须保持 2–4 节点/天，覆盖大巴扎+博物馆这类经典地标，而不是把深度探索的排法套上去。"
+    },
+    {
+      "id": "urumqi-deep-4d",
+      "title": "深度探索四天 · 乌鲁木齐（高密度、含近郊）",
+      "request": "去乌鲁木齐 4 天，想深度走一遍，市区和天山周边都要，节奏紧凑点没关系",
+      "context": {
+        "city": "乌鲁木齐", "days": 4, "budget": 7000, "members": 2,
+        "preferences": { "pace": "intense", "interest": ["深度", "历史", "博物馆", "徒步", "自然风光"] },
+        "season": "夏", "weather": "晴"
+      },
+      "signals": { "wants_cultural": true, "wants_scenic": true, "interest": ["深度", "历史", "徒步"], "pace": "intense" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["博物馆", "峡谷", "古城", "山"],
+        "must_not": ["四天全排满且没有任何低强度日"],
+        "min_nodes_per_day": 3, "max_nodes_per_day": 6
+      },
+      "notes": "深度探索必须真的提高密度（3–6 节点/天），并且不能只在文案里说『深度』；与 urumqi-normal-3d 形成对照组。"
+    },
+    {
+      "id": "urumqi-food-3d",
+      "title": "美食偏好三天 · 乌鲁木齐（寻味优先、少景点）",
+      "request": "去乌鲁木齐 3 天主要为了吃，手抓肉、烤包子、大盘鸡、馕都要有，景点一两个就够",
+      "context": {
+        "city": "乌鲁木齐", "days": 3, "budget": 4200, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["美食", "小吃", "老字号", "夜市"], "dietary": "能吃辣" },
+        "season": "秋", "weather": "多云"
+      },
+      "signals": { "wants_food": true, "interest": ["小吃", "老字号", "夜市"] },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "should_have": ["烧烤", "面", "甜品", "市场"],
+        "must_not": ["把行程排成纯景点打卡", "三天里没有任何当地特色餐饮"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "美食偏好必须落到餐饮节点上：food 标签要被覆盖，且不能退化成普通景点线路；用于守住『所有用户输入偏好都要在行程中体现』这条硬约束。"
+    },
+    {
+      "id": "chengdu-normal-3d",
+      "title": "普通游三天 · 成都（经典路线、节奏适中）",
+      "request": "成都玩 3 天，宽窄巷子、武侯祠这些经典的去一下，节奏正常",
+      "context": {
+        "city": "成都", "days": 3, "budget": 4500, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["地标", "文化", "美食", "购物"] },
+        "season": "秋", "weather": "阴"
+      },
+      "signals": { "wants_cultural": true, "wants_food": true, "pace": "normal" },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "should_have": ["博物馆", "古街", "公园"],
+        "must_not": ["单日超过 4 个节点", "连续三天都排满"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "成都已有 food-chengdu-2d（美食专线），这条补『普通游』基线：同城不同偏好的排法必须可区分。"
+    },
+    {
+      "id": "chengdu-deep-4d",
+      "title": "深度探索四天 · 成都（含近郊、高密度）",
+      "request": "成都深度 4 天，市区 + 都江堰青城山都想去，多看点历史和文化，节奏紧一点没事",
+      "context": {
+        "city": "成都", "days": 4, "budget": 7200, "members": 2,
+        "preferences": { "pace": "intense", "interest": ["深度", "历史", "文化", "徒步", "自然风光"] },
+        "season": "春", "weather": "多云"
+      },
+      "signals": { "wants_cultural": true, "wants_scenic": true, "interest": ["深度", "历史", "徒步"], "pace": "intense" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["博物馆", "古城", "山", "遗址"],
+        "must_not": ["四天全排满且没有任何低强度日"],
+        "min_nodes_per_day": 3, "max_nodes_per_day": 6
+      },
+      "notes": "成都深度版必须含近郊（都江堰/青城山方向），用于校验跨区调度与空间效率维度不会因为拉长而崩掉。"
+    },
+    {
+      "id": "chengdu-food-3d",
+      "title": "美食偏好三天 · 成都（火锅串串为主）",
+      "request": "去成都 3 天只为吃：火锅、串串、担担面、龙抄手都要安排，景点无所谓",
+      "context": {
+        "city": "成都", "days": 3, "budget": 3800, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["美食", "小吃", "火锅", "夜市"], "dietary": "能吃辣" },
+        "season": "秋", "weather": "阴"
+      },
+      "signals": { "wants_food": true, "interest": ["火锅", "小吃", "夜市"] },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "should_have": ["火锅", "小吃街", "夜市", "老字号"],
+        "must_not": ["把行程排成纯景点打卡", "三天里没有任何当地特色餐饮"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "成都美食偏好的强化版（3 天、火锅为主），与 chengdu-normal-3d 对照验证偏好确实改变了节点构成。"
+    },
+    {
+      "id": "sanya-normal-4d",
+      "title": "普通游四天 · 三亚（海岛常规、含休整）",
+      "request": "三亚玩 4 天，常规海岛路线，海边待一待、看看景点，节奏正常别太累",
+      "context": {
+        "city": "三亚", "days": 4, "budget": 8000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["海滨", "自然风光", "地标", "美食"] },
+        "season": "冬", "weather": "晴"
+      },
+      "signals": { "wants_scenic": true, "wants_food": true, "pace": "normal" },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "should_have": ["海滩", "岛", "公园"],
+        "must_not": ["单日超过 4 个节点", "连续四天都排满"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "三亚已有 couple-anniversary-sanya-3d（纪念日品质路线），这条补『普通游』基线，并校验 4 天里留出休整日。"
+    },
+    {
+      "id": "sanya-deep-3d",
+      "title": "深度探索三天 · 三亚（含离岛与雨林）",
+      "request": "三亚深度 3 天，蜈支洲岛、雨林、南山都要去到，尽量多看，紧凑一点",
+      "context": {
+        "city": "三亚", "days": 3, "budget": 7800, "members": 2,
+        "preferences": { "pace": "intense", "interest": ["深度", "自然风光", "徒步", "海滨", "文化"] },
+        "season": "冬", "weather": "多云"
+      },
+      "signals": { "wants_scenic": true, "wants_cultural": true, "interest": ["深度", "徒步"], "pace": "intense" },
+      "expectations": {
+        "must_have": ["酒店"],
+        "should_have": ["岛", "森林", "寺", "海"],
+        "must_not": ["三天全排满且没有任何低强度日"],
+        "min_nodes_per_day": 3, "max_nodes_per_day": 6
+      },
+      "notes": "三亚深度版：离岛 + 雨林 + 文化点位混排，验证高强度偏好下 pacing 与空间效率仍不被判失败。"
+    },
+    {
+      "id": "sanya-food-3d",
+      "title": "美食偏好三天 · 三亚（海鲜与本地味）",
+      "request": "去三亚 3 天主要吃海鲜和本地小吃，清补凉、文昌鸡、第一市场都要去，景点一两个就行",
+      "context": {
+        "city": "三亚", "days": 3, "budget": 6000, "members": 2,
+        "preferences": { "pace": "normal", "interest": ["美食", "海鲜", "小吃", "市场"] },
+        "season": "冬", "weather": "晴"
+      },
+      "signals": { "wants_food": true, "interest": ["海鲜", "小吃", "市场"] },
+      "expectations": {
+        "must_have": ["酒店", "餐"],
+        "should_have": ["市场", "海鲜", "小吃", "夜市"],
+        "must_not": ["把行程排成纯景点打卡", "三天里没有任何当地特色餐饮"],
+        "min_nodes_per_day": 2, "max_nodes_per_day": 4
+      },
+      "notes": "三亚美食偏好：餐饮与市场节点必须压过景点密度，守住『偏好必须体现在行程中』。"
     }
   ]
 }

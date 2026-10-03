@@ -98,8 +98,8 @@ export function getTrainTypeLabel(trainType: string): string {
 
 export function getTrainTypeColor(trainType: string): string {
   const map: Record<string, string> = {
-    'G': 'bg-blue-500', 'D': 'bg-sky-500', 'C': 'bg-cyan-500',
-    'Z': 'bg-purple-500', 'T': 'bg-indigo-500', 'K': 'bg-teal-500',
+    'G': 'bg-orange-600', 'D': 'bg-orange-600', 'C': 'bg-orange-600',
+    'Z': 'bg-stone-500', 'T': 'bg-stone-500', 'K': 'bg-stone-500',
   };
   return map[trainType] || 'bg-slate-500';
 }

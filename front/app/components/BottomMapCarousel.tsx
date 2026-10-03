@@ -80,7 +80,7 @@ export default function BottomMapCarousel({ selectedIndex, onSelect, routes }: a
               
               {/* 类型标签 */}
               <div className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[9px] font-black backdrop-blur-md ${
-                isFood ? 'bg-orange-500/80 text-white' : isHotel ? 'bg-indigo-500/80 text-white' : 'bg-emerald-500/80 text-white'
+                isFood ? 'bg-orange-500/80 text-white' : isHotel ? 'bg-stone-500/80 text-white' : 'bg-stone-400/80 text-white'
               }`}>
                 {typeLabel.length > 4 ? typeLabel.slice(0, 4) : typeLabel}
               </div>

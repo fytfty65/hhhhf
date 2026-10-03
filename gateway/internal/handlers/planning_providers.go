@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,12 +30,19 @@ func fetchPlanningProvider(ctx context.Context, kind string, input contracts.Pla
 		return nil, contracts.Source{}, false
 	}
 	all := make([]contracts.Candidate, 0)
+	aggregateStarted := time.Now()
 	for _, config := range configs {
 		provider := config.label
 		if provider == "" {
 			provider = providerName(key, config.base)
 		}
+		started := time.Now()
 		options, ok := fetchOnePlanningProvider(ctx, key, input, config.base, config.token, provider)
+		qualityStatus := "empty"
+		if ok {
+			qualityStatus = "ok"
+		}
+		recordProviderQualityObservation(input, key, provider, options, qualityStatus, time.Since(started))
 		if ok {
 			all = append(all, options...)
 		}
@@ -40,7 +50,108 @@ func fetchPlanningProvider(ctx context.Context, kind string, input contracts.Pla
 	if len(all) == 0 {
 		return nil, contracts.Source{}, false
 	}
+	all = annotateProviderConflicts(all)
+	if len(configs) > 1 {
+		// Keep per-provider observations for latency/coverage, then add one
+		// aggregate-only observation so cross-source conflicts are measurable.
+		recordProviderQualityObservation(input, key, "multi-source", all, "ok", time.Since(aggregateStarted))
+	}
 	return all, all[0].Source, true
+}
+
+// annotateProviderConflicts keeps every supplier option visible while making
+// cross-source disagreements explicit. We intentionally do not silently pick
+// a price or availability value: the caller can rank candidates, but the user
+// must be able to see that the sources disagree and open an official link.
+func annotateProviderConflicts(candidates []contracts.Candidate) []contracts.Candidate {
+	groups := make(map[string][]int)
+	for index := range candidates {
+		name := strings.ToLower(strings.TrimSpace(candidates[index].Name))
+		if name == "" {
+			continue
+		}
+		groups[name] = append(groups[name], index)
+	}
+	for _, indexes := range groups {
+		if len(indexes) < 2 {
+			continue
+		}
+		providers := make(map[string]bool)
+		conflictingFields := make(map[string]bool)
+		for _, index := range indexes {
+			provider := strings.TrimSpace(candidates[index].Source.Provider)
+			if provider == "" {
+				provider = "unknown"
+			}
+			providers[provider] = true
+		}
+		if len(providers) < 2 {
+			continue
+		}
+		for _, field := range []string{"price", "duration_minutes", "availability"} {
+			first := providerCandidateFieldValue(candidates[indexes[0]], field)
+			for _, index := range indexes[1:] {
+				if providerCandidateFieldValue(candidates[index], field) != first {
+					conflictingFields[field] = true
+					break
+				}
+			}
+		}
+		if len(conflictingFields) == 0 {
+			continue
+		}
+		providerList := make([]string, 0, len(providers))
+		for provider := range providers {
+			providerList = append(providerList, provider)
+		}
+		sort.Strings(providerList)
+		fieldList := make([]string, 0, len(conflictingFields))
+		for field := range conflictingFields {
+			fieldList = append(fieldList, field)
+		}
+		sort.Strings(fieldList)
+		conflictValues := make([]map[string]any, 0, len(indexes))
+		for _, index := range indexes {
+			values := make(map[string]any, len(fieldList))
+			for _, field := range fieldList {
+				switch field {
+				case "price":
+					values[field] = candidates[index].Price
+				case "duration_minutes":
+					values[field] = candidates[index].Duration
+				case "availability":
+					values[field] = candidates[index].Extra[field]
+				}
+			}
+			conflictValues = append(conflictValues, map[string]any{
+				"provider":     strings.TrimSpace(candidates[index].Source.Provider),
+				"candidate_id": candidates[index].ID,
+				"values":       values,
+			})
+		}
+		for _, index := range indexes {
+			candidates[index].Extra = ensureCandidateExtra(candidates[index].Extra)
+			candidates[index].Extra["source_conflict"] = true
+			candidates[index].Extra["conflicting_sources"] = providerList
+			candidates[index].Extra["conflict_fields"] = fieldList
+			candidates[index].Extra["source_conflict_values"] = conflictValues
+			candidates[index].Extra["conflict_resolution"] = "kept_per_source_for_user_review"
+		}
+	}
+	return candidates
+}
+
+func providerCandidateFieldValue(candidate contracts.Candidate, field string) string {
+	switch field {
+	case "price":
+		return fmt.Sprintf("%.6f", candidate.Price)
+	case "duration_minutes":
+		return strconv.Itoa(candidate.Duration)
+	case "availability":
+		return strings.TrimSpace(fmt.Sprint(candidate.Extra[field]))
+	default:
+		return ""
+	}
 }
 
 func fetchOnePlanningProvider(ctx context.Context, key string, input contracts.PlanningContext, base, token, provider string) ([]contracts.Candidate, bool) {
@@ -211,7 +322,7 @@ func normalizeProviderCandidates(payload any, provider string) []contracts.Candi
 		if !ok {
 			continue
 		}
-		name := firstString(row, "name", "title", "hotelName", "hotel_name", "scenicName", "scenic_name", "resName", "trainNum", "trainNo", "routeName", "route_name", "restaurant_name")
+		name := firstString(row, "name", "title", "hotelName", "hotel_name", "scenicName", "scenic_name", "poi_name", "attractionName", "resName", "trainNum", "trainNo", "routeName", "route_name", "restaurant_name", "restaurantName")
 		if name == "" {
 			name = strings.TrimSpace(firstString(row, "airlineCompany", "airlineName") + " " + firstString(row, "flightNumber", "flightNo", "trainNum"))
 		}
@@ -231,13 +342,19 @@ func normalizeProviderCandidates(payload any, provider string) []contracts.Candi
 		if !observed {
 			observedAt = time.Now().UTC()
 		}
-		candidate := contracts.Candidate{ID: firstStringOrNumber(row, "id", "hotelId", "hotel_id", "productId", "product_id", "resId", "resourceId", "resource_id", "scenicId", "offerId", "offer_id", "provider_id"), Name: name, Score: score, Price: price, Duration: duration, Tags: firstStrings(row, "tags", "labels", "features"), Reasons: firstStrings(row, "reasons", "highlights"), Constraints: firstStrings(row, "constraints", "warnings"), Source: contracts.Source{Provider: provider, Retrieved: observedAt, Estimated: false}, Extra: map[string]any{}}
+		candidate := contracts.Candidate{ID: firstStringOrNumber(row, "id", "hotelId", "hotel_id", "productId", "product_id", "resId", "resourceId", "resource_id", "scenicId", "poiId", "poi_id", "attractionId", "attraction_id", "offerId", "offer_id", "flight_id", "train_id", "provider_id"), Name: name, Score: score, Price: price, Duration: duration, Tags: firstStrings(row, "tags", "labels", "features", "theme_tags"), Reasons: firstStrings(row, "reasons", "highlights", "selling_points"), Constraints: firstStrings(row, "constraints", "warnings", "notices"), Source: contracts.Source{Provider: provider, Retrieved: observedAt, Estimated: false}, Extra: map[string]any{}}
 		candidate.Extra["observed_at_provided"] = observed
 		if candidate.ID == "" {
 			candidate.ID = uuid.NewString()
 		}
-		for _, key := range []string{"address", "location", "availability", "mode", "currency", "rating", "provider_id", "open_time", "check_in", "check_out", "room_type", "nightly_price", "queue_minutes", "allergens", "cuisine", "carbon_kg", "carbon_kg_estimate", "transfer_buffer_minutes", "delay_risk", "commute_minutes", "crowd_level", "url", "link", "deep_link", "booking_url", "bookingUrl", "imageUrl", "image_url", "starName", "brand", "areaCode", "departureTime", "arrivalTime"} {
+		for _, key := range []string{"address", "location", "availability", "mode", "currency", "rating", "provider_id", "open_time", "openTime", "open_hours", "opening_hours", "openingHours", "check_in", "check_out", "room_type", "nightly_price", "nightlyPrice", "queue_minutes", "allergens", "cuisine", "carbon_kg", "carbon_kg_estimate", "transfer_buffer_minutes", "delay_risk", "commute_minutes", "crowd_level", "crowdLevel", "crowd_level_text", "crowdLevelText", "forecast_hour", "forecastHour", "temperature", "temp", "precipitation", "precipitation_probability", "condition", "weatherType", "weather_desc", "alert", "url", "link", "deep_link", "deepLink", "booking_url", "bookingUrl", "bookingLink", "imageUrl", "image_url", "starName", "brand", "areaCode", "departureTime", "departure_time", "arrivalTime", "arrival_time"} {
 			if value, exists := row[key]; exists {
+				if isProviderURLField(key) {
+					if sanitized := sanitizeProviderURL(fmt.Sprint(value)); sanitized != "" {
+						candidate.Extra[key] = sanitized
+					}
+					continue
+				}
 				candidate.Extra[key] = value
 			}
 		}
@@ -248,9 +365,113 @@ func normalizeProviderCandidates(payload any, provider string) []contracts.Candi
 			"availability":     map[bool]string{true: provider, false: "unavailable"}[candidate.Extra["availability"] != nil],
 		}
 		candidate.Extra["field_sources"] = candidate.FieldSources
+		annotateProviderEnumValidation(&candidate)
 		out = append(out, candidate)
 	}
 	return out
+}
+
+// annotateProviderEnumValidation records canonical values for the small set
+// of supplier enums that influence live decisions. Unknown values are kept
+// for user visibility but marked unrecognized, so they cannot silently pass
+// a fact gate as if they were a known status.
+func annotateProviderEnumValidation(candidate *contracts.Candidate) {
+	if candidate == nil {
+		return
+	}
+	candidate.Extra = ensureCandidateExtra(candidate.Extra)
+	validation := map[string]any{}
+	for field, keys := range map[string][]string{
+		"availability": {"availability", "available", "inventory"},
+		"crowd_level":  {"crowd_level", "crowdLevel", "crowd_level_text", "crowdLevelText"},
+		"condition":    {"condition", "weather", "weather_condition", "weatherType", "weather_desc"},
+	} {
+		var raw any
+		found := false
+		for _, key := range keys {
+			if value, ok := candidate.Extra[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+				raw = value
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		text := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+		canonical, ok := canonicalProviderEnum(field, text)
+		entry := map[string]any{"status": "valid", "normalized": canonical}
+		if !ok {
+			entry["status"] = "unrecognized"
+			entry["normalized"] = ""
+		}
+		validation[field] = entry
+	}
+	if len(validation) > 0 {
+		candidate.Extra["enum_validation"] = validation
+	}
+}
+
+func canonicalProviderEnum(field, value string) (string, bool) {
+	value = strings.NewReplacer(" ", "", "-", "_", "/", "_").Replace(value)
+	value = strings.TrimSpace(value)
+	sets := map[string]map[string]string{
+		"availability": {
+			"available": "available", "in_stock": "available", "on_sale": "available", "可用": "available", "有票": "available", "可预订": "available", "true": "available",
+			"unavailable": "unavailable", "sold_out": "unavailable", "soldout": "unavailable", "无票": "unavailable", "售罄": "unavailable", "不可用": "unavailable", "false": "unavailable",
+			"limited": "limited", "少量": "limited", "紧张": "limited",
+			"unknown": "unknown", "未知": "unknown",
+		},
+		"crowd_level": {
+			"low": "low", "低": "low", "少": "low", "不拥挤": "low",
+			"medium": "medium", "moderate": "medium", "中": "medium", "一般": "medium",
+			"high": "high", "高": "high", "拥挤": "high",
+			"very_high": "very_high", "极高": "very_high", "爆满": "very_high",
+			"unknown": "unknown", "未知": "unknown",
+		},
+		"condition": {
+			"sunny": "sunny", "clear": "sunny", "晴": "sunny",
+			"cloudy": "cloudy", "overcast": "cloudy", "多云": "cloudy", "阴": "cloudy",
+			"rain": "rain", "rainy": "rain", "小雨": "rain", "中雨": "rain", "大雨": "rain",
+			"snow": "snow", "snowy": "snow", "小雪": "snow", "大雪": "snow",
+			"storm": "storm", "thunderstorm": "storm", "雷雨": "storm",
+			"fog": "fog", "雾": "fog", "unknown": "unknown", "未知": "unknown",
+		},
+	}
+	canonical, ok := sets[field][value]
+	return canonical, ok
+}
+
+func isProviderURLField(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "url", "link", "deep_link", "booking_url", "bookingurl":
+		return true
+	default:
+		return false
+	}
+}
+
+// sanitizeProviderURL keeps supplier-provided links usable as public
+// verification/deep links without allowing javascript URLs, embedded
+// credentials, or common API credential query parameters to cross the
+// provider boundary into the browser.
+func sanitizeProviderURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return ""
+	}
+	if scheme := strings.ToLower(parsed.Scheme); scheme != "http" && scheme != "https" {
+		return ""
+	}
+	query := parsed.Query()
+	for key := range query {
+		lower := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "api_key") || strings.Contains(lower, "apikey") || strings.Contains(lower, "signature") {
+			query.Del(key)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 // providerObservedAt extracts a supplier timestamp without guessing. A
@@ -258,7 +479,7 @@ func normalizeProviderCandidates(payload any, provider string) []contracts.Candi
 // candidate is explicitly marked so callers can distinguish it from a
 // field-level observation supplied by the vendor.
 func providerObservedAt(row map[string]any) (time.Time, bool) {
-	for _, key := range []string{"observed_at", "observedAt", "retrieved_at", "retrievedAt", "updated_at", "updatedAt", "timestamp"} {
+	for _, key := range []string{"observed_at", "observedAt", "retrieved_at", "retrievedAt", "updated_at", "updatedAt", "updatedTime", "collected_at", "data_time", "timestamp"} {
 		value := strings.TrimSpace(firstString(row, key))
 		if value == "" {
 			if number, ok := toFloat(row[key]); ok && number > 0 {
@@ -298,6 +519,7 @@ func annotateCandidates(candidates []contracts.Candidate, domain string) []contr
 		}
 		candidate.FreshnessSeconds = age
 		candidate.Extra = ensureCandidateExtra(candidate.Extra)
+		attachPublicVerificationLinks(candidate, domain)
 		freshnessLimit := providerFreshnessLimitSeconds(domain)
 		candidate.Extra["freshness_limit_seconds"] = freshnessLimit
 		candidate.Extra["freshness_status"] = freshnessStatus(age, freshnessLimit, candidate.Source.Estimated)
@@ -325,6 +547,8 @@ func annotateCandidates(candidates []contracts.Candidate, domain string) []contr
 		candidate.Extra = ensureCandidateExtra(candidate.Extra)
 		candidate.Extra["freshness_seconds"] = candidate.FreshnessSeconds
 		candidate.Extra["confidence"] = candidate.Confidence
+		annotateEvidenceContract(candidate)
+		annotateDecisionGate(candidate, domain)
 	}
 	for i := range candidates {
 		for j := range candidates {
@@ -335,6 +559,306 @@ func annotateCandidates(candidates []contracts.Candidate, domain string) []contr
 		}
 	}
 	return candidates
+}
+
+// annotateEvidenceContract is the final supplier boundary before ranking or
+// route selection. A candidate can still be displayed when evidence is weak,
+// but fact_usable=false prevents downstream code from treating estimated or
+// incomplete fields as live supplier facts.
+func annotateEvidenceContract(candidate *contracts.Candidate) {
+	issues := make([]string, 0, 4)
+	if strings.TrimSpace(candidate.Source.Provider) == "" || candidate.Source.Provider == "unknown" {
+		issues = append(issues, "source_provider_missing")
+	}
+	if candidate.Source.Retrieved.IsZero() {
+		issues = append(issues, "source_timestamp_missing")
+	}
+	if candidate.Source.Estimated {
+		issues = append(issues, "estimated_source")
+	}
+	if candidate.Price > 0 && strings.TrimSpace(fieldSource(candidate, "price")) == "" {
+		issues = append(issues, "price_source_missing")
+	}
+	if candidate.Duration > 0 && strings.TrimSpace(fieldSource(candidate, "duration_minutes")) == "" {
+		issues = append(issues, "duration_source_missing")
+	}
+	candidate.Extra["evidence_contract"] = "candidate-evidence-v1"
+	candidate.Extra["evidence_issues"] = issues
+	candidate.Extra["fact_usable"] = len(issues) == 0
+}
+
+func annotatePlanningCandidates(candidates []contracts.Candidate, domain string, ctx contracts.PlanningContext) []contracts.Candidate {
+	annotated := annotateCandidates(candidates, domain)
+	attachContextVerificationLinks(annotated, domain, ctx)
+	for index := range annotated {
+		annotated[index].Extra = ensureCandidateExtra(annotated[index].Extra)
+		annotated[index].Extra["source_priority"] = providerSourcePriority(annotated[index].Source.Provider)
+	}
+	// Keep provider-verified candidates ahead of advisory/fallback candidates,
+	// while retaining every option for transparent UI comparison and official
+	// channel verification.
+	sort.SliceStable(annotated, func(i, j int) bool {
+		left, _ := annotated[i].Extra["decision_eligible"].(bool)
+		right, _ := annotated[j].Extra["decision_eligible"].(bool)
+		if left != right {
+			return left && !right
+		}
+		leftPriority := intValue(annotated[i].Extra["source_priority"])
+		rightPriority := intValue(annotated[j].Extra["source_priority"])
+		if leftPriority != rightPriority {
+			return leftPriority > rightPriority
+		}
+		return false
+	})
+	return annotated
+}
+
+// providerSourcePriority is an explicit operator policy, not an implicit
+// trust claim. Configure comma-separated entries such as
+// `RollingGo:100,Amap:80`; absent entries remain at zero and retain stable
+// arrival order. The raw setting never leaves the server.
+func providerSourcePriority(provider string) int {
+	target := strings.ToLower(strings.TrimSpace(provider))
+	if target == "" {
+		return 0
+	}
+	raw := strings.TrimSpace(os.Getenv("PLANNING_PROVIDER_PRIORITY"))
+	if raw == "" {
+		return 0
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[0]), target) {
+			continue
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err == nil {
+			if value < 0 {
+				return 0
+			}
+			if value > 1000 {
+				return 1000
+			}
+			return value
+		}
+	}
+	return 0
+}
+
+// decisionRequiredFieldGroups defines the minimum supplier facts needed before
+// a candidate can influence a real-time fact decision. Groups are OR-ed within
+// each entry; every entry must have at least one field. This keeps the gate
+// strict about domain evidence without requiring every vendor to expose the
+// same optional schema.
+func decisionRequiredFieldGroups(domain string) [][]string {
+	switch strings.ToLower(strings.TrimSpace(domain)) {
+	case "transport":
+		return [][]string{{"price", "duration_minutes", "availability", "departure_time", "arrival_time"}}
+	case "lodging":
+		return [][]string{{"price", "availability", "room_type"}}
+	case "scenic", "destination", "scenic_micro":
+		return [][]string{{"opening_hours", "crowd_level", "booking_url"}}
+	case "dining":
+		return [][]string{{"price", "opening_hours", "cuisine"}}
+	case "weather":
+		return [][]string{{"condition", "temperature", "precipitation", "alert"}}
+	case "crowd":
+		return [][]string{{"crowd_level", "score", "forecast_hour"}}
+	default:
+		return [][]string{{"price", "duration_minutes", "availability"}}
+	}
+}
+
+func decisionCandidateHasField(candidate *contracts.Candidate, field string) bool {
+	if field == "price" {
+		return candidate.Price > 0
+	}
+	if field == "duration_minutes" {
+		return candidate.Duration > 0
+	}
+	if field == "departure_time" || field == "arrival_time" {
+		if candidate.Extra == nil {
+			return false
+		}
+		keys := map[string][]string{"departure_time": {"departureTime", "departure_time"}, "arrival_time": {"arrivalTime", "arrival_time"}}
+		for _, key := range keys[field] {
+			if value, ok := candidate.Extra[key]; ok && strings.TrimSpace(fmt.Sprint(value)) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	if !candidateEnumFieldUsable(candidate, field) {
+		return false
+	}
+	return providerQualityHasField(*candidate, field)
+}
+
+func candidateEnumFieldUsable(candidate *contracts.Candidate, field string) bool {
+	if candidate == nil || candidate.Extra == nil {
+		return true
+	}
+	validation, ok := candidate.Extra["enum_validation"].(map[string]any)
+	if !ok {
+		return true
+	}
+	entry, ok := validation[field].(map[string]any)
+	if !ok {
+		return true
+	}
+	return strings.TrimSpace(fmt.Sprint(entry["status"])) != "unrecognized"
+}
+
+func annotateDecisionGate(candidate *contracts.Candidate, domain string) {
+	issues := make([]string, 0, 4)
+	if candidate.Source.Estimated {
+		issues = append(issues, "estimated_source")
+	}
+	if candidate.Source.Retrieved.IsZero() {
+		issues = append(issues, "source_timestamp_missing")
+	}
+	if candidate.Extra == nil || candidate.Extra["observed_at_provided"] != true {
+		issues = append(issues, "observed_at_missing")
+	}
+	if status := strings.TrimSpace(fmt.Sprint(candidate.Extra["freshness_status"])); status != "fresh" {
+		if status == "stale" {
+			issues = append(issues, "source_stale")
+		} else if status != "<nil>" && status != "" {
+			issues = append(issues, "freshness_not_verified")
+		}
+	}
+	for index, group := range decisionRequiredFieldGroups(domain) {
+		matched := false
+		for _, field := range group {
+			if decisionCandidateHasField(candidate, field) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			issues = append(issues, fmt.Sprintf("required_fields_missing_group_%d", index+1))
+		}
+	}
+	if validation, ok := candidate.Extra["enum_validation"].(map[string]any); ok {
+		for field, raw := range validation {
+			entry, ok := raw.(map[string]any)
+			if ok && strings.TrimSpace(fmt.Sprint(entry["status"])) == "unrecognized" {
+				issues = append(issues, "enum_unrecognized_"+field)
+			}
+		}
+	}
+	candidate.Extra["decision_gate_contract"] = "provider-decision-gate-v1"
+	candidate.Extra["decision_gate_reasons"] = issues
+	candidate.Extra["decision_eligible"] = len(issues) == 0
+	// public_sources is an API boundary value and may have been decoded from
+	// JSON as []any (or may be absent entirely). Never assert its concrete type
+	// directly here: a malformed/legacy candidate must be blocked gracefully,
+	// not panic the planning request.
+	candidate.Extra["official_fallback_available"] = hasPublicVerificationSources(candidate.Extra["public_sources"])
+}
+
+func hasPublicVerificationSources(raw any) bool {
+	switch links := raw.(type) {
+	case []map[string]string:
+		for _, link := range links {
+			if strings.TrimSpace(link["url"]) != "" {
+				return true
+			}
+		}
+		return false
+	case []any:
+		for _, value := range links {
+			switch link := value.(type) {
+			case map[string]string:
+				if strings.TrimSpace(link["url"]) != "" {
+					return true
+				}
+			case map[string]any:
+				if strings.TrimSpace(fmt.Sprint(link["url"])) != "" && strings.TrimSpace(fmt.Sprint(link["url"])) != "<nil>" {
+					return true
+				}
+			}
+		}
+		return false
+	case map[string]string:
+		return strings.TrimSpace(links["url"]) != ""
+	case map[string]any:
+		value := strings.TrimSpace(fmt.Sprint(links["url"]))
+		return value != "" && value != "<nil>"
+	default:
+		return false
+	}
+}
+
+// attachContextVerificationLinks adds query context only to the outbound
+// verification URL. It does not persist the query or treat the destination
+// page as a confirmed quote/order.
+func attachContextVerificationLinks(candidates []contracts.Candidate, domain string, ctx contracts.PlanningContext) {
+	origin := strings.TrimSpace(ctx.Origin)
+	destination := strings.TrimSpace(ctx.Destination)
+	if origin == "" && destination == "" {
+		return
+	}
+	for i := range candidates {
+		candidate := &candidates[i]
+		candidate.Extra = ensureCandidateExtra(candidate.Extra)
+		query := strings.TrimSpace(candidate.Name + " " + destination)
+		if strings.EqualFold(domain, "transport") && origin != "" {
+			query = strings.TrimSpace(origin + " 到 " + destination + " " + candidate.Name)
+		}
+		encodedQuery := url.QueryEscape(query)
+		links := []map[string]string{}
+		if raw, ok := candidate.Extra["public_sources"].([]map[string]string); ok {
+			links = append(links, raw...)
+		}
+		if len(links) == 0 {
+			links = append(links, map[string]string{"label": "高德地图核验", "url": "https://www.amap.com/search?query=" + encodedQuery})
+		}
+		contextLink := map[string]string{"label": "按当前行程核验", "url": "https://www.bing.com/search?q=" + encodedQuery}
+		switch strings.ToLower(strings.TrimSpace(domain)) {
+		case "transport":
+			contextLink = map[string]string{"label": "按出发地目的地核验", "url": "https://www.amap.com/dir?from=" + url.QueryEscape(origin) + "&to=" + url.QueryEscape(destination)}
+		case "lodging":
+			contextLink = map[string]string{"label": "按目的地核验住宿", "url": "https://www.trip.com/hotels/list?searchWord=" + url.QueryEscape(destination)}
+		}
+		links = append([]map[string]string{contextLink}, links...)
+		candidate.Extra["public_sources"] = links
+		candidate.Extra["verification_url"] = contextLink["url"]
+		candidate.Extra["verification_label"] = contextLink["label"]
+	}
+}
+
+// attachPublicVerificationLinks provides a transparent web fallback when a
+// commercial provider cannot return a quote. These are search/detail links,
+// not claims of live inventory or price. The client must label them as
+// user-verification channels and never treat them as booked orders.
+func attachPublicVerificationLinks(candidate *contracts.Candidate, domain string) {
+	query := url.QueryEscape(strings.TrimSpace(candidate.Name))
+	if query == "" {
+		return
+	}
+	links := []map[string]string{{"label": "高德地图核验", "url": "https://www.amap.com/search?query=" + query}}
+	switch strings.ToLower(strings.TrimSpace(domain)) {
+	case "transport":
+		links = append(links,
+			map[string]string{"label": "12306 官方核验", "url": "https://www.12306.cn/index/"},
+			map[string]string{"label": "Trip.com 航班核验", "url": "https://www.trip.com/flights/"},
+		)
+	case "lodging":
+		links = append(links, map[string]string{"label": "Trip.com 酒店核验", "url": "https://www.trip.com/hotels/list?searchWord=" + query})
+	case "dining", "destination", "scenic":
+		links = append(links, map[string]string{"label": "公开网页搜索", "url": "https://www.bing.com/search?q=" + query})
+	}
+	if existing, ok := candidate.Extra["public_sources"].([]map[string]string); ok && len(existing) > 0 {
+		return
+	}
+	candidate.Extra["public_sources"] = links
+	if _, exists := candidate.Extra["verification_url"]; !exists {
+		candidate.Extra["verification_url"] = links[0]["url"]
+	}
+	if _, exists := candidate.Extra["verification_label"]; !exists {
+		candidate.Extra["verification_label"] = "打开公开渠道核验"
+	}
 }
 
 func ensureCandidateExtra(extra map[string]any) map[string]any {
@@ -408,10 +932,10 @@ func findProviderRows(payload any, depth int) []any {
 }
 
 func normalizeProviderDuration(row map[string]any) int {
-	if seconds := firstNumber(row, "duration_seconds", "duration_sec", "travel_seconds"); seconds > 0 {
+	if seconds := firstNumber(row, "duration_seconds", "duration_sec", "travel_seconds", "travelDurationSeconds"); seconds > 0 {
 		return int(math.Round(seconds / 60))
 	}
-	minutes := firstNumber(row, "duration_minutes", "travel_minutes")
+	minutes := firstNumber(row, "duration_minutes", "durationMin", "travel_minutes", "travelTimeMinutes", "time_minutes")
 	if minutes <= 0 {
 		minutes = firstNumber(row, "duration")
 		// Legacy suppliers use duration as seconds. Values over a day are
@@ -502,7 +1026,7 @@ func firstStringOrNumber(row map[string]any, keys ...string) string {
 // nested {price:{lowestPrice}}, flight {basePrice + totalTax}, and multi-seat
 // train fare blocks where the lowest positive fare is the useful value.
 func providerPrice(row map[string]any) float64 {
-	if p := firstNumber(row, "lowestPrice", "minPrice", "salePrice", "startPrice", "price"); p > 0 {
+	if p := firstNumber(row, "lowestPrice", "lowest_price", "minPrice", "min_price", "salePrice", "sale_price", "startPrice", "start_price", "displayPrice", "display_price", "price"); p > 0 {
 		return p
 	}
 	if nested, ok := row["price"].(map[string]any); ok {
@@ -522,7 +1046,7 @@ func providerPrice(row map[string]any) float64 {
 	if base := firstNumber(row, "basePrice", "base_price"); base > 0 {
 		return base + firstNumber(row, "totalTax", "total_tax")
 	}
-	return firstNumber(row, "fare", "cost", "amount", "nightlyPrice", "nightly_price")
+	return firstNumber(row, "fare", "cost", "amount", "totalPrice", "total_price", "nightlyPrice", "nightly_price")
 }
 
 func toFloat(value any) (float64, bool) {
@@ -696,6 +1220,12 @@ func fetchPlanningSignal(ctx context.Context, kind string, input contracts.Plann
 			}
 			tool := chooseMCPTool(provider, tools, key)
 			if tool.Name == "" {
+				continue
+			}
+			// Signal lookups are part of the read-only planning path. A vendor
+			// may advertise mutation tools beside weather/crowd tools, but a
+			// malformed or request-only schema must never be invoked here.
+			if audit := mcpToolSchemaAudit(tool, key); audit["status"] != "ready" {
 				continue
 			}
 			args := mcpArgumentsForTool(tool, input, key)

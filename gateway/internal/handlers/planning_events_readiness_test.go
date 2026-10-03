@@ -118,3 +118,29 @@ func TestNormalizePlanningEventContextPreservesExplicitBuckets(t *testing.T) {
 		t.Fatalf("explicit context was overwritten: %#v", payload)
 	}
 }
+
+func TestNormalizeSourceEvidenceEventRemovesRawAndBoundsFields(t *testing.T) {
+	payload := map[string]any{
+		"module":              "transport",
+		"candidate_id":        "candidate-1",
+		"provider":            "sandbox",
+		"source_conflict":     true,
+		"conflict_fields":     []string{"price", "availability"},
+		"conflicting_sources": []string{"A", "B"},
+		"target_url":          "https://supplier.example/private?token=secret",
+		"raw_response":        map[string]any{"token": "must-not-persist"},
+	}
+	normalizeSourceEvidenceEvent("official_channel_verified", payload)
+	if _, exists := payload["target_url"]; exists {
+		t.Fatal("raw target URL must not be retained")
+	}
+	if _, exists := payload["raw_response"]; exists {
+		t.Fatal("raw supplier response must not be retained")
+	}
+	if payload["source_conflict"] != true {
+		t.Fatalf("source conflict flag was lost: %#v", payload)
+	}
+	if _, ok := payload["conflict_fields"].([]string); !ok {
+		t.Fatalf("conflict fields should remain bounded and structured: %#v", payload)
+	}
+}

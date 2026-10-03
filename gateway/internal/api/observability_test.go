@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"gateway/internal/database"
 	"github.com/gin-gonic/gin"
 )
 
@@ -161,5 +162,30 @@ func TestIsLoopbackRequest(t *testing.T) {
 		if got := isLoopbackRequest(c); got != want {
 			t.Fatalf("isLoopbackRequest(%q) = %v, want %v", remote, got, want)
 		}
+	}
+}
+
+func TestReadyzReportsEnabledPushWorkerConfigurationWarning(t *testing.T) {
+	oldEnv, oldWorker, oldPath := os.Getenv("APP_ENV"), os.Getenv("PROVIDER_QUALITY_WEB_PUSH_WORKER_ENABLED"), os.Getenv("FCM_SERVICE_ACCOUNT_JSON_PATH")
+	t.Cleanup(func() {
+		_ = os.Setenv("APP_ENV", oldEnv)
+		_ = os.Setenv("PROVIDER_QUALITY_WEB_PUSH_WORKER_ENABLED", oldWorker)
+		_ = os.Setenv("FCM_SERVICE_ACCOUNT_JSON_PATH", oldPath)
+	})
+	_ = os.Setenv("APP_ENV", "staging")
+	_ = os.Setenv("PROVIDER_QUALITY_WEB_PUSH_WORKER_ENABLED", "true")
+	_ = os.Unsetenv("FCM_SERVICE_ACCOUNT_JSON_PATH")
+	oldDB := database.DB
+	database.DB = nil
+	t.Cleanup(func() { database.DB = oldDB })
+	r := gin.New()
+	r.GET("/readyz", ReadyzHandler)
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("staging readiness should expose unavailable database in this isolated test, got %d", res.Code)
+	}
+	if !strings.Contains(res.Body.String(), "provider_quality_web_push") || !strings.Contains(res.Body.String(), "warning") {
+		t.Fatalf("expected push configuration warning, got %s", res.Body.String())
 	}
 }

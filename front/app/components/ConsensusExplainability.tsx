@@ -7,8 +7,8 @@ import { scoreRouteForConsensus, type ConsensusMemberPreference, type ConsensusR
 export default function ConsensusExplainability({ route, members = [], fairnessAudit }: { route: ConsensusRouteNode[]; members?: ConsensusMemberPreference[]; fairnessAudit?: any }) {
   const score = useMemo(() => scoreRouteForConsensus(route, members), [route, members]);
   const dimensions = [
-    ['预算', score.dimensions.budget, 'bg-emerald-500'],
-    ['节奏', score.dimensions.pace, 'bg-blue-500'],
+    ['预算', score.dimensions.budget, 'bg-stone-400'],
+    ['节奏', score.dimensions.pace, 'bg-orange-600'],
     ['风险', score.dimensions.risk, 'bg-amber-500'],
     ['兴趣', score.dimensions.interest, 'bg-orange-500'],
   ] as const;

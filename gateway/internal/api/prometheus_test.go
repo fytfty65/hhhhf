@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"gateway/internal/metrics"
 	"github.com/gin-gonic/gin"
 )
 
@@ -59,6 +60,8 @@ func resetPrometheusState() {
 
 func TestPrometheusExpositionHasRequiredSeries(t *testing.T) {
 	resetPrometheusState()
+	metrics.RecordProviderQualityPush(map[string]int{"sent": 1}, nil)
+	metrics.RecordProviderQualityDeliveryCleanup(1, nil)
 	recordRequest("GET", "/ping", 200, 3)
 	recordPrometheusLatency("GET", "/ping", 3)
 	recordRequest("POST", "/api/v1/risk/realtime", 200, 9200)
@@ -74,6 +77,13 @@ func TestPrometheusExpositionHasRequiredSeries(t *testing.T) {
 		"# TYPE omniroute_gateway_responses_total counter",
 		`omniroute_gateway_responses_total{status="200"} 2`,
 		"# TYPE omniroute_gateway_bandit_feedback_total counter",
+		"# TYPE omniroute_model_audit_cleanup_runs_total counter",
+		"# TYPE omniroute_model_audit_cleanup_healthy gauge",
+		"# TYPE omniroute_provider_quality_push_total counter",
+		`omniroute_provider_quality_push_total{outcome="sent"}`,
+		"# TYPE omniroute_provider_quality_delivery_cleanup_last_success_timestamp_seconds gauge",
+		"# TYPE omniroute_provider_quality_push_last_run_timestamp_seconds gauge",
+		"# TYPE omniroute_provider_quality_delivery_cleanup_total counter",
 		"# TYPE omniroute_gateway_request_duration_milliseconds histogram",
 		`method="GET",path="/ping"`,
 		`method="POST",path="/api/v1/risk/realtime"`,

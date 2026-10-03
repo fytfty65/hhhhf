@@ -197,6 +197,22 @@ func TestConfirmReplanAtomicallyAppliesOnlyAffectedNode(t *testing.T) {
 	if applied != 1 {
 		t.Fatalf("expected one applied event, got %d", applied)
 	}
+	var replanned int64
+	db.Model(&models.PlanningEvent{}).Where("trip_id = ? AND event_type = ?", "trip-confirm", "route_replanned").Count(&replanned)
+	if replanned != 1 {
+		t.Fatalf("expected one route_replanned event, got %d", replanned)
+	}
+	var routeEvent models.PlanningEvent
+	if err := db.Where("trip_id = ? AND event_type = ?", "trip-confirm", "route_replanned").First(&routeEvent).Error; err != nil {
+		t.Fatal(err)
+	}
+	var routePayload map[string]any
+	if err := json.Unmarshal([]byte(routeEvent.Payload), &routePayload); err != nil {
+		t.Fatal(err)
+	}
+	if routePayload["candidate_count"] != float64(1) || routePayload["pareto_frontier_count"] != float64(1) || routePayload["provider_available"] != true || routePayload["hard_constraints_status"] != "passed" || routePayload["fairness_status"] != "not_evaluated" {
+		t.Fatalf("route quality evidence missing: %#v", routePayload)
+	}
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/planning/replan/confirm", strings.NewReader(body)))
 	if response.Code != http.StatusConflict {
@@ -233,5 +249,60 @@ func TestConfirmReplanRejectsVisitedNode(t *testing.T) {
 	r.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/planning/replan/confirm", strings.NewReader(body)))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "NODE_ALREADY_COMPLETED") {
 		t.Fatalf("visited node must be immutable: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRejectReplanRecordsDecisionWithoutMutatingRoute(t *testing.T) {
+	old := database.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	t.Cleanup(func() { database.DB = old })
+	if err := db.AutoMigrate(&models.TripPlan{}, &models.PlanningEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	route, _ := json.Marshal(map[string]any{"routes": []any{map[string]any{"day": 1, "name": "西湖"}}})
+	if err := db.Create(&models.TripPlan{ID: "trip-reject", UserID: "user-reject", DestCity: "杭州", Content: string(route)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	proposal, _ := json.Marshal(map[string]any{"proposal_id": "risk-reject", "status": "pending_confirmation", "affected_nodes": []string{"西湖"}, "expires_at": time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339)})
+	if err := db.Create(&models.PlanningEvent{UserID: "user-reject", TripID: "trip-reject", EventType: "replan_triggered", Payload: string(proposal)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r := gin.New()
+	r.POST("/planning/replan/reject", func(c *gin.Context) { c.Set("user_id", "user-reject"); RejectReplanHandler(c) })
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/planning/replan/reject", strings.NewReader(`{"trip_id":"trip-reject","proposal_id":"risk-reject","reason":"not_suitable"}`)))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"rejected"`) {
+		t.Fatalf("expected rejected response: %d %s", response.Code, response.Body.String())
+	}
+	var rejected int64
+	db.Model(&models.PlanningEvent{}).Where("trip_id = ? AND event_type = ?", "trip-reject", "replan_proposal_rejected").Count(&rejected)
+	if rejected != 1 {
+		t.Fatalf("expected one rejection event, got %d", rejected)
+	}
+	var saved models.TripPlan
+	if err := db.First(&saved, "id = ?", "trip-reject").Error; err != nil || saved.Content != string(route) {
+		t.Fatalf("reject must not mutate route: err=%v content=%s", err, saved.Content)
+	}
+}
+
+func TestRiskTriggerTypesNormalizeSignals(t *testing.T) {
+	types := riskTriggerTypes([]map[string]interface{}{
+		{"type": "weather", "detail": "天气变化"},
+		{"type": "delay", "detail": "交通延误"},
+		{"type": "closure", "detail": "景点关闭"},
+		{"type": "budget", "detail": "预算超支"},
+	})
+	want := map[string]bool{"weather_change": true, "transport_disruption": true, "attraction_closure": true, "budget_change": true}
+	if len(types) != len(want) {
+		t.Fatalf("unexpected trigger types: %#v", types)
+	}
+	for _, typeName := range types {
+		if !want[typeName] {
+			t.Fatalf("unexpected trigger type %q", typeName)
+		}
 	}
 }

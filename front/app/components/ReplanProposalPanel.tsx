@@ -39,6 +39,7 @@ export default function ReplanProposalPanel({ proposal, busy = false, onApply, o
         <div><span className="font-bold text-rose-700">待调整 {affected.length}</span><span className="ml-2 text-slate-500">{affected.join('、') || '待确认节点'}</span></div>
         <div><span className="font-bold text-emerald-700">保留 {preserved.length}</span><span className="ml-2 text-slate-500">未受影响安排</span></div>
       </div>
+      {(action.trigger_types?.length > 0 || action.expires_at) && <div className="border-t border-orange-100 px-4 py-2 text-[10px] text-slate-500">{action.trigger_types?.length > 0 && <span>触发：{action.trigger_types.join('、')}</span>}{action.expires_at && <span className="ml-3">有效至：{new Date(action.expires_at).toLocaleString('zh-CN', { hour12: false })}</span>}</div>}
       <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-orange-100 px-4 py-2 text-[10px] text-slate-500">
         <span>Pareto 保留 {candidates.length} / {allCandidates.length}</span>
         {fairness?.status === 'evaluated' ? <span className={fairness.threshold_exceeded ? 'font-bold text-rose-600' : 'text-emerald-700'}>成员公平标准差 {Number(fairness.utility_stddev || 0).toFixed(3)} / 上限 {Number(fairness.threshold || 0).toFixed(3)}</span> : <span>多人满意度：待成员效用数据确认</span>}

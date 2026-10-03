@@ -216,3 +216,41 @@ def select_fair_route(routes: Sequence[Sequence[Mapping[str, Any]]], members: Se
         return {"index": -1, "report": fairness_report([], members), "reports": []}
     index = max(range(len(reports)), key=lambda item: (reports[item]["minimum_utility"], -reports[item]["utility_variance"], -reports[item]["max_regret"], reports[item]["mean_utility"]))
     return {"index": index, "report": reports[index], "reports": reports}
+
+
+def fairness_gate(
+    routes: Sequence[Sequence[Mapping[str, Any]]],
+    members: Sequence[Mapping[str, Any]],
+    *,
+    max_stddev: float = 0.15,
+) -> Dict[str, Any]:
+    """Select the best route while treating member spread as a real gate.
+
+    Eligible routes are ranked by maximin utility first. If none satisfies the
+    standard-deviation limit, the least unfair route is returned but the result
+    is explicitly marked blocked so callers can request repair or confirmation.
+    """
+    reports = [fairness_report(route, members) for route in routes]
+    if not reports:
+        return {"index": -1, "report": fairness_report([], members), "reports": [], "eligible_indices": [], "threshold_exceeded": False}
+    limit = max(0.0, float(max_stddev))
+    eligible = [index for index, report in enumerate(reports) if report["utility_stddev"] <= limit]
+    pool = eligible or list(range(len(reports)))
+    index = min(
+        pool,
+        key=lambda item: (
+            -reports[item]["minimum_utility"],
+            reports[item]["utility_variance"],
+            reports[item]["max_regret"],
+            -reports[item]["mean_utility"],
+        ),
+    )
+    return {
+        "index": index,
+        "report": reports[index],
+        "reports": reports,
+        "eligible_indices": eligible,
+        "threshold": limit,
+        "threshold_exceeded": not bool(eligible),
+        "selection_method": "fairness_gate" if eligible else "least_unfair_fallback",
+    }

@@ -29,8 +29,17 @@ const user = {
 
 // Mirrors the mock used by core-flow.spec.ts so the app reaches the decision
 // phase without a real gateway.
-async function installMocks(page: Page) {
+// `governance: true` 会额外下发 quality / budget_report 等核对字段 ——
+// 证据层的「行程核对说明」面板只有在有核对数据时才渲染（无数据按设计返回 null），
+// 所以需要断言该面板的用例必须显式打开这个开关，避免污染其余用例的渲染。
+async function installMocks(page: Page, options: { governance?: boolean } = {}) {
   await page.addInitScript((payload) => {
+    const governanceJson = payload.governance
+      ? '"quality":{"score":76.5,"verdict":"pass","gate_passed":true,"gate_failures":[],"unverifiable_count":0,' +
+        '"dimensions":{"preference_coverage":1,"pacing":0.9,"space_efficiency":0.9,"truthfulness":0.9,"anchoring":0.9,"diversity":0.9}},' +
+        '"budget_report":{"budget":1200,"verified_cost":980,"estimated_cost":120,"unknown_count":1,"status":"ok","confidence":"medium"},' +
+        '"horizon":{"days":2,"segments":[{"start":1,"end":2,"days":2}],"advisories":[]},'
+      : '';
     localStorage.setItem('omni_user', JSON.stringify(payload.user));
     // The room bootstrap JSON-parses this value and requires BOTH room_id and
     // invite_code; storing a bare string makes it fall through to a real
@@ -75,7 +84,8 @@ async function installMocks(page: Page) {
             data: JSON.stringify({
               type: 'stream_token',
               payload:
-                '[FINAL_JSON]{"status":"ok","negotiation_summary":"已完成个性化协商",' +
+                '[FINAL_JSON]{"status":"ok",' + governanceJson +
+                '"negotiation_summary":"已完成个性化协商",' +
                 '"team_satisfaction":{"E2E 旅行者":62},' +
                 '"bandit":{"enabled":true,"arm_id":"qwen-plus:relaxed","reason":"thompson_exploitation","explored":false,"propensity":0.71},' +
                 '"simulation":{"samples":2000,"total_minutes":{"p50":480,"p90":560,"mean":486},' +
@@ -83,7 +93,16 @@ async function installMocks(page: Page) {
                 '"budget_overrun_probability":0.12,"per_day_minutes_p90":{"1":180},' +
                 '"member_satisfaction":{"E2E 旅行者":{"satisfaction_p50":0.62,"satisfaction_floor_p10":0.55}},' +
                 '"assumptions":{"nodes":1,"unpriced_nodes":0,"sample_count":2000}},' +
-                '"route":[{"day":1,"location":"洛阳古城","time":"09:00","cost_estimate":"¥80","lnglat":[112.45,34.62],"tags":["地标"]}]}',
+                // 多日行程 + 方案裁决数据：驱动「多日看板」与博弈裁决板的三列对比
+                '"optimization_audit":{"method":"Pareto","frontier_count":2,"rejected_count":1,' +
+                '"rejected":[{"candidate":"暴走方案","reason":"dominated","dominated_by":["慢游方案"]}]},' +
+                '"plan_variants":[' +
+                '{"id":"relaxed","name":"慢游方案","style":"relaxed","desc":"少走路、多停留",' +
+                '"route":[{"day":1,"location":"龙门石窟","time":"10:00","cost_estimate":"¥90","lnglat":[112.47,34.55],"tags":["文化"]}]},' +
+                '{"id":"intense","name":"暴走方案","style":"intense","desc":"一天多看两个点",' +
+                '"route":[{"day":2,"location":"白马寺","time":"09:00","cost_estimate":"¥50","lnglat":[112.6,34.72],"tags":["文化"]}]}],' +
+                '"route":[{"day":1,"location":"洛阳古城","name":"洛阳古城","time":"09:00","cost_estimate":"¥80","lnglat":[112.45,34.62],"tags":["地标"]},' +
+                '{"day":2,"location":"龙门石窟","name":"龙门石窟","time":"09:30","cost_estimate":"¥90","lnglat":[112.47,34.55],"tags":["文化"]}]}',
             }),
           });
         }, 80);
@@ -95,9 +114,36 @@ async function installMocks(page: Page) {
       removeEventListener() {}
     }
     (window as unknown as { WebSocket: unknown }).WebSocket = MockWebSocket;
-  }, { user });
+  }, { user, governance: Boolean(options.governance) });
 
-  await page.route('**/api/v1/**', (route) => route.fulfill({ json: { ok: true, success: true, data: {} } }));
+  await page.route('**/api/v1/**', (route) => {
+    // Keep the professional diagnostics path deterministic without contacting
+    // a live Gateway. This mirrors the bounded quality contract returned by
+    // PlanningQualityHandler and exercises the release-gate summary in the UI.
+    if (route.request().url().includes('/api/v1/planning/quality')) {
+      return route.fulfill({ json: {
+        ok: true,
+        success: true,
+        data: {
+          events: 24,
+          training_ready: true,
+          provider_quality_gate: {
+            status: 'available',
+            providers: 2,
+            ready_providers: 2,
+            insufficient_providers: 0,
+            blocked_providers: 0,
+            reasons: [],
+            alerts: [],
+          },
+          rates: { adoption: 0.75 },
+          drift: { status: 'stable' },
+          counterfactual: { status: 'available' },
+        },
+      } });
+    }
+    return route.fulfill({ json: { ok: true, success: true, data: {} } });
+  });
   await page.route('**/api/auth/login', (route) =>
     route.fulfill({ json: { message: '登录成功', token: user.token, user } }),
   );
@@ -137,7 +183,7 @@ async function reachDecision(page: Page) {
 
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
   await page.locator('textarea').first().fill('去洛阳玩1天，想吃地道老字号，节奏不要太赶');
-  await page.getByText('锁定意图并开始推演').click();
+  await page.getByText('生成行程方案').click();
   await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 20_000 });
 }
 
@@ -224,7 +270,7 @@ test.describe('refactor regression', () => {
   });
 
   test('workspace decision phase keeps tools, quality strip and panels', async ({ page }) => {
-    await installMocks(page);
+    await installMocks(page, { governance: true });
     await page.goto('/');
     await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
     await reachDecision(page);
@@ -235,9 +281,14 @@ test.describe('refactor regression', () => {
     await page.getByTestId('workspace-layer-evidence').click();
     await expect(page.getByLabel('行程核对说明')).toBeVisible();
     await page.getByTestId('workspace-layer-execution').click();
-    await expect(page.getByText('旅中执行模式')).toBeVisible();
+    // 「旅中执行模式」是面板的 aria-label，不是可见标题
+    await expect(page.getByLabel('旅中执行模式')).toBeVisible();
     await page.getByTestId('workspace-layer-professional').click();
     await expect(page.getByTestId('professional-diagnostics')).toBeVisible();
+    // 供应商质量门禁落在「专业诊断 · 高级诊断」里，默认收起 —— 先展开再断言
+    await page.getByTestId('toggle-advanced-diagnostics').click();
+    await expect(page.getByTestId('provider-quality-release-gate')).toContainText('供应商质量门禁通过');
+    await expect(page.getByTestId('provider-quality-release-gate')).not.toContainText('需处理');
     await page.getByTestId('workspace-layer-plan').click();
 
     // Toolbar: 常用 4 个在外面，其余收进「更多」（10 个按钮挤成一团太乱）
@@ -294,7 +345,7 @@ test.describe('refactor regression', () => {
 
     // Radar opens and exposes the global intel toggle
     await page.getByRole('button', { name: '3D 态势雷达' }).click();
-    const radar = page.getByRole('dialog', { name: '3D 态势感知雷达' });
+    const radar = page.getByRole('dialog', { name: '全球风险地图' });
     await expect(radar).toBeVisible({ timeout: 15_000 });
     await expect(radar.locator('canvas').first()).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('button', { name: '打开全球情报视图' })).toBeVisible();
@@ -318,5 +369,48 @@ test.describe('refactor regression', () => {
     await reachDecision(page);
 
     await expect.poll(() => tileRequests.length, { timeout: 25_000 }).toBeGreaterThan(0);
+  });
+
+  test('专业诊断可展开 + 多日看板 + 方案裁决对比', async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installMocks(page);
+    await page.goto('/');
+    await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
+    await reachDecision(page);
+
+    // 高级诊断默认收起；展开后才出现「智能体运行明细」二级折叠
+    await page.getByTestId('workspace-layer-professional').click();
+    await expect(page.getByTestId('professional-diagnostics')).toBeVisible();
+    const advanced = page.getByTestId('toggle-advanced-diagnostics');
+    await expect(advanced).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByTestId('toggle-agent-runtime-detail')).toBeHidden();
+    await advanced.click();
+    await expect(advanced).toHaveAttribute('aria-expanded', 'true');
+    const runtime = page.getByTestId('toggle-agent-runtime-detail');
+    await expect(runtime).toHaveAttribute('aria-expanded', 'false');
+    await runtime.click();
+    await expect(runtime).toHaveAttribute('aria-expanded', 'true');
+
+    // 多日看板：切到行程数据看板，两天行程必须都落在时间轴上
+    await page.getByTestId('workspace-layer-plan').click();
+    await page.getByRole('button', { name: '行程数据看板' }).click();
+    await expect(page.getByText('行程总览')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('每日白天节点')).toBeVisible();
+    await expect(page.getByText(/D1:\d+ · D2:\d+/).first()).toBeVisible();
+
+    // 博弈裁决板：三列真正对比（保留 / 淘汰+原因 / 替代）
+    // 用右上角常驻动作条上的「博弈裁决看板」入口：MACRO 面板内嵌的「裁决看板」按钮
+    // 会被该动作条（全局 z-50 覆盖 z-20 面板）遮住，动作条入口才是真实可点路径。
+    await page.getByRole('button', { name: '博弈裁决看板' }).click();
+    const board = page.getByTestId('plan-arbitration-board');
+    await expect(board).toBeVisible({ timeout: 10_000 });
+    await expect(board.getByText('保留方案', { exact: true })).toBeVisible();
+    await expect(board.getByText('淘汰方案与原因', { exact: true })).toBeVisible();
+    await expect(board.getByText('替代方案', { exact: true })).toBeVisible();
+    await expect(board.getByText(/被 慢游方案 支配/)).toBeVisible();
+    await expect(board.getByText('慢游方案').first()).toBeVisible();
+    // 保留方案列必须真的落到具体方案（而不是"当前只有一套方案"空态）
+    await expect(board.getByText('AI 主方案')).toBeVisible();
   });
 });

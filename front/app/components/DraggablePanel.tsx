@@ -14,7 +14,7 @@ interface DraggablePanelProps {
 }
 
 /**
- * 可折叠 + 可拖拽 HUD 面板：
+ * 可折叠 + 可拖拽信息面板：
  * - 顶栏作为拖拽手柄（指针捕获，双击复位）
  * - 右上角折叠/展开
  * - 通过 transform 位移，不改变原绝对定位布局
@@ -72,7 +72,7 @@ export default function DraggablePanel({
         className="radar-drag-handle flex items-center justify-between gap-2 shrink-0 px-4 py-2.5"
         onPointerDown={onPointerDown}
         onDoubleClick={resetPosition}
-        title="拖拽移动 · 双击复位"
+        title="拖动调整位置 · 双击复位"
       >
         <div className="flex items-center gap-2 min-w-0">
           {icon}

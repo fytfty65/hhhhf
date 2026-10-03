@@ -128,7 +128,7 @@ export default function CarbonFootprintPanel({ routes, travelDetails }: CarbonFo
           whileTap={{ scale: 0.92 }}
           className={`relative p-3 rounded-2xl shadow-xl border transition-all cursor-pointer flex items-center gap-2 ${
             open
-              ? 'bg-gradient-to-br from-emerald-500 to-teal-500 text-white border-emerald-400/40'
+              ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 text-white border-emerald-400/40'
               : 'bg-white/95 backdrop-blur-md text-slate-700 border-slate-200/80 hover:text-emerald-600'
           }`}
           title="碳足迹与绿色交通评估"
@@ -189,9 +189,9 @@ export default function CarbonFootprintPanel({ routes, travelDetails }: CarbonFo
                       <p className="text-2xl font-black text-emerald-600">{result.total_kg}</p>
                       <p className="text-[10px] text-emerald-600/80 font-bold mt-0.5">总排放 (kg)</p>
                     </div>
-                    <div className="bg-sky-50 border border-sky-100 rounded-xl p-3 text-center">
-                      <p className="text-2xl font-black text-sky-600">{greenPct}%</p>
-                      <p className="text-[10px] text-sky-600/80 font-bold mt-0.5">绿色里程占比</p>
+                    <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 text-center">
+                      <p className="text-2xl font-black text-emerald-700">{greenPct}%</p>
+                      <p className="text-[10px] text-emerald-700/80 font-bold mt-0.5">绿色里程占比</p>
                     </div>
                     <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-center">
                       <p className="text-2xl font-black text-amber-600">{result.tree_equivalent}</p>

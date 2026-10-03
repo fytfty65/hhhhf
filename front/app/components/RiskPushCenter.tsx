@@ -32,7 +32,7 @@ export interface RiskChange {
   severity: 'LOW' | 'MEDIUM' | 'HIGH';
   title: string;
   detail: string;
-  replan?: { proposal_id?: string; status?: string; trip_id?: string; reason?: string; changed_signals?: unknown[] };
+  replan?: { proposal_id?: string; status?: string; trip_id?: string; reason?: string; trigger_types?: string[]; expires_at?: string; changed_signals?: unknown[] };
 }
 
 interface RiskInboxItem extends RiskChange {
@@ -74,7 +74,7 @@ interface RiskPushCenterProps {
 const SEVERITY_META: Record<string, { badge: string; dot: string }> = {
   HIGH: { badge: 'bg-rose-500/12 text-rose-500 border-rose-400/30', dot: 'bg-rose-500' },
   MEDIUM: { badge: 'bg-amber-500/12 text-amber-500 border-amber-400/30', dot: 'bg-amber-500' },
-  LOW: { badge: 'bg-sky-500/12 text-sky-500 border-sky-400/30', dot: 'bg-sky-500' },
+  LOW: { badge: 'bg-emerald-500/12 text-emerald-600 border-emerald-400/30', dot: 'bg-emerald-500' },
 };
 
 // 变更类型 → 图标
@@ -528,7 +528,7 @@ export default function RiskPushCenter({
                     className={`p-1.5 rounded-lg cursor-pointer transition-colors disabled:opacity-50 flex items-center gap-1 text-[10px] font-bold ${
                       subscribed
                         ? 'text-emerald-600 hover:bg-emerald-50'
-                        : 'text-sky-600 hover:bg-sky-50'
+                        : 'text-orange-700 hover:bg-orange-50'
                     }`}
                     title={subscribed ? '取消目的地风险订阅' : '订阅目的地风险监控'}
                   >
@@ -548,7 +548,7 @@ export default function RiskPushCenter({
 
             {/* 列表 */}
             <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
-              {statusMessage && <div className="border-b border-sky-100 bg-sky-50 px-4 py-2 text-[11px] font-bold leading-relaxed text-sky-700">{statusMessage}</div>}
+              {statusMessage && <div className="border-b border-orange-100 bg-orange-50 px-4 py-2 text-[11px] font-bold leading-relaxed text-orange-800">{statusMessage}</div>}
               {items.length === 0 ? (
                 <div className="py-10 flex flex-col items-center gap-2 text-center">
                   <CheckCircle2 className="w-8 h-8 text-emerald-500" />
@@ -578,7 +578,7 @@ export default function RiskPushCenter({
                           <span>来源：{sourceLabel}</span>
                           <span>{it.estimated ? '估算信号' : '供应商信号'}</span>
                           <span>观测：{observedLabel}</span>
-                          <button type="button" onClick={() => setExpandedId(expanded ? null : it.id)} className="inline-flex items-center gap-0.5 font-bold text-slate-500 hover:text-sky-600">
+                          <button type="button" onClick={() => setExpandedId(expanded ? null : it.id)} className="inline-flex items-center gap-0.5 font-bold text-slate-500 hover:text-orange-700">
                             {expanded ? '收起证据' : '查看证据'} {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                           </button>
                         </div>
@@ -589,8 +589,8 @@ export default function RiskPushCenter({
                               <p key={key}>{key}：{signal.provider || '未提供'} · {signal.estimated ? '估算' : '实测'}{signal.retrieved_at ? ` · ${new Date(parseRiskTimestamp(signal.retrieved_at)).toLocaleString('zh-CN', { hour12: false })}` : ''}</p>
                             ))}
                             <div className="mt-1.5 flex flex-wrap gap-2">
-                              <a href={`https://www.amap.com/search?query=${cityQuery}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-sky-700 hover:text-sky-900"><ExternalLink className="h-3 w-3" />高德查看目的地</a>
-                              <a href={`https://ditu.amap.com/dir?city=${cityQuery}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-sky-700 hover:text-sky-900"><ExternalLink className="h-3 w-3" />高德规划路线</a>
+                              <a href={`https://www.amap.com/search?query=${cityQuery}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-orange-700 hover:text-orange-900"><ExternalLink className="h-3 w-3" />高德查看目的地</a>
+                              <a href={`https://ditu.amap.com/dir?city=${cityQuery}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-orange-700 hover:text-orange-900"><ExternalLink className="h-3 w-3" />高德规划路线</a>
                               {it.status !== 'acknowledged' && <button type="button" onClick={() => void acknowledgeNotification(it)} className="font-bold text-emerald-700 hover:text-emerald-900">标记已处理</button>}
                             </div>
                           </div>

@@ -233,27 +233,14 @@ export default function TripMacroDashboard({
         </div>
       </div>
 
-      {/* ============ 底部滚动信息条 ============ */}
-      <div
-        className="shrink-0 h-7 flex items-center px-4 overflow-hidden"
-        style={{
-          background: mode === 'dark' ? 'linear-gradient(180deg, transparent, rgba(2,6,23,0.95))' : 'linear-gradient(180deg, transparent, rgba(15,23,42,0.16))',
-          borderTop: `1px solid ${COLORS.divider}`,
-        }}
-      >
-        <div className="flex items-center gap-8 animate-marquee whitespace-nowrap" style={{ animationDuration: '25s' }}>
-          {[
-            { text: `预算: ¥${dayTotal} / ¥${dailyBudget || '—'}`, color: hasOverrun ? COLORS.danger : COLORS.safe },
-            { text: `节点数: ${routes.length}`, color: COLORS.accent },
-            { text: `人均: ¥${avgCost}`, color: COLORS.accent },
-            { text: `超支: ${hasOverrun ? '¥' + Math.round(overrun) : '无'}`, color: hasOverrun ? COLORS.danger : COLORS.safe },
-            { text: `总预算: ¥${dailyForecast.totalBudget ? Math.round(dailyForecast.totalBudget) : '—'}`, color: COLORS.accent },
-          ].map((item, i) => (
-            <div key={i} className="flex items-center gap-1.5">
-              <span className="text-xs font-mono" style={{ color: item.color, fontFamily: RADAR_FONT.data }}>{item.text}</span>
-              <span className="text-xs mx-1" style={{ color: COLORS.muted }}>|</span>
-            </div>
-          ))}
+      {/* 底部摘要：静态、可扫读，避免滚动文字造成控制台感。 */}
+      <div className="shrink-0 px-4 sm:px-6 pb-3">
+        <div className="rounded-xl border px-4 py-2.5 flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]" style={{ background: COLORS.panelSolid, borderColor: COLORS.borderSoft }}>
+          <span style={{ color: COLORS.muted }}>本日预算 <strong style={{ color: hasOverrun ? COLORS.danger : COLORS.safe }}>¥{dayTotal} / ¥{dailyBudget || '—'}</strong></span>
+          <span style={{ color: COLORS.muted }}>节点 <strong style={{ color: COLORS.accent }}>{routes.length}</strong></span>
+          <span style={{ color: COLORS.muted }}>人均 <strong style={{ color: COLORS.accent }}>¥{avgCost}</strong></span>
+          <span style={{ color: COLORS.muted }}>总预算 <strong style={{ color: COLORS.accent }}>¥{dailyForecast.totalBudget ? Math.round(dailyForecast.totalBudget) : '—'}</strong></span>
+          <span className="ml-auto" style={{ color: hasOverrun ? COLORS.danger : COLORS.safe }}>{hasOverrun ? `需调整 ¥${Math.round(overrun)}` : '预算在计划内'}</span>
         </div>
       </div>
     </div>

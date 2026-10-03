@@ -303,8 +303,8 @@ export function PoiImage({ photos = [], mapImage = '', amapUrl = '', name, type 
   if (allFailed || !currentUrl) {
     const typeLabel = type || '目的地';
     const typeColor = type?.includes('餐') || type?.includes('食') ? 'from-orange-400 to-rose-400'
-      : type?.includes('酒店') || type?.includes('住宿') ? 'from-indigo-400 to-purple-400'
-      : 'from-teal-400 to-emerald-400';
+      : type?.includes('酒店') || type?.includes('住宿') ? 'from-orange-300 to-orange-500'
+      : 'from-stone-300 to-stone-400';
     return (
       <div
         className={`relative overflow-hidden cursor-pointer group ${className}`}

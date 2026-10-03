@@ -16,7 +16,7 @@ export default function VoiceIntentChips({ parsed }: { parsed: VoiceIntent | nul
         </span>
       )}
       {parsed.days > 0 && (
-        <span className="flex items-center gap-1 bg-sky-50 border border-sky-200 text-sky-700 px-2 py-0.5 rounded-full text-[11px] font-bold">
+        <span className="flex items-center gap-1 bg-orange-50 border border-orange-200 text-orange-800 px-2 py-0.5 rounded-full text-[11px] font-bold">
           <CalendarDays className="w-3 h-3" /> {parsed.days} 天
         </span>
       )}

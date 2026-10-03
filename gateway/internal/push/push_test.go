@@ -18,10 +18,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gateway/internal/database"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 // —— 测试辅助（放这里是为了让上面的用例读起来直接）——
-func decodeSegment(segment string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(segment) }
+func decodeSegment(segment string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(segment)
+}
 
 func sha256Sum(text string) []byte {
 	sum := sha256.Sum256([]byte(text))
@@ -137,6 +143,57 @@ func TestLoadServiceAccountValidates(t *testing.T) {
 	}
 }
 
+func TestPreflightFromEnvUsesBoundedReasonCodes(t *testing.T) {
+	t.Setenv("FCM_SERVICE_ACCOUNT_JSON_PATH", "")
+	t.Setenv("FCM_PROJECT_ID", "")
+	blocked := PreflightFromEnv("production")
+	if blocked.Status != "blocked" || blocked.Reason != "environment_not_staging_or_test" || blocked.ServiceAccountConfigured {
+		t.Fatalf("production preflight must be blocked without inspecting credentials: %#v", blocked)
+	}
+	missing := PreflightFromEnv("staging")
+	if missing.Status != "blocked" || missing.Reason != "service_account_path_missing" {
+		t.Fatalf("missing service account path must be explicit: %#v", missing)
+	}
+
+	dir := t.TempDir()
+	path := dir + "/service-account.json"
+	account, _ := testAccount(t)
+	raw, err := json.Marshal(account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(path, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FCM_SERVICE_ACCOUNT_JSON_PATH", path)
+	ready := PreflightFromEnv("staging")
+	if ready.Status != "ready" || !ready.ServiceAccountReadable || !ready.ServiceAccountParsed || !ready.ProjectIDConfigured || ready.Reason != "" {
+		t.Fatalf("valid staging configuration should be ready: %#v", ready)
+	}
+
+	t.Setenv("FCM_PROJECT_ID", "")
+	if err := os.WriteFile(path, []byte(`{"client_email":"x@example.com","private_key":"bad"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalid := PreflightFromEnv("test")
+	if invalid.Status != "blocked" || invalid.Reason != "service_account_invalid" {
+		t.Fatalf("invalid account must use bounded reason code: %#v", invalid)
+	}
+}
+
+func TestNewSenderFromEnvRejectsInvalidPrivateKeyLocally(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/service-account.json"
+	if err := writeFile(path, `{"client_email":"x@example.com","private_key":"bad","project_id":"demo"}`); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FCM_SERVICE_ACCOUNT_JSON_PATH", path)
+	t.Setenv("FCM_PROJECT_ID", "")
+	if _, err := NewSenderFromEnv(); err == nil || !strings.Contains(err.Error(), "私钥无效") {
+		t.Fatalf("invalid private key must be rejected before network use: %v", err)
+	}
+}
+
 func TestSenderExchangesTokenAndSends(t *testing.T) {
 	account, _ := testAccount(t)
 	var gotAuth string
@@ -241,5 +298,128 @@ func TestSignJWTRejectsBrokenKey(t *testing.T) {
 	account := &ServiceAccount{ClientEmail: "a@b.c", PrivateKey: "not-a-pem"}
 	if _, err := signJWT(account, "https://x/token", time.Now(), time.Hour); err == nil {
 		t.Fatal("坏私钥必须报错")
+	}
+}
+
+func TestInvalidTokenResponseOnlyClassifiesExplicitTokenErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+		body string
+		want bool
+	}{
+		{name: "not found", code: http.StatusNotFound, body: `{"error":"not found"}`, want: true},
+		{name: "unregistered", code: http.StatusBadRequest, body: `{"error":{"status":"UNREGISTERED"}}`, want: true},
+		{name: "invalid argument token", code: http.StatusBadRequest, body: `{"error":"INVALID_ARGUMENT token"}`, want: true},
+		{name: "generic bad request", code: http.StatusBadRequest, body: `{"error":"invalid payload"}`, want: false},
+		{name: "server error", code: http.StatusInternalServerError, body: `UNREGISTERED`, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInvalidTokenResponse(tc.code, tc.body); got != tc.want {
+				t.Fatalf("isInvalidTokenResponse(%d, %q) = %v, want %v", tc.code, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSendToUserRemovesOnlyExplicitlyInvalidTokens(t *testing.T) {
+	oldDB := database.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	t.Cleanup(func() { database.DB = oldDB })
+	if err := db.AutoMigrate(&DeviceToken{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&DeviceToken{UserID: "push-user", Token: "valid-device", Platform: "web"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&DeviceToken{UserID: "push-user", Token: "invalid-device", Platform: "web"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	account, _ := testAccount(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			fmt.Fprint(w, `{"access_token":"test-access","expires_in":3600}`)
+			return
+		}
+		var payload struct {
+			Message struct {
+				Token string `json:"token"`
+			} `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode FCM request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch payload.Message.Token {
+		case "invalid-device":
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"status":"UNREGISTERED"}}`)
+		case "valid-device":
+			fmt.Fprint(w, `{"name":"projects/demo/messages/1"}`)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"unknown token"}`)
+		}
+	}))
+	defer server.Close()
+	sender := &Sender{
+		projectID: account.ProjectID,
+		account:   &ServiceAccount{ClientEmail: account.ClientEmail, PrivateKey: account.PrivateKey, TokenURI: server.URL + "/token", ProjectID: account.ProjectID},
+		client:    server.Client(), fcmBaseURL: server.URL, now: time.Now,
+	}
+	result, err := sender.SendToUser(context.Background(), "push-user", Message{Title: "测试", Body: "测试消息"})
+	if err != nil || result.Sent != 1 || len(result.Invalid) != 1 || result.Failed != 0 {
+		t.Fatalf("unexpected aggregate send result: %#v err=%v", result, err)
+	}
+	var remaining []DeviceToken
+	if err := db.Where("user_id = ?", "push-user").Find(&remaining).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].Token != "valid-device" {
+		t.Fatalf("only explicitly invalid token should be removed: %#v", remaining)
+	}
+}
+
+func TestSendToUserKeepsTokenOnGenericBadRequest(t *testing.T) {
+	oldDB := database.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	t.Cleanup(func() { database.DB = oldDB })
+	if err := db.AutoMigrate(&DeviceToken{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&DeviceToken{UserID: "payload-user", Token: "payload-device", Platform: "web"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	account, _ := testAccount(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			fmt.Fprint(w, `{"access_token":"test-access","expires_in":3600}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"invalid payload"}`)
+	}))
+	defer server.Close()
+	sender := &Sender{projectID: account.ProjectID, account: &ServiceAccount{ClientEmail: account.ClientEmail, PrivateKey: account.PrivateKey, TokenURI: server.URL + "/token"}, client: server.Client(), fcmBaseURL: server.URL, now: time.Now}
+	result, err := sender.SendToUser(context.Background(), "payload-user", Message{Title: "测试", Body: "测试消息"})
+	if err != nil || result.Failed != 1 || len(result.Invalid) != 0 {
+		t.Fatalf("generic bad request should be failed, not invalid token: %#v err=%v", result, err)
+	}
+	var count int64
+	if err := db.Model(&DeviceToken{}).Where("token = ?", "payload-device").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("generic payload failure must retain the device token")
 	}
 }

@@ -189,6 +189,22 @@ type ModelDeployment struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// ModelAuditEvent is a de-identified, append-only lifecycle record for model
+// evaluation, shadow execution, deployment changes and automatic rollback.
+// It intentionally has no user, trip, route or raw provider payload fields.
+type ModelAuditEvent struct {
+	ID          string    `gorm:"primaryKey" json:"id"`
+	Kind        string    `gorm:"index" json:"kind"`
+	Version     string    `gorm:"index" json:"version"`
+	Status      string    `gorm:"index" json:"status"`
+	Summary     string    `json:"summary"`
+	SampleCount int       `json:"sample_count,omitempty"`
+	ReasonCount int       `json:"reason_count,omitempty"`
+	ReasonCodes string    `gorm:"type:text" json:"reason_codes,omitempty"`
+	OccurredAt  time.Time `gorm:"index" json:"occurred_at"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // PlanningRun pins attribution and pre-feedback features to the actual executor.
 type PlanningRun struct {
 	ID           string    `gorm:"primaryKey" json:"plan_id"`
@@ -296,6 +312,39 @@ type RiskNotification struct {
 	Status         string     `gorm:"index" json:"status"` // unread/read/acknowledged
 	CreatedAt      time.Time  `gorm:"index" json:"created_at"`
 	ReadAt         *time.Time `json:"read_at,omitempty"`
+}
+
+// ProviderQualityAlertState tracks delivery cooldowns for aggregate supplier
+// quality alerts. Scope is stored as a hash so this operational state never
+// exposes user or trip identifiers through diagnostics.
+type ProviderQualityAlertState struct {
+	ID                string    `gorm:"primaryKey" json:"-"`
+	ScopeHash         string    `gorm:"index" json:"-"`
+	Digest            string    `gorm:"index" json:"digest"`
+	Status            string    `json:"status"`
+	LastSeenAt        time.Time `json:"last_seen_at"`
+	LastNotifiedAt    time.Time `json:"last_notified_at"`
+	NotificationCount int       `json:"notification_count"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// ProviderQualityAlertDelivery is a channel-agnostic delivery ledger. It is
+// created as pending and can later be claimed by an explicitly authorized
+// Web Push or email worker; no provider payload or credential is stored.
+type ProviderQualityAlertDelivery struct {
+	ID             string     `gorm:"primaryKey" json:"-"`
+	NotificationID string     `gorm:"index" json:"notification_id"`
+	ScopeHash      string     `gorm:"index" json:"-"`
+	Channel        string     `gorm:"index" json:"channel"`
+	Status         string     `gorm:"index" json:"status"` // pending/sent/failed/retrying
+	Attempts       int        `json:"attempts"`
+	LastError      string     `json:"last_error,omitempty"`
+	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty"`
+	SentAt         *time.Time `json:"sent_at,omitempty"`
+	LeaseUntil     *time.Time `json:"lease_until,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // WebPushSubscription stores a user-consented browser endpoint. The private

@@ -201,7 +201,7 @@ export default function ItineraryPoster({ route, city }: { route: PosterNode[]; 
               key={t}
               onClick={() => setTemplate(t)}
               className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-                template === t ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                template === t ? 'bg-orange-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
               }`}
             >
               {TEMPLATES[t].name}
@@ -213,7 +213,7 @@ export default function ItineraryPoster({ route, city }: { route: PosterNode[]; 
       <div className="flex flex-col items-center gap-4 sm:flex-row">
         <canvas ref={canvasPreviewRef} className="h-80 w-45 rounded-lg border border-slate-200 bg-slate-50" />
         <div className="flex w-full flex-col gap-2">
-          <button onClick={generate} className="rounded-lg bg-indigo-600 py-2 text-sm font-medium text-white hover:bg-indigo-700">
+          <button onClick={generate} className="rounded-lg bg-orange-700 py-2 text-sm font-medium text-white hover:bg-orange-800">
             生成海报
           </button>
           <button onClick={download} className="rounded-lg border border-slate-300 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">

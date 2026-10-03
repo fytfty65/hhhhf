@@ -3,23 +3,25 @@
 /* Tailwind v4 暗色模式：基于 .dark 类的自定义变体 */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* 语义主题变量（供暗色覆盖与身体背景使用） */
+/* 语义主题变量（供暗色覆盖与身体背景使用）
+   旧令牌已并入暖纸体系：以下名称仅作为别名保留，避免遗留引用断裂；
+   新代码一律使用文末「设计纪律」区块的语义令牌（--paper/--ink/--accent…）。 */
 :root {
-  --bg-body: #f1f5f9;
-  --bg-card: #ffffff;
-  --text-primary: #0f172a;
-  --surface-muted: #f7f7f5;
-  --line-subtle: #e2e2de;
-  --brand-accent: #c85a22;
+  --bg-body: var(--paper);
+  --bg-card: var(--paper-card);
+  --text-primary: var(--ink);
+  --surface-muted: var(--paper-hover);
+  --line-subtle: var(--line);
+  --brand-accent: var(--accent);
   /* 3D 雷达 HUD 字体：展示数字用科幻字体，中文回退系统字体 */
   --font-radar-display: 'Orbitron', 'Rajdhani', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-radar-data: 'Rajdhani', 'JetBrains Mono', 'SF Mono', Consolas, 'PingFang SC', monospace;
 }
 
 .dark {
-  --bg-body: #0b1220;
-  --bg-card: #1e293b;
-  --text-primary: #e2e8f0;
+  --bg-body: var(--paper);
+  --bg-card: var(--paper-card);
+  --text-primary: var(--ink);
 }
 
 .custom-scrollbar::-webkit-scrollbar { display: none; }
@@ -187,6 +189,7 @@
 
 .radar-render-status {
   max-width: calc(100% - 2rem);
+  text-align: left;
 }
 
 @media (max-width: 640px) {
@@ -257,6 +260,7 @@
   }
 
   .radar-render-status {
+    right: .75rem;
     top: 8.5rem;
   }
 
@@ -392,39 +396,39 @@ html, body, #__next {
    （优先级高于 Tailwind utilities）统一映射到深色，作为基础暗色主题。 */
 
 .dark body {
-  background-color: #0b1220;
-  color: #e2e8f0;
+  background-color: var(--paper);
+  color: var(--ink);
 }
 
 /* —— 背景 —— */
-.dark .bg-slate-50 { background-color: #0f172a; }
-.dark .bg-slate-100 { background-color: #1e293b; }
-.dark .bg-slate-200 { background-color: #334155; }
-.dark .bg-white { background-color: #1e293b; }
-.dark .bg-white\/90 { background-color: rgba(30, 41, 59, 0.9); }
-.dark .bg-white\/80 { background-color: rgba(30, 41, 59, 0.8); }
-.dark .bg-white\/70 { background-color: rgba(30, 41, 59, 0.7); }
-.dark .bg-white\/60 { background-color: rgba(30, 41, 59, 0.6); }
-.dark .bg-white\/50 { background-color: rgba(30, 41, 59, 0.5); }
-.dark .bg-stone-50 { background-color: #1c1917; }
+.dark .bg-slate-50 { background-color: var(--paper); }
+.dark .bg-slate-100 { background-color: var(--paper-card); }
+.dark .bg-slate-200 { background-color: var(--paper-raised); }
+.dark .bg-white { background-color: var(--paper-card); }
+.dark .bg-white\/90 { background-color: rgba(28, 25, 23, 0.9); }
+.dark .bg-white\/80 { background-color: rgba(28, 25, 23, 0.8); }
+.dark .bg-white\/70 { background-color: rgba(28, 25, 23, 0.7); }
+.dark .bg-white\/60 { background-color: rgba(28, 25, 23, 0.6); }
+.dark .bg-white\/50 { background-color: rgba(28, 25, 23, 0.5); }
+.dark .bg-stone-50 { background-color: var(--paper-card); }
 .dark .bg-amber-50\/60 { background-color: rgba(69, 46, 26, 0.6); }
 
 /* —— 文字 —— */
-.dark .text-slate-900 { color: #f1f5f9; }
-.dark .text-slate-800 { color: #e2e8f0; }
-.dark .text-slate-700 { color: #cbd5e1; }
-.dark .text-slate-600 { color: #cbd5e1; }
-.dark .text-slate-500 { color: #94a3b8; }
-.dark .text-slate-400 { color: #7c8aa0; }
-.dark .text-stone-700 { color: #e7e5e4; }
-.dark .text-stone-600 { color: #d6d3d1; }
-.dark .text-stone-500 { color: #a8a29e; }
+.dark .text-slate-900 { color: var(--ink); }
+.dark .text-slate-800 { color: var(--ink); }
+.dark .text-slate-700 { color: var(--ink-2); }
+.dark .text-slate-600 { color: var(--ink-2); }
+.dark .text-slate-500 { color: var(--ink-3); }
+.dark .text-slate-400 { color: var(--ink-3); }
+.dark .text-stone-700 { color: var(--ink); }
+.dark .text-stone-600 { color: var(--ink-2); }
+.dark .text-stone-500 { color: var(--ink-3); }
 
 /* —— 边框 —— */
-.dark .border-slate-200 { border-color: #334155; }
-.dark .border-slate-100 { border-color: #1e293b; }
-.dark .border-stone-200 { border-color: #44403c; }
-.dark .border-white { border-color: #334155; }
+.dark .border-slate-200 { border-color: var(--line); }
+.dark .border-slate-100 { border-color: var(--line-soft); }
+.dark .border-stone-200 { border-color: var(--line); }
+.dark .border-white { border-color: var(--line); }
 
 /* ================= 无障碍：减少动态效果 =================
    尊重系统「减少动态效果」偏好，全局降级动画与过渡，
@@ -693,25 +697,25 @@ html, body, #__next {
 
 .dark .profile-page,
 .dark .community-page {
-  background-color: #0b1220;
-  background-image: linear-gradient(rgba(148, 163, 184, .035) 1px, transparent 1px), linear-gradient(90deg, rgba(148, 163, 184, .035) 1px, transparent 1px);
+  background-color: var(--paper);
+  background-image: linear-gradient(rgba(214, 207, 196, .03) 1px, transparent 1px), linear-gradient(90deg, rgba(214, 207, 196, .03) 1px, transparent 1px);
 }
 
 .dark .profile-page .profile-panel,
 .dark .community-page .community-panel {
-  background: rgba(30, 41, 59, .92);
-  border-color: rgba(148, 163, 184, .18);
+  background: rgba(28, 25, 23, .92);
+  border-color: var(--line);
   box-shadow: 0 16px 36px rgba(0, 0, 0, .22);
 }
 
 .dark .profile-next-step {
-  background: linear-gradient(110deg, rgba(67, 38, 18, .72), rgba(30, 41, 59, .92));
+  background: linear-gradient(110deg, rgba(67, 38, 18, .72), rgba(28, 25, 23, .92));
   border-color: rgba(251, 146, 60, .38);
 }
 
 .dark .profile-next-step-copy h2,
 .dark .community-hero-metrics strong {
-  color: #f1f5f9;
+  color: var(--ink);
 }
 
 .dark .profile-progress-ring::before {
@@ -758,24 +762,145 @@ html, body, #__next {
 }
 
 /* Planning workspace toolbar: quiet, document-like controls instead of a
-   rainbow of AI-style pills. Accent colour is reserved for hover/focus. */
-.workspace-toolbar > button {
+   rainbow of AI-style pills. Accent colour is reserved for hover/focus.
+   NOTE: must be a descendant selector — the primary row buttons are wrapped
+   in an inner flex div, so `>` never matched them (fixed 2026-09). */
+.workspace-toolbar button {
   border-radius: 8px !important;
   background: #fff !important;
-  border-color: #e2e8f0 !important;
-  color: #475569 !important;
+  border: 1px solid #e7e5e4 !important;
+  color: #57534e !important;
   box-shadow: none !important;
   min-height: 34px;
+  font-weight: 600 !important;
 }
-.workspace-toolbar > button:hover {
-  background: #fff7ed !important;
-  border-color: #fdba74 !important;
-  color: #c2410c !important;
+.workspace-toolbar button:hover {
+  background: #faf7f2 !important;
+  border-color: #d6cfc4 !important;
+  color: #1c1917 !important;
 }
-.workspace-toolbar > button:focus-visible {
-  outline: 2px solid #fb923c;
+.workspace-toolbar button:focus-visible {
+  outline: 2px solid #c2410c;
   outline-offset: 2px;
 }
+/* The one allowed accent: the primary forward action. */
+.workspace-toolbar button.btn-accent {
+  background: #c2410c !important;
+  border-color: #c2410c !important;
+  color: #fff !important;
+}
+.workspace-toolbar button.btn-accent:hover {
+  background: #9a3412 !important;
+  border-color: #9a3412 !important;
+  color: #fff !important;
+}
+/* Saved state: success is a state, not a decoration. */
+.workspace-toolbar button.btn-success {
+  color: #15803d !important;
+  border-color: #bbf7d0 !important;
+  background: #f0fdf4 !important;
+}
+
+/* ==========================================================================
+   OmniRoute 设计纪律（暖纸文档风）
+   原则：颜色是信息，不是装饰。
+   - 中性层承担 90% 的界面（纸底、墨字、暖灰线）
+   - 陶土橙 #c2410c 只给主 CTA 与品牌节点
+   - 语义色只剩三种：good(emerald)/ warn(amber)/ risk(rose)，且只用
+     「极浅底 + 深色字」，禁止高饱和色块并排出现
+   ========================================================================== */
+:root {
+  --paper: #f8f5ef;
+  --paper-card: #fffdf8;
+  --paper-raised: #ffffff;
+  --paper-hover: #f3eee6;
+  --ink: #1c1917;
+  --ink-2: #57534e;
+  --ink-3: #a8a29e;
+  --line: rgba(120, 83, 45, 0.16);
+  --line-soft: rgba(120, 83, 45, 0.09);
+  --backdrop: rgba(28, 25, 23, 0.42);
+  --accent: #c2410c;
+  --accent-ink: #9a3412;
+  --accent-soft: #fdf1e7;
+  --good: #15803d;
+  --good-soft: #f0fdf4;
+  --warn: #a16207;
+  --warn-soft: #fefce8;
+  --risk: #be123c;
+  --risk-soft: #fff1f2;
+  --focus-ring: #c2410c;
+}
+
+.dark {
+  --paper: #12100d;
+  --paper-card: #1c1917;
+  --paper-raised: #292524;
+  --paper-hover: #231f1c;
+  --ink: #e7e5e4;
+  --ink-2: #d6d3d1;
+  --ink-3: #78716c;
+  --line: rgba(214, 207, 196, 0.16);
+  --line-soft: rgba(214, 207, 196, 0.08);
+  --backdrop: rgba(0, 0, 0, 0.6);
+  --accent: #ea580c;
+  --accent-ink: #fb923c;
+  --accent-soft: rgba(67, 38, 18, 0.55);
+  --good: #4ade80;
+  --good-soft: rgba(20, 83, 45, 0.35);
+  --warn: #facc15;
+  --warn-soft: rgba(113, 63, 18, 0.35);
+  --risk: #fb7185;
+  --risk-soft: rgba(136, 19, 55, 0.35);
+  --focus-ring: #ea580c;
+}
+
+/* 把语义令牌桥接为 Tailwind v4 工具类：bg-paper / bg-paper-card /
+   text-ink / text-ink-2 / border-line / bg-accent / text-good …
+   组件中不再出现具体色值，明暗切换由 CSS 变量自动完成。
+   注意：--color-line 等是 rgba 值，不支持 /opacity 修饰符。 */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-paper-card: var(--paper-card);
+  --color-paper-raised: var(--paper-raised);
+  --color-paper-hover: var(--paper-hover);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-backdrop: var(--backdrop);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-risk: var(--risk);
+  --color-risk-soft: var(--risk-soft);
+}
+
+/* 统一徽章：取代 rainbow chips。默认中性，语义仅四级。 */
+.ob-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: transparent;
+  padding: 0.1rem 0.45rem;
+  color: var(--ink-2);
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.ob-tag strong { color: var(--ink); font-weight: 800; }
+.ob-tag-good { background: var(--good-soft); border-color: transparent; color: var(--good); }
+.ob-tag-warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+.ob-tag-risk { background: var(--risk-soft); border-color: transparent; color: var(--risk); }
+.ob-tag-accent { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
 
 /* Planning workbench: information-dense and calm. Colour communicates state,
    while navigation and actions remain neutral. */
@@ -853,7 +978,7 @@ html, body, #__next {
 .dark .planning-option,
 .dark .planning-detail-button,
 .dark .planning-verify-link {
-  background: #111827;
-  border-color: #334155;
-  color: #cbd5e1;
+  background: var(--paper-card);
+  border-color: var(--line);
+  color: var(--ink-2);
 }

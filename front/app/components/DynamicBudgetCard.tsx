@@ -15,11 +15,11 @@ export default function DynamicBudgetCard({ summary, budgetData }: { summary?: s
   const total = budgetData?.total_budget || 0;
 
   return (
-    <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 dark:bg-slate-800 dark:border-slate-700 shadow-xs">
+    <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-emerald-50 to-emerald-100 border border-emerald-200 dark:bg-slate-800 dark:border-slate-700 shadow-xs">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <div className={`p-1.5 rounded-lg font-bold text-xs text-white ${
-            mode === 'HIGH_LUXURY' ? 'bg-purple-600' : mode === 'EXACT_AMOUNT' ? 'bg-emerald-600' : 'bg-orange-500'
+            mode === 'HIGH_LUXURY' ? 'bg-orange-800' : mode === 'EXACT_AMOUNT' ? 'bg-emerald-600' : 'bg-orange-500'
           }`}>
             {mode === 'HIGH_LUXURY' ? '💎 臻选高预算' : mode === 'EXACT_AMOUNT' ? '💰 专属定额精算' : '✨ 高性价比方案'}
           </div>
@@ -50,7 +50,7 @@ export default function DynamicBudgetCard({ summary, budgetData }: { summary?: s
           </div>
           <div className="bg-white/80 dark:bg-slate-900/60 p-2 rounded-xl border border-emerald-100 dark:border-slate-700">
             <p className="text-[10px] text-slate-400 font-bold">🎟️ 门票体验</p>
-            <p className="text-xs font-black text-indigo-500 mt-0.5">¥{budgetData.ticket}</p>
+            <p className="text-xs font-black text-orange-700 mt-0.5">¥{budgetData.ticket}</p>
           </div>
           <div className="bg-white/80 dark:bg-slate-900/60 p-2 rounded-xl border border-emerald-100 dark:border-slate-700">
             <p className="text-[10px] text-slate-400 font-bold">🚗 交通备用</p>

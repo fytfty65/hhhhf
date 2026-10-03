@@ -75,6 +75,11 @@ func ConfirmReplanHandler(c *gin.Context) {
 			return replanConfirmError{status: http.StatusConflict, code: "REPLAN_PROPOSAL_NOT_PENDING", message: "重规划提案已经处理，不能重复应用"}
 		}
 		if expires, err := time.Parse(time.RFC3339, strings.TrimSpace(fmt.Sprint(proposal["expires_at"]))); err == nil && expires.Before(time.Now().UTC()) {
+			proposal["status"] = "expired"
+			if encoded, marshalErr := json.Marshal(proposal); marshalErr == nil {
+				_ = tx.Model(&proposalEvent).Update("payload", string(encoded)).Error
+				_ = recordReplanLifecycleEventTx(tx, userID, req.TripID, "replan_proposal_expired", req.ProposalID, map[string]any{"reason": "confirmation_timeout"})
+			}
 			return replanConfirmError{status: http.StatusConflict, code: "REPLAN_PROPOSAL_EXPIRED", message: "重规划提案已过期，请重新评估风险"}
 		}
 		proposalAffected := proposalAffectedNodes(proposal)
@@ -145,6 +150,37 @@ func ConfirmReplanHandler(c *gin.Context) {
 		if err := tx.Create(&models.PlanningEvent{UserID: userID, TripID: req.TripID, EventType: "replan_applied", Payload: string(appliedPayload), CreatedAt: time.Now().UTC()}).Error; err != nil {
 			return replanConfirmError{status: http.StatusInternalServerError, code: "REPLAN_EVENT_WRITE_FAILED", message: "重规划应用记录失败"}
 		}
+		candidateCount := 1
+		if raw, ok := proposal["candidate_count"].(float64); ok && int(raw) > 0 {
+			candidateCount = int(raw)
+		}
+		paretoFrontierCount := 1
+		if raw, ok := proposal["pareto_frontier_count"].(float64); ok && int(raw) > 0 {
+			paretoFrontierCount = int(raw)
+		}
+		providerAvailable := candidateHasSource(req.Candidate)
+		if raw, ok := proposal["provider_available"].(bool); ok {
+			providerAvailable = raw
+		}
+		hardConstraintStatus := strings.TrimSpace(fmt.Sprint(proposal["hard_constraints_status"]))
+		if hardConstraintStatus == "" || hardConstraintStatus == "<nil>" {
+			hardConstraintStatus = "passed"
+		}
+		fairnessStatus := strings.TrimSpace(fmt.Sprint(proposal["fairness_status"]))
+		if fairnessStatus == "" || fairnessStatus == "<nil>" {
+			fairnessStatus = "not_evaluated"
+		}
+		routePayload, _ := json.Marshal(map[string]any{
+			"proposal_id": req.ProposalID, "changed_nodes": req.AffectedNodes,
+			"preserved_nodes": len(route) - 1, "candidate_name": candidateName,
+			"candidate_count": candidateCount, "pareto_frontier_count": paretoFrontierCount,
+			"provider_available": providerAvailable, "hard_constraints_satisfied": hardConstraintStatus == "passed",
+			"hard_constraints_status": hardConstraintStatus, "fairness_status": fairnessStatus,
+			"perturbation_ratio": roundRatio(float64(len(req.AffectedNodes)) / float64(len(route))),
+		})
+		if err := tx.Create(&models.PlanningEvent{UserID: userID, TripID: req.TripID, EventType: "route_replanned", Value: 1, Payload: string(routePayload), CreatedAt: time.Now().UTC()}).Error; err != nil {
+			return replanConfirmError{status: http.StatusInternalServerError, code: "REPLAN_EVENT_WRITE_FAILED", message: "重规划质量记录失败"}
+		}
 		proposal["status"] = "applied"
 		proposalBytes, _ := json.Marshal(proposal)
 		if err := tx.Model(&proposalEvent).Update("payload", string(proposalBytes)).Error; err != nil {
@@ -155,10 +191,94 @@ func ConfirmReplanHandler(c *gin.Context) {
 	})
 	if err != nil {
 		if typed, ok := err.(replanConfirmError); ok {
+			_ = recordReplanFailureEvent(userID, req.TripID, req.ProposalID, typed.code)
 			planningError(c, typed.status, typed.code, typed.message, nil)
 			return
 		}
 		planningError(c, http.StatusInternalServerError, "REPLAN_APPLY_FAILED", "重规划结果保存失败", nil)
+		_ = recordReplanFailureEvent(userID, req.TripID, req.ProposalID, "REPLAN_APPLY_FAILED")
+		return
+	}
+	planningData(c, result)
+}
+
+func recordReplanFailureEvent(userID, tripID, proposalID, code string) error {
+	if database.DB == nil {
+		return nil
+	}
+	payload, _ := json.Marshal(map[string]any{"proposal_id": proposalID, "failure_code": code})
+	return database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: tripID, EventType: "replan_failed", Payload: string(payload), CreatedAt: time.Now().UTC()}).Error
+}
+
+// RejectReplanHandler records an explicit user decision without mutating the
+// itinerary. A reason is optional for compatibility but is bounded and kept
+// as a controlled label, never as free-form prompt content.
+func RejectReplanHandler(c *gin.Context) {
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		TripID     string `json:"trip_id"`
+		ProposalID string `json:"proposal_id"`
+		Reason     string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		planningError(c, http.StatusBadRequest, "INVALID_JSON", "请求数据格式不正确", nil)
+		return
+	}
+	req.TripID, req.ProposalID = strings.TrimSpace(req.TripID), strings.TrimSpace(req.ProposalID)
+	if req.TripID == "" || req.ProposalID == "" {
+		planningError(c, http.StatusBadRequest, "REPLAN_REJECTION_INCOMPLETE", "缺少行程或提案标识", nil)
+		return
+	}
+	if _, ok := requireTripOrRoomAccess(c, req.TripID); !ok {
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	allowedReasons := map[string]bool{"not_suitable": true, "keep_original": true, "need_more_evidence": true, "already_resolved": true}
+	if !allowedReasons[reason] {
+		reason = "keep_original"
+	}
+	var result gin.H
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		var events []models.PlanningEvent
+		if err := tx.Where("user_id = ? AND trip_id = ? AND event_type = ?", userID, req.TripID, "replan_triggered").Order("created_at desc").Limit(50).Find(&events).Error; err != nil {
+			return replanConfirmError{status: http.StatusInternalServerError, code: "REPLAN_PROPOSAL_QUERY_FAILED", message: "重规划提案查询失败"}
+		}
+		var proposalEvent models.PlanningEvent
+		var proposal map[string]any
+		for _, event := range events {
+			var payload map[string]any
+			if json.Unmarshal([]byte(event.Payload), &payload) == nil && strings.TrimSpace(fmt.Sprint(payload["proposal_id"])) == req.ProposalID {
+				proposalEvent, proposal = event, payload
+				break
+			}
+		}
+		if proposal == nil {
+			return replanConfirmError{status: http.StatusNotFound, code: "REPLAN_PROPOSAL_NOT_FOUND", message: "重规划提案不存在或不属于当前行程"}
+		}
+		if strings.TrimSpace(fmt.Sprint(proposal["status"])) != "pending_confirmation" {
+			return replanConfirmError{status: http.StatusConflict, code: "REPLAN_PROPOSAL_NOT_PENDING", message: "重规划提案已经处理，不能重复拒绝"}
+		}
+		proposal["status"], proposal["rejection_reason"] = "rejected", reason
+		encoded, _ := json.Marshal(proposal)
+		if err := tx.Model(&proposalEvent).Update("payload", string(encoded)).Error; err != nil {
+			return replanConfirmError{status: http.StatusInternalServerError, code: "REPLAN_PROPOSAL_UPDATE_FAILED", message: "重规划提案状态更新失败"}
+		}
+		eventPayload, _ := json.Marshal(map[string]any{"proposal_id": req.ProposalID, "reason": reason})
+		if err := tx.Create(&models.PlanningEvent{UserID: userID, TripID: req.TripID, EventType: "replan_proposal_rejected", Payload: string(eventPayload), CreatedAt: time.Now().UTC()}).Error; err != nil {
+			return replanConfirmError{status: http.StatusInternalServerError, code: "REPLAN_EVENT_WRITE_FAILED", message: "重规划拒绝记录失败"}
+		}
+		result = gin.H{"trip_id": req.TripID, "proposal_id": req.ProposalID, "status": "rejected", "reason": reason}
+		return nil
+	})
+	if err != nil {
+		if typed, ok := err.(replanConfirmError); ok {
+			planningError(c, typed.status, typed.code, typed.message, nil)
+			return
+		}
+		planningError(c, http.StatusInternalServerError, "REPLAN_REJECT_FAILED", "重规划拒绝记录失败", nil)
 		return
 	}
 	planningData(c, result)
@@ -168,6 +288,15 @@ type replanConfirmError struct {
 	status  int
 	code    string
 	message string
+}
+
+func recordReplanLifecycleEventTx(tx *gorm.DB, userID, tripID, eventType string, proposalID any, fields map[string]any) error {
+	payload := map[string]any{"proposal_id": strings.TrimSpace(fmt.Sprint(proposalID))}
+	for key, value := range fields {
+		payload[key] = value
+	}
+	encoded, _ := json.Marshal(payload)
+	return tx.Create(&models.PlanningEvent{UserID: userID, TripID: tripID, EventType: eventType, Payload: string(encoded), CreatedAt: time.Now().UTC()}).Error
 }
 
 func (e replanConfirmError) Error() string { return e.message }

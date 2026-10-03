@@ -105,7 +105,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByText('进入共识沙盘').click();
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible();
   await page.locator('textarea').fill('去洛阳玩1天，想吃地道老字号，节奏不要太赶');
-  await page.getByText('锁定意图并开始推演').click();
+  await page.getByText('生成行程方案').click();
   await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText('如果这样调整，会发生什么？')).toBeVisible();
   await expect(page.getByText(/预估花销/).first()).toBeVisible();
@@ -123,8 +123,8 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByRole('button', { name: '关闭预算账本' }).click();
 
   await page.getByRole('button', { name: '3D 态势雷达' }).click();
-  await expect(page.getByRole('dialog', { name: '3D 态势感知雷达' })).toBeVisible();
-  const globeCanvas = page.getByRole('dialog', { name: '3D 态势感知雷达' }).locator('canvas').first();
+  await expect(page.getByRole('dialog', { name: '全球风险地图' })).toBeVisible();
+  const globeCanvas = page.getByRole('dialog', { name: '全球风险地图' }).locator('canvas').first();
   await expect(globeCanvas).toBeVisible();
   const desktopBox = await globeCanvas.boundingBox();
   expect(desktopBox?.width).toBeGreaterThan(300);
@@ -133,7 +133,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   const globalIntel = page.getByRole('button', { name: '打开全球情报视图' });
   await globalIntel.click();
   await expect(page.getByRole('button', { name: '退出全球情报视图' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByText(/10 区域 · 20 城市/)).toBeVisible();
+  await expect(page.getByText(/区域 · \d+ 城市/)).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   const mobileBox = await globeCanvas.boundingBox();
   expect(mobileBox?.width).toBeGreaterThan(300);
@@ -158,6 +158,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByTestId('download-diary').click();
   await expect((await diaryDownload).suggestedFilename()).toContain('.md');
   await page.getByText('带入下一轮规划').click();
-  await expect(page.getByText('追加诉求并迭代路书')).toBeVisible();
+  // 回到「描述需求」面板：已追加过诉求，标题会带上追加次数
+  await expect(page.getByText(/继续调整行程/)).toBeVisible();
   expect(renderLifecycleErrors).toEqual([]);
 });

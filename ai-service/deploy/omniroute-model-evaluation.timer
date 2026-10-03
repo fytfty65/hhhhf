@@ -1,0 +1,11 @@
+[Unit]
+Description=Run OmniRoute offline model evaluation every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=omniroute-model-evaluation.service
+
+[Install]
+WantedBy=timers.target

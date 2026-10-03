@@ -123,7 +123,7 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
       <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-h-[86vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h4 className="text-base font-black text-slate-800 flex items-center gap-1.5">
-            <PieChart className="w-4 h-4 text-indigo-500" /> 花费报告
+            <PieChart className="w-4 h-4 text-orange-700" /> 花费报告
           </h4>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 cursor-pointer">
             <X className="w-5 h-5" />
@@ -164,7 +164,7 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
           </>
         )}
 
-        {message && <p className="mb-3 text-xs font-medium text-indigo-600">{message}</p>}
+        {message && <p className="mb-3 text-xs font-medium text-orange-700">{message}</p>}
 
         {/* 拍照记账（OCR） */}
         <div className="mb-4 p-3 rounded-xl bg-slate-50 border border-slate-100">
@@ -175,10 +175,10 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
             value={ocrText}
             onChange={(e) => setOcrText(e.target.value)}
             placeholder={'例如：川西坝子火锅\n合计：128.50元'}
-            className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 focus:outline-none focus:border-indigo-400 mb-2 resize-none"
+            className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 focus:outline-none focus:border-orange-500 mb-2 resize-none"
             rows={3}
           />
-          <button onClick={submitOcr} disabled={busy || !ocrText.trim()} className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold cursor-pointer">
+          <button onClick={submitOcr} disabled={busy || !ocrText.trim()} className="w-full py-2 bg-orange-700 hover:bg-orange-800 disabled:opacity-50 text-white rounded-lg text-xs font-bold cursor-pointer">
             识别金额并记账
           </button>
         </div>

@@ -99,6 +99,15 @@ func TestFeatureSnapshotSeparatesBehaviorAndHidesPromptHint(t *testing.T) {
 	if err := db.Create(&models.PlanningEvent{UserID: "user-features", EventType: "plan_adopted", Payload: `{"secret":"do-not-return"}`}).Error; err != nil {
 		t.Fatal(err)
 	}
+	for _, event := range []models.PlanningEvent{
+		{UserID: "user-features", EventType: "official_channel_click", Payload: `{"module":"transport","channel":"12306 官方核验","candidate_id":"candidate-private-1"}`},
+		{UserID: "user-features", EventType: "official_channel_verified", Payload: `{"module":"transport","channel":"12306 官方核验","candidate_id":"candidate-private-1"}`},
+		{UserID: "user-features", EventType: "candidate_adopted", Payload: `{"module":"transport","candidate_id":"candidate-private-1"}`},
+	} {
+		if err := db.Create(&event).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
 	r := gin.New()
 	r.GET("/planning/features", func(c *gin.Context) { c.Set("user_id", "user-features"); FeatureSnapshotHandler(c) })
 	res := httptest.NewRecorder()
@@ -119,6 +128,13 @@ func TestFeatureSnapshotSeparatesBehaviorAndHidesPromptHint(t *testing.T) {
 	behavior := groups["behavior"].(map[string]any)
 	if _, exists := behavior["raw_payload"]; exists {
 		t.Fatal("raw behavior payload must not be exposed")
+	}
+	funnel := behavior["channel_funnel"].(map[string]any)
+	if funnel["clicks"] != float64(1) || funnel["verified"] != float64(1) || funnel["adopted"] != float64(1) {
+		t.Fatalf("expected channel behavior features, got %#v", funnel)
+	}
+	if strings.Contains(res.Body.String(), "candidate-private-1") {
+		t.Fatal("raw candidate id must not be exposed in feature snapshot")
 	}
 }
 
@@ -149,5 +165,76 @@ func TestCrowdForecastExplanationIsActionable(t *testing.T) {
 	reasons, ok := explanation["reasons"].([]string)
 	if !ok || len(reasons) < 2 {
 		t.Fatalf("expected explainable reasons: %+v", explanation)
+	}
+}
+
+func TestOfficialChannelMetricsReportsVerificationFunnel(t *testing.T) {
+	old := database.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	t.Cleanup(func() { database.DB = old })
+	if err := db.AutoMigrate(&models.PlanningEvent{}, &models.TripPlan{}, &models.RoomMember{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.TripPlan{ID: "trip-channel", UserID: "user-channel", DestCity: "西安"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []models.PlanningEvent{
+		{UserID: "user-channel", TripID: "trip-channel", EventType: "official_channel_click", Payload: `{"channel":"12306 官方核验"}`},
+		{UserID: "user-channel", TripID: "trip-channel", EventType: "official_channel_returned", Payload: `{"channel":"12306 官方核验"}`},
+		{UserID: "user-channel", TripID: "trip-channel", EventType: "official_channel_verified", Payload: `{"channel":"12306 官方核验"}`},
+		{UserID: "user-channel", TripID: "trip-channel", EventType: "candidate_adopted", Payload: `{"candidate_id":"train-1"}`},
+	} {
+		if err := db.Create(&event).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := gin.New()
+	r.GET("/planning/channels/metrics", func(c *gin.Context) { c.Set("user_id", "user-channel"); OfficialChannelMetricsHandler(c) })
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/planning/channels/metrics?trip_id=trip-channel", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", res.Code, res.Body.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	data := envelope["data"].(map[string]any)
+	funnel := data["funnel"].(map[string]any)
+	if funnel["clicks"] != float64(1) || funnel["returned"] != float64(1) || funnel["verified"] != float64(1) || funnel["adopted"] != float64(1) {
+		t.Fatalf("unexpected channel funnel: %#v", funnel)
+	}
+}
+
+func TestCandidateBehaviorFeaturesRequireMinimumEvidence(t *testing.T) {
+	old := database.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	t.Cleanup(func() { database.DB = old })
+	if err := db.AutoMigrate(&models.PlanningEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := db.Create(&models.PlanningEvent{UserID: "user-gate", TripID: "trip-gate", EventType: "official_channel_verified", Payload: `{"module":"transport","candidate_id":"c"}`}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	features := candidateBehaviorFeatures("user-gate", "trip-gate", "transport")
+	if features["enabled"] != false || features["reason"] != "sample_insufficient" {
+		t.Fatalf("four samples must remain gated: %#v", features)
+	}
+	if err := db.Create(&models.PlanningEvent{UserID: "user-gate", TripID: "trip-gate", EventType: "candidate_adopted", Payload: `{"module":"transport","candidate_id":"c"}`}).Error; err != nil {
+		t.Fatal(err)
+	}
+	features = candidateBehaviorFeatures("user-gate", "trip-gate", "transport")
+	if features["enabled"] != true || features["reason"] != "sample_sufficient" {
+		t.Fatalf("five samples should enable bounded behavior ranking: %#v", features)
 	}
 }

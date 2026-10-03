@@ -14,6 +14,9 @@ func RegisterRoutes(r *gin.Engine) {
 	r.GET("/healthz", HealthzHandler)
 	r.GET("/readyz", ReadyzHandler)
 	r.GET("/ws", handlers.AuthMiddleware(), handlers.HandleWebSocket)
+	// Offline evaluator callback. It uses a dedicated service token instead of
+	// browser sessions and stores only validated aggregate metrics.
+	r.POST("/internal/v1/planning/models/:id/evaluation", handlers.IngestModelEvaluationHandler)
 
 	// ==========================================
 	// 认证接口：注册 & 登录 (前端调用 /api/auth/*)
@@ -113,6 +116,7 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/planning/secondary", handlers.SecondaryItineraryHandler)
 		apiGroup.POST("/planning/replan", handlers.MinimalPerturbationReplanHandler)
 		apiGroup.POST("/planning/replan/confirm", handlers.ConfirmReplanHandler)
+		apiGroup.POST("/planning/replan/reject", handlers.RejectReplanHandler)
 		apiGroup.POST("/planning/replan/validate", handlers.ValidateReplanCandidateHandler)
 		apiGroup.GET("/planning/features", handlers.FeatureSnapshotHandler)
 		apiGroup.POST("/planning/knowledge/graph", handlers.KnowledgeGraphHandler)
@@ -130,6 +134,7 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/planning/emergency/evaluate", handlers.EmergencyEvaluateHandler)
 		apiGroup.POST("/planning/pretrip/tasks", handlers.PreTripTasksHandler)
 		apiGroup.POST("/planning/joint", handlers.JointPlanHandler)
+		apiGroup.POST("/planning/ranking/evaluate", handlers.RankingEvaluationHandler)
 		apiGroup.POST("/planning/orders", handlers.CreateOrderHandler)
 		apiGroup.DELETE("/planning/orders/:id", handlers.CancelOrderHandler)
 		apiGroup.POST("/planning/events", handlers.RecordPlanningEventHandler)
@@ -138,12 +143,21 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/planning/providers/health", handlers.PlanningProviderHealthHandler)
 		apiGroup.GET("/planning/providers/registry", handlers.ProviderRegistryHandler)
 		apiGroup.GET("/planning/providers/probe", handlers.PlanningProviderProbeHandler)
+		apiGroup.GET("/planning/providers/quality", handlers.ProviderQualityHandler)
+		apiGroup.GET("/planning/providers/quality/trend", handlers.ProviderQualityTrendHandler)
+		apiGroup.GET("/planning/providers/quality/alerts", handlers.ProviderQualityAlertStateHandler)
+		apiGroup.GET("/planning/providers/quality/alerts/delivery", handlers.ProviderQualityAlertDeliveryHandler)
 		apiGroup.GET("/planning/providers/tools", handlers.MCPToolsSchemaHandler)
 		apiGroup.POST("/planning/signals", handlers.PlanningSignalsHandler)
 		apiGroup.GET("/planning/models", handlers.ListModelDeploymentsHandler)
 		apiGroup.POST("/planning/models", handlers.RegisterModelDeploymentHandler)
 		apiGroup.POST("/planning/models/:id/evaluate", handlers.EvaluateModelDeploymentHandler)
 		apiGroup.POST("/planning/models/:id/promote", handlers.PromoteModelDeploymentHandler)
+		apiGroup.GET("/planning/models/runtime-health", handlers.ModelRuntimeHealthHandler)
+		apiGroup.GET("/planning/models/evaluation-audit", handlers.ModelEvaluationAuditHandler)
+		apiGroup.GET("/planning/models/evaluation-audit/summary", handlers.ModelEvaluationAuditSummaryHandler)
+		apiGroup.GET("/planning/models/evaluation-audit/compare", handlers.ModelEvaluationAuditCompareHandler)
+		apiGroup.GET("/planning/models/audit-cleanup-health", handlers.ModelAuditCleanupHealthHandler)
 
 		// AI 代理状态同步路由
 		apiGroup.POST("/agent/sync", handlers.AgentSyncHandler)

@@ -59,7 +59,7 @@ func JourneyStateHandler(c *gin.Context) {
 			proposalID := strings.TrimSpace(fmt.Sprint(payload["proposal_id"]))
 			if proposalID != "" && status != "expired" {
 				var lifecycle []models.PlanningEvent
-				_ = database.DB.Where("user_id = ? AND trip_id = ? AND event_type IN ?", userID, tripID, []string{"replan_proposal_accepted", "replan_proposal_rejected", "replan_applied"}).Order("created_at desc").Find(&lifecycle).Error
+				_ = database.DB.Where("user_id = ? AND trip_id = ? AND event_type IN ?", userID, tripID, []string{"replan_proposal_accepted", "replan_proposal_rejected", "replan_proposal_expired", "replan_applied"}).Order("created_at desc").Find(&lifecycle).Error
 				for _, event := range lifecycle {
 					var eventPayload map[string]any
 					if json.Unmarshal([]byte(event.Payload), &eventPayload) == nil && strings.TrimSpace(fmt.Sprint(eventPayload["proposal_id"])) == proposalID {
@@ -68,6 +68,8 @@ func JourneyStateHandler(c *gin.Context) {
 							status = "accepted"
 						case "replan_proposal_rejected":
 							status = "rejected"
+						case "replan_proposal_expired":
+							status = "expired"
 						case "replan_applied":
 							status = "applied"
 						}

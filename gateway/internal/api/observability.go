@@ -17,6 +17,7 @@ import (
 
 	"gateway/internal/database"
 	"gateway/internal/metrics"
+	"gateway/internal/push"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -197,6 +198,7 @@ func HealthzHandler(c *gin.Context) {
 // and distributed rate limits; in local development it remains optional.
 func ReadyzHandler(c *gin.Context) {
 	checks := map[string]string{}
+	warnings := map[string]string{}
 	ready := true
 	if database.DB == nil {
 		checks["database"] = "unavailable"
@@ -234,9 +236,35 @@ func ReadyzHandler(c *gin.Context) {
 		}
 	}
 
+	// External Web Push is opt-in. Report missing FCM configuration explicitly
+	// so operators do not mistake an enabled-but-nonfunctional worker for a
+	// healthy notification path. Staging dry-run does not need credentials.
+	workerEnabled := strings.EqualFold(strings.TrimSpace(os.Getenv("PROVIDER_QUALITY_WEB_PUSH_WORKER_ENABLED")), "true")
+	dryRun := strings.EqualFold(strings.TrimSpace(os.Getenv("PROVIDER_QUALITY_WEB_PUSH_DRY_RUN")), "true") && (env == "staging" || env == "test")
+	switch {
+	case !workerEnabled:
+		checks["provider_quality_web_push"] = "disabled"
+	case dryRun:
+		checks["provider_quality_web_push"] = "dry_run"
+	default:
+		if _, err := push.NewSenderFromEnv(); err != nil {
+			checks["provider_quality_web_push"] = "warning"
+			warnings["provider_quality_web_push"] = "worker enabled but FCM configuration is unavailable"
+			if env == "production" || env == "prod" {
+				ready = false
+			}
+		} else {
+			checks["provider_quality_web_push"] = "configured"
+		}
+	}
+
 	status := http.StatusOK
 	if !ready {
 		status = http.StatusServiceUnavailable
 	}
-	c.JSON(status, gin.H{"status": map[bool]string{true: "ready", false: "not_ready"}[ready], "checks": checks})
+	response := gin.H{"status": map[bool]string{true: "ready", false: "not_ready"}[ready], "checks": checks}
+	if len(warnings) > 0 {
+		response["warnings"] = warnings
+	}
+	c.JSON(status, response)
 }

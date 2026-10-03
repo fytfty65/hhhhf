@@ -51,6 +51,10 @@ func main() {
 	if err := database.InitDB(); err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
+	auditCleanupCancel := handlers.StartModelAuditCleanupLoop(context.Background())
+	defer auditCleanupCancel()
+	qualityPushCancel := handlers.StartProviderQualityWebPushLoop(context.Background())
+	defer qualityPushCancel()
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("DB_AUTO_BACKUP")), "true") {
 		if path, err := database.Backup(""); err != nil {
 			log.Printf("数据库自动备份失败: %v", err)

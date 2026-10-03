@@ -286,7 +286,7 @@ async function reachDecision(page: Page) {
   await page.getByText('进入共识沙盘').click();
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
   await page.locator('textarea').first().fill('带孩子去西安 3 天，预算 1200，必须住得下也要每天有正餐');
-  await page.getByText('锁定意图并开始推演').click();
+  await page.getByText('生成行程方案').click();
   await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 20_000 });
 }
 
@@ -403,7 +403,9 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // 滚不到（1440×900 实测：header 1210px、正文 clientHeight 0、文档不可滚）。
     // 现在面板在滚动区里：这里直接找它**真正所在的可滚动祖先**，把它 scrollIntoView 到
     // 视口中央，再验证「确实滚进来了」——如果容器不可滚（旧 bug），这段就会留在视口外。
-    const layout = await page.evaluate(() => {
+    // 「行程核对面板」在证据层、「行程正文」在主方案层，两者已不再同屏，
+    // 因此分层各自验证，而不是一次性在文档里同时找两个元素。
+    const probeLayout = async (which: 'governance' | 'day'): Promise<any> => page.evaluate((target) => {
       const scrollerOf = (el: HTMLElement) => {
         let node: HTMLElement | null = el.parentElement;
         while (node && node !== document.body) {
@@ -430,15 +432,16 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
         };
       };
       const all = Array.from(document.querySelectorAll<HTMLElement>('*'));
-      const lastGovernanceSection = all.filter((el) => el.textContent === '还需要你留意').pop() || null;
-      const dayHeading = all.find((el) => /^第 \d+ 天 行程安排$/.test(el.textContent || '')) || null;
-      return { governance: probe(lastGovernanceSection), day: probe(dayHeading) };
-    });
+      const el = target === 'governance'
+        ? (all.filter((node) => node.textContent === '还需要你留意').pop() || null)
+        : (all.find((node) => /^第 \d+ 天 行程安排$/.test(node.textContent || '')) || null);
+      return probe(el);
+    }, which);
 
-    expect(layout.governance.inView, `面板最后一段必须能滚进视口：${JSON.stringify(layout.governance)}`).toBe(true);
-    expect(layout.governance.clientHeight || 0, '滚动区必须有实际高度').toBeGreaterThan(200);
-    expect(layout.day.found, '行程正文（第 N 天 行程安排）必须存在').toBe(true);
-    expect(layout.day.inView, `行程正文必须能滚进视口：${JSON.stringify(layout.day)}`).toBe(true);
+    // 证据层：面板最后一段必须能滚进视口，且它所在滚动区必须有实际高度
+    const governanceLayout = await probeLayout('governance');
+    expect(governanceLayout.inView, `面板最后一段必须能滚进视口：${JSON.stringify(governanceLayout)}`).toBe(true);
+    expect(governanceLayout.clientHeight || 0, '滚动区必须有实际高度').toBeGreaterThan(200);
 
     // 回到面板顶部再截图：基线要稳定，不能受上一段滚动位置影响
     await panel.evaluate((el) => el.scrollIntoView({ block: 'start' }));
@@ -446,5 +449,13 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // 截图时禁用动画：页面里的 framer-motion / 3D 画布会一直动，
     // 不禁用的话 Playwright 会等"字体加载 + 动画稳定"直到超时。
     await page.screenshot({ path: '../work/plan-governance.png', animations: 'disabled', fullPage: false });
+
+    // 主方案层：行程正文（第 N 天 行程安排）必须存在并能滚进视口。
+    // 面板迁到证据层后，正文只属于主方案层 —— 必须切回 plan 层再验，
+    // 否则文档里根本没有这个标题（旧断言就是因此失效）。
+    await page.getByTestId('workspace-layer-plan').click();
+    const dayLayout = await probeLayout('day');
+    expect(dayLayout.found, '行程正文（第 N 天 行程安排）必须存在').toBe(true);
+    expect(dayLayout.inView, `行程正文必须能滚进视口：${JSON.stringify(dayLayout)}`).toBe(true);
   });
 });

@@ -46,16 +46,79 @@ var (
 	ErrNoTokens              = errors.New("该用户没有已注册的推送设备")
 )
 
+// ConfigPreflight is a credential-free summary of FCM configuration health.
+// It deliberately contains booleans and bounded reason codes only; callers
+// must never expose the service-account path, private key, project id, or
+// parser error text in an HTTP response or metric label.
+type ConfigPreflight struct {
+	Environment              string `json:"environment"`
+	EnvironmentAllowed       bool   `json:"environment_allowed"`
+	ServiceAccountConfigured bool   `json:"service_account_configured"`
+	ServiceAccountReadable   bool   `json:"service_account_readable"`
+	ServiceAccountParsed     bool   `json:"service_account_parsed"`
+	ProjectIDConfigured      bool   `json:"project_id_configured"`
+	Status                   string `json:"status"`
+	Reason                   string `json:"reason,omitempty"`
+}
+
+// PreflightFromEnv validates only local configuration. It does not exchange
+// an OAuth token and never calls an external endpoint.
+func PreflightFromEnv(appEnv string) ConfigPreflight {
+	env := strings.ToLower(strings.TrimSpace(appEnv))
+	result := ConfigPreflight{Environment: env, Status: "blocked"}
+	result.EnvironmentAllowed = env == "staging" || env == "test"
+	if !result.EnvironmentAllowed {
+		result.Reason = "environment_not_staging_or_test"
+		return result
+	}
+	path := strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_JSON_PATH"))
+	result.ServiceAccountConfigured = path != ""
+	if path == "" {
+		result.Reason = "service_account_path_missing"
+		return result
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		result.Reason = "service_account_file_unavailable"
+		return result
+	}
+	result.ServiceAccountReadable = true
+	account, err := LoadServiceAccount(path)
+	if err != nil || account == nil {
+		result.Reason = "service_account_invalid"
+		return result
+	}
+	// Validate the PEM/RSA material locally without exchanging a token or
+	// contacting Google. signJWT only performs parsing and an in-memory
+	// signature, and its output is deliberately discarded.
+	if _, err := signJWT(account, account.TokenURI, time.Now().UTC(), time.Minute); err != nil {
+		result.Reason = "service_account_invalid"
+		return result
+	}
+	result.ServiceAccountParsed = true
+	projectID := strings.TrimSpace(os.Getenv("FCM_PROJECT_ID"))
+	if projectID == "" {
+		projectID = strings.TrimSpace(account.ProjectID)
+	}
+	result.ProjectIDConfigured = projectID != ""
+	if !result.ProjectIDConfigured {
+		result.Reason = "project_id_missing"
+		return result
+	}
+	result.Status = "ready"
+	return result
+}
+
 // ---------------------------------------------------------------------------
 // 设备 token 存储（SQLite）
 // ---------------------------------------------------------------------------
 
 // DeviceToken 一条设备推送 token（同一用户可有多台设备）。
 type DeviceToken struct {
-	ID        uint      `gorm:"primaryKey"`
-	UserID    string    `gorm:"index;size:64;not null"`
-	Token     string    `gorm:"uniqueIndex;size:512;not null"`
-	Platform  string    `gorm:"size:32"`
+	ID        uint   `gorm:"primaryKey"`
+	UserID    string `gorm:"index;size:64;not null"`
+	Token     string `gorm:"uniqueIndex;size:512;not null"`
+	Platform  string `gorm:"size:32"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -202,10 +265,10 @@ type Message struct {
 
 // Sender 负责取 access token 并投递到 FCM HTTP v1。
 type Sender struct {
-	projectID   string
-	account     *ServiceAccount
-	client      *http.Client
-	fcmBaseURL  string
+	projectID  string
+	account    *ServiceAccount
+	client     *http.Client
+	fcmBaseURL string
 
 	mu          sync.Mutex
 	accessToken string
@@ -219,6 +282,9 @@ func NewSenderFromEnv() (*Sender, error) {
 	account, err := LoadServiceAccount(os.Getenv("FCM_SERVICE_ACCOUNT_JSON_PATH"))
 	if err != nil {
 		return nil, err
+	}
+	if _, err := signJWT(account, account.TokenURI, time.Now().UTC(), time.Minute); err != nil {
+		return nil, errors.New("FCM 服务账号私钥无效")
 	}
 	projectID := strings.TrimSpace(os.Getenv("FCM_PROJECT_ID"))
 	if projectID == "" {
@@ -309,8 +375,10 @@ func (s *Sender) SendToUser(ctx context.Context, userID string, message Message)
 			result.LastError = err.Error()
 		case status == http.StatusOK:
 			result.Sent++
-		case status == http.StatusNotFound || status == http.StatusBadRequest:
-			// UNREGISTERED / INVALID_ARGUMENT：token 已失效 → 清掉，别一直重试
+		case isInvalidTokenResponse(status, body):
+			// FCM UNREGISTERED (通常 404) 或明确的 token INVALID_ARGUMENT：
+			// token 已失效 → 清掉，别一直重试。普通 400 不能直接删，
+			// 因为它也可能代表 payload 配置错误而不是设备授权失效。
 			result.Invalid = append(result.Invalid, token)
 			_ = UnregisterDevice("", token)
 		default:
@@ -319,6 +387,17 @@ func (s *Sender) SendToUser(ctx context.Context, userID string, message Message)
 		}
 	}
 	return result, nil
+}
+
+func isInvalidTokenResponse(status int, body string) bool {
+	if status == http.StatusNotFound {
+		return true
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	upper := strings.ToUpper(body)
+	return strings.Contains(upper, "UNREGISTERED") || strings.Contains(upper, "INVALID_ARGUMENT")
 }
 
 func (s *Sender) sendOne(ctx context.Context, accessToken, deviceToken string, message Message) (int, string, error) {

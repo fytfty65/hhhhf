@@ -36,8 +36,8 @@ export default function RealPoiImage({ photoUrl, poiName, className = '', type }
     const typeLabel = type || '目的地';
     const typeColor =
       type?.includes('餐') || type?.includes('食') ? 'from-orange-500 to-rose-500'
-      : type?.includes('酒店') || type?.includes('住宿') ? 'from-indigo-500 to-purple-600'
-      : 'from-emerald-500 to-teal-600';
+      : type?.includes('酒店') || type?.includes('住宿') ? 'from-orange-400 to-orange-600'
+      : 'from-stone-400 to-stone-500';
     return (
       <div className={`relative overflow-hidden rounded-xl ${className}`}>
         <div className={`absolute inset-0 bg-gradient-to-br ${typeColor}`} />

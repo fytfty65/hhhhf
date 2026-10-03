@@ -95,7 +95,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               <OmniLogo className="w-11 h-11" />
               <div>
                 <h1 className="text-2xl font-black text-slate-900 tracking-tight">OmniRoute</h1>
-                <p className="text-[10px] text-slate-500 font-extrabold tracking-widest uppercase mt-0.5">多智能体协同旅行中枢</p>
+                <p className="text-[10px] text-slate-500 font-semibold tracking-wide mt-0.5">从想法到可执行行程</p>
               </div>
             </div>
 
@@ -103,7 +103,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               让每一次同行，<br/>都达成最优共识。
             </h2>
             <p className="text-xs sm:text-sm text-slate-500 font-medium leading-relaxed mb-8">
-              依托底层多智能体博弈黑板与高维拓扑算法，为您与好友消除行程分歧，兼顾寻味、视觉大片与极致性价比。
+              把目的地、时间、预算和同行人的要求放在一起，生成一份可以继续修改和执行的行程。
             </p>
 
             <div className="space-y-3.5">
@@ -112,8 +112,8 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
                   <BrainCircuit className="w-4 h-4" />
                 </div>
                 <div>
-                  <h4 className="text-xs font-bold text-slate-800">帕累托多智能体博弈</h4>
-                  <p className="text-[11px] text-slate-400 font-medium">全员画像统一输入，自主寻优无冲突路线</p>
+                  <h4 className="text-xs font-bold text-slate-800">多人偏好一起考虑</h4>
+                  <p className="text-[11px] text-slate-400 font-medium">把节奏、预算和必去地点放进同一份方案</p>
                 </div>
               </div>
 
@@ -122,8 +122,8 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
                   <Users className="w-4 h-4" />
                 </div>
                 <div>
-                  <h4 className="text-xs font-bold text-slate-800">跨端真实房间协同</h4>
-                  <p className="text-[11px] text-slate-400 font-medium">输入专属房间码，多设备同频实时推演</p>
+                  <h4 className="text-xs font-bold text-slate-800">同行者实时协作</h4>
+                  <p className="text-[11px] text-slate-400 font-medium">用房间码加入，在同一处查看和调整行程</p>
                 </div>
               </div>
             </div>

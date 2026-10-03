@@ -355,8 +355,8 @@ func DestinationRecommendHandler(c *gin.Context) {
 		return
 	}
 	if options, source, available := fetchPlanningProvider(c.Request.Context(), "DESTINATION", ctx); available {
-		options = planningService.RankCandidates(options, ctx.Preferences)
-		options = annotateCandidates(options, "destination")
+		options = planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "destination"))
+		options = annotatePlanningCandidates(options, "destination", ctx)
 		planningData(c, gin.H{"context": ctx, "candidates": options, "ranking": []string{"季节匹配", "兴趣匹配", "约束可行性", "实时风险"}, "source": source, "fallback": false})
 		return
 	}
@@ -372,7 +372,7 @@ func DestinationRecommendHandler(c *gin.Context) {
 	for index, name := range names {
 		candidates = append(candidates, contracts.Candidate{ID: uuid.NewString(), Name: name, Score: 0.72 - float64(index)*0.06, Tags: []string{interest}, Reasons: []string{"基于当前目的地和用户偏好生成", "等待季节与实时供应商信号校正"}, Constraints: []string{"需在日期、预算和实时风险校验后确认"}, Source: candidateSource("omniroute-destination-ranker", true)})
 	}
-	candidates = annotateCandidates(candidates, "destination")
+	candidates = annotatePlanningCandidates(candidates, "destination", ctx)
 	planningData(c, gin.H{"context": ctx, "candidates": candidates, "ranking": []string{"季节匹配", "兴趣匹配", "约束可行性", "实时风险"}, "fallback": true})
 }
 
@@ -413,8 +413,8 @@ func TransportOptionsHandler(c *gin.Context) {
 		return
 	}
 	if options, source, ok := fetchPlanningProvider(c.Request.Context(), "TRANSPORT", ctx); ok {
-		options = planningService.RankCandidates(options, ctx.Preferences)
-		options = annotateCandidates(options, "transport")
+		options = planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "transport"))
+		options = annotatePlanningCandidates(options, "transport", ctx)
 		planningData(c, gin.H{"context": ctx, "options": options, "optimization": gin.H{"objective": "time_cost_carbon", "fallback": false}, "source": source})
 		return
 	}
@@ -430,8 +430,8 @@ func TransportOptionsHandler(c *gin.Context) {
 	if pref, exists := ctx.Preferences["low_carbon"]; exists && pref == true {
 		sort.SliceStable(options, func(i, j int) bool { return options[i].Tags[0] == "低碳" })
 	}
-	options = planningService.RankCandidates(options, ctx.Preferences)
-	options = annotateCandidates(options, "transport")
+	options = planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "transport"))
+	options = annotatePlanningCandidates(options, "transport", ctx)
 	planningData(c, gin.H{"context": ctx, "options": options, "optimization": gin.H{"objective": "time_cost_carbon", "dimensions": []string{"fare", "duration", "transfer_buffer", "carbon_kg", "delay_risk"}, "fallback": true}})
 }
 
@@ -441,8 +441,8 @@ func LodgingOptionsHandler(c *gin.Context) {
 		return
 	}
 	if options, source, ok := fetchPlanningProvider(c.Request.Context(), "LODGING", ctx); ok {
-		options = planningService.RankCandidates(options, ctx.Preferences)
-		options = annotateCandidates(options, "lodging")
+		options = planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "lodging"))
+		options = annotatePlanningCandidates(options, "lodging", ctx)
 		planningData(c, gin.H{"context": ctx, "options": options, "ranking": []string{"通勤成本", "价格", "安全", "用户偏好"}, "source": source})
 		return
 	}
@@ -451,8 +451,8 @@ func LodgingOptionsHandler(c *gin.Context) {
 		{ID: uuid.NewString(), Name: ctx.Destination + "核心景区附近精品酒店", Score: 0.90, Duration: 12, Tags: []string{"步行友好", "安静"}, Reasons: []string{"平均通勤短", "适合连续多日行程"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"area": "景区周边", "booking_url": hotelURL, "booking_label": "打开高德核验房价"}, priceEvidence("unknown", "房价待核验", hotelURL, "未提供"))},
 		{ID: uuid.NewString(), Name: ctx.Destination + "交通枢纽商圈酒店", Score: 0.84, Duration: 20, Tags: []string{"性价比", "换乘方便"}, Reasons: []string{"公共交通覆盖好", "预算压力较低"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"area": "交通枢纽", "booking_url": hotelURL, "booking_label": "打开高德核验房价"}, priceEvidence("unknown", "房价待核验", hotelURL, "未提供"))},
 	}
-	options = planningService.RankCandidates(options, ctx.Preferences)
-	options = annotateCandidates(options, "lodging")
+	options = planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "lodging"))
+	options = annotatePlanningCandidates(options, "lodging", ctx)
 	planningData(c, gin.H{"context": ctx, "options": options, "ranking": []string{"每日通勤成本", "价格", "安全", "用户偏好"}, "ranking_service": "planning-ranker-v1"})
 }
 
@@ -462,8 +462,8 @@ func DiningOptionsHandler(c *gin.Context) {
 		return
 	}
 	if options, source, ok := fetchPlanningProvider(c.Request.Context(), "DINING", ctx); ok {
-		options = planningService.RankCandidates(options, ctx.Preferences)
-		options = annotateCandidates(options, "dining")
+		options = planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "dining"))
+		options = annotatePlanningCandidates(options, "dining", ctx)
 		planningData(c, gin.H{"context": ctx, "options": options, "ranking": []string{"营业时间", "距离", "口味偏好", "人均预算"}, "source": source})
 		return
 	}
@@ -473,8 +473,8 @@ func DiningOptionsHandler(c *gin.Context) {
 		{ID: uuid.NewString(), Name: ctx.Destination + "错峰早午餐路线", Score: 0.87, Duration: 50, Tags: []string{"错峰", "轻食"}, Reasons: []string{"避开晚餐排队", "适合紧凑行程"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"booking_url": diningURL, "booking_label": "打开高德核验店铺"}, priceEvidence("unknown", "人均待核验", diningURL, "未提供"))},
 		{ID: uuid.NewString(), Name: ctx.Destination + "夜间特色街区", Score: 0.83, Duration: 100, Tags: []string{"夜游", "美食"}, Reasons: []string{"与夜间路线衔接", "可分散客流"}, Source: candidateSource("omniroute-estimator", true), Extra: mergeMaps(map[string]any{"booking_url": diningURL, "booking_label": "打开高德核验店铺"}, priceEvidence("unknown", "人均待核验", diningURL, "未提供"))},
 	}
-	options = planningService.RankCandidates(options, ctx.Preferences)
-	options = annotateCandidates(options, "dining")
+	options = planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "dining"))
+	options = annotatePlanningCandidates(options, "dining", ctx)
 	planningData(c, gin.H{"context": ctx, "options": options, "ranking": []string{"营业时间", "距离", "口味偏好", "人均预算"}, "ranking_service": "planning-ranker-v1"})
 }
 
@@ -650,6 +650,10 @@ func JointPlanHandler(c *gin.Context) {
 			if err := tx.Create(&models.PlanningEvent{UserID: ctx.UserID, TripID: ctx.TripID, PlanID: run.ID, EventType: "model_shadow_executed", Payload: string(shadowPayload)}).Error; err != nil {
 				return err
 			}
+			shadowVersion := strings.TrimSpace(fmt.Sprint(shadow["version"]))
+			if shadowVersion != "" && shadowVersion != "<nil>" {
+				recordModelAuditEventTx(tx, "shadow", shadowVersion, "executed", "影子模型已执行", 1, 0, time.Now().UTC())
+			}
 		}
 		return nil
 	})
@@ -799,7 +803,7 @@ func SecondaryItineraryHandler(c *gin.Context) {
 		req.Requirements = "避开拥挤路线，优先特色店铺与短距离步行"
 	}
 	if options, source, available := fetchPlanningProvider(c.Request.Context(), "SCENIC", ctx); available {
-		options = annotateCandidates(planningService.RankCandidates(options, ctx.Preferences), "scenic_micro")
+		options = annotatePlanningCandidates(planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, "scenic_micro")), "scenic_micro", ctx)
 		route := make([]gin.H, 0, len(options))
 		for _, option := range options {
 			crowd := "未知"
@@ -913,13 +917,17 @@ func MinimalPerturbationReplanHandler(c *gin.Context) {
 	replacementSource := candidateSource("omniroute-minimal-replan", true)
 	if changed > 0 {
 		if options, source, available := fetchPlanningProvider(c.Request.Context(), kind, ctx); available {
-			replacements = annotateCandidates(planningService.RankCandidates(options, ctx.Preferences), strings.ToLower(kind))
+			replacements = annotatePlanningCandidates(planningService.RankCandidatesWithBehavior(options, ctx.Preferences, candidateBehaviorFeatures(ctx.UserID, ctx.TripID, strings.ToLower(kind))), strings.ToLower(kind), ctx)
 			replacementSource = source
 		}
 	}
 	replacementStatus := "awaiting_provider"
 	if len(replacements) > 0 {
 		replacementStatus = "provider_candidates_require_constraint_validation"
+	}
+	failureReasons := []string{}
+	if changed > 0 && len(replacements) == 0 {
+		failureReasons = append(failureReasons, "REPLAN_CANDIDATES_INSUFFICIENT")
 	}
 	minimum, variance, stddev, maxRegret := fairnessStats(req.MemberUtilities)
 	fairnessThreshold := envFloat("PLANNING_FAIRNESS_MAX_STD", 0.15)
@@ -931,8 +939,12 @@ func MinimalPerturbationReplanHandler(c *gin.Context) {
 			}
 			return "within_threshold"
 		}()}
+		if stddev > fairnessThreshold {
+			failureReasons = append(failureReasons, "REPLAN_FAIRNESS_THRESHOLD_EXCEEDED")
+		}
 	}
-	planningData(c, gin.H{"context": ctx, "route": req.ExistingRoute, "preserved_nodes": len(req.ExistingRoute) - changed, "changed_nodes": changed, "perturbation_ratio": roundRatio(perturbation), "changed_signals": req.ChangedSignals, "replacement_kind": strings.ToLower(kind), "replacement_candidates": replacements, "replacement_status": replacementStatus, "pareto": replanParetoAudit(replacements), "fairness": fairness, "next_action": "仅替换 changed_nodes，并对候选执行硬约束、Pareto 与公平性裁决", "source": replacementSource})
+	paretoAudit := replanParetoAudit(replacements)
+	planningData(c, gin.H{"context": ctx, "route": req.ExistingRoute, "preserved_nodes": len(req.ExistingRoute) - changed, "changed_nodes": changed, "perturbation_ratio": roundRatio(perturbation), "changed_signals": req.ChangedSignals, "replacement_kind": strings.ToLower(kind), "replacement_candidates": replacements, "candidate_count": len(replacements), "replacement_status": replacementStatus, "provider_available": replacementSource.Provider != "omniroute-minimal-replan", "failure_reasons": failureReasons, "pareto": paretoAudit, "fairness": fairness, "next_action": "仅替换 changed_nodes，并对候选执行硬约束、Pareto 与公平性裁决", "source": replacementSource})
 }
 
 // ValidateReplanCandidateHandler is the final, provider-agnostic hard

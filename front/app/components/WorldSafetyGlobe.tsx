@@ -247,7 +247,7 @@ export default function WorldSafetyGlobe({
   const [globeKey, setGlobeKey] = useState(0);
   const [webglLost, setWebglLost] = useState(false);
   const compactViewport = dimensions.width < 640;
-  const globeAtmosphereColor = mode === 'dark' ? '#7dd3fc' : '#93c5fd';
+  const globeAtmosphereColor = mode === 'dark' ? '#7dd3fc' : '#d9c8b4';
 
   // P1: 轻量刷新 —— 用后端实时风控端点刷新 is_estimated 快照，避免用户停留在过期快照上
   const [liveSafety, setLiveSafety] = useState<SafetyInfo | undefined>(safetyInfo);
@@ -567,7 +567,7 @@ export default function WorldSafetyGlobe({
       arcsData.push({
         startLat: safeRoutePoints[i].lnglat[1], startLng: safeRoutePoints[i].lnglat[0],
         endLat: safeRoutePoints[i + 1].lnglat[1], endLng: safeRoutePoints[i + 1].lnglat[0],
-        color: [COLORS.accent, '#818cf8'], stroke: 0.22,
+        color: [COLORS.origin, COLORS.accent], stroke: 0.22,
       });
     }
   }
@@ -652,52 +652,33 @@ export default function WorldSafetyGlobe({
   const signalSources = liveSafety?.signal_sources || {};
   const availableSignalCount = Object.values(signalSources).filter((signal) => signal?.available).length;
 
-  // 底部滚动条
-  const tickerItems = [
-    { icon: ShieldCheck, text: `${targetCity} CII: ${hasRealCii ? ciiScore.toFixed(1) : 'N/A'}`, color: profile.color },
-    { icon: CloudRain, text: `天气: ${weatherCondition}`, color: COLORS.accent },
-    { icon: Activity, text: `路况: ${trafficSummary}`, color: COLORS.accent },
-    { icon: Globe2, text: `全球情报: ${globalRegionCount} 区域 / ${dynamicGlobalCities.length} 城市`, color: COLORS.purple },
-    { icon: Siren, text: `活跃告警: ${alertCount}`, color: COLORS.danger },
-    { icon: DollarSign, text: `总预算: ¥${totalCost}`, color: '#fbbf24' },
-    { icon: Clock, text: `刷新: ${currentTime.toLocaleTimeString('zh-CN')}`, color: COLORS.cyan },
-  ];
-
   if (typeof document === 'undefined') return null;
 
   return createPortal(
-    <div ref={containerRef} role="dialog" aria-modal="true" aria-label="3D 态势感知雷达" className="radar-modal-root fixed inset-0 z-[2147483000] overflow-hidden pointer-events-auto" style={{ background: bg }}>
-      {/* 星空背景 */}
-      <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute inset-0" style={{
-          background: 'radial-gradient(1px 1px at 15% 25%, rgba(255,255,255,0.6), transparent), radial-gradient(1px 1px at 55% 65%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 75% 15%, rgba(255,255,255,0.7), transparent), radial-gradient(2px 2px at 35% 75%, rgba(180,200,255,0.4), transparent), radial-gradient(1px 1px at 85% 45%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 25% 85%, rgba(255,255,255,0.6), transparent), radial-gradient(1px 1px at 65% 5%, rgba(200,220,255,0.5), transparent), radial-gradient(2px 2px at 45% 55%, rgba(255,255,255,0.3), transparent), radial-gradient(1px 1px at 95% 80%, rgba(255,255,255,0.4), transparent), radial-gradient(1px 1px at 5% 55%, rgba(255,255,255,0.5), transparent)'
-        }} />
-        <div className="absolute inset-0 opacity-15" style={{ background: 'radial-gradient(ellipse 70% 18% at 65% 35%, rgba(56,189,248,0.15), transparent), radial-gradient(ellipse 50% 12% at 25% 65%, rgba(139,92,246,0.1), transparent)' }} />
-      </div>
-      <div className="absolute inset-0 opacity-[0.03]" style={{ backgroundImage: 'linear-gradient(rgba(56,189,248,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(56,189,248,0.5) 1px, transparent 1px)', backgroundSize: '60px 60px' }} />
-
-      {/* 扫描线 / 旋转雷达扫掠 / 暗角 */}
-      <div className="absolute inset-0 pointer-events-none radar-scanlines opacity-70" />
-      <div className="absolute pointer-events-none radar-sweep" style={{ position: 'absolute', top: '-25%', left: '-25%', width: '150%', height: '150%' }} />
-      <div className="absolute inset-0 pointer-events-none radar-vignette" />
+    <div ref={containerRef} role="dialog" aria-modal="true" aria-label="全球风险地图" className="radar-modal-root fixed inset-0 z-[2147483000] overflow-hidden pointer-events-auto" style={{ background: bg }}>
+      {/* 轻量背景：把数据可读性放在装饰之前。 */}
+      <div className="absolute inset-0 pointer-events-none" style={{
+        background: mode === 'dark'
+          ? 'linear-gradient(180deg, rgba(20,16,12,0.4), transparent 44%), radial-gradient(ellipse 70% 55% at 18% 0%, rgba(234,88,12,0.07), transparent 70%)'
+          : 'linear-gradient(180deg, rgba(255,253,248,0.72), transparent 44%), radial-gradient(ellipse 70% 55% at 18% 0%, rgba(194,65,12,0.06), transparent 70%)',
+      }} />
 
       {/* ========== 顶部HUD ========== */}
       <div className="radar-hud-top absolute top-0 left-0 right-0 z-50 px-4 sm:px-6 py-4 flex items-start sm:items-center justify-between gap-3 flex-wrap sm:flex-nowrap pointer-events-none">
         <div className="radar-hud-brand flex items-center gap-4 pointer-events-auto min-w-0">
           <div className="relative">
-            <div className="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center">
-              <Radar className="w-5 h-5 text-sky-600 dark:text-sky-400" />
+            <div className="w-10 h-10 rounded-xl bg-orange-600/10 border border-orange-600/30 flex items-center justify-center">
+              <Radar className="w-5 h-5 text-orange-700 dark:text-orange-400" />
             </div>
-            <div className="absolute inset-0 w-10 h-10 rounded-xl bg-sky-400/20 animate-ping" />
           </div>
           <div>
             <div className="radar-hud-title flex items-center gap-3 min-w-0">
-              <h2 className="text-slate-900 dark:text-white font-black text-xl tracking-[0.25em]" style={{ fontFamily: RADAR_FONT.display, textShadow: '0 0 20px rgba(56,189,248,0.45)' }}>OMNIROUTE</h2>
-              <span className="radar-hud-badge text-xs font-bold px-2 py-0.5 rounded border border-sky-500/30 text-sky-700 dark:text-sky-300 bg-sky-500/10 tracking-wider">3D 态势感知雷达</span>
+              <h2 className="text-slate-900 dark:text-white font-bold text-xl tracking-tight">全球风险地图</h2>
+              <span className="radar-hud-badge text-xs font-medium px-2 py-0.5 rounded-full border border-orange-600/30 text-orange-700 dark:text-orange-300 bg-orange-600/10">实时信号</span>
             </div>
             <div className="radar-hud-meta flex items-center gap-3 mt-1 min-w-0">
               <p className="text-[13px] text-slate-700 dark:text-slate-300 tracking-wide" style={{ fontFamily: RADAR_FONT.data }}>
-                <span className="truncate inline-block max-w-[12rem] align-bottom">{targetCity}</span> <span className="text-slate-500">·</span> {safeRoutePoints.length} 节点 <span className="text-slate-500">·</span> CII <span className="text-cyan-700 dark:text-cyan-300">{hasRealCii ? ciiScore.toFixed(1) : '---'}</span>
+                <span className="truncate inline-block max-w-[12rem] align-bottom">{targetCity}</span> <span className="text-slate-500">·</span> {safeRoutePoints.length} 节点 <span className="text-slate-500">·</span> CII <span className="text-orange-700 dark:text-orange-300">{hasRealCii ? ciiScore.toFixed(1) : '---'}</span>
               </p>
               <span className={`text-xs font-bold px-1.5 py-0.5 rounded border ${hasRealCii ? profile.bg + ' ' + profile.text + ' border-current/20' : 'bg-slate-100 dark:bg-slate-800/50 text-slate-500 border-slate-300/70 dark:border-white/10'}`}>
                 {hasRealCii ? profile.label : '评估中'}
@@ -707,10 +688,10 @@ export default function WorldSafetyGlobe({
         </div>
 
         <div className="radar-hud-actions flex items-center gap-2 pointer-events-auto">
-          <button onClick={toggleGlobalNetwork} aria-pressed={showGlobalNetwork} aria-label={showGlobalNetwork ? '退出全球情报视图' : '打开全球情报视图'} className={`radar-hud-action h-8 px-2.5 rounded-lg border text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${showGlobalNetwork ? 'bg-purple-500/10 border-purple-400/30 text-purple-700 dark:text-purple-300' : 'bg-slate-900/5 dark:bg-white/5 border-slate-300/70 dark:border-white/10 text-slate-500'}`}>
+          <button onClick={toggleGlobalNetwork} aria-pressed={showGlobalNetwork} aria-label={showGlobalNetwork ? '退出全球情报视图' : '打开全球情报视图'} className={`radar-hud-action h-8 px-2.5 rounded-lg border text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${showGlobalNetwork ? 'bg-orange-600/15 border-orange-500/40 text-orange-700 dark:text-orange-300' : 'bg-slate-900/5 dark:bg-white/5 border-slate-300/70 dark:border-white/10 text-slate-600 dark:text-slate-400 hover:bg-slate-900/10 dark:hover:bg-white/10'}`}>
             <Target className="w-3 h-3 shrink-0" /> <span className="radar-action-label">全球情报</span>
           </button>
-          <button onClick={toggleAutoRotate} aria-pressed={autoRotate} aria-label={autoRotate ? '停止自动巡航' : '开启自动巡航'} className={`radar-hud-action h-8 px-2.5 rounded-lg border text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${autoRotate ? 'bg-sky-500/15 border-sky-400/40 text-sky-700 dark:text-sky-300' : 'bg-slate-900/5 dark:bg-white/5 border-slate-300/70 dark:border-white/10 text-slate-600 dark:text-slate-400 hover:bg-slate-900/10 dark:hover:bg-white/10'}`}>
+          <button onClick={toggleAutoRotate} aria-pressed={autoRotate} aria-label={autoRotate ? '停止自动巡航' : '开启自动巡航'} className={`radar-hud-action h-8 px-2.5 rounded-lg border text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${autoRotate ? 'bg-orange-600/15 border-orange-500/40 text-orange-700 dark:text-orange-300' : 'bg-slate-900/5 dark:bg-white/5 border-slate-300/70 dark:border-white/10 text-slate-600 dark:text-slate-400 hover:bg-slate-900/10 dark:hover:bg-white/10'}`}>
             <RotateCw className={`w-3 h-3 ${autoRotate ? 'animate-spin' : ''}`} style={{ animationDuration: '4s' }} />
             <span className="radar-action-label">{autoRotate ? '巡航' : '手动'}</span>
           </button>
@@ -727,7 +708,7 @@ export default function WorldSafetyGlobe({
         style={panelStyle}
         defaultCollapsed={compactViewport}
         icon={<ShieldCheck className="w-3.5 h-3.5" style={{ color: COLORS.accent }} />}
-        title={<span className="text-[13px] font-bold" style={{ color: COLORS.accent }}>态势风控面板</span>}
+        title={<span className="text-[13px] font-bold" style={{ color: COLORS.accent }}>风险概览</span>}
       >
         <div className="flex border-b border-slate-300/50 dark:border-white/5">
           {([
@@ -735,7 +716,7 @@ export default function WorldSafetyGlobe({
             { key: 'risk', label: '风险维度', icon: AlertTriangle },
             { key: 'route', label: '路线详情', icon: Navigation },
           ] as const).map(tab => (
-            <button key={tab.key} onClick={() => setActiveTab(tab.key)} className={`flex-1 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${activeTab === tab.key ? 'text-sky-700 dark:text-sky-300 border-b-2 border-sky-400 bg-sky-500/5' : 'text-slate-500 hover:text-slate-700 dark:text-slate-300'}`}>
+            <button key={tab.key} onClick={() => setActiveTab(tab.key)} className={`flex-1 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${activeTab === tab.key ? 'text-orange-700 dark:text-orange-300 border-b-2 border-orange-500 bg-orange-600/5' : 'text-slate-500 hover:text-slate-700 dark:text-slate-300'}`}>
               <tab.icon className="w-3 h-3" /> {tab.label}
             </button>
           ))}
@@ -745,7 +726,7 @@ export default function WorldSafetyGlobe({
           {/* P1: 情报同步状态指示（估算值徽标 + 上次同步时间 + 刷新中转圈） */}
           <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-500">
             <span className="flex items-center gap-1.5">
-              <RotateCw className={`w-3 h-3 ${refreshing ? 'animate-spin text-sky-500' : ''}`} />
+              <RotateCw className={`w-3 h-3 ${refreshing ? 'animate-spin text-orange-600' : ''}`} />
               <span>{refreshing ? '正在同步实时情报…' : `本次请求 ${new Date(lastRefreshed).toLocaleTimeString('zh-CN')} · ${requestFreshnessLabel}`}</span>
             </span>
             {liveSafety?.is_estimated && (
@@ -786,11 +767,11 @@ export default function WorldSafetyGlobe({
                   <span>数据边界</span><span>{availableSignalCount}/3 信号源 · 快照 {snapshotFreshnessLabel}</span>
                 </div>
                 <div className="grid grid-cols-3 gap-1.5">
-                  <button type="button" onClick={() => setShowRouteLayer((value) => !value)} aria-pressed={showRouteLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showRouteLayer ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>路线 {showRouteLayer ? '开' : '关'}</button>
+                  <button type="button" onClick={() => setShowRouteLayer((value) => !value)} aria-pressed={showRouteLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showRouteLayer ? 'bg-orange-600/15 text-orange-700 dark:text-orange-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>路线 {showRouteLayer ? '开' : '关'}</button>
                   <button type="button" onClick={() => setShowContextLayer((value) => !value)} aria-pressed={showContextLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showContextLayer ? 'bg-slate-300/70 text-slate-700 dark:bg-white/10 dark:text-slate-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>周边 {showContextLayer ? '开' : '关'}</button>
                   <button type="button" onClick={() => setShowSignalLayer((value) => !value)} aria-pressed={showSignalLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showSignalLayer ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>风险 {showSignalLayer ? '开' : '关'}</button>
                 </div>
-                <div className="mt-1.5 grid grid-cols-2 gap-1.5"><button type="button" onClick={toggleGlobalNetwork} aria-pressed={showGlobalNetwork} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showGlobalNetwork ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>全球城市 {showGlobalNetwork ? '开' : '关'}</button><span className="rounded bg-slate-200/60 px-1.5 py-1 text-center text-[10px] text-slate-500">信号点 {signalPoints.length}</span></div>
+                <div className="mt-1.5 grid grid-cols-2 gap-1.5"><button type="button" onClick={toggleGlobalNetwork} aria-pressed={showGlobalNetwork} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showGlobalNetwork ? 'bg-orange-600/15 text-orange-700 dark:text-orange-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>全球城市 {showGlobalNetwork ? '开' : '关'}</button><span className="rounded bg-slate-200/60 px-1.5 py-1 text-center text-[10px] text-slate-500">信号点 {signalPoints.length}</span></div>
                 <div className="mt-2 grid grid-cols-3 gap-1">{(['safety', 'weather', 'traffic'] as const).map((key) => { const signal = signalSources[key]; return <span key={key} className={`rounded px-1.5 py-1 text-center text-[9px] ${signal?.available ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-slate-200/70 text-slate-400 dark:bg-slate-800'}`}>{key === 'safety' ? '安全' : key === 'weather' ? '天气' : '路况'} · {signal?.available ? (signal.provider || '已接入') : '无数据'}</span>; })}</div>
                 <p className="mt-2 text-[10px] leading-4 text-slate-400">全球城市点为坐标目录，不代表实时天气、路况或客流；实时字段仅在接入供应商且带时间戳时展示。</p>
               </div>
@@ -799,7 +780,7 @@ export default function WorldSafetyGlobe({
               <div className="bg-slate-200/70 dark:bg-slate-800/40 rounded-xl p-3 border border-slate-300/50 dark:border-white/5 space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Building2 className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+                    <Building2 className="w-3.5 h-3.5 text-orange-700 dark:text-orange-400" />
                     <span className="text-[13px] font-bold text-slate-900 dark:text-white">{targetCity}</span>
                   </div>
                   <span className={`text-xs font-mono px-2 py-0.5 rounded border ${profile.text} border-current/20 bg-current/5`}>{profile.label}</span>
@@ -825,7 +806,7 @@ export default function WorldSafetyGlobe({
               {/* 天气 & 路况 */}
               <div className="grid grid-cols-2 gap-2">
                 <div className="bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 border border-slate-300/50 dark:border-white/5">
-                  <div className="flex items-center gap-1 text-sky-600 dark:text-sky-400 mb-0.5"><Thermometer className="w-3 h-3" /><span className="text-[11px] font-bold">天气</span></div>
+                  <div className="flex items-center gap-1 text-orange-700 dark:text-orange-400 mb-0.5"><Thermometer className="w-3 h-3" /><span className="text-[11px] font-bold">天气</span></div>
                   <div className="text-[13px] text-slate-900 dark:text-white font-bold">{weatherCondition || '暂无数据'}</div>
                 </div>
                 <div className="bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 border border-slate-300/50 dark:border-white/5">
@@ -887,7 +868,7 @@ export default function WorldSafetyGlobe({
                         grid={COLORS.divider}
                         labelColor={COLORS.muted}
                         tooltipBg={COLORS.labelBg}
-                        tooltipText={mode === 'dark' ? '#e2e8f0' : '#0f172a'}
+                        tooltipText={mode === 'dark' ? '#ede8e0' : '#292524'}
                         max={100}
                       />
                       <div className="grid grid-cols-5 gap-1">
@@ -924,10 +905,10 @@ export default function WorldSafetyGlobe({
                 const cost = parseCostNumber(pt.cost);
                 const isHighCost = cost > 300;
                 return (
-                  <button key={idx} onClick={() => focusOnPoint(idx)} className={`w-full text-left rounded-lg p-2 border transition-all cursor-pointer ${selectedIndex === idx ? 'bg-sky-500/10 border-sky-500/30' : 'bg-slate-200/70 dark:bg-slate-800/30 border-slate-300/50 dark:border-white/5 hover:bg-slate-100 dark:bg-slate-800/50'}`}>
+                  <button key={idx} onClick={() => focusOnPoint(idx)} className={`w-full text-left rounded-lg p-2 border transition-all cursor-pointer ${selectedIndex === idx ? 'bg-orange-600/10 border-orange-600/30' : 'bg-slate-200/70 dark:bg-slate-800/30 border-slate-300/50 dark:border-white/5 hover:bg-slate-100 dark:bg-slate-800/50'}`}>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-sky-500/20 text-sky-600 dark:text-sky-400 text-[11px] font-black flex items-center justify-center">{idx + 1}</span>
+                        <span className="w-5 h-5 rounded-full bg-orange-600/20 text-orange-700 dark:text-orange-400 text-[11px] font-black flex items-center justify-center">{idx + 1}</span>
                         <span className="text-xs font-bold text-slate-900 dark:text-slate-200">{pt.name}</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -938,7 +919,7 @@ export default function WorldSafetyGlobe({
                     {pt.tags && pt.tags.length > 0 && (
                       <div className="flex gap-1 mt-1 ml-7">
                         {pt.tags.slice(0, 3).map((t, i) => (
-                          <span key={i} className="text-[9px] bg-sky-500/10 border border-sky-500/20 px-1 py-0.5 rounded text-sky-600 dark:text-sky-400">{t}</span>
+                          <span key={i} className="text-[9px] bg-orange-600/10 border border-orange-600/20 px-1 py-0.5 rounded text-orange-700 dark:text-orange-400">{t}</span>
                         ))}
                       </div>
                     )}
@@ -960,7 +941,7 @@ export default function WorldSafetyGlobe({
               <div className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400 font-mono"><Siren className="w-3 h-3" /> 安全告警</div>
               {alertCount > 0 ? (
                 liveSafety!.active_alerts!.map((alert, idx) => (
-                  <div key={idx} className={`rounded-lg p-2.5 border ${alert.level === 'HIGH' ? 'bg-rose-500/5 border-rose-500/20' : alert.level === 'MEDIUM' ? 'bg-amber-500/5 border-amber-500/20' : 'bg-sky-500/5 border-sky-500/20'}`}>
+                  <div key={idx} className={`rounded-lg p-2.5 border ${alert.level === 'HIGH' ? 'bg-rose-500/5 border-rose-500/20' : alert.level === 'MEDIUM' ? 'bg-amber-500/5 border-amber-500/20' : 'bg-orange-600/5 border-orange-600/20'}`}>
                     <div className="flex items-center gap-1.5 mb-0.5" style={{ color: alert.level === 'HIGH' ? COLORS.danger : alert.level === 'MEDIUM' ? COLORS.warn : COLORS.accent }}>
                       <AlertTriangle className="w-3 h-3" /><span className="text-xs font-bold">{alert.title}</span>
                       <span className="text-[10px] font-mono px-1 rounded" style={{ background: 'currentColor', color: '#000' }}>{alert.level}</span>
@@ -978,7 +959,7 @@ export default function WorldSafetyGlobe({
 
           {liveSafety?.safety_advice && (
             <div className="pt-2 border-t border-slate-300/50 dark:border-white/5 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-              <span className="text-sky-600 dark:text-sky-400 font-bold flex items-center gap-1 mb-1"><Info className="w-3 h-3" /> 安全建议</span>
+              <span className="text-orange-700 dark:text-orange-400 font-bold flex items-center gap-1 mb-1"><Info className="w-3 h-3" /> 安全建议</span>
               {liveSafety.safety_advice}
             </div>
           )}
@@ -1005,26 +986,26 @@ export default function WorldSafetyGlobe({
           {globalError && <div className="rounded border border-amber-400/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">{globalError}</div>}
           <div className="flex items-center justify-between gap-2 rounded border border-slate-300/50 bg-slate-100/50 px-2 py-1.5 dark:border-white/10 dark:bg-white/5">
             <span className="text-[10px] text-slate-500">选择城市进行真实信号对比（最多 4 个）</span>
-            <button type="button" disabled={globalSelection.length < 2 || globalCompareLoading} onClick={() => void compareGlobalCities()} className="shrink-0 rounded bg-sky-500/15 px-2 py-1 text-[10px] font-bold text-sky-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-sky-300">{globalCompareLoading ? '查询中…' : `对比 ${globalSelection.length || ''}`}</button>
+            <button type="button" disabled={globalSelection.length < 2 || globalCompareLoading} onClick={() => void compareGlobalCities()} className="shrink-0 rounded bg-orange-600/15 px-2 py-1 text-[10px] font-bold text-orange-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-orange-300">{globalCompareLoading ? '查询中…' : `对比 ${globalSelection.length || ''}`}</button>
           </div>
           {dynamicGlobalCities.slice(0, 10).map(city => {
             const snapshot = globalSnapshots[city.name];
             const source = snapshot?.source || snapshot?.signal_sources?.safety?.provider;
             return (
             <div key={city.name} className="flex items-center gap-2 border-b border-slate-300/50 py-1.5 last:border-0 dark:border-white/5">
-              <input type="checkbox" aria-label={`选择${city.name}进行对比`} checked={globalSelection.includes(city.name)} onChange={() => toggleGlobalSelection(city.name)} className="h-3 w-3 accent-sky-500" />
+              <input type="checkbox" aria-label={`选择${city.name}进行对比`} checked={globalSelection.includes(city.name)} onChange={() => toggleGlobalSelection(city.name)} className="h-3 w-3 accent-orange-600" />
               <div className="flex items-center gap-2">
                 <div className={`w-1.5 h-1.5 rounded-full ${snapshot ? (snapshot.risk_level === 'HIGH' ? 'bg-rose-500' : snapshot.risk_level === 'MEDIUM' ? 'bg-amber-500' : 'bg-emerald-500') : 'bg-slate-500'}`} />
                 <span className="text-xs text-slate-700 dark:text-slate-300">{city.name}</span>
               </div>
-              <button type="button" onClick={() => void inspectGlobalCity(city)} className="ml-auto rounded px-1.5 py-1 text-[10px] text-slate-500 hover:bg-slate-200/70 hover:text-sky-700 dark:hover:bg-white/10 dark:hover:text-sky-300">{globalLoadingCity === city.name ? '查询中…' : snapshot ? `${snapshot.risk_level || '已同步'} · ${source || '来源未知'}` : `${city.region} · 查询`}</button>
+              <button type="button" onClick={() => void inspectGlobalCity(city)} className="ml-auto rounded px-1.5 py-1 text-[10px] text-slate-500 hover:bg-slate-200/70 hover:text-orange-700 dark:hover:bg-white/10 dark:hover:text-orange-300">{globalLoadingCity === city.name ? '查询中…' : snapshot ? `${snapshot.risk_level || '已同步'} · ${source || '来源未知'}` : `${city.region} · 查询`}</button>
             </div>
             );
           })}
           {Object.keys(globalSnapshots).length > 0 && <p className="text-[10px] leading-4 text-slate-500">已查询城市的风险等级来自后端快照；未点击城市仍只是地理目录。</p>}
           {globalSelection.length >= 2 && (
-            <div className="rounded border border-sky-400/30 bg-sky-500/5 p-2">
-              <div className="mb-1.5 flex items-center justify-between"><span className="text-[10px] font-bold text-sky-700 dark:text-sky-300">城市信号对比</span><span className="text-[9px] text-slate-500">仅展示已有快照</span></div>
+            <div className="rounded border border-orange-500/30 bg-orange-600/5 p-2">
+              <div className="mb-1.5 flex items-center justify-between"><span className="text-[10px] font-bold text-orange-700 dark:text-orange-300">城市信号对比</span><span className="text-[9px] text-slate-500">仅展示已有快照</span></div>
               <div className="grid grid-cols-2 gap-1.5">
                 {globalSelection.map((name) => {
                   const snapshot = globalSnapshots[name];
@@ -1037,17 +1018,14 @@ export default function WorldSafetyGlobe({
         </div>
       </DraggablePanel>
 
-      {/* ========== 底部滚动信息条 ========== */}
-      <div className="radar-ticker absolute bottom-0 left-0 right-0 z-20 h-8 pointer-events-none" style={{ background: 'linear-gradient(180deg, transparent, rgba(2,6,23,0.95))', borderTop: '1px solid rgba(56,189,248,0.1)' }}>
-        <div className="h-full flex items-center px-4 overflow-hidden">
-          <div className="flex items-center gap-8 animate-marquee whitespace-nowrap">
-            {[...tickerItems, ...tickerItems].map((item, i) => (
-              <div key={i} className="flex items-center gap-1.5">
-                <item.icon className="w-3 h-3" style={{ color: item.color }} />
-                <span className="text-xs tracking-wide" style={{ color: item.color, fontFamily: RADAR_FONT.data }}>{item.text}</span>
-                <span className="text-xs text-slate-700 mx-1">|</span>
-              </div>
-            ))}
+      {/* 底部摘要：静态展示关键状态，避免滚动信息打断阅读。 */}
+      <div className="absolute bottom-0 left-0 right-0 z-20 px-4 pb-3 pointer-events-none">
+        <div className="mx-auto max-w-5xl rounded-xl border bg-white/75 px-4 py-2 text-[11px] shadow-sm backdrop-blur dark:border-white/10 dark:bg-slate-950/70">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-slate-600 dark:text-slate-300">
+            <span>天气：<strong className="font-medium text-orange-700 dark:text-orange-300">{weatherCondition}</strong></span>
+            <span>路况：<strong className="font-medium text-amber-700 dark:text-amber-300">{trafficSummary}</strong></span>
+            <span>全球目录：<strong className="font-medium">{globalRegionCount} 个区域 / {dynamicGlobalCities.length} 城市</strong></span>
+            <span className="ml-auto text-slate-500">更新于 {currentTime.toLocaleTimeString('zh-CN')}</span>
           </div>
         </div>
       </div>
@@ -1128,25 +1106,25 @@ export default function WorldSafetyGlobe({
             // 👑 始终可见的标签：规划节点大标签 vs 周边城市小标签 vs 参考城市小标签
             const labelHtml = routeLabelVisible ? `
               <div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:${size + 6}px;white-space:nowrap;pointer-events:none;z-index:10;">
-                <div style="background:rgba(2,8,23,0.96);border:2px solid ${color}aa;border-radius:8px;padding:5px 10px;backdrop-filter:blur(16px);display:flex;flex-direction:column;align-items:center;gap:3px;box-shadow:0 4px 24px rgba(0,0,0,0.6),0 0 16px ${color}30,0 0 40px ${color}10;">
+                <div style="background:${COLORS.panelSolid};border:2px solid ${color}aa;border-radius:8px;padding:5px 10px;backdrop-filter:blur(16px);display:flex;flex-direction:column;align-items:center;gap:3px;box-shadow:0 4px 24px rgba(0,0,0,0.6),0 0 16px ${color}30,0 0 40px ${color}10;">
                   <span style="font-size:14px;font-weight:900;color:${color};font-family:${RADAR_FONT.display};max-width:120px;overflow:hidden;text-overflow:ellipsis;letter-spacing:1px;text-shadow:0 0 8px ${color}60;">${safeName}</span>
                   <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:center;">
-                    ${safeCost ? `<span style="font-size:11px;font-weight:800;color:#fbbf24;font-family:${RADAR_FONT.data};text-shadow:0 0 6px rgba(251,191,36,0.5);">${safeCost}</span>` : ''}
+                    ${safeCost ? `<span style="font-size:11px;font-weight:800;color:${COLORS.gold};font-family:${RADAR_FONT.data};">${safeCost}</span>` : ''}
                     ${riskScore > 0 ? `<span style="font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;background:${riskScore > 30 ? '#f43f5e30' : '#10b98130'};color:${riskScore > 30 ? '#f43f5e' : '#10b981'};font-family:${RADAR_FONT.data};">风险${riskScore}</span>` : ''}
-                    <span style="font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;background:#38bdf830;color:#38bdf8;font-family:${RADAR_FONT.data};">#${d.index + 1}</span>
+                    <span style="font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;background:${COLORS.accent}30;color:${COLORS.accent};font-family:${RADAR_FONT.data};">#${d.index + 1}</span>
                     <span style="font-size:8px;font-weight:800;padding:2px 5px;border-radius:4px;background:${color}20;color:${color};font-family:${RADAR_FONT.display};letter-spacing:1px;">规划地点</span>
                   </div>
                 </div>
               </div>
             ` : isContext ? `
               <div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:${size + 2}px;white-space:nowrap;pointer-events:none;z-index:5;opacity:0.6;">
-                <div style="background:rgba(2,8,23,0.5);border:1px solid rgba(100,116,139,0.3);border-radius:4px;padding:1px 5px;backdrop-filter:blur(4px);display:flex;align-items:center;gap:3px;">
-                  <span style="font-size:8px;font-weight:500;color:#94a3b8;font-family:${RADAR_FONT.display};max-width:50px;overflow:hidden;text-overflow:ellipsis;">${safeName}</span>
+                <div style="background:${COLORS.panel};border:1px solid ${COLORS.borderSoft};border-radius:4px;padding:1px 5px;backdrop-filter:blur(4px);display:flex;align-items:center;gap:3px;">
+                  <span style="font-size:8px;font-weight:500;color:${COLORS.muted};font-family:${RADAR_FONT.display};max-width:50px;overflow:hidden;text-overflow:ellipsis;">${safeName}</span>
                 </div>
               </div>
             ` : isGlobal ? `
               <div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:${size + 2}px;white-space:nowrap;pointer-events:none;z-index:5;opacity:0.7;">
-                <div style="background:rgba(2,8,23,0.7);border:1px solid ${color}40;border-radius:4px;padding:2px 5px;backdrop-filter:blur(6px);display:flex;align-items:center;gap:3px;">
+                <div style="background:${COLORS.panel};border:1px solid ${color}40;border-radius:4px;padding:2px 5px;backdrop-filter:blur(6px);display:flex;align-items:center;gap:3px;">
                   <span style="font-size:8px;font-weight:600;color:${color};font-family:${RADAR_FONT.display};max-width:60px;overflow:hidden;text-overflow:ellipsis;">${safeName}</span>
                 </div>
               </div>
@@ -1162,11 +1140,11 @@ export default function WorldSafetyGlobe({
                   <div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};box-shadow:0 0 ${size * 1.5}px ${color},0 0 ${size * 3}px ${color}80;border:${isRoute ? '2.5px' : '1px'} solid rgba(255,255,255,${isRoute ? 0.95 : isContext ? 0.4 : 0.7});position:relative;z-index:1;"></div>
                 </div>
                 <div style="position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%) translateY(4px);opacity:0;pointer-events:none;transition:all 0.25s;z-index:50;white-space:nowrap;" class="ws-point-card">
-                  <div style="background:rgba(8,15,30,0.95);border:1px solid ${color}50;border-radius:8px;padding:6px 10px;box-shadow:0 8px 32px rgba(0,0,0,0.6);backdrop-filter:blur(16px);">
+                  <div style="background:${COLORS.panelSolid};border:1px solid ${color}50;border-radius:8px;padding:6px 10px;box-shadow:0 8px 32px rgba(0,0,0,0.6);backdrop-filter:blur(16px);">
                     <div style="font-size:10px;font-weight:900;color:${color};line-height:1.2;font-family:${RADAR_FONT.display};margin-bottom:2px;">${safeName}</div>
-                    ${isContext ? `<div style="font-size:8px;color:#94a3b8;font-family:${RADAR_FONT.data};">${safeRegion} · 周边城市</div>` :
-                    isGlobal ? `<div style="font-size:8px;color:#94a3b8;font-family:${RADAR_FONT.data};">${safeRegion} · ${d.snapshotAvailable ? `后端快照 ${escapeHtml(d.riskLevel || '已同步')}` : '点击查询真实快照'}</div>` :
-                    `<div style="font-size:8px;color:#94a3b8;font-family:${RADAR_FONT.data};">${safeDesc.slice(0, 25) || '航点'}${safeTime ? ' · ' + safeTime : ''}${safeCost ? ' · ' + safeCost : ''}</div>`}
+                    ${isContext ? `<div style="font-size:8px;color:${COLORS.muted};font-family:${RADAR_FONT.data};">${safeRegion} · 周边城市</div>` :
+                    isGlobal ? `<div style="font-size:8px;color:${COLORS.muted};font-family:${RADAR_FONT.data};">${safeRegion} · ${d.snapshotAvailable ? `后端快照 ${escapeHtml(d.riskLevel || '已同步')}` : '点击查询真实快照'}</div>` :
+                    `<div style="font-size:8px;color:${COLORS.muted};font-family:${RADAR_FONT.data};">${safeDesc.slice(0, 25) || '航点'}${safeTime ? ' · ' + safeTime : ''}${safeCost ? ' · ' + safeCost : ''}</div>`}
                   </div>
                 </div>
               </div>
@@ -1202,15 +1180,15 @@ export default function WorldSafetyGlobe({
       </div>
 
       {(textureStatus === 'loading' || textureStatus === 'fallback' || webglLost) && (
-        <div className="radar-render-status absolute left-1/2 -translate-x-1/2 top-24 sm:top-20 z-40 pointer-events-auto" role="status">
-          <div className="flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-bold shadow-lg backdrop-blur-xl" style={{ background: COLORS.labelBg, borderColor: webglLost ? `${COLORS.danger}66` : `${COLORS.accent}44`, color: webglLost ? COLORS.danger : COLORS.muted }}>
+        <div className="radar-render-status absolute right-4 top-24 z-40 pointer-events-auto sm:right-6 sm:top-20" role="status">
+          <div className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[10px] font-semibold shadow-sm backdrop-blur-md" style={{ background: COLORS.labelBg, borderColor: webglLost ? `${COLORS.danger}66` : `${COLORS.accent}35`, color: webglLost ? COLORS.danger : COLORS.muted }}>
             {webglLost ? <AlertTriangle className="w-3.5 h-3.5" /> : textureStatus === 'loading' ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Info className="w-3.5 h-3.5" />}
             <span>{webglLost ? '3D 渲染上下文已中断' : textureStatus === 'loading' ? '正在加载地球纹理…' : '地球纹理不可达，已启用离线视图'}</span>
             {(webglLost || textureStatus === 'fallback') && (
               <button
                 type="button"
                 onClick={() => { setWebglLost(false); retryTexture(); setGlobeKey((value) => value + 1); }}
-                className="ml-1 rounded-md px-2 py-1 text-[10px] font-black transition-colors"
+                className="ml-1 min-h-7 rounded-md px-2 text-[10px] font-semibold transition-colors hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-600"
                 style={{ background: `${COLORS.accent}18`, color: COLORS.accent }}
               >
                 重试

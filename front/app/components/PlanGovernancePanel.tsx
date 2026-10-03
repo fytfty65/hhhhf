@@ -41,6 +41,9 @@ type LongTripSegment = {
 };
 
 export type PlanGovernance = {
+  dailyBalance?: {
+    [day: string]: { daytime?: number; hotel?: number; target_daytime?: number; satisfied?: boolean };
+  };
   quality?: {
     score?: number;
     verdict?: string;
@@ -257,7 +260,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -378,6 +381,35 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {dailyBalance && Object.keys(dailyBalance).length > 0 && (
+        <div className="mt-3 border-t border-slate-200 pt-2.5">
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<CalendarRange className="h-3 w-3" />}>每日安排</SectionLabel>
+            <span className="text-[11px] text-slate-500">白天节点，不含住宿</span>
+          </div>
+          <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1">
+            {Object.entries(dailyBalance).map(([day, summary]) => {
+              const actual = summary.daytime ?? 0;
+              const target = summary.target_daytime ?? 0;
+              const satisfied = summary.satisfied ?? (target > 0 ? actual >= target : true);
+              return (
+                <div key={day} className="flex items-center justify-between gap-2 text-[12px]">
+                  <span className="text-slate-600">Day {day}</span>
+                  <span className={satisfied ? 'font-medium text-emerald-600' : 'font-medium text-amber-600'}>
+                    {actual}/{target || '—'} 个点{satisfied ? '' : ' · 候选不足'}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {Object.values(dailyBalance).some((summary) => summary.satisfied === false) && (
+            <p className="mt-1.5 text-[12px] leading-relaxed text-amber-600">
+              个别日期的真实候选不足，系统已做跨日均衡；未复制地点，也未编造新的价格或开放时间。
+            </p>
+          )}
         </div>
       )}
 

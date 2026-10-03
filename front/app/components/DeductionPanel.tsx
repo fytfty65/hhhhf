@@ -37,7 +37,7 @@ export default function DeductionPanel({ latestLog, error, timedOut, onRetry, on
       </div>
 
       <h3 className={`text-base font-black ${hasError ? 'text-red-600' : 'text-slate-800'}`}>
-        {hasError ? '推演遇到问题' : '多智能体正在博弈调和众口诉求...'}
+        {hasError ? '暂时无法生成方案' : '正在整理你的行程方案…'}
       </h3>
       
       {/* 实时推演日志卡片 */}
@@ -46,10 +46,10 @@ export default function DeductionPanel({ latestLog, error, timedOut, onRetry, on
       }`}>
         <div className={`flex items-center gap-1.5 font-bold mb-1 ${hasError ? 'text-red-400' : 'text-orange-400'}`}>
           <span className={`w-2 h-2 rounded-full ${hasError ? 'bg-red-500' : 'bg-orange-500 animate-ping'}`}></span>
-          <span>{hasError ? '系统提示:' : '智能体实时推演中:'}</span>
+          <span>{hasError ? '需要处理:' : '当前进度:'}</span>
         </div>
         <p className={`text-[11px] leading-relaxed line-clamp-3 ${hasError ? 'text-red-200' : 'text-slate-300'}`}>
-          {hasError ? displayError : (latestLog || "全息雷达数据已捕获，多智能体正在计算拓扑并交织生成行程...")}
+          {hasError ? displayError : (latestLog || "正在核对目的地、开放时间、交通和预算信息…")}
         </p>
       </div>
 
@@ -76,7 +76,7 @@ export default function DeductionPanel({ latestLog, error, timedOut, onRetry, on
       {/* 正常推演时显示提示 */}
       {!hasError && (
         <p className="mt-3 text-[11px] text-slate-400">
-          通常需要 20-60 秒，正在协调地理/风控/知识/调度多智能体共识...
+          通常需要 20–60 秒；完成后你可以继续修改任何一天的安排。
         </p>
       )}
     </motion.div>

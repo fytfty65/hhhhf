@@ -95,7 +95,7 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
             <option key={c} value={c}>{c}</option>
           ))}
         </select>
-        <button onClick={() => void setBudgetPlan()} disabled={busy || !tripId} className="col-span-2 rounded-lg bg-indigo-600 py-2 text-sm text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{busy ? '处理中…' : '设置预算'}</button>
+        <button onClick={() => void setBudgetPlan()} disabled={busy || !tripId} className="col-span-2 rounded-lg bg-orange-700 py-2 text-sm text-white hover:bg-orange-800 disabled:cursor-not-allowed disabled:opacity-50">{busy ? '处理中…' : '设置预算'}</button>
       </div>
 
       {/* 消费记录 */}
@@ -111,7 +111,7 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
         <button onClick={() => void addExpense()} disabled={busy || !tripId} className="col-span-2 rounded-lg bg-slate-800 py-2 text-sm text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50">记一笔</button>
       </div>
 
-      {message && <p className="mb-3 text-xs font-medium text-indigo-600">{message}</p>}
+      {message && <p className="mb-3 text-xs font-medium text-orange-700">{message}</p>}
 
       {/* 汇总 */}
       {loading && <p className="mb-3 text-xs font-bold text-slate-400">正在同步预算…</p>}
@@ -147,7 +147,7 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
                   <span>{summary.by_category[k]?.toFixed(2)} · {v.toFixed(0)}%</span>
                 </div>
                 <div className="mt-0.5 h-2 w-full rounded-full bg-slate-200">
-                  <div className="h-full rounded-full bg-indigo-400" style={{ width: `${v}%` }} />
+                  <div className="h-full rounded-full bg-orange-500" style={{ width: `${v}%` }} />
                 </div>
               </div>
             ))}

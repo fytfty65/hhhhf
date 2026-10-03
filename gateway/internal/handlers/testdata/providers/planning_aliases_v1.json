@@ -1,0 +1,19 @@
+{
+  "contract_version": "planning-provider-mapping-v1",
+  "source": "redacted_fixture",
+  "data": {
+    "items": [
+      {
+        "poi_id": "poi-redacted-1",
+        "poi_name": "示例景区",
+        "display_price": "¥128",
+        "durationMin": 95,
+        "data_time": "2026-09-27T08:00:00Z",
+        "crowdLevelText": "moderate",
+        "weatherType": "sunny",
+        "open_hours": "09:00-18:00",
+        "bookingLink": "https://official.example/verify?id=poi-redacted-1"
+      }
+    ]
+  }
+}

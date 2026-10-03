@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"strings"
 
@@ -21,6 +23,101 @@ func RankCandidates(candidates []contracts.Candidate, preferences map[string]any
 		return left > right
 	})
 	return result
+}
+
+// RankCandidatesWithBehavior applies a bounded, opt-in behavior signal. The
+// signal is intentionally aggregate-only: callers pass counts derived from
+// the versioned feature snapshot, never raw events or prompt text.
+func RankCandidatesWithBehavior(candidates []contracts.Candidate, preferences map[string]any, behavior map[string]any) []contracts.Candidate {
+	result := append([]contracts.Candidate(nil), candidates...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left := adjustedScore(result[i], preferences) + behaviorNudge(result[i], behavior)
+		right := adjustedScore(result[j], preferences) + behaviorNudge(result[j], behavior)
+		if left == right {
+			return result[i].Name < result[j].Name
+		}
+		return left > right
+	})
+	return result
+}
+
+func behaviorNudge(candidate contracts.Candidate, behavior map[string]any) float64 {
+	if behavior == nil {
+		return 0
+	}
+	if enabled, ok := behavior["enabled"].(bool); ok && !enabled {
+		return 0
+	}
+	module := strings.ToLower(strings.TrimSpace(toText(behavior["module"])))
+	if module != "" && !candidateMatchesModule(candidate, module) {
+		return 0
+	}
+	verified := boundedNumber(behavior["verified"])
+	adopted := boundedNumber(behavior["adopted"])
+	if actions, ok := behavior["candidate_actions"].(map[string]map[string]int); ok && candidate.ID != "" {
+		if candidateActions, exists := actions[stableBehaviorHash(candidate.ID)]; exists {
+			verified = boundedNumber(candidateActions["verified"])
+			adopted = boundedNumber(candidateActions["adopted"])
+		}
+	}
+	// Verification raises confidence slightly; adoption is a stronger but
+	// still capped signal. One user's history can never move a candidate by
+	// more than 0.04 score points.
+	return clamp(verified*0.005+adopted*0.01, 0, 0.04)
+}
+
+func stableBehaviorHash(value string) string {
+	// Kept local to the ranking service so raw candidate IDs never become a
+	// feature key exposed to callers. This matches the feature snapshot hash.
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func candidateMatchesModule(candidate contracts.Candidate, module string) bool {
+	text := strings.ToLower(candidate.Name + " " + strings.Join(candidate.Tags, " "))
+	keywords := map[string][]string{
+		"transport": {"铁路", "航班", "公交", "地铁", "自驾", "交通"},
+		"lodging":   {"酒店", "住宿", "民宿", "旅馆"},
+		"dining":    {"餐", "美食", "小馆", "街区", "菜"},
+	}[module]
+	for _, keyword := range keywords {
+		if strings.Contains(text, keyword) {
+			return true
+		}
+	}
+	return module == "destination" || module == "scenic_micro"
+}
+
+func boundedNumber(value any) float64 {
+	switch number := value.(type) {
+	case int:
+		return float64(maxInt(minInt(number, 4), 0))
+	case int64:
+		return float64(maxInt(int(minInt64(number, 4)), 0))
+	case float64:
+		return clamp(number, 0, 4)
+	default:
+		return 0
+	}
+}
+
+func minInt(value, limit int) int {
+	if value < limit {
+		return value
+	}
+	return limit
+}
+func maxInt(value, limit int) int {
+	if value > limit {
+		return value
+	}
+	return limit
+}
+func minInt64(value int64, limit int64) int64 {
+	if value < limit {
+		return value
+	}
+	return limit
 }
 
 func preferenceKeywords(preferences map[string]any) []string {

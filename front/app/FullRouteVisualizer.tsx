@@ -51,8 +51,8 @@ export function RealPoiImage({ photoUrl, poiName, className = '', type }: { phot
     const typeLabel = type || '目的地';
     const typeColor =
       type?.includes('餐') || type?.includes('食') ? 'from-orange-500 to-rose-500'
-      : type?.includes('酒店') || type?.includes('住宿') ? 'from-indigo-500 to-purple-600'
-      : 'from-emerald-500 to-teal-600';
+      : type?.includes('酒店') || type?.includes('住宿') ? 'from-orange-400 to-orange-600'
+      : 'from-stone-400 to-stone-500';
     return (
       <div className={`relative overflow-hidden rounded-xl ${className}`}>
         <div className={`absolute inset-0 bg-gradient-to-br ${typeColor}`} />
@@ -124,6 +124,14 @@ interface FullRouteVisualizerProps {
   trafficInfo?: any;
   travelDetails?: Record<string, any>;
   budgetData?: any;
+  /** 多套候选行程方案（保留/替代的真实来源） */
+  planVariants?: any[];
+  /** 当前选中的方案 id */
+  activePlanId?: string;
+  /** 帕累托裁决审计：保留前沿 + 被淘汰候选及其原因 */
+  optimizationAudit?: any;
+  /** 切换到某个替代方案 */
+  onSelectPlanVariant?: (id: string) => void;
 }
 
 export default function FullRouteVisualizer({
@@ -140,7 +148,11 @@ export default function FullRouteVisualizer({
   safetyInfo,
   weatherInfo,
   trafficInfo,
-  budgetData
+  budgetData,
+  planVariants = [],
+  activePlanId,
+  optimizationAudit,
+  onSelectPlanVariant,
 }: FullRouteVisualizerProps) {
   const mode = useRadarTheme();
   const COLORS = radarPalette(mode);
@@ -156,20 +168,44 @@ export default function FullRouteVisualizer({
   // 👑 时间轴状态：按天回放路线
   const [timelineDay, setTimelineDay] = useState(1);
   const timelineDays = useMemo(() => {
-    const days = new Set<number>(routes.map(routeDay));
+    const source = allRoutes.length > 0 ? allRoutes : routes;
+    const days = new Set<number>(source.map(routeDay));
     return Array.from(days).sort((a, b) => a - b);
-  }, [routes]);
+  }, [routes, allRoutes]);
 
   // 👑 按时间轴天过滤路线节点
   const filteredRoutes = useMemo(() => {
-    return routes.filter((r: any) => routeDay(r) === timelineDay);
-  }, [routes, timelineDay]);
+    const source = allRoutes.length > 0 ? allRoutes : routes;
+    return source.filter((r: any) => routeDay(r) === timelineDay);
+  }, [routes, allRoutes, timelineDay]);
 
   useEffect(() => {
     setWindowReady(true);
   }, []);
 
   const cityName = targetCityInfo?.name || (routes.length > 0 ? routes[0].name : '目标城市');
+
+  // 行程看板必须使用全程路线。`routes` 是当前天的视图数据，之前把它直接
+  // 传给 MACRO 看板，导致五天行程只显示一个 Day、累计图只有一个点、节点
+  // 成本分布也与完整方案脱节；地图 MICRO 仍然只展示当前天。
+  const dashboardRoutes = allRoutes.length > 0 ? allRoutes : routes;
+
+  // 👑 方案级裁决对比数据：保留方案 / 淘汰方案 / 淘汰原因 / 替代方案
+  const styleLabel = (style?: string) =>
+    style === 'relaxed' ? '慢游' : style === 'intense' ? '暴走' : style === 'niche' ? '小众' : (style || '');
+  const keptPlan = useMemo(
+    () => planVariants.find((v: any) => v?.id === activePlanId) || planVariants[0] || null,
+    [planVariants, activePlanId],
+  );
+  const alternatePlans = useMemo(
+    () => planVariants.filter((v: any) => v !== keptPlan),
+    [planVariants, keptPlan],
+  );
+  const rejectedCandidates = useMemo(
+    () => (Array.isArray(optimizationAudit?.rejected) ? optimizationAudit.rejected : []),
+    [optimizationAudit],
+  );
+  const hasPlanArbitration = Boolean(keptPlan || rejectedCandidates.length > 0 || alternatePlans.length > 0);
 
   // ⚠️ 职责分离：行程数据看板聚焦「成本分布 / 时间轴 / 预算」，风险维度（CII/五维/告警/天气路况）统一归属 WorldSafetyGlobe 3D 态势感知雷达
 
@@ -178,15 +214,16 @@ export default function FullRouteVisualizer({
 
   // 👑 基于「当前时间轴天」的真实节点成本计算博弈裁决数据（修复：此前误用全程 nodes，导致"今日"口径=全程总消费）
   const dayNodes = (filteredRoutes || []).filter((r: any) => r && typeof r.name === 'string');
-  const dayTotal = dayNodes.reduce((sum: number, r: any) => sum + parseCostNumber(r.cost), 0);
+  const dashboardDayNodes = dashboardRoutes.filter((r: any) => routeDay(r) === timelineDay && r && typeof r.name === 'string');
+  const dayTotal = dashboardDayNodes.reduce((sum: number, r: any) => sum + parseCostNumber(r.cost), 0);
   const dailyBudget = Number(budgetData?.daily_avg || budgetData?.total_budget || 0);
   // 👑 人均估算 = 当日总消费 ÷ 出行人数（后端下发 member_count；缺省按 1 人，避免误除导致数值失真）
   const memberCount = Math.max(1, Number(budgetData?.member_count || 1));
-  const highestCostNode = dayNodes.length > 0
-    ? dayNodes.reduce((max: any, r: any) => (parseCostNumber(r.cost) > parseCostNumber(max.cost) ? r : max), dayNodes[0])
+  const highestCostNode = dashboardDayNodes.length > 0
+    ? dashboardDayNodes.reduce((max: any, r: any) => (parseCostNumber(r.cost) > parseCostNumber(max.cost) ? r : max), dashboardDayNodes[0])
     : null;
-  const lowestCostNode = dayNodes.length > 1
-    ? dayNodes.reduce((min: any, r: any) => (parseCostNumber(r.cost) < parseCostNumber(min.cost) ? r : min), dayNodes[0])
+  const lowestCostNode = dashboardDayNodes.length > 1
+    ? dashboardDayNodes.reduce((min: any, r: any) => (parseCostNumber(r.cost) < parseCostNumber(min.cost) ? r : min), dashboardDayNodes[0])
     : null;
   const overrun = dailyBudget > 0 ? dayTotal - dailyBudget : 0;
   const hasOverrun = overrun > 0;
@@ -196,17 +233,27 @@ export default function FullRouteVisualizer({
   // 价格只有"能解析出数字"的才参与比较：取不到价格的一律不计入、也不当 0 元
   // （之前把"暂无供应商数据"解析成 0，于是看板显示"消费 ¥0 / 人均 ¥0 / 成本最低=某酒店"，
   //  看着像结论，其实什么都没说）
-  const pricedNodes = [...dayNodes].filter((n: any) => parseCostNumber(n.cost) > 0);
+  const pricedNodes = [...dashboardDayNodes].filter((n: any) => parseCostNumber(n.cost) > 0);
   const pricedTotal = pricedNodes.reduce((s: number, n: any) => s + parseCostNumber(n.cost), 0);
-  const unpricedNodes = dayNodes.filter((n: any) => parseCostNumber(n.cost) <= 0);
+  const unpricedNodes = dashboardDayNodes.filter((n: any) => parseCostNumber(n.cost) <= 0);
   const costSortedNodes = [...pricedNodes].sort((a, b) => parseCostNumber(b.cost) - parseCostNumber(a.cost)).slice(0, 6);
   const maxNodeCost = costSortedNodes.length > 0 ? Math.max(1, parseCostNumber(costSortedNodes[0].cost)) : 1;
+  const categoryCounts = dashboardDayNodes.reduce((counts: Record<string, number>, node: any) => {
+    const category = String(node.category || node.type || '其他');
+    counts[category] = (counts[category] || 0) + 1;
+    return counts;
+  }, {});
+  const categorySummary = Object.entries(categoryCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 4)
+    .map(([category, count]) => `${category} ${count}`)
+    .join(' · ');
 
   // 👑 多日预算滚动预测：逐日累计花费 vs 累计预算，提前预警后期超支
   const dailyForecast = useMemo(() => {
     const days = timelineDays;
     const perDay = days.map((d) => {
-      const nodes = routes.filter((r: any) => {
+      const nodes = dashboardRoutes.filter((r: any) => {
         return routeDay(r) === d;
       });
       const cost = nodes.reduce((s: number, r: any) => s + parseCostNumber(r.cost), 0);
@@ -215,7 +262,7 @@ export default function FullRouteVisualizer({
     const totalSpent = perDay.reduce((s, d) => s + d.cost, 0);
     const totalBudget = Number(budgetData?.total_budget || dailyBudget * days.length || 0);
     return { perDay, totalSpent, totalBudget, remaining: totalBudget - totalSpent };
-  }, [routes, timelineDays, dailyBudget, budgetData]);
+  }, [dashboardRoutes, timelineDays, dailyBudget, budgetData]);
 
   if (!windowReady) return null;
 
@@ -262,7 +309,7 @@ export default function FullRouteVisualizer({
               </>
             ) : (
               <>
-                <BarChart3 className="w-4 h-4 text-cyan-400" />
+                <BarChart3 className="w-4 h-4 text-orange-400" />
                 <span>行程数据看板</span>
               </>
             )}
@@ -284,11 +331,11 @@ export default function FullRouteVisualizer({
         {/* 👑 从看板节点点击跳回 2D 后：返回看板快捷入口 + 定位原节点悬停态 */}
         {viewState === 'MICRO' && returnDashboardNode !== null && (
           <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 pointer-events-auto">
-            <div className="group relative flex items-center gap-1.5 rounded-2xl bg-slate-900/90 backdrop-blur-md border border-cyan-500/40 shadow-2xl pl-1.5 pr-1 py-1.5">
+            <div className="group relative flex items-center gap-1.5 rounded-2xl bg-slate-900/90 backdrop-blur-md border border-orange-500/40 shadow-2xl pl-1.5 pr-1 py-1.5">
               <button
                 onClick={() => onPoiSelect(returnDashboardNode)}
                 title={`定位节点：${routes[returnDashboardNode]?.name || '—'}`}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-cyan-300 hover:bg-cyan-500/10 text-xs font-bold transition-all cursor-pointer"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-orange-300 hover:bg-orange-500/10 text-xs font-bold transition-all cursor-pointer"
               >
                 <MapPin className="w-3.5 h-3.5" />
                 定位
@@ -309,8 +356,8 @@ export default function FullRouteVisualizer({
               </button>
               {/* 悬停提示：原节点信息 */}
               <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-200 whitespace-nowrap">
-                <div className="bg-slate-900/95 border border-cyan-500/30 text-white rounded-xl px-3 py-2 text-xs shadow-xl">
-                  已定位节点 <span className="text-cyan-300 font-bold">#{returnDashboardNode + 1} {routes[returnDashboardNode]?.name || '—'}</span>
+                <div className="bg-slate-900/95 border border-orange-500/30 text-white rounded-xl px-3 py-2 text-xs shadow-xl">
+                  已定位节点 <span className="text-orange-300 font-bold">#{returnDashboardNode + 1} {routes[returnDashboardNode]?.name || '—'}</span>
                 </div>
               </div>
             </div>
@@ -325,7 +372,7 @@ export default function FullRouteVisualizer({
                 initial={{ opacity: 0, scale: 0.9, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-xl w-full shadow-2xl relative text-slate-800 dark:text-white max-h-[90vh] overflow-y-auto custom-scrollbar"
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-2xl w-full shadow-2xl relative text-slate-800 dark:text-white max-h-[90vh] overflow-y-auto custom-scrollbar"
               >
                 <button
                   onClick={() => setShowArbitrationModal(false)}
@@ -343,6 +390,81 @@ export default function FullRouteVisualizer({
                     <p className="text-xs text-slate-400">黑板协作裁决：预算红线与帕累托优化</p>
                   </div>
                 </div>
+
+                <div className="rounded-2xl border border-orange-200 bg-orange-50/80 p-3 text-[11px] leading-relaxed text-orange-950">
+                  <p className="font-black">这个看板的作用</p>
+                  <p className="mt-1">它不是让用户阅读算法术语，而是说明路线在“花费、距离、体验类型和数据可靠性”之间如何取舍。当前 Day {timelineDay} 的节点构成为：{categorySummary || '暂无分类数据'}。</p>
+                  <p className="mt-1 font-bold">当前判断：{hasOverrun ? '预算已超过日均上限，优先建议降低高成本节点。' : unpricedNodes.length > 0 ? `还有 ${unpricedNodes.length} 个节点未核价，预算结论需要你打开官方链接确认。` : '当前没有预算冲突，保留现有方案。'}</p>
+                </div>
+
+                {/* 👑 方案裁决对比：保留 / 淘汰 / 淘汰原因 / 替代 —— 真正的对比界面 */}
+                {hasPlanArbitration && (
+                  <div className="mb-4 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800" data-testid="plan-arbitration-board">
+                    <div className="flex items-center justify-between gap-2 bg-slate-50 px-3.5 py-2.5 dark:bg-slate-800/50">
+                      <div className="flex items-center gap-1.5 text-[11px] font-black text-slate-700 dark:text-slate-200">
+                        <Scale className="w-3.5 h-3.5 text-amber-500" /> 方案裁决对比
+                      </div>
+                      <span className="text-[10px] text-slate-400">{optimizationAudit?.method || 'Pareto'} · 保留前沿 {optimizationAudit?.frontier_count ?? (keptPlan ? 1 : 0)} · 淘汰 {optimizationAudit?.rejected_count ?? rejectedCandidates.length}</span>
+                    </div>
+                    <div className="grid gap-px bg-slate-100 dark:bg-slate-800 sm:grid-cols-3">
+                      {/* 保留方案 */}
+                      <div className="bg-white p-3 dark:bg-slate-900">
+                        <div className="flex items-center gap-1.5 text-[10px] font-black text-emerald-700 dark:text-emerald-400"><CheckCircle2 className="w-3.5 h-3.5" /> 保留方案</div>
+                        {keptPlan ? (
+                          <div className="mt-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-black text-slate-800 dark:text-white">{keptPlan.name}</span>
+                              {keptPlan.style && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">{styleLabel(keptPlan.style)}</span>}
+                            </div>
+                            {keptPlan.desc && <p className="mt-1 text-[10px] leading-4 text-slate-500">{keptPlan.desc}</p>}
+                            <p className="mt-1 text-[9px] text-slate-400">共 {Array.isArray(keptPlan.nodes) ? keptPlan.nodes.length : 0} 个节点 · 当前选中</p>
+                          </div>
+                        ) : <p className="mt-2 text-[10px] leading-4 text-slate-400">当前只有一套方案，未产生候选对比。</p>}
+                      </div>
+                      {/* 淘汰方案 + 原因 */}
+                      <div className="bg-white p-3 dark:bg-slate-900">
+                        <div className="flex items-center gap-1.5 text-[10px] font-black text-rose-600 dark:text-rose-400"><X className="w-3.5 h-3.5" /> 淘汰方案与原因</div>
+                        {rejectedCandidates.length > 0 ? (
+                          <div className="mt-2 space-y-1.5">
+                            {rejectedCandidates.slice(0, 4).map((item: any, index: number) => (
+                              <div key={`rej-${index}`} className="rounded-lg bg-rose-50/70 px-2 py-1.5 dark:bg-rose-950/30">
+                                <div className="text-[10px] font-bold text-slate-700 dark:text-slate-200">{item.candidate || `候选 ${index + 1}`}</div>
+                                <p className="mt-0.5 text-[9px] leading-4 text-rose-600 dark:text-rose-400">
+                                  {item.reason === 'dominated'
+                                    ? `被 ${Array.isArray(item.dominated_by) && item.dominated_by.length ? item.dominated_by.join('、') : '更优候选'} 支配：同预算下体验或距离指标全面不占优`
+                                    : (item.reason || '未通过门禁校验')}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : <p className="mt-2 text-[10px] leading-4 text-slate-400">本次没有方案被淘汰，所有候选都在保留前沿内。</p>}
+                      </div>
+                      {/* 替代方案 */}
+                      <div className="bg-white p-3 dark:bg-slate-900">
+                        <div className="flex items-center gap-1.5 text-[10px] font-black text-orange-600 dark:text-orange-400"><Activity className="w-3.5 h-3.5" /> 替代方案</div>
+                        {alternatePlans.length > 0 ? (
+                          <div className="mt-2 space-y-1.5">
+                            {alternatePlans.slice(0, 4).map((v: any) => (
+                              <button
+                                key={`alt-${v.id}`}
+                                type="button"
+                                disabled={!onSelectPlanVariant}
+                                onClick={() => onSelectPlanVariant?.(v.id)}
+                                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-left transition-colors hover:border-orange-300 hover:bg-orange-50 disabled:cursor-default dark:border-slate-700 dark:bg-slate-800/40"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="truncate text-[10px] font-bold text-slate-700 dark:text-slate-200">{v.name}</span>
+                                  {v.style && <span className="shrink-0 text-[9px] font-bold text-orange-600 dark:text-orange-400">{styleLabel(v.style)}</span>}
+                                </div>
+                                <p className="mt-0.5 truncate text-[9px] text-slate-400">{v.desc || `共 ${Array.isArray(v.nodes) ? v.nodes.length : 0} 个节点`}</p>
+                              </button>
+                            ))}
+                          </div>
+                        ) : <p className="mt-2 text-[10px] leading-4 text-slate-400">没有其他可切换的替代方案。</p>}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-4 gap-2 my-4">
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-2xl p-2.5 text-center">
@@ -380,7 +502,7 @@ export default function FullRouteVisualizer({
                     </div>
                     <div className="h-2.5 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
                       <div
-                        className={`h-full rounded-full transition-all duration-700 ${hasOverrun ? 'bg-gradient-to-r from-amber-500 to-rose-500' : 'bg-gradient-to-r from-emerald-500 to-teal-400'}`}
+                        className={`h-full rounded-full transition-all duration-700 ${hasOverrun ? 'bg-gradient-to-r from-amber-500 to-rose-500' : 'bg-gradient-to-r from-emerald-500 to-emerald-400'}`}
                         style={{ width: `${Math.min(100, Math.round((pricedTotal / dailyBudget) * 100))}%` }}
                       />
                     </div>
@@ -537,45 +659,34 @@ export default function FullRouteVisualizer({
               className="absolute inset-0 w-full h-full z-20 overflow-hidden"
               style={{ background: radarBackground(mode) }}
             >
-              {/* 星空背景层 */}
-              <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                <div className="absolute inset-0" style={{
-                  background: 'radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.6), transparent), radial-gradient(1px 1px at 60% 70%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 80% 20%, rgba(255,255,255,0.7), transparent), radial-gradient(2px 2px at 40% 80%, rgba(180,200,255,0.4), transparent), radial-gradient(1px 1px at 10% 60%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 90% 50%, rgba(255,255,255,0.6), transparent), radial-gradient(1px 1px at 50% 10%, rgba(200,220,255,0.5), transparent), radial-gradient(2px 2px at 70% 90%, rgba(255,255,255,0.3), transparent), radial-gradient(1px 1px at 30% 90%, rgba(255,255,255,0.5), transparent), radial-gradient(1px 1px at 15% 15%, rgba(255,255,255,0.4), transparent)',
-                }} />
-                <div className="absolute inset-0 opacity-20" style={{
-                  background: 'radial-gradient(ellipse 80% 20% at 70% 30%, rgba(56,189,248,0.15), transparent), radial-gradient(ellipse 60% 15% at 20% 70%, rgba(139,92,246,0.1), transparent)'
-                }} />
-              </div>
-              {/* 网格背景 */}
-              <div className="absolute inset-0 opacity-[0.04] pointer-events-none" style={{
-                backgroundImage: 'linear-gradient(rgba(56,189,248,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(56,189,248,0.5) 1px, transparent 1px)',
-                backgroundSize: '80px 80px'
-              }} />
-
-              {/* 扫描线 / 暗角 */}
-              <div className="absolute inset-0 pointer-events-none radar-scanlines opacity-70" />
-              <div className="absolute inset-0 pointer-events-none radar-vignette" />
+              {/* 轻量背景：保持层次，但不再使用星空、扫描线和网格装饰。 */}
+              <div
+                className="absolute inset-0 pointer-events-none"
+                style={{
+                  background: mode === 'dark'
+                    ? 'linear-gradient(180deg, rgba(15,23,42,0.32), transparent 42%), radial-gradient(ellipse 75% 50% at 18% 0%, rgba(56,189,248,0.08), transparent 70%)'
+                    : 'linear-gradient(180deg, rgba(255,255,255,0.7), transparent 42%), radial-gradient(ellipse 75% 50% at 18% 0%, rgba(2,132,199,0.08), transparent 70%)',
+                }}
+              />
 
               {/* 顶部HUD */}
               <div className="absolute top-0 left-0 right-0 z-50 px-6 py-4 flex items-center justify-between pointer-events-none">
                 <div className="flex items-center gap-4 pointer-events-auto">
                   <div className="relative">
-                    <div className="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center">
-                      <BarChart3 className="w-5 h-5 text-sky-600 dark:text-sky-400" />
+                    <div className="w-10 h-10 rounded-xl bg-orange-600/10 border border-orange-600/30 flex items-center justify-center">
+                      <BarChart3 className="w-5 h-5 text-orange-700 dark:text-orange-400" />
                     </div>
-                    <div className="absolute inset-0 w-10 h-10 rounded-xl bg-sky-400/20 animate-ping" />
                   </div>
                   <div>
                     <div className="flex items-center gap-3">
-                      <h2 className="text-slate-900 dark:text-white font-black text-xl tracking-[0.25em]" style={{ fontFamily: RADAR_FONT.display, textShadow: '0 0 20px rgba(56,189,248,0.45)' }}>OMNIROUTE</h2>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded border border-orange-500/30 text-orange-600 dark:text-orange-300 bg-orange-500/10 tracking-wider">
-                        行程数据看板
+                      <h2 className="text-slate-900 dark:text-white font-bold text-xl tracking-tight">行程总览</h2>
+                      <span className="text-[11px] font-medium px-2 py-0.5 rounded-full border border-slate-300/70 dark:border-white/10 text-slate-600 dark:text-slate-300 bg-white/60 dark:bg-white/5">
+                        {cityName}
                       </span>
-                      <span className="text-[10px] text-slate-500" style={{ fontFamily: RADAR_FONT.data }}>v3.0</span>
                     </div>
                     <div className="flex items-center gap-4 mt-0.5">
-                      <p className="text-[11px] text-slate-700 dark:text-slate-300 tracking-wide" style={{ fontFamily: RADAR_FONT.data }}>
-                        {cityName} <span className="text-slate-500">·</span> {routes.length} 节点 <span className="text-slate-500">·</span> 今日 <span className="text-amber-600 dark:text-amber-300">¥{dayTotal}</span>
+                      <p className="text-[11px] text-slate-700 dark:text-slate-300">
+                        {dashboardRoutes.length} 个行程节点 <span className="text-slate-500">·</span> Day {timelineDay} 已计价 <span className="text-amber-600 dark:text-amber-300">¥{dayTotal || '—'}</span>
                       </p>
                       <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${hasOverrun ? 'bg-rose-500/10 text-rose-500' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'}`}>
                         {hasOverrun ? '超支预警' : dailyBudget > 0 ? '预算健康' : '未设预算'}
@@ -584,10 +695,10 @@ export default function FullRouteVisualizer({
                   </div>
                 </div>
                 <div className="flex items-center gap-2 pointer-events-auto">
-                  <button onClick={() => setShowArbitrationModal(true)} className="h-8 px-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-300 hover:bg-amber-500/20 transition-all flex items-center gap-1.5 text-[10px] font-bold cursor-pointer">
+                  <button onClick={() => setShowArbitrationModal(true)} className="h-9 px-3 rounded-lg bg-white/75 dark:bg-white/5 border border-slate-300/70 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-white/10 transition-colors flex items-center gap-1.5 text-[11px] font-semibold cursor-pointer">
                     <Scale className="w-3 h-3" /> 裁决看板
                   </button>
-                  <button onClick={() => setViewState('MICRO')} className="h-8 px-3 rounded-lg bg-slate-900/5 dark:bg-white/5 border border-slate-300/70 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:bg-slate-900/10 dark:hover:bg-white/10 transition-all flex items-center gap-1.5 text-[10px] font-bold cursor-pointer">
+                  <button onClick={() => setViewState('MICRO')} className="h-9 px-3 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-900 hover:bg-slate-700 dark:hover:bg-slate-100 transition-colors flex items-center gap-1.5 text-[11px] font-semibold cursor-pointer">
                     <MapIcon className="w-3 h-3" /> 2D地图
                   </button>
                 </div>
@@ -598,7 +709,7 @@ export default function FullRouteVisualizer({
                 mode={mode}
                 timelineDay={timelineDay}
                 timelineDays={timelineDays}
-                routes={routes}
+                routes={dashboardRoutes}
                 dayTotal={dayTotal}
                 dailyBudget={dailyBudget}
                 memberCount={memberCount}
@@ -609,7 +720,15 @@ export default function FullRouteVisualizer({
                 maxNodeCost={maxNodeCost}
                 dailyForecast={dailyForecast}
                 onDayChange={setTimelineDay}
-                onPoiSelect={(idx: number) => { onPoiSelect(idx); setReturnDashboardNode(idx); setViewState('MICRO'); }}
+                onPoiSelect={(idx: number) => {
+                  const target = dashboardRoutes[idx];
+                  const localIndex = target
+                    ? routes.findIndex((item: any) => item.name === target.name && routeDay(item) === routeDay(target))
+                    : -1;
+                  onPoiSelect(localIndex >= 0 ? localIndex : 0);
+                  setReturnDashboardNode(idx);
+                  setViewState('MICRO');
+                }}
               />
             </motion.div>
           )}

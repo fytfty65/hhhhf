@@ -7,7 +7,7 @@ import os
 import time
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from api.agent import (
@@ -223,10 +223,13 @@ async def refresh_subscriptions(payload: Dict[str, Any]):
 
 
 @router.get("/events/stream")
-async def events_stream(room_id: str = ""):
+async def events_stream(request: Request, room_id: str = ""):
     async def stream_events():
         last_id = "$"
         while True:
+            # 客户端断开就必须收工：否则被遗弃的流会永远跑下去（实测它烧过 87% 单核）。
+            if await request.is_disconnected():
+                break
             events = await event_bus.consume(OMNI_EVENTS_STREAM, last_id=last_id, count=50, block_ms=5000)
             if not events:
                 yield json.dumps({"type": "keepalive", "ts": int(datetime.datetime.now().timestamp() * 1000)}) + "\n"

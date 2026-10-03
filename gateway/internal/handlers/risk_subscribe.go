@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // aiServiceBaseURL returns the configured internal AI service address. Keep
@@ -289,7 +291,12 @@ func createRiskReplanProposal(userID, city string, changes []map[string]interfac
 			if expires, err := time.Parse(time.RFC3339, strings.TrimSpace(fmt.Sprint(prior["expires_at"]))); err == nil && expires.Before(time.Now().UTC()) {
 				prior["status"] = "expired"
 				encoded, _ := json.Marshal(prior)
-				_ = database.DB.Model(&event).Update("payload", string(encoded)).Error
+				_ = database.DB.Transaction(func(tx *gorm.DB) error {
+					if err := tx.Model(&event).Update("payload", string(encoded)).Error; err != nil {
+						return err
+					}
+					return recordReplanLifecycleEventTx(tx, userID, trip.ID, "replan_proposal_expired", prior["proposal_id"], map[string]any{"reason": "confirmation_timeout"})
+				})
 				continue
 			}
 			return gin.H{"proposal_id": prior["proposal_id"], "status": "pending_confirmation", "trip_id": trip.ID, "city": city, "deduplicated": true, "expires_at": prior["expires_at"]}
@@ -339,7 +346,7 @@ func createRiskReplanProposal(userID, city string, changes []map[string]interfac
 	}
 	replacementKind := riskReplacementKind(changes)
 	expiresAt := time.Now().UTC().Add(30 * time.Minute)
-	proposal := gin.H{"proposal_id": fmt.Sprintf("risk-%d", time.Now().UTC().UnixNano()), "status": "pending_confirmation", "trip_id": trip.ID, "city": city, "reason": "risk_signal_changed", "changed_signals": changes, "affected_nodes": affectedNodes, "preserved_nodes": preservedNodes, "changed_node_count": len(affectedNodes), "preserved_node_count": len(preservedNodes), "perturbation_ratio": roundRatio(float64(len(affectedNodes)) / float64(len(route))), "replacement_kind": replacementKind, "confirmation_required": true, "generated_at": time.Now().UTC(), "expires_at": expiresAt, "official_links": amapOfficialLinks(city)}
+	proposal := gin.H{"proposal_id": fmt.Sprintf("risk-%d", time.Now().UTC().UnixNano()), "status": "pending_confirmation", "trip_id": trip.ID, "city": city, "reason": "risk_signal_changed", "trigger_types": riskTriggerTypes(changes), "changed_signals": changes, "affected_nodes": affectedNodes, "preserved_nodes": preservedNodes, "changed_node_count": len(affectedNodes), "preserved_node_count": len(preservedNodes), "perturbation_ratio": roundRatio(float64(len(affectedNodes)) / float64(len(route))), "replacement_kind": replacementKind, "candidate_count": 0, "pareto_frontier_count": 0, "provider_available": false, "hard_constraints_status": "pending_validation", "fairness_status": "not_evaluated", "confirmation_required": true, "generated_at": time.Now().UTC(), "expires_at": expiresAt, "official_links": amapOfficialLinks(city)}
 	payload, _ := json.Marshal(proposal)
 	_ = database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: trip.ID, EventType: "replan_triggered", Payload: string(payload)}).Error
 	_ = snapshot
@@ -431,4 +438,29 @@ func riskChangesRequireReplan(changes []map[string]interface{}) bool {
 		}
 	}
 	return len(changes) > 0
+}
+
+func riskTriggerTypes(changes []map[string]interface{}) []string {
+	seen := map[string]bool{}
+	for _, change := range changes {
+		text := strings.ToLower(fmt.Sprint(change["type"], " ", change["field"], " ", change["reason"], " ", change["detail"]))
+		typeName := "risk_change"
+		switch {
+		case strings.Contains(text, "weather") || strings.Contains(text, "天气") || strings.Contains(text, "雨") || strings.Contains(text, "台风"):
+			typeName = "weather_change"
+		case strings.Contains(text, "delay") || strings.Contains(text, "延误") || strings.Contains(text, "拥堵") || strings.Contains(text, "traffic"):
+			typeName = "transport_disruption"
+		case strings.Contains(text, "关闭") || strings.Contains(text, "cancel") || strings.Contains(text, "closed"):
+			typeName = "attraction_closure"
+		case strings.Contains(text, "budget") || strings.Contains(text, "预算") || strings.Contains(text, "超支") || strings.Contains(text, "price"):
+			typeName = "budget_change"
+		}
+		seen[typeName] = true
+	}
+	result := make([]string, 0, len(seen))
+	for typeName := range seen {
+		result = append(result, typeName)
+	}
+	sort.Strings(result)
+	return result
 }

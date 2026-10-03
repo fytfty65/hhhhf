@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.optimization import fairness_report, pareto_frontier, select_fair_route, validate_route
+from core.optimization import fairness_gate, fairness_report, pareto_frontier, select_fair_route, validate_route
 
 
 class TestOptimization(unittest.TestCase):
@@ -40,6 +40,16 @@ class TestOptimization(unittest.TestCase):
         self.assertEqual(selected["index"], 1)
         report = fairness_report(routes[selected["index"]], members)
         self.assertLessEqual(report["max_regret"], 0.01)
+
+    def test_fairness_gate_prefers_eligible_route_and_explains_block(self):
+        members = [{"id": "food", "interestTags": ["food"]}, {"id": "scenic", "interestTags": ["scenic"]}]
+        routes = [[{"name": "food", "tags": ["food"], "cost": 20}], [{"name": "balanced", "tags": ["food", "scenic"], "cost": 20}]]
+        result = fairness_gate(routes, members, max_stddev=0.01)
+        self.assertEqual(result["index"], 1)
+        self.assertFalse(result["threshold_exceeded"])
+        blocked = fairness_gate(routes[:1], members, max_stddev=0.01)
+        self.assertTrue(blocked["threshold_exceeded"])
+        self.assertEqual(blocked["selection_method"], "least_unfair_fallback")
 
 
 if __name__ == "__main__":

@@ -458,5 +458,146 @@ class TestHorizon(unittest.TestCase):
         self.assertTrue(snapshot["horizon"]["advisories"])
 
 
+class TestCityPreferenceRegression(unittest.TestCase):
+    """城市 × 偏好回归矩阵：乌鲁木齐 / 成都 / 三亚 × 普通游 / 深度探索 / 美食偏好。
+
+    这三座城市的气候、可达半径和 POI 结构差异明显（西北内陆 / 西南平原 / 海岛），
+    三种偏好又分别对应不同的密度与节点构成。历史上出现过"三种偏好套用同一套排法"
+    的退化，所以这里把口径钉死在金标用例上，并由评分器验证偏好真的改变了节点构成。
+    """
+
+    MATRIX = (
+        # (case_id, city, mode)   mode ∈ {"normal", "intense", "food"}
+        ("urumqi-normal-3d", "乌鲁木齐", "normal"),
+        ("urumqi-deep-4d", "乌鲁木齐", "intense"),
+        ("urumqi-food-3d", "乌鲁木齐", "food"),
+        ("chengdu-normal-3d", "成都", "normal"),
+        ("chengdu-deep-4d", "成都", "intense"),
+        ("chengdu-food-3d", "成都", "food"),
+        ("sanya-normal-4d", "三亚", "normal"),
+        ("sanya-deep-3d", "三亚", "intense"),
+        ("sanya-food-3d", "三亚", "food"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        payload = json.loads(GOLDEN.read_text(encoding="utf-8"))
+        cls.by_id = {case["id"]: case for case in payload["cases"]}
+
+    def _case(self, case_id):
+        self.assertIn(case_id, self.by_id, f"金标集缺少城市×偏好用例 {case_id}")
+        return self.by_id[case_id]
+
+    def test_matrix_cases_exist_and_are_well_formed(self):
+        for case_id, city, _mode in self.MATRIX:
+            with self.subTest(case=case_id):
+                case = self._case(case_id)
+                context = case["context"]
+                self.assertEqual(context["city"], city)
+                self.assertGreaterEqual(int(context["days"]), 2)
+                self.assertGreater(int(context["budget"]), 0)
+                self.assertIn("preferences", context)
+                expectations = case["expectations"]
+                self.assertLessEqual(expectations["min_nodes_per_day"], expectations["max_nodes_per_day"])
+                self.assertLessEqual(len(expectations["must_have"]), 2)
+                self.assertTrue(case["request"].strip())
+
+    def test_mode_is_encoded_in_preferences_and_signals(self):
+        for case_id, _city, mode in self.MATRIX:
+            with self.subTest(case=case_id):
+                case = self._case(case_id)
+                preferences = case["context"]["preferences"]
+                signals = case.get("signals") or {}
+                if mode == "normal":
+                    self.assertEqual(preferences.get("pace"), "normal")
+                elif mode == "intense":
+                    self.assertEqual(preferences.get("pace"), "intense")
+                else:  # food
+                    self.assertIn("美食", preferences.get("interest") or [])
+                    self.assertIs(signals.get("wants_food"), True)
+
+    def test_density_expectations_differ_by_mode(self):
+        """普通游/美食偏好必须比深度探索稀疏——这是最容易退化成同一套排法的地方。"""
+        for case_id, _city, mode in self.MATRIX:
+            with self.subTest(case=case_id):
+                expectations = self._case(case_id)["expectations"]
+                lo = int(expectations["min_nodes_per_day"])
+                hi = int(expectations["max_nodes_per_day"])
+                if mode == "intense":
+                    self.assertGreaterEqual(lo, 3)
+                    self.assertGreaterEqual(hi, 5)
+                else:
+                    self.assertLessEqual(hi, 4)
+                    self.assertGreaterEqual(lo, 2)
+
+    def test_food_preference_must_land_on_dining_nodes(self):
+        """美食偏好：行程里有餐饮节点才算满足，纯景点方案必须被判缺失。"""
+        dining = {"route": [node("第一市场海鲜", 1, "12:30", node_type="餐饮")]}
+        sights_only = {"route": [node("天涯海角", 1, "09:00", node_type="景区")]}
+        for case_id, _city, mode in self.MATRIX:
+            if mode != "food":
+                continue
+            with self.subTest(case=case_id):
+                context = self._case(case_id)["context"]
+                signals = self._case(case_id).get("signals")
+                hit = score_preference_coverage(context, dining, signals)
+                miss = score_preference_coverage(context, sights_only, signals)
+                self.assertIn("food", hit["requested"])
+                self.assertIn("food", hit["addressed"])
+                self.assertIn("food", miss["missing"])
+                self.assertGreater(hit["value"], miss["value"])
+
+    def test_intense_preference_needs_culture_or_outdoor(self):
+        """深度探索：博物馆/公园这类节点必须被识别为已覆盖，空方案必须计入缺失。"""
+        deep_plan = {"route": [
+            node("新疆维吾尔自治区博物馆", 1, "09:00", node_type="博物馆"),
+            node("红山公园", 1, "15:00", node_type="公园"),
+            node("天山步道", 1, "16:30", node_type="徒步"),
+        ]}
+        for case_id, _city, mode in self.MATRIX:
+            if mode != "intense":
+                continue
+            with self.subTest(case=case_id):
+                case = self._case(case_id)
+                report = score_preference_coverage(case["context"], deep_plan, case.get("signals"))
+                self.assertTrue(report["requested"], "深度探索用例必须能映射到偏好标签")
+                for label in ("cultural", "scenic", "outdoor"):
+                    self.assertIn(label, report["requested"])
+                    self.assertIn(label, report["addressed"])
+                empty = score_preference_coverage(case["context"], {"route": []}, case.get("signals"))
+                self.assertTrue(empty["missing"], "空方案必须把偏好全部计入缺失")
+
+    def test_mode_pairs_are_distinguishable(self):
+        """同一城市内，三种偏好的期望节点密度不得完全一致（防止偏好被忽略）。"""
+        for city in ("乌鲁木齐", "成都", "三亚"):
+            shapes = {}
+            for case_id, case_city, mode in self.MATRIX:
+                if case_city != city:
+                    continue
+                expectations = self._case(case_id)["expectations"]
+                shapes[mode] = (expectations["min_nodes_per_day"], expectations["max_nodes_per_day"])
+            self.assertEqual(len(shapes), 3, city)
+            self.assertNotEqual(shapes["normal"], shapes["intense"], city)
+            self.assertNotEqual(shapes["food"], shapes["intense"], city)
+
+    def test_scoring_is_deterministic_per_case(self):
+        plan = {"route": [
+            node("酒店", 1, "09:00", node_type="住宿", open_time="00:00-23:59"),
+            node("博物馆", 1, "10:30", node_type="博物馆"),
+            node("本地餐馆", 1, "12:30", node_type="餐饮"),
+        ]}
+        for case_id, _city, _mode in self.MATRIX:
+            with self.subTest(case=case_id):
+                case = self._case(case_id)
+                first = evaluate_plan(case["context"], plan, case["expectations"], signals=case.get("signals"))
+                second = evaluate_plan(case["context"], plan, case["expectations"], signals=case.get("signals"))
+                self.assertEqual(first["score"], second["score"])
+                self.assertEqual(first["verdict"], second["verdict"])
+                self.assertEqual(
+                    first["dimensions"]["preference_coverage"],
+                    second["dimensions"]["preference_coverage"],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

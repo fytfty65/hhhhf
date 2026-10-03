@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +39,7 @@ func FeatureSnapshotHandler(c *gin.Context) {
 	profile := planningService.ProfilePayload(userID)
 	delete(profile, "prompt_hint")
 	behavior := map[string]int{}
+	channelBehavior := map[string]any{"clicks": 0, "returned": 0, "verified": 0, "adopted": 0, "by_module": map[string]map[string]int{}, "by_channel": map[string]map[string]int{}, "candidate_actions": map[string]map[string]int{}}
 	var behaviorEvents []models.PlanningEvent
 	behaviorQuery := database.DB.Where("user_id = ?", userID)
 	if tripID != "" {
@@ -46,6 +49,35 @@ func FeatureSnapshotHandler(c *gin.Context) {
 	for _, event := range behaviorEvents {
 		if planningEventTrainableTypes[event.EventType] {
 			behavior[event.EventType]++
+		}
+		if event.EventType == "official_channel_click" || event.EventType == "official_channel_returned" || event.EventType == "official_channel_verified" || event.EventType == "candidate_adopted" {
+			var payload map[string]any
+			if json.Unmarshal([]byte(event.Payload), &payload) != nil {
+				continue
+			}
+			module := boundedFeatureText(payload["module"], "unknown")
+			channel := boundedFeatureText(payload["channel"], "unknown")
+			candidate := stableFeatureHash(boundedFeatureText(payload["candidate_id"], "unknown"))
+			action := map[string]string{"official_channel_click": "clicks", "official_channel_returned": "returned", "official_channel_verified": "verified", "candidate_adopted": "adopted"}[event.EventType]
+			if action == "" {
+				continue
+			}
+			channelBehavior[action] = channelBehavior[action].(int) + 1
+			byModule := channelBehavior["by_module"].(map[string]map[string]int)
+			if byModule[module] == nil {
+				byModule[module] = map[string]int{}
+			}
+			byModule[module][action]++
+			byChannel := channelBehavior["by_channel"].(map[string]map[string]int)
+			if byChannel[channel] == nil {
+				byChannel[channel] = map[string]int{}
+			}
+			byChannel[channel][action]++
+			candidateActions := channelBehavior["candidate_actions"].(map[string]map[string]int)
+			if candidateActions[candidate] == nil {
+				candidateActions[candidate] = map[string]int{}
+			}
+			candidateActions[candidate][action]++
 		}
 	}
 	journey := map[string]any{"status": "not_selected", "trip_id": tripID}
@@ -67,12 +99,71 @@ func FeatureSnapshotHandler(c *gin.Context) {
 			"long_term": gin.H{"values": profile, "source": "preference_profile", "observed_at": time.Now().UTC()},
 			"journey":   journey,
 			"realtime":  gin.H{"status": "not_persisted", "fields": []string{"weather", "crowd", "delay", "open_status"}, "policy": "provider_snapshot_only"},
-			"behavior":  gin.H{"counts": behavior, "source": "planning_events", "raw_payload_excluded": true},
+			"behavior":  gin.H{"counts": behavior, "channel_funnel": channelBehavior, "source": "planning_events", "raw_payload_excluded": true, "candidate_ids_hashed": true},
 		},
 		"aggregates":     gin.H{"feedback_events": feedback, "planning_events": events},
 		"feature_policy": gin.H{"raw_text_excluded": true, "prompt_injection": "disabled", "future_feedback": "explicit_and_implicit_separate", "retention_days": 730},
 		"generated_at":   time.Now().UTC(),
 	})
+}
+
+func boundedFeatureText(value any, fallback string) string {
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "<nil>" {
+		return fallback
+	}
+	if len(text) > 80 {
+		text = text[:80]
+	}
+	return text
+}
+
+func stableFeatureHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func candidateBehaviorFeatures(userID, tripID, module string) map[string]any {
+	features := map[string]any{"module": module, "verified": 0, "adopted": 0, "sample_count": 0, "enabled": false, "reason": "sample_insufficient", "candidate_actions": map[string]map[string]int{}}
+	if database.DB == nil || strings.TrimSpace(userID) == "" {
+		return features
+	}
+	var events []models.PlanningEvent
+	query := database.DB.Where("user_id = ? AND event_type IN ?", userID, []string{"official_channel_verified", "candidate_adopted"})
+	if strings.TrimSpace(tripID) != "" {
+		query = query.Where("trip_id = ?", tripID)
+	}
+	if query.Find(&events).Error != nil {
+		return features
+	}
+	for _, event := range events {
+		var payload map[string]any
+		if json.Unmarshal([]byte(event.Payload), &payload) != nil {
+			continue
+		}
+		if strings.EqualFold(boundedFeatureText(payload["module"], ""), module) || strings.TrimSpace(module) == "" {
+			features["sample_count"] = features["sample_count"].(int) + 1
+			if event.EventType == "official_channel_verified" {
+				features["verified"] = features["verified"].(int) + 1
+			} else if event.EventType == "candidate_adopted" {
+				features["adopted"] = features["adopted"].(int) + 1
+			}
+			candidateID := boundedFeatureText(payload["candidate_id"], "")
+			if candidateID != "" {
+				actions := features["candidate_actions"].(map[string]map[string]int)
+				key := stableFeatureHash(candidateID)
+				if actions[key] == nil {
+					actions[key] = map[string]int{}
+				}
+				actions[key][map[string]string{"official_channel_verified": "verified", "candidate_adopted": "adopted"}[event.EventType]]++
+			}
+		}
+	}
+	if features["sample_count"].(int) >= 5 && (features["verified"].(int) > 0 || features["adopted"].(int) > 0) {
+		features["enabled"] = true
+		features["reason"] = "sample_sufficient"
+	}
+	return features
 }
 
 // KnowledgeGraphHandler builds a lightweight route knowledge graph from
@@ -511,7 +602,7 @@ func OfficialChannelMetricsHandler(c *gin.Context) {
 		return
 	}
 	var events []models.PlanningEvent
-	query := database.DB.Where("user_id = ? AND event_type = ?", userID, "official_channel_click")
+	query := database.DB.Where("user_id = ? AND event_type IN ?", userID, []string{"official_channel_click", "official_channel_returned", "official_channel_verified", "candidate_adopted"})
 	if tripID := strings.TrimSpace(c.Query("trip_id")); tripID != "" {
 		if _, ok := requireTripOrRoomAccess(c, tripID); !ok {
 			return
@@ -520,6 +611,7 @@ func OfficialChannelMetricsHandler(c *gin.Context) {
 	}
 	_ = query.Find(&events).Error
 	byChannel := map[string]int{}
+	counts := map[string]int{"clicks": 0, "returned": 0, "verified": 0, "adopted": 0}
 	for _, event := range events {
 		var payload map[string]any
 		_ = json.Unmarshal([]byte(event.Payload), &payload)
@@ -527,7 +619,23 @@ func OfficialChannelMetricsHandler(c *gin.Context) {
 		if channel == "" || channel == "<nil>" {
 			channel = "unknown"
 		}
-		byChannel[channel]++
+		switch event.EventType {
+		case "official_channel_click":
+			counts["clicks"]++
+			byChannel[channel]++
+		case "official_channel_returned":
+			counts["returned"]++
+		case "official_channel_verified":
+			counts["verified"]++
+		case "candidate_adopted":
+			counts["adopted"]++
+		}
 	}
-	planningData(c, gin.H{"total_clicks": len(events), "by_channel": byChannel, "conversion_policy": "click_only_until_external_completion_callback", "status": "attribution_ready"})
+	rate := func(n, d int) float64 {
+		if d == 0 {
+			return 0
+		}
+		return roundRatio(float64(n) / float64(d))
+	}
+	planningData(c, gin.H{"total_clicks": counts["clicks"], "by_channel": byChannel, "funnel": counts, "rates": gin.H{"return_rate": rate(counts["returned"], counts["clicks"]), "verification_rate": rate(counts["verified"], counts["returned"]), "adoption_rate": rate(counts["adopted"], counts["verified"])}, "conversion_policy": "user_confirmed_external_verification_until_provider_callback", "status": "attribution_ready"})
 }

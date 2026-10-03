@@ -22,13 +22,21 @@ from openai import AsyncOpenAI, BadRequestError
 from models.schemas import GatewayMessage, NegotiateResponse
 from core.travel_utils import analyze_weather_for_planning, estimate_crowdedness, build_personalization_hint, build_profile_category_boost, build_profile_budget_gamma, build_profile_fine_tag_boost, classify_fine_tags, normalize_mode, normalize_role
 from core.time_intelligence import analyze_pace, monday_closure_notes
-from core.optimization import fairness_report, pareto_frontier, repair_route, select_fair_route, validate_candidate, validate_route
+from core.optimization import fairness_gate, fairness_report, pareto_frontier, repair_route, select_fair_route, validate_candidate, validate_route
 from core.constraints import resolve_conflicts
 from core.contextual_bandit import ContextualThompsonBandit, derive_reward, stable_arm_id
 from core.agent_contracts import capability_registry, validate_agent_proposal, proposal_timestamp
 from core.simulation import member_utilities_for, simulate_plan
 from core import llm_config as llm_cfg  # LLM 调用参数单一来源（模型/端点/temperature/max_tokens）
 from core.llm_config import model_name  # LLM 默认值单一来源（曾与 conflict.py 各写一套）
+
+
+def _fairness_limit_from_env() -> float:
+    """Read the group fairness standard deviation limit defensively."""
+    try:
+        return max(0.0, float(os.getenv("PLANNING_FAIRNESS_MAX_STD", "0.15")))
+    except (TypeError, ValueError):
+        return 0.15
 
 
 def _simulate_final_plan(
@@ -447,6 +455,11 @@ class RedisEventStream:
 
     def __init__(self):
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        # 事件流会被订阅端点长时间挂在后台，所以这里：
+        #  1) 复用同一个 Redis 客户端（原来每轮循环都 redis.from_url 新建一次）；
+        #  2) 记录上次报错时间做**日志节流**（否则 Redis 挂掉时日志会刷爆）。
+        self._client = None
+        self._last_error_log = 0.0
 
     async def emit(self, stream: str, event_type: str, payload: dict, room_id: str = "", max_len: int = 1000):
         """发布一条事件到 Redis Stream。事件结构：{type, room_id, payload, ts}。
@@ -474,13 +487,23 @@ class RedisEventStream:
         """阻塞消费 Stream 新事件，返回 [(event_id, event_dict), ...]。
 
         last_id 传 "$" 表示仅订阅新消息；block_ms 为阻塞超时毫秒（0 表示永不超时）。
+
+        ⚠️ 异常时**必须等一会儿再返回空**：订阅端是 `while True` + 依赖本方法的 block 来
+        "睡 5 秒"。如果这里立刻返回空，那个循环会退化成毫秒级空转，把一整个核心烧满
+        —— 实测 2026-10-03：ai-service 空转 87.6% 单核、开机 25 小时累计 22 小时 CPU、
+        而 8000 端口一个客户端连接都没有（原因就是 Redis 侧的异常被这里立即 return 掉）。
         """
         try:
-            r = redis.from_url(self.redis_url, decode_responses=True)
-            resp = await r.xread({str(stream): last_id}, count=count, block=block_ms)
-            await r.aclose()
+            if self._client is None:
+                self._client = redis.from_url(self.redis_url, decode_responses=True)
+            resp = await self._client.xread({str(stream): last_id}, count=count, block=block_ms)
         except Exception as e:
-            print(f"⚠️ [事件流] Redis consume 跳过 (不影响主推演流程): {e}")
+            self._client = None  # 连接可能已损坏，下一轮重建
+            now = _time.monotonic()
+            if now - self._last_error_log > 10:  # 日志节流：10 秒最多一条
+                print(f"⚠️ [事件流] Redis consume 失败，退避后重试（不影响主推演流程）: {e}")
+                self._last_error_log = now
+            await asyncio.sleep(max(0.5, min(5.0, (block_ms or 5000) / 1000.0)))
             return []
 
         events = []
@@ -1525,7 +1548,9 @@ class SemanticItineraryCache:
     def _key(self, city: str, days: int, profile_text: str) -> str:
         # 👑 版本号参与哈希：修复生成逻辑后 bump 版本即可让旧缓存（缺美食/酒店）自动失效
         # v4 invalidates plans cached before the final daily-balance gate.
-        raw = f"v4|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v5：类别/原始诉求进入精确缓存键，避免同城同天数的文化路线
+        # 污染自然、美食、购物或普通均衡路线。
+        raw = f"v5|{city}|{days}|{''.join(str(profile_text or '').split())}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     async def _embed(self, text: str) -> Optional[List[float]]:
@@ -1579,24 +1604,11 @@ class SemanticItineraryCache:
             print(f"✅ [语义缓存] 精确命中 {city}/{days}天")
             return hit
 
-        # 语义命中：对同城市+同天数条目计算画像 embedding 余弦相似度
-        vec = await self._embed(profile_text)
-        if vec is not None:
-            best_key, best_sim = None, 0.0
-            for k, item in self._vec_index.items():
-                if item.get("city") != city or int(item.get("days", 0)) != days:
-                    continue
-                iv = item.get("vector")
-                if not iv:
-                    continue
-                s = self._cosine(vec, iv)
-                if s > best_sim:
-                    best_sim, best_key = s, k
-            if best_key and best_sim >= self.sim_threshold:
-                hit = self._mem.get(best_key) or await self._redis_get(best_key)
-                if hit:
-                    print(f"✅ [语义缓存] 相似画像命中 (cosine={best_sim:.3f} >= {self.sim_threshold}) {city}/{days}天")
-                    return hit
+        # 规划结果不能只按“城市 + 天数 + 语义相似”复用。
+        # “想看博物馆”和“想看自然风景/美食”在 embedding 空间可能很接近，
+        # 但对用户而言是完全不同的路线。以前的语义命中会把文化主题缓存
+        # 复用到普通/深度探索请求，表现为“无论输入什么都在逛博物馆”。
+        # 保留精确画像命中；跨画像的语义缓存暂时只用于离线实验，不参与线上规划。
         return None
 
     async def store(self, city: str, days: int, profile_text: str, payload: Dict[str, Any]):
@@ -1788,7 +1800,9 @@ async def run_negotiate(msg: GatewayMessage):
     llm_temperature = 0.55 if is_refinement else 0.2
 
     # 动态调优候选池数量，确保足够支撑多天无重复
-    poi_limit = max(45, trip_days * (target_daily_count + 5))
+    # 长行程需要留出候选冗余：模型会做去重、类别均衡和最小扰动重排，
+    # 仅按“天数 × 节点数”拉取很容易让最后一天在清洗后只剩住宿。
+    poi_limit = max(60, trip_days * (target_daily_count + 8))
 
     # —— 动态预算解析：优先识别用户明确给出的预算金额，其次识别品质/高消费诉求 ——
     luxury_keywords = ["1万", "万元", "10000", "预算充足", "不差钱", "高档", "高端", "豪华", "五星", "奢华", "享受", "品质", "好看", "商圈"]
@@ -1823,6 +1837,12 @@ async def run_negotiate(msg: GatewayMessage):
     # —— 🚀 LLM 语义缓存层：命中时秒回，跳过完整推理 ——
     profile_text = " | ".join([
         intent_str,
+        # 结构化类别签名比 embedding 更可靠；它会随用户明确的“想吃/想逛
+        # 景区/少博物馆/购物”等诉求变化。
+        "signals:" + json.dumps({
+            key: bool(pref_signals.get(key))
+            for key in ("wants_scenic", "wants_food", "wants_cultural", "wants_shopping", "wants_hotel")
+        }, ensure_ascii=False, sort_keys=True),
         personalization_hint,
         budget_mode,
         str(user_role),
@@ -1850,10 +1870,48 @@ async def run_negotiate(msg: GatewayMessage):
                 cache_ok = is_daily_balance_acceptable(cached_route or [], trip_days, target_daily_count)
             except Exception:
                 cache_ok = False
+            # 旧缓存只做了“每天有节点”校验，无法阻止整套路线被单一文化场馆占满。
+            # 普通城市游默认需要景区 + 餐饮 + 人文/地标 + 住宿；只有用户明确要求
+            # 只看博物馆/历史场馆时，才允许单一文化主题缓存继续复用。
+            if cache_ok and isinstance(cached_route, list):
+                cached_categories = {
+                    classify_poi_category(
+                        str(item.get("name") or item.get("location") or ""),
+                        str(item.get("type") or ""),
+                        bool(item.get("is_hotel")),
+                    )
+                    for item in cached_route
+                    if isinstance(item, dict) and not item.get("is_hotel")
+                }
+                explicit_culture_only = bool(pref_signals.get("wants_cultural")) and not any(
+                    pref_signals.get(key) for key in ("wants_food", "wants_scenic", "wants_hotel", "wants_shopping")
+                )
+                if not explicit_culture_only:
+                    cache_ok = {"scenic", "food"}.issubset(cached_categories) and "cultural" in cached_categories
+                    if cache_ok:
+                        cached_by_day: Dict[int, set[str]] = {}
+                        for item in cached_route:
+                            if not isinstance(item, dict) or item.get("is_hotel"):
+                                continue
+                            try:
+                                cached_day = int(item.get("day") or 1)
+                            except (TypeError, ValueError):
+                                cached_day = 1
+                            cached_by_day.setdefault(cached_day, set()).add(
+                                classify_poi_category(
+                                    str(item.get("name") or item.get("location") or ""),
+                                    str(item.get("type") or ""),
+                                    bool(item.get("is_hotel")),
+                                )
+                            )
+                        cache_ok = all(
+                            {"scenic", "food"}.issubset(cached_by_day.get(day, set()))
+                            for day in range(1, trip_days + 1)
+                        )
             if cache_ok:
                 print(f"✅ [语义缓存] {target_city}/{trip_days}天命中，秒回", flush=True)
                 return StreamingResponse(cached_stream(cached_hit), media_type="application/x-ndjson")
-            print(f"♻️ [语义缓存] {target_city}/{trip_days}天命中但每日密度不达标，跳过旧方案", flush=True)
+            print(f"♻️ [语义缓存] {target_city}/{trip_days}天命中但密度或类别多样性不达标，跳过旧方案", flush=True)
         # Seed templates are intentionally limited to short cold-start trips.
         # Long/deep itineraries must use the supplier-backed candidate pool so
         # every requested day receives a balanced set of unique nodes.
@@ -1907,8 +1965,66 @@ async def run_negotiate(msg: GatewayMessage):
                 pass
 
         coord_task = toolbox.get_coordinates(target_city)
-        # 精准文旅分类，剔除建材数码五金
-        attractions_task = toolbox.get_dynamic_pois(target_city, keywords="必玩景点|文化地标|历史古迹|博物馆|文庙|古城|5A景区", types="110000|141200|060400|060100", limit=poi_limit)
+
+        # 不再把所有景点类型塞进一次宽泛检索。高德在“景点|博物馆|文化地标”
+        # 这类混合关键词下很容易返回大量博物馆，导致模型看到的候选池本身就失衡。
+        # 分领域检索后再合并，保证自然景区、文化、人文商业和特色餐饮都有真实候选。
+        async def _fetch_attraction_mix() -> List[Dict[str, Any]]:
+            scenic_query = toolbox.get_dynamic_pois(
+                target_city,
+                keywords="自然风景|公园|天山|天池|草原|湖|峡谷|沙漠|绿洲|植物园|动物园|5A景区",
+                types="110000",
+                limit=poi_limit,
+            )
+            cultural_query = toolbox.get_dynamic_pois(
+                target_city,
+                keywords="文化地标|历史古迹|博物馆|文庙|古城|遗址|非遗",
+                types="141200",
+                limit=max(20, poi_limit // 2),
+            )
+            shopping_query = toolbox.get_dynamic_pois(
+                target_city,
+                keywords="特色步行街|夜市|商圈|集市|老街|文创市集",
+                types="060400|060100",
+                limit=max(16, poi_limit // 3),
+            )
+            scenic, cultural, shopping = await asyncio.gather(
+                scenic_query, cultural_query, shopping_query, return_exceptions=True
+            )
+            # 高德对“关键词1|关键词2”偶尔会按名称相关性返回跨类 POI。
+            # 例如自然查询混入博物馆，最终模型看到的候选池就会被文化场馆淹没。
+            # 这里按查询意图做一次保守的类别隔离：明显属于另一类的记录丢弃，
+            # 无法判断的记录保留，避免误删真实景点。
+            def keep_for(result: Any, expected: str) -> List[Dict[str, Any]]:
+                if not isinstance(result, list):
+                    return []
+                kept: List[Dict[str, Any]] = []
+                for item in result:
+                    if not isinstance(item, dict):
+                        continue
+                    actual = classify_poi_category(
+                        str(item.get("name") or ""),
+                        str(item.get("type") or ""),
+                        bool(item.get("is_hotel")),
+                    )
+                    if expected == "scenic" and actual in {"cultural", "food", "hotel"}:
+                        continue
+                    if expected == "shopping" and actual in {"cultural", "food", "hotel"}:
+                        continue
+                    if expected == "cultural" and actual in {"food", "hotel", "scenic"}:
+                        continue
+                    item = dict(item)
+                    item["planning_category"] = expected if actual == "other" else actual
+                    kept.append(item)
+                return kept
+
+            merged: List[Dict[str, Any]] = []
+            merged.extend(keep_for(scenic, "scenic"))
+            merged.extend(keep_for(cultural, "cultural"))
+            merged.extend(keep_for(shopping, "shopping"))
+            return merged
+
+        attractions_task = _fetch_attraction_mix()
         foods_task = toolbox.get_dynamic_pois(target_city, keywords="特色老字号|地方特色美食|正宗名吃|特色正餐|川菜", types="050000", limit=poi_limit)
         hotels_task = toolbox.get_dynamic_pois(target_city, keywords="品质酒店|高端度假酒店|高分精品住宿", types="100000", limit=30)
         safety_task = wm_client.get_city_safety_intel(target_city)
@@ -1945,15 +2061,72 @@ async def run_negotiate(msg: GatewayMessage):
                     continue
                 cleaned_hotels.append(h)
 
+        # Specialist runtime: these domain tasks run independently and return
+        # validated proposals before the coordinator performs final route
+        # selection. Empty supplier data is kept as a degraded proposal rather
+        # than being replaced with fabricated facts.
+        specialist_runtime_result = {"status": "degraded", "proposals": [], "completed": 0, "failed": 0, "degraded": 0, "parallel": True}
+        try:
+            from core.agent_runtime import build_pool_runtime
+            from core.proposal_governance import apply_candidate_gates
+
+            _runtime, _runtime_requests = build_pool_runtime(
+                attractions=unique_attractions,
+                transport=[traffic_data] if isinstance(traffic_data, dict) else [],
+                lodging=cleaned_hotels,
+                dining=unique_foods,
+                risk=[safety_intel] if isinstance(safety_intel, dict) else [],
+                budget=[],
+            )
+            specialist_runtime_result = await _runtime.execute(_runtime_requests)
+            _gated = apply_candidate_gates(
+                {"attractions": unique_attractions, "dining": unique_foods, "lodging": cleaned_hotels},
+                specialist_runtime_result,
+            )
+            # Only contract-approved candidates enter the coordinator's
+            # scoring pool. A degraded proposal leaves that domain empty and
+            # is surfaced in the audit instead of silently becoming a fact.
+            unique_attractions = _gated["pools"].get("attractions", [])
+            unique_foods = _gated["pools"].get("dining", [])
+            cleaned_hotels = _gated["pools"].get("lodging", [])
+            specialist_runtime_result["gate_audits"] = _gated["audits"]
+            await event_bus.emit(OMNI_EVENTS_STREAM, "specialist_proposals_ready", {
+                "room_id": room_id,
+                "city": target_city,
+                "status": specialist_runtime_result.get("status"),
+                "completed": specialist_runtime_result.get("completed", 0),
+                "degraded": specialist_runtime_result.get("degraded", 0),
+            }, room_id)
+        except Exception as _runtime_error:
+            specialist_runtime_result = {
+                **specialist_runtime_result,
+                "status": "degraded",
+                "error": str(_runtime_error)[:240],
+            }
+
         # 景点与餐饮都属于可执行的白天节点。此前只统计景点会在长行程中
         # 过早降低 actual_daily_count，导致后续日期只剩住宿。
         available_total = len(unique_attractions) + len(unique_foods)
         actual_daily_count = target_daily_count
-        if available_total < trip_days * target_daily_count and available_total > 0:
+        # 深度探索的“每天节点数”是用户可感知的硬期望，不能因为候选池偏小
+        # 就静默改成另一个规划密度。保持目标值，让后续均衡门禁尽力补齐，
+        # 并将真实候选缺口写入审计字段；普通模式仍允许适度降密度。
+        if role != "深度探索" and available_total < trip_days * target_daily_count and available_total > 0:
             actual_daily_count = max(5 if role == "深度探索" else 3, available_total // trip_days)
             yield json.dumps({"token": f"[协商提示]: 已根据当地核心地标池精选每日 {actual_daily_count} 个核心游览节点！\n"}, ensure_ascii=False) + "\n"
             async for _e in emit_reasoning("时空调度体", "compromise", f"候选池仅 {available_total} 个核心地标，将每日节点由 {target_daily_count} 妥协下调至 {actual_daily_count} 个", "避免多天重复排布，保证每个节点真实可达"):
                 yield _e
+        elif role == "深度探索" and available_total < trip_days * target_daily_count:
+            shortage = trip_days * target_daily_count - available_total
+            yield json.dumps({
+                "type": "candidate_shortage",
+                "payload": {
+                    "requested_daytime_nodes": trip_days * target_daily_count,
+                    "available_daytime_candidates": available_total,
+                    "shortage": shortage,
+                    "message": "真实候选池不足，系统不会复制地点或编造地点；已尽力均衡到各天。",
+                },
+            }, ensure_ascii=False) + "\n"
 
         fusion_signals = (safety_intel.get("fusion") or {}).get("signals") or []
         fusion_summary = "、".join(fusion_signals) if fusion_signals else "无显著风险增量"
@@ -2147,6 +2320,7 @@ async def run_negotiate(msg: GatewayMessage):
                     'photos': p.get('photos', []) if isinstance(p.get('photos'), list) else [],
                     'web_knowledge': str(web_info),
                     'is_hotel': bool(p.get("is_hotel", False)),
+                    'planning_category': classify_poi_category(p_name, p_type, bool(p.get("is_hotel", False))),
                     # 优先保留 get_dynamic_pois 生成的精确坐标标点链接（uri.amap.com/marker），缺失时回退关键词搜索
                     'amap_url': str(p.get('amap_url') or amap_link),
                     'map_image': str(p.get('map_image') or ''),
@@ -2167,6 +2341,7 @@ async def run_negotiate(msg: GatewayMessage):
                     'type': p_type or '风景',
                     'cost_estimate': formatted_cost,
                     'is_hotel': bool(p.get("is_hotel", False)),
+                    'planning_category': classify_poi_category(p_name, p_type, bool(p.get("is_hotel", False))),
                     'data_sources': p.get('data_sources') or {'rating': 'unavailable', 'cost_estimate': 'unavailable', 'open_time': 'unavailable'},
                     'estimated': bool(p.get('estimated', True)),
                     'hint': short_hint
@@ -2519,6 +2694,23 @@ async def run_negotiate(msg: GatewayMessage):
                 yield json.dumps({"token": f"\n[系统兜底] {friendly}\n"}, ensure_ascii=False) + "\n"
 
                 syn_routes, syn_summary = _synthesize_from_pool(err_msg[:80])
+                try:
+                    from core.itinerary_balance import enforce_category_mix
+
+                    _culture_only_fallback = bool(pref_signals.get("wants_cultural")) and not any(
+                        pref_signals.get(key) for key in ("wants_food", "wants_scenic", "wants_hotel", "wants_shopping")
+                    )
+                    if not _culture_only_fallback:
+                        _fallback_mix = enforce_category_mix(
+                            syn_routes,
+                            poi_pool_data,
+                            days=trip_days,
+                            target_daytime=target_daily_count,
+                        )
+                        syn_routes = _fallback_mix["route"]
+                        syn_summary = f"{syn_summary} 已执行景区、餐饮、人文类别均衡。"
+                except Exception as _fallback_mix_exc:
+                    print(f"⚠️ [兜底类别均衡] 失败，保留候选池顺序: {_fallback_mix_exc}", flush=True)
                 final_data = {
                     "status": "degraded_fallback",
                     "negotiation_summary": syn_summary,
@@ -2803,6 +2995,9 @@ async def run_negotiate(msg: GatewayMessage):
                         }
                     llm_routes = _synth_full_trip()
 
+                if isinstance(final_data, dict):
+                    final_data["specialist_runtime"] = specialist_runtime_result
+
                 if isinstance(llm_routes, list) and llm_routes:
                     llm_routes = _rebind(llm_routes)
 
@@ -3043,7 +3238,13 @@ async def run_negotiate(msg: GatewayMessage):
                             str(d): {
                                 "daytime": len(_daytime(by_day.get(d, []))),
                                 "hotel": sum(1 for item in by_day.get(d, []) if _node_cat(item) == "hotel"),
-                                "target_daytime": desired_counts[d],
+                                # target_daytime preserves the user's requested
+                                # density; achievable_target is the amount
+                                # reachable from the verified pool after
+                                # deduplication and cross-day balancing.
+                                "target_daytime": actual_daily_count,
+                                "achievable_target": desired_counts[d],
+                                "satisfied": len(_daytime(by_day.get(d, []))) >= actual_daily_count,
                             }
                             for d in range(1, trip_days + 1)
                         }
@@ -3154,7 +3355,20 @@ async def run_negotiate(msg: GatewayMessage):
                     # Structured proposal audit: arbitration receives an
                     # explicit evidence/degradation status alongside the
                     # human-readable reasoning stream.
-                    final_data["agent_contracts"] = [audit_route_agent_proposal(llm_routes)]
+                    _specialist_audits = []
+                    for _proposal in specialist_runtime_result.get("proposals", []) if isinstance(specialist_runtime_result, dict) else []:
+                        if not isinstance(_proposal, dict):
+                            continue
+                        _specialist_audits.append({
+                            "agent_id": _proposal.get("agent_id"),
+                            "domain": _proposal.get("domain"),
+                            "status": _proposal.get("status", "failed"),
+                            "evidence_count": len(_proposal.get("evidence") or []),
+                            "candidate_count": len(_proposal.get("candidates") or []),
+                            "degraded": bool(_proposal.get("degraded")),
+                            "latency_ms": _proposal.get("latency_ms", 0),
+                        })
+                    final_data["agent_contracts"] = [audit_route_agent_proposal(llm_routes), *_specialist_audits]
                     print(f"🔍 [偏好覆协校验] {final_data['preference_validation']}", flush=True)
 
                     # 👑 多方案生成：同一候选池产出 2 套差异化风格的完整方案，供用户对比选择
@@ -3264,12 +3478,12 @@ async def run_negotiate(msg: GatewayMessage):
                             _feasible_indices = [int(entry.get("index", 0)) for entry in _constraint_resolution.get("ranked", [])]
                             if _feasible_indices:
                                 _feasible_routes = [fair_routes[i] for i in _feasible_indices]
-                                fair_selection = select_fair_route(_feasible_routes, fairness_members)
+                                fair_selection = fairness_gate(_feasible_routes, fairness_members, max_stddev=_fairness_limit_from_env())
                                 selected_index = _feasible_indices[int(fair_selection.get("index", 0))]
                                 _report_route_indices = _feasible_indices
                                 _selection_method = "hard_constraint_filter_then_maximin"
                             else:
-                                fair_selection = select_fair_route(fair_routes, fairness_members)
+                                fair_selection = fairness_gate(fair_routes, fairness_members, max_stddev=_fairness_limit_from_env())
                                 selected_index = int(fair_selection.get("index", 0))
                                 _report_route_indices = list(range(len(fair_routes)))
                                 _selection_method = "maximin_fallback_all_infeasible"
@@ -3290,11 +3504,18 @@ async def run_negotiate(msg: GatewayMessage):
                                 _report_copy["candidate_name"] = "AI 主方案" if _route_index == 0 else str(plan_variants[_route_index - 1].get("name") or f"候选方案 {_route_index}") if _route_index - 1 < len(plan_variants) else f"候选方案 {_route_index}"
                                 _report_copy["candidate_index"] = _route_index
                                 _candidate_reports.append(_report_copy)
-                            try:
-                                _fairness_threshold = float(os.getenv("PLANNING_FAIRNESS_MAX_STD", "0.15"))
-                            except (TypeError, ValueError):
-                                _fairness_threshold = 0.15
-                            final_data["fairness"] = dict(fairness_base, selected_variant_index=selected_variant_index, selection_method=_selection_method, candidate_reports=_candidate_reports, threshold=_fairness_threshold, threshold_exceeded=float(fairness_base.get("utility_stddev", 0)) > _fairness_threshold)
+                            _fairness_threshold = _fairness_limit_from_env()
+                            _fairness_exceeded = bool(fair_selection.get("threshold_exceeded", float(fairness_base.get("utility_stddev", 0)) > _fairness_threshold))
+                            final_data["fairness"] = dict(
+                                fairness_base,
+                                selected_variant_index=selected_variant_index,
+                                selection_method=_selection_method,
+                                candidate_reports=_candidate_reports,
+                                threshold=_fairness_threshold,
+                                threshold_exceeded=_fairness_exceeded,
+                                repair_attempted=_fairness_exceeded,
+                                repair_status="no_candidate_within_threshold" if _fairness_exceeded else "not_needed",
+                            )
                             if selected_index > 0:
                                 llm_routes = repair_route(llm_routes, max_nodes_per_day=actual_daily_count + 1)
                                 final_data["route"] = llm_routes
@@ -3795,7 +4016,7 @@ async def run_negotiate(msg: GatewayMessage):
                     # balance pass; run the same deterministic check immediately
                     # before emitting and caching the result.
                     try:
-                        from core.itinerary_balance import rebalance_daily_route
+                        from core.itinerary_balance import enforce_category_mix, rebalance_daily_route
 
                         _final_target = target_daily_count if role == "深度探索" else min(target_daily_count, 5)
                         _balanced = rebalance_daily_route(
@@ -3808,6 +4029,28 @@ async def run_negotiate(msg: GatewayMessage):
                         llm_routes = final_data["route"]
                         final_data["daily_balance"] = _balanced["audit"]
                         final_data["daily_balance"]["gate"] = "final_pre_emit"
+
+                        # 普通游的最终门禁：用户没有明确要求“只看博物馆”时，
+                        # 每天至少出现景区、特色餐饮、人文/地标三类体验，且文化场馆
+                        # 不得占掉大多数白天节点。只使用同一候选池中的真实 POI 替换，
+                        # 不编造名称、价格或坐标。
+                        _culture_only_request = bool(pref_signals.get("wants_cultural")) and not any(
+                            pref_signals.get(key) for key in ("wants_food", "wants_scenic", "wants_hotel", "wants_shopping")
+                        )
+                        if not _culture_only_request:
+                            _mixed = enforce_category_mix(
+                                final_data["route"],
+                                poi_pool_data,
+                                days=trip_days,
+                                target_daytime=_final_target,
+                            )
+                            final_data["route"] = _mixed["route"]
+                            llm_routes = final_data["route"]
+                            final_data["category_balance"] = _mixed["audit"]
+                            final_data["daily_balance"] = {
+                                **final_data["daily_balance"],
+                                "category_balance": _mixed["audit"],
+                            }
                         _final_fairness = fairness_report(final_data["route"], fairness_members or room_members)
                         _fairness_meta = final_data.get("fairness") or {}
                         _threshold = float(_fairness_meta.get("threshold", 0.15) or 0.15)
@@ -3816,6 +4059,8 @@ async def run_negotiate(msg: GatewayMessage):
                             **_final_fairness,
                             "threshold": _threshold,
                             "threshold_exceeded": float(_final_fairness.get("utility_stddev", 0)) > _threshold,
+                            "repair_attempted": bool(_fairness_meta.get("repair_attempted", False)),
+                            "repair_status": _fairness_meta.get("repair_status", "not_needed"),
                         }
                         try:
                             final_data["constraints"] = validate_route(

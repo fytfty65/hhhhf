@@ -55,7 +55,11 @@ export interface RoutePoint {
   time?: string;
   transport?: string;
   tags?: string[];
+  category?: string;
   cost?: string;
+  cost_estimate?: string | null;
+  data_sources?: Record<string, unknown>;
+  estimated?: boolean;
   trust_reason?: string;
   photos?: string[];
   riskScore?: number; // 👑 节点级风险画像（后端下发）
@@ -657,7 +661,7 @@ export default function InteractiveAmapComponent({
 
       {/* 👑 一块底图瓦片都没画出来时，用**离线示意图**兜底：不依赖网络，
           路线与编号仍然可读（之前这种情况就是一块空白）。 */}
-      {!basemapPainted && (
+      {(!basemapPainted || tileError) && (
         <RouteSchematicMap
           routes={activeNodes}
           scope={mapScope}
@@ -693,9 +697,9 @@ export default function InteractiveAmapComponent({
         {/* 👑 方案 A 核心：3D 态势/安全雷达视角切换按钮 */}
         <button
           onClick={() => setShow3DGlobe(true)}
-          className="bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 text-white px-3.5 py-2.5 rounded-xl shadow-lg border border-blue-400/30 flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
+          className="bg-gradient-to-r from-orange-700 via-orange-600 to-orange-500 text-white px-3.5 py-2.5 rounded-xl shadow-lg border border-orange-400/30 flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
         >
-          <Globe2 className="w-3.5 h-3.5 text-cyan-300 animate-spin-slow" />
+          <Globe2 className="w-3.5 h-3.5 text-orange-200 animate-spin-slow" />
           <span>3D 态势雷达</span>
         </button>
         </div>

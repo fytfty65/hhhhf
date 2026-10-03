@@ -1,0 +1,44 @@
+{
+  "tools": [
+    {
+      "name": "tuniuHotelSearch",
+      "description": "Search hotel availability and room offers",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"},
+          "check-in": {"type": "string", "format": "date"},
+          "check-out": {"type": "string", "format": "date"},
+          "guest-count": {"type": "integer", "minimum": 1}
+        },
+        "required": ["city", "check-in", "check-out", "guest-count"]
+      }
+    },
+    {
+      "name": "tuniuHotelCreateOrder",
+      "description": "Create a hotel order after user confirmation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hotelId": {"type": "string"},
+          "roomType": {"type": "string"},
+          "checkInDate": {"type": "string", "format": "date"},
+          "checkOutDate": {"type": "string", "format": "date"},
+          "passengerName": {"type": "string"},
+          "contact": {"type": "string"},
+          "certificateNo": {"type": "string"}
+        },
+        "required": ["hotelId", "roomType", "checkInDate", "checkOutDate", "passengerName", "contact", "certificateNo"]
+      }
+    },
+    {
+      "name": "cancelOrder",
+      "description": "Cancel an existing order",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"orderId": {"type": "string"}},
+        "required": ["orderId"]
+      }
+    }
+  ]
+}

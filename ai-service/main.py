@@ -10,7 +10,7 @@ load_dotenv()
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from api import conflict, agent, carbon_service, operations
+from api import conflict, agent, carbon_service, operations, evaluation
 from api.agent import planning_bandit
 from core.observability import ObservabilityMiddleware, METRICS  # P3 可观测性
 
@@ -89,6 +89,7 @@ app.include_router(conflict.router, prefix="/api/v1", tags=["Conflict Detection"
 app.include_router(agent.router, prefix="/api/v1", tags=["Agent Negotiation"])  # 🚨 修复点 2：把 agent 路由挂载上去
 app.include_router(carbon_service.router, prefix="/api/v1", tags=["Carbon Footprint"])  # P5 碳足迹评估
 app.include_router(operations.router, prefix="/api/v1", tags=["Trip Operations"])
+app.include_router(evaluation.router, prefix="/api/v1", tags=["Evaluation Observability"])
 
 if __name__ == "__main__":
     import uvicorn

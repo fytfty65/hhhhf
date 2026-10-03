@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -136,6 +137,66 @@ func PrometheusHandler(c *gin.Context) {
 		fmt.Fprintf(&b, "omniroute_gateway_bandit_feedback_total{outcome=\"%s\"} %d\n",
 			outcome, counters[outcome])
 	}
+
+	// Audit retention worker health. These aggregate gauges make a silent
+	// cleanup outage alertable without exposing audit rows or database details.
+	b.WriteString("# HELP omniroute_model_audit_cleanup_runs_total Audit cleanup runs completed or attempted.\n")
+	b.WriteString("# TYPE omniroute_model_audit_cleanup_runs_total counter\n")
+	auditCleanup := metrics.AuditCleanupSnapshot()
+	fmt.Fprintf(&b, "omniroute_model_audit_cleanup_runs_total %d\n", int64(auditCleanup["runs"].(int64)))
+	b.WriteString("# HELP omniroute_model_audit_cleanup_failures_total Audit cleanup failures.\n")
+	b.WriteString("# TYPE omniroute_model_audit_cleanup_failures_total counter\n")
+	fmt.Fprintf(&b, "omniroute_model_audit_cleanup_failures_total %d\n", int64(auditCleanup["failures"].(int64)))
+	b.WriteString("# HELP omniroute_model_audit_cleanup_last_deleted Number of audit rows deleted by the latest cleanup.\n")
+	b.WriteString("# TYPE omniroute_model_audit_cleanup_last_deleted gauge\n")
+	fmt.Fprintf(&b, "omniroute_model_audit_cleanup_last_deleted %d\n", int64(auditCleanup["last_deleted"].(int64)))
+	b.WriteString("# HELP omniroute_model_audit_cleanup_last_run_timestamp_seconds Unix timestamp of the latest cleanup attempt.\n")
+	b.WriteString("# TYPE omniroute_model_audit_cleanup_last_run_timestamp_seconds gauge\n")
+	lastRun, _ := time.Parse(time.RFC3339, auditCleanup["last_run_at"].(string))
+	fmt.Fprintf(&b, "omniroute_model_audit_cleanup_last_run_timestamp_seconds %d\n", lastRun.Unix())
+	b.WriteString("# HELP omniroute_model_audit_cleanup_healthy Whether the latest audit cleanup completed without error.\n")
+	b.WriteString("# TYPE omniroute_model_audit_cleanup_healthy gauge\n")
+	healthy := 0
+	if auditCleanup["status"] == "healthy" {
+		healthy = 1
+	}
+	fmt.Fprintf(&b, "omniroute_model_audit_cleanup_healthy %d\n", healthy)
+
+	// Provider quality delivery worker health. These counters intentionally
+	// contain no user, trip, token, or provider payload labels.
+	b.WriteString("# HELP omniroute_provider_quality_push_total Web Push worker outcomes.\n")
+	b.WriteString("# TYPE omniroute_provider_quality_push_total counter\n")
+	pushSnapshot := metrics.ProviderQualityPushSnapshot()
+	workerEnabled := 0
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("PROVIDER_QUALITY_WEB_PUSH_WORKER_ENABLED")), "true") {
+		workerEnabled = 1
+	}
+	dryRun := 0
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("PROVIDER_QUALITY_WEB_PUSH_DRY_RUN")), "true") && (env == "staging" || env == "test") {
+		dryRun = 1
+	}
+	b.WriteString("# HELP omniroute_provider_quality_worker_enabled Whether the provider quality Web Push worker is explicitly enabled.\n")
+	b.WriteString("# TYPE omniroute_provider_quality_worker_enabled gauge\n")
+	fmt.Fprintf(&b, "omniroute_provider_quality_worker_enabled %d\n", workerEnabled)
+	b.WriteString("# HELP omniroute_provider_quality_worker_dry_run Whether the worker is running in staging/test dry-run mode.\n")
+	b.WriteString("# TYPE omniroute_provider_quality_worker_dry_run gauge\n")
+	fmt.Fprintf(&b, "omniroute_provider_quality_worker_dry_run %d\n", dryRun)
+	b.WriteString("# HELP omniroute_provider_quality_push_last_run_timestamp_seconds Unix timestamp of the latest worker run.\n")
+	b.WriteString("# TYPE omniroute_provider_quality_push_last_run_timestamp_seconds gauge\n")
+	fmt.Fprintf(&b, "omniroute_provider_quality_push_last_run_timestamp_seconds %d\n", pushSnapshot["last_run_unix"])
+	for _, outcome := range []string{"runs", "errors", "claimed", "sent", "retrying", "failed", "invalid_token", "no_token", "dry_runs"} {
+		fmt.Fprintf(&b, "omniroute_provider_quality_push_total{outcome=\"%s\"} %d\n", outcome, pushSnapshot[outcome])
+	}
+	b.WriteString("# HELP omniroute_provider_quality_delivery_cleanup_total Delivery retention cleanup outcomes.\n")
+	b.WriteString("# TYPE omniroute_provider_quality_delivery_cleanup_total counter\n")
+	for _, outcome := range []string{"runs", "deleted", "failures"} {
+		key := "cleanup_" + outcome
+		fmt.Fprintf(&b, "omniroute_provider_quality_delivery_cleanup_total{outcome=\"%s\"} %d\n", outcome, pushSnapshot[key])
+	}
+	b.WriteString("# HELP omniroute_provider_quality_delivery_cleanup_last_success_timestamp_seconds Unix timestamp of the latest successful delivery cleanup.\n")
+	b.WriteString("# TYPE omniroute_provider_quality_delivery_cleanup_last_success_timestamp_seconds gauge\n")
+	fmt.Fprintf(&b, "omniroute_provider_quality_delivery_cleanup_last_success_timestamp_seconds %d\n", pushSnapshot["cleanup_last_success_unix"])
 
 	b.WriteString("# HELP omniroute_gateway_request_duration_milliseconds HTTP request latency.\n")
 	b.WriteString("# TYPE omniroute_gateway_request_duration_milliseconds histogram\n")

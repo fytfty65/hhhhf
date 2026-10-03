@@ -1,0 +1,82 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Web Push worker",
+      "id": 1,
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "omniroute_provider_quality_worker_enabled", "legendFormat": "enabled", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "disabled"}, "1": {"text": "enabled"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "blue", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "orientation": "auto", "textMode": "auto"}
+    },
+    {
+      "type": "stat",
+      "title": "Dry-run",
+      "id": 2,
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "omniroute_provider_quality_worker_dry_run", "legendFormat": "dry_run", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "off"}, "1": {"text": "staging dry-run"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "orientation": "auto", "textMode": "auto"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Push outcomes / min",
+      "id": 3,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [
+        {"expr": "rate(omniroute_provider_quality_push_total{outcome=\"sent\"}[5m]) * 60", "legendFormat": "sent", "refId": "A"},
+        {"expr": "rate(omniroute_provider_quality_push_total{outcome=\"failed\"}[5m]) * 60", "legendFormat": "failed", "refId": "B"},
+        {"expr": "rate(omniroute_provider_quality_push_total{outcome=\"retrying\"}[5m]) * 60", "legendFormat": "retrying", "refId": "C"},
+        {"expr": "rate(omniroute_provider_quality_push_total{outcome=\"no_token\"}[5m]) * 60", "legendFormat": "no token", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops/min"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Token invalidation / min",
+      "id": 4,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "rate(omniroute_provider_quality_push_total{outcome=\"invalid_token\"}[15m]) * 60", "legendFormat": "invalid token", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ops/min", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 1}, {"color": "red", "value": 10}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Delivery cleanup / hour",
+      "id": 5,
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 12},
+      "targets": [
+        {"expr": "increase(omniroute_provider_quality_delivery_cleanup_total{outcome=\"runs\"}[1h])", "legendFormat": "cleanup runs", "refId": "A"},
+        {"expr": "increase(omniroute_provider_quality_delivery_cleanup_total{outcome=\"deleted\"}[1h])", "legendFormat": "deleted rows", "refId": "B"},
+        {"expr": "increase(omniroute_provider_quality_delivery_cleanup_total{outcome=\"failures\"}[1h])", "legendFormat": "cleanup failures", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "stat",
+      "title": "Push processing errors",
+      "id": 6,
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 12},
+      "targets": [{"expr": "increase(omniroute_provider_quality_push_total{outcome=\"errors\"}[1h])", "legendFormat": "errors in last hour", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "orientation": "auto", "textMode": "auto"}
+    }
+  ],
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["omniroute", "provider-quality", "web-push"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "OmniRoute · Provider Quality Delivery",
+  "uid": "omniroute-provider-quality",
+  "version": 1
+}

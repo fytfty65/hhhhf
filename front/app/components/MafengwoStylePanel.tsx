@@ -295,8 +295,8 @@ export default function MafengwoStylePanel({
                   )}
 
                   {pt.split_info && (
-                    <div className="mb-3 p-3 rounded-2xl bg-gradient-to-r from-purple-500/10 to-indigo-500/10 border border-purple-500/30 text-xs">
-                      <div className="font-bold text-purple-700 dark:text-purple-400 flex items-center gap-1.5 mb-1">
+                    <div className="mb-3 p-3 rounded-2xl bg-gradient-to-r from-orange-600/10 to-orange-400/10 border border-orange-500/30 text-xs">
+                      <div className="font-bold text-orange-800 dark:text-orange-400 flex items-center gap-1.5 mb-1">
                         <Split className="w-3.5 h-3.5" />
                         <span>多智能体分合流时空调度：</span>
                       </div>
@@ -352,9 +352,9 @@ export default function MafengwoStylePanel({
                   </div>
 
                   {(pt.is_hotel || pt.tags?.includes("住宿") || idx === routes.length - 1) && pt.hotel_candidates && pt.hotel_candidates.length > 0 && (
-                    <div className="mt-3 p-3.5 rounded-2xl bg-purple-50/80 border border-purple-200/80 text-xs">
-                      <div className="font-bold text-purple-900 mb-2 flex items-center justify-between">
-                        <span className="flex items-center gap-1.5"><Hotel className="w-4 h-4 text-purple-600" /> 同商圈备选品质酒店：</span>
+                    <div className="mt-3 p-3.5 rounded-2xl bg-orange-50/80 border border-orange-200/80 text-xs">
+                      <div className="font-bold text-orange-900 mb-2 flex items-center justify-between">
+                        <span className="flex items-center gap-1.5"><Hotel className="w-4 h-4 text-orange-700" /> 同商圈备选品质酒店：</span>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {pt.hotel_candidates.map((cand: any, cIdx: number) => {
@@ -370,21 +370,21 @@ export default function MafengwoStylePanel({
                             if (candUrl) window.open(candUrl, '_blank', 'noopener,noreferrer');
                           };
                           return (
-                            <div key={cIdx} className="bg-white p-2.5 rounded-xl border border-purple-100 flex items-center justify-between shadow-2xs">
-                              <span className="font-bold text-slate-800 text-xs truncate max-w-[130px]">{candName} {candPrice && <span className="text-purple-600 font-normal">({candPrice})</span>}</span>
+                            <div key={cIdx} className="bg-white p-2.5 rounded-xl border border-orange-100 flex items-center justify-between shadow-2xs">
+                              <span className="font-bold text-slate-800 text-xs truncate max-w-[130px]">{candName} {candPrice && <span className="text-orange-700 font-normal">({candPrice})</span>}</span>
                               <div className="flex items-center gap-1.5 shrink-0">
                                 <a 
                                   href={candUrl} 
                                   target="_blank" 
                                   rel="noopener noreferrer" 
                                   onClick={openHotelDetail}
-                                  className="px-2 py-1 text-purple-600 hover:bg-purple-50 rounded-md border border-purple-200 text-[11px] font-bold flex items-center gap-0.5 cursor-pointer"
+                                  className="px-2 py-1 text-orange-700 hover:bg-orange-50 rounded-md border border-orange-200 text-[11px] font-bold flex items-center gap-0.5 cursor-pointer"
                                 >
                                   <ExternalLink className="w-3.5 h-3.5" /> 详情
                                 </a>
                                 <button 
                                   onClick={(e) => { e.stopPropagation(); onSwapPoi(pt.name); }} 
-                                  className="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-[11px] font-bold flex items-center gap-0.5 cursor-pointer"
+                                  className="px-2 py-1 bg-orange-700 hover:bg-orange-800 text-white rounded-md text-[11px] font-bold flex items-center gap-0.5 cursor-pointer"
                                 >
                                   <RotateCw className="w-3.5 h-3.5" /> 置换
                                 </button>

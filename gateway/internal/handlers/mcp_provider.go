@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -116,6 +118,12 @@ func fetchMCPProvider(ctx context.Context, endpoint, token, authHeader, provider
 	if tool.Name == "" {
 		return nil, false
 	}
+	// Discovery must never fall through to a mutation tool or a schema whose
+	// required fields are not supplied by the canonical planning context. Order
+	// and cancellation calls have a separate, explicitly confirmed path.
+	if audit := mcpToolSchemaAudit(tool, kind); audit["status"] != "ready" {
+		return nil, false
+	}
 	arguments := mcpArgumentsForTool(tool, input, kind)
 	if missing := mcpRequiredProperties(tool, arguments); len(missing) > 0 {
 		return nil, false
@@ -139,8 +147,11 @@ func discoverMCPTools(ctx context.Context, endpoint, token, authHeader string) (
 	client := &http.Client{Timeout: 20 * time.Second}
 	session := ""
 	call := func(method string, params any, notify bool) (json.RawMessage, error) {
-		id := atomic.AddUint64(&mcpRequestID, 1)
-		body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+		requestBody := map[string]any{"jsonrpc": "2.0", "method": method, "params": params}
+		if !notify {
+			requestBody["id"] = atomic.AddUint64(&mcpRequestID, 1)
+		}
+		body, err := json.Marshal(requestBody)
 		if err != nil {
 			return nil, err
 		}
@@ -324,7 +335,7 @@ func mcpArgumentsForTool(tool mcpTool, input contracts.PlanningContext, kind str
 	}
 	projected := make(map[string]any, len(properties))
 	for property, rawSchema := range properties {
-		canonical := strings.ToLower(strings.NewReplacer("_", "", "-", " ").Replace(property))
+		canonical := normalizeMCPPropertyName(property)
 		if value, ok := mcpValueForProperty(canonical, base); ok {
 			projected[property] = value
 			continue
@@ -357,12 +368,16 @@ func mcpArgumentsForOrder(tool mcpTool, input contracts.PlanningContext, fields 
 	}
 	projected := make(map[string]any, len(properties))
 	for property := range properties {
-		canonical := strings.ToLower(strings.NewReplacer("_", "", "-", " ").Replace(property))
+		canonical := normalizeMCPPropertyName(property)
 		if value, ok := mcpValueForProperty(canonical, base); ok {
 			projected[property] = value
 		}
 	}
 	return projected
+}
+
+func normalizeMCPPropertyName(value string) string {
+	return strings.ToLower(strings.NewReplacer("_", "", "-", "", " ", "", ".", "").Replace(strings.TrimSpace(value)))
 }
 
 func mcpRequiredProperties(tool mcpTool, arguments map[string]any) []string {
@@ -384,27 +399,113 @@ func mcpRequiredProperties(tool mcpTool, arguments map[string]any) []string {
 		provided, exists := arguments[name]
 		if !exists || provided == nil || strings.TrimSpace(fmt.Sprint(provided)) == "" {
 			missing = append(missing, name)
+			continue
+		}
+		if properties, ok := tool.InputSchema["properties"].(map[string]any); ok {
+			if schema, exists := properties[name]; exists {
+				if issue := mcpSchemaValueIssue(schema, provided); issue != "" {
+					missing = append(missing, name)
+				}
+			}
 		}
 	}
 	return missing
+}
+
+// mcpSchemaValueIssue performs the small, deterministic part of JSON Schema
+// validation needed before a supplier call. It prevents a value that was
+// mapped by name from being sent with the wrong primitive type or enum value.
+// Complex vendor-specific constraints remain blocked by the schema audit.
+func mcpSchemaValueIssue(rawSchema any, value any) string {
+	schema, ok := rawSchema.(map[string]any)
+	if !ok || value == nil {
+		return ""
+	}
+	if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
+		matched := false
+		for _, allowed := range enum {
+			if fmt.Sprint(allowed) == fmt.Sprint(value) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return "enum_mismatch"
+		}
+	}
+	typeName := strings.ToLower(strings.TrimSpace(fmt.Sprint(schema["type"])))
+	if typeName == "" {
+		return ""
+	}
+	compatible := true
+	switch typeName {
+	case "string":
+		_, compatible = value.(string)
+	case "integer":
+		compatible = isMCPInteger(value)
+	case "number":
+		compatible = isMCPNumber(value)
+	case "boolean":
+		_, compatible = value.(bool)
+	case "array":
+		kind := reflect.ValueOf(value)
+		compatible = kind.IsValid() && (kind.Kind() == reflect.Array || kind.Kind() == reflect.Slice)
+	case "object":
+		kind := reflect.ValueOf(value)
+		compatible = kind.IsValid() && kind.Kind() == reflect.Map
+	}
+	if !compatible {
+		return "type_mismatch"
+	}
+	return ""
+}
+
+func isMCPNumber(value any) bool {
+	switch number := value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32:
+		return true
+	case float64:
+		return !math.IsNaN(number) && !math.IsInf(number, 0)
+	case json.Number:
+		_, err := number.Float64()
+		return err == nil
+	default:
+		return false
+	}
+}
+
+func isMCPInteger(value any) bool {
+	switch number := value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	case float32:
+		return !math.IsNaN(float64(number)) && !math.IsInf(float64(number), 0) && math.Trunc(float64(number)) == float64(number)
+	case float64:
+		return !math.IsNaN(number) && !math.IsInf(number, 0) && math.Trunc(number) == number
+	case json.Number:
+		parsed, err := number.Float64()
+		return err == nil && math.Trunc(parsed) == parsed
+	default:
+		return false
+	}
 }
 
 func mcpValueForProperty(property string, base map[string]any) (any, bool) {
 	aliases := map[string][]string{
 		"destination": {"destination", "city", "tocity", "arrivalcity", "targetcity", "to", "query", "keyword", "keywords", "searchterm", "place", "cityname", "arrivalcityname", "originquery", "scenicname"},
 		"origin":      {"origin", "fromcity", "departurecity", "from", "departurecityname"},
-		"startdate":   {"startdate", "checkin", "departuredate", "date", "departdate"},
-		"enddate":     {"enddate", "checkout", "returndate", "checkoutparam"},
-		"travelers":   {"travelers", "traveller", "passengers", "passengercount", "adults", "guests", "adultnum"},
+		"startdate":   {"startdate", "checkin", "checkindate", "departuredate", "date", "departdate"},
+		"enddate":     {"enddate", "checkout", "checkoutdate", "returndate", "checkoutparam"},
+		"travelers":   {"travelers", "traveller", "passengers", "passengercount", "adults", "guests", "guestcount", "adultnum"},
 		"budget":      {"budget", "maxprice", "pricelimit", "maxbudget"},
 		"currency":    {"currency", "currencycode"},
 		"preferences": {"preferences", "preference", "filters"},
 		"context":     {"context", "planningcontext"},
 		"hotelid":     {"hotelid", "hotel", "propertyid", "productid", "resourceid"},
 		"roomtype":    {"roomtype", "room", "roomname", "roomcategory"},
-		"passenger":   {"passenger", "passengers", "guest", "guestinfo", "travelerinfo"},
-		"contact":     {"contact", "contactinfo", "contactname", "phone", "mobile", "email"},
-		"certificate": {"certificate", "certificateno", "certificateid", "documentno", "idcard", "idnumber"},
+		"passenger":   {"passenger", "passengername", "passengers", "guest", "guestinfo", "travelerinfo", "travelername"},
+		"contact":     {"contact", "contactinfo", "contactname", "contactphone", "contactemail", "phone", "mobile", "email"},
+		"certificate": {"certificate", "certificateno", "certificatenumber", "certificateid", "documentno", "idcard", "idcardnumber", "idnumber"},
 		"flightid":    {"flightid", "flight", "flightnumber", "flightno"},
 		"trainid":     {"trainid", "train", "trainnumber", "trainno"},
 		"ticketid":    {"ticketid", "ticket", "scenicid", "productid"},
@@ -424,7 +525,7 @@ func mcpValueForProperty(property string, base map[string]any) (any, bool) {
 		}
 	}
 	for source, value := range base {
-		normalized := strings.ToLower(strings.NewReplacer("_", "", "-", " ").Replace(source))
+		normalized := normalizeMCPPropertyName(source)
 		for _, alias := range propertyAliases {
 			if normalized == alias {
 				return value, value != nil && fmt.Sprint(value) != ""
@@ -458,7 +559,7 @@ func chooseMCPTool(provider string, tools []mcpTool, kind string) mcpTool {
 	if byDomain, ok := mcpPreferredDiscoveryTool[strings.ToUpper(provider)]; ok {
 		for _, preferred := range byDomain[strings.ToUpper(kind)] {
 			for _, tool := range tools {
-				if strings.EqualFold(strings.TrimSpace(tool.Name), preferred) {
+				if strings.EqualFold(strings.TrimSpace(tool.Name), preferred) && !isMCPMutationTool(tool) {
 					return tool
 				}
 			}
@@ -475,7 +576,12 @@ func chooseMCPTool(provider string, tools []mcpTool, kind string) mcpTool {
 	}
 	best := mcpTool{}
 	bestScore := 0
+	readOnlyCount := 0
 	for _, candidate := range tools {
+		if isMCPMutationTool(candidate) {
+			continue
+		}
+		readOnlyCount++
 		text := strings.ToLower(candidate.Name + " " + candidate.Description)
 		score := 0
 		for _, keyword := range keywords[strings.ToUpper(kind)] {
@@ -487,10 +593,32 @@ func chooseMCPTool(provider string, tools []mcpTool, kind string) mcpTool {
 			best, bestScore = candidate, score
 		}
 	}
-	if bestScore == 0 && len(tools) == 1 {
-		return tools[0]
+	if bestScore == 0 && readOnlyCount == 1 {
+		for _, candidate := range tools {
+			if !isMCPMutationTool(candidate) {
+				return candidate
+			}
+		}
 	}
 	return best
+}
+
+// isMCPMutationTool separates read-only discovery from supplier side effects.
+// The keyword list is intentionally conservative: an ambiguous tool is not
+// allowed to be selected for planning and remains available only to the
+// explicit order/cancel handlers after confirmation and idempotency checks.
+func isMCPMutationTool(tool mcpTool) bool {
+	text := strings.ToLower(strings.TrimSpace(tool.Name + " " + tool.Description))
+	for _, keyword := range []string{
+		"createorder", "create_order", "saveorder", "save_order", "booktrain", "book_train",
+		"bookflight", "book_flight", "createticketorder", "create_ticket_order", "cancelorder", "cancel_order",
+		"reserve", "reservation", "下单", "预订", "预定", "取消订单", "支付",
+	} {
+		if strings.Contains(text, strings.ToLower(keyword)) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractMCPToolPayload(raw json.RawMessage) any {

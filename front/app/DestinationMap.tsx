@@ -390,7 +390,7 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
                   href={`https://www.mafengwo.cn/search/q.php?q=${encodeURIComponent(selected + ' 旅游攻略')}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="mt-2.5 inline-flex items-center gap-1 text-[11px] font-bold text-sky-600 hover:text-sky-700 hover:underline"
+                  className="mt-2.5 inline-flex items-center gap-1 text-[11px] font-bold text-orange-700 hover:text-orange-800 hover:underline"
                 >
                   查看详细攻略 <ExternalLink className="w-3 h-3" />
                 </a>
@@ -404,7 +404,7 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
                     : (r.clicks || 0) > 0 ? { label: '热门', cls: 'bg-amber-100 text-amber-600' } : null;
                   return (
                     <div key={h.name} className="flex items-start gap-3 p-3 bg-slate-50 rounded-2xl">
-                      <div className={`p-2 rounded-xl shrink-0 ${h.type === 'food' ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
+                      <div className={`p-2 rounded-xl shrink-0 ${h.type === 'food' ? 'bg-orange-100 text-orange-600' : 'bg-stone-100 text-stone-600'}`}>
                         {h.type === 'food' ? <Utensils className="w-4 h-4" /> : <Landmark className="w-4 h-4" />}
                       </div>
                       <div className="min-w-0">
@@ -422,7 +422,7 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
                           target="_blank"
                           rel="noopener noreferrer"
                           onClick={() => trackPoiClick(h.name)}
-                          className="mt-1 inline-flex items-center gap-0.5 text-[10px] font-bold text-sky-600 hover:text-sky-700 hover:underline"
+                          className="mt-1 inline-flex items-center gap-0.5 text-[10px] font-bold text-orange-700 hover:text-orange-800 hover:underline"
                         >
                           在线详情 <ExternalLink className="w-2.5 h-2.5" />
                         </a>

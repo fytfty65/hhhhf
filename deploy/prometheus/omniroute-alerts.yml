@@ -1,0 +1,71 @@
+groups:
+  - name: omniroute-provider-quality
+    interval: 30s
+    rules:
+      # A configured worker that keeps failing is actionable, but a disabled
+      # worker is an intentional deployment choice and must stay quiet.
+      - alert: OmniRouteProviderPushFailures
+        expr: |
+          omniroute_provider_quality_worker_enabled == 1
+          and omniroute_provider_quality_worker_dry_run == 0
+          and increase(omniroute_provider_quality_push_total{outcome="failed"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: omniroute-gateway
+        annotations:
+          summary: "OmniRoute provider quality push failures"
+          description: "The Web Push worker has recorded failed deliveries during the last 10 minutes. Check FCM configuration, token health, and provider-quality delivery logs."
+
+      - alert: OmniRouteProviderPushWorkerErrors
+        expr: |
+          omniroute_provider_quality_worker_enabled == 1
+          and omniroute_provider_quality_worker_dry_run == 0
+          and increase(omniroute_provider_quality_push_total{outcome="errors"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: omniroute-gateway
+        annotations:
+          summary: "OmniRoute provider quality push worker errors"
+          description: "The worker loop is returning processing errors. Inspect /readyz and gateway logs before enabling real delivery again."
+
+      - alert: OmniRouteProviderPushDeliveryStalled
+        expr: |
+          omniroute_provider_quality_worker_enabled == 1
+          and omniroute_provider_quality_worker_dry_run == 0
+          and increase(omniroute_provider_quality_push_total{outcome="claimed"}[30m]) > 0
+          and increase(omniroute_provider_quality_push_total{outcome="sent"}[30m]) == 0
+          and increase(omniroute_provider_quality_push_total{outcome="failed"}[30m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: omniroute-gateway
+        annotations:
+          summary: "OmniRoute provider push delivery stalled"
+          description: "The worker claimed deliveries but recorded neither sent nor failed outcomes. Check worker liveness and database lease transitions."
+
+      - alert: OmniRouteProviderDeliveryCleanupStalled
+        expr: |
+          omniroute_provider_quality_worker_enabled == 1
+          and omniroute_provider_quality_delivery_cleanup_last_success_timestamp_seconds > 0
+          and time() - omniroute_provider_quality_delivery_cleanup_last_success_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: warning
+          service: omniroute-gateway
+        annotations:
+          summary: "OmniRoute provider delivery cleanup is stale"
+          description: "The delivery retention cleanup has not completed successfully for more than 48 hours. Terminal rows may accumulate."
+
+      - alert: OmniRouteProviderPushInvalidTokenSpike
+        expr: |
+          omniroute_provider_quality_worker_enabled == 1
+          and increase(omniroute_provider_quality_push_total{outcome="invalid_token"}[30m]) >= 10
+        for: 10m
+        labels:
+          severity: info
+          service: omniroute-gateway
+        annotations:
+          summary: "OmniRoute invalid push token spike"
+          description: "At least 10 device tokens were invalidated in the last 30 minutes. Review subscription lifecycle and client registration behavior."
