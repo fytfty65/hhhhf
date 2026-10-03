@@ -3,7 +3,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import dynamic from 'next/dynamic';
-import maplibregl from 'maplibre-gl';
+// maplibre-gl 6.x **移除了默认导出**：5.x 的 `import maplibregl from 'maplibre-gl'` 会报 TS1192，
+// 必须改成命名空间导入。这是 6.x 升级里我们唯一的破坏性改动（已验证）。
+import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { 
   ArrowLeft, 

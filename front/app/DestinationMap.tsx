@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import maplibregl from 'maplibre-gl';
+// maplibre-gl 6.x **移除了默认导出**：5.x 的 `import maplibregl from 'maplibre-gl'` 会报 TS1192，
+// 必须改成命名空间导入。这是 6.x 升级里我们唯一的破坏性改动（已验证）。
+import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { X, MapPin, Star, Flame, Utensils, Landmark, Search, Sparkles, Compass, ExternalLink } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
