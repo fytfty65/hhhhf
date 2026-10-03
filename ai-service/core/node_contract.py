@@ -1,0 +1,268 @@
+"""权威路线节点契约（P0：统一事实）。
+
+为什么需要
+----------
+同一件事在各层有好几种写法，实测 grep 出来的分叉包括：
+
+- 花费：`cost` / `cost_estimate` / `costEstimate` / `price`
+- 类别：`type` / `category` / `planning_category`
+- 坐标：`lnglat`（[lng,lat] 数组）/ `location`（AMap POI 里是 "lng,lat" 字符串，
+  但在路线节点里 `location` 其实是**名称**！）/ `coordinates`
+- 来源与时间：`data_sources` / `source` / `observed_at`
+
+网关侧已有一份 `contracts.Candidate`（含 `ObservedAt`）并在供应商质量门禁里卡
+`observed_at_missing`；前端也在各处自行归一化。缺的是**一份权威节点契约**，
+让"事实"只有一种形状。本模块给出它，并坚持项目一贯的诚实口径：
+
+**取不到的价格一律 `cost_status="unknown"`，绝不当作 0 元、绝不冒充已核实。**
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, List, Mapping, Optional
+
+# 权威节点字段（与目标架构里列出的 12 个字段一一对应）
+CANONICAL_FIELDS = (
+    "day",
+    "name",
+    "category",
+    "coordinates",
+    "cost",
+    "cost_status",
+    "source",
+    "observed_at",
+    "confidence",
+    "open_time",
+    "official_url",
+    "estimated",
+)
+
+# cost_status 三态：只有拿到可核实来源才算 verified
+COST_VERIFIED = "verified"
+COST_ESTIMATED = "estimated"
+COST_UNKNOWN = "unknown"
+
+CASH_SOURCE_MARKERS = ("amap", "official", "provider", "vendor", "ticketing", "12306", "rollinggo")
+UNKNOWN_PRICE_MARKERS = ("暂无供应商数据", "暂无报价", "未知", "待确认", "n/a", "na", "unknown", "无")
+
+# 类别别名 → 粗粒度类别（与 core/plan_quality 的 _coarse_category 口径保持一致，便于对账）
+CATEGORY_ALIASES: Dict[str, str] = {
+    "餐": "food", "餐饮": "food", "美食": "food", "food": "food", "dining": "food",
+    "住宿": "hotel", "酒店": "hotel", "民宿": "hotel", "hotel": "hotel", "lodging": "hotel",
+    "文化": "cultural", "博物馆": "cultural", "古迹": "cultural", "cultural": "cultural",
+    "自然": "scenic", "自然风光": "scenic", "风景": "scenic", "景区": "scenic", "公园": "scenic", "scenic": "scenic",
+    "购物": "shopping", "商圈": "shopping", "shopping": "shopping",
+    "夜景": "nightlife", "夜市": "nightlife", "nightlife": "nightlife",
+    "交通": "transport", "transport": "transport",
+}
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def looks_like_coordinates(value: Any) -> bool:
+    """"lng,lat" 形态的字符串（AMap POI 的 location 字段就是这个形状）。
+
+    注意：路线节点里的 `location` 是**名称**，所以不能无条件把它当坐标 —— 必须先看形状。
+    """
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return True
+    match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", _text(value))
+    return bool(match)
+
+
+def parse_coordinates(value: Any) -> Optional[List[float]]:
+    """归一化成 `[lng, lat]`；非法/零点返回 None（不编造坐标）。"""
+    if isinstance(value, Mapping):
+        lng, lat = value.get("lng"), value.get("lat")
+        try:
+            coords = [float(lng), float(lat)]
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, str):
+        match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", value)
+        if not match:
+            return None
+        coords = [float(match.group(1)), float(match.group(2))]
+    elif isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            coords = [float(value[0]), float(value[1])]
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    lng, lat = coords
+    if lng == 0.0 and lat == 0.0:
+        return None
+    if not (-180.0 <= lng <= 180.0 and -90.0 <= lat <= 90.0):
+        return None
+    return coords
+
+
+def parse_cost(value: Any) -> Optional[float]:
+    """解析金额：`¥50` / `50元` / `50-120`（取区间下限）/ 数字；取不到返回 None。
+
+    "暂无供应商数据"这类占位词必须返回 None —— **不能变成 0**，否则预算会把"未知"算成"免费"。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = _text(value)
+    if not text:
+        return None
+    lowered = text.lower()
+    for marker in UNKNOWN_PRICE_MARKERS:
+        if marker and marker in lowered:
+            return None
+    numbers = re.findall(r"\d+(?:\.\d+)?", text)
+    if not numbers:
+        return None
+    return float(numbers[0])
+
+
+def normalize_category(raw: Any) -> str:
+    """归一化类别；认不出来就原样保留（不硬塞进某个已知类别，避免造假）。"""
+    text = _text(raw)
+    if not text:
+        return ""
+    head = text.split(";")[0].strip()
+    for candidate in (text, head):
+        if candidate in CATEGORY_ALIASES:
+            return CATEGORY_ALIASES[candidate]
+    for key, value in CATEGORY_ALIASES.items():
+        if key in text:
+            return value
+    return text
+
+
+def _first(mapping: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping and mapping[key] not in (None, "", [], {}):
+            return mapping[key]
+    return None
+
+
+def normalize_node(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """把任意来源的节点/候选归一化成权威契约。
+
+    返回的字典**一定包含 `CANONICAL_FIELDS` 全部键**（缺的就是 None/空），
+    并附带 `facts_missing`（缺哪些关键事实），供上层如实降级而不是假装齐全。
+    """
+    if not isinstance(raw, Mapping):
+        raise TypeError("node_must_be_mapping")
+
+    sources = raw.get("data_sources") if isinstance(raw.get("data_sources"), Mapping) else {}
+    name = _text(_first(raw, "name", "title"))
+    location = _first(raw, "location", "address")
+    if not name and isinstance(location, str) and not looks_like_coordinates(location):
+        name = _text(location)  # 路线节点里 location 常常就是名称
+
+    coordinates = None
+    for key in ("coordinates", "lnglat", "location", "coord", "point"):
+        candidate = raw.get(key)
+        if candidate is None:
+            continue
+        parsed = parse_coordinates(candidate)
+        if parsed:
+            coordinates = parsed
+            break
+
+    cost = parse_cost(_first(raw, "cost", "cost_estimate", "costEstimate", "price", "estimated_price"))
+    source = _text(
+        _first(raw, "source")
+        or sources.get("cost_estimate")
+        or sources.get("price")
+        or sources.get("rating")
+        or ""
+    )
+    explicit_status = _text(_first(raw, "cost_status", "price_status")).lower()
+    estimated_flag = bool(raw.get("estimated")) or explicit_status == COST_ESTIMATED
+
+    if cost is None:
+        cost_status = COST_UNKNOWN
+        estimated_flag = False  # 未知不是"估算"，两者不能混
+    elif explicit_status in {COST_VERIFIED, COST_ESTIMATED}:
+        cost_status = explicit_status
+    elif any(marker in source.lower() for marker in CASH_SOURCE_MARKERS):
+        cost_status = COST_VERIFIED
+        estimated_flag = False
+    else:
+        cost_status = COST_ESTIMATED
+        estimated_flag = True
+
+    confidence = _first(raw, "confidence")
+    try:
+        confidence = None if confidence is None else max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        confidence = None
+
+    node: Dict[str, Any] = {
+        "day": raw.get("day"),
+        "name": name,
+        "category": normalize_category(_first(raw, "category", "planning_category", "type")),
+        "coordinates": coordinates,
+        "cost": cost,
+        "cost_status": cost_status,
+        "source": source or None,
+        "observed_at": _first(raw, "observed_at", "observedAt", "data_time", "updated_at", "collected_at"),
+        "confidence": confidence,
+        "open_time": _text(_first(raw, "open_time", "opening_hours", "openTime")) or None,
+        "official_url": _text(_first(raw, "official_url", "amap_url", "booking_url", "url")) or None,
+        "estimated": estimated_flag,
+    }
+
+    missing: List[str] = []
+    if not node["name"]:
+        missing.append("name")
+    if not node["coordinates"]:
+        missing.append("coordinates")
+    if cost is None:
+        missing.append("cost")
+    if not node["source"]:
+        missing.append("source")
+    if not node["observed_at"]:
+        missing.append("observed_at")
+    node["facts_missing"] = missing
+    return node
+
+
+def validate_node(node: Mapping[str, Any]) -> List[str]:
+    """契约自检：返回违规项列表（空列表 = 合规）。用于 CI/单测与上游产出前的把关。"""
+    problems: List[str] = []
+    for field in CANONICAL_FIELDS:
+        if field not in node:
+            problems.append(f"missing_field:{field}")
+    if _text(node.get("name")) == "":
+        problems.append("name_required")
+    if node.get("coordinates") is not None and not parse_coordinates(node.get("coordinates")):
+        problems.append("coordinates_invalid")
+    status = _text(node.get("cost_status")).lower()
+    if status not in {COST_VERIFIED, COST_ESTIMATED, COST_UNKNOWN}:
+        problems.append(f"cost_status_invalid:{status or 'empty'}")
+    # 【诚实口径】取不到价格就必须是 unknown，且不能被标成估算
+    if node.get("cost") is None and status != COST_UNKNOWN:
+        problems.append("missing_cost_must_be_unknown")
+    if node.get("cost") is None and node.get("estimated"):
+        problems.append("unknown_cost_must_not_be_estimated")
+    # 【诚实口径】标成已核实就必须有来源
+    if status == COST_VERIFIED and not _text(node.get("source")):
+        problems.append("verified_cost_requires_source")
+    return problems
+
+
+__all__ = [
+    "CANONICAL_FIELDS",
+    "CATEGORY_ALIASES",
+    "COST_ESTIMATED",
+    "COST_UNKNOWN",
+    "COST_VERIFIED",
+    "looks_like_coordinates",
+    "normalize_category",
+    "normalize_node",
+    "parse_coordinates",
+    "parse_cost",
+    "validate_node",
+]

@@ -1,0 +1,129 @@
+"""权威节点契约的回归锁（P0：统一事实）。
+
+实测的字段分叉：花费有 `cost/cost_estimate/costEstimate/price`；类别有
+`type/category/planning_category`；坐标既有 `[lng,lat]` 数组，也有 AMap 的 `"lng,lat"` 字符串，
+而路线节点里的 `location` 其实是**名称**。这些测试把归一化与诚实口径钉死。
+"""
+
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.node_contract import (  # noqa: E402
+    CANONICAL_FIELDS,
+    COST_ESTIMATED,
+    COST_UNKNOWN,
+    COST_VERIFIED,
+    looks_like_coordinates,
+    normalize_category,
+    normalize_node,
+    parse_coordinates,
+    parse_cost,
+    validate_node,
+)
+
+
+class TestCostParsing(unittest.TestCase):
+    def test_parses_common_spellings(self):
+        self.assertEqual(parse_cost("¥50"), 50.0)
+        self.assertEqual(parse_cost("50元"), 50.0)
+        self.assertEqual(parse_cost(50), 50.0)
+        self.assertEqual(parse_cost("¥50-120/人"), 50.0)  # 区间取下限，不编造中间值
+
+    def test_unknown_placeholders_never_become_zero(self):
+        """这是全项目最关键的一条诚实口径：取不到价格不能变成 0 元、也不能变成"免费"。"""
+        for value in ("暂无供应商数据", "暂无报价", "待确认", "N/A", "unknown", "", None):
+            self.assertIsNone(parse_cost(value), f"{value!r} 必须解析为 None，不能是 0")
+
+
+class TestCoordinatesAndLocationAmbiguity(unittest.TestCase):
+    def test_accepts_both_shapes(self):
+        self.assertEqual(parse_coordinates([86.15, 41.76]), [86.15, 41.76])
+        self.assertEqual(parse_coordinates("86.15,41.76"), [86.15, 41.76])
+        self.assertEqual(parse_coordinates({"lng": 86.15, "lat": 41.76}), [86.15, 41.76])
+
+    def test_rejects_junk_and_zero_point(self):
+        for bad in (None, "", "博斯腾湖", [0, 0], [999, 999], [1]):
+            self.assertIsNone(parse_coordinates(bad), f"{bad!r} 不该解析成坐标")
+
+    def test_location_is_a_name_in_route_nodes_but_coords_in_amap_pois(self):
+        """同一个键名两种含义 —— 必须按**形状**判断，不能按名字猜。"""
+        self.assertFalse(looks_like_coordinates("博斯腾湖"))
+        self.assertTrue(looks_like_coordinates("86.15,41.76"))
+        route_node = normalize_node({"day": 1, "name": "博斯腾湖", "location": "博斯腾湖", "lnglat": [86.15, 41.76]})
+        self.assertEqual(route_node["name"], "博斯腾湖")
+        self.assertEqual(route_node["coordinates"], [86.15, 41.76])
+        amap_poi = normalize_node({"name": "博斯腾湖", "location": "86.15,41.76"})
+        self.assertEqual(amap_poi["name"], "博斯腾湖")
+        self.assertEqual(amap_poi["coordinates"], [86.15, 41.76])
+
+
+class TestCategoryNormalization(unittest.TestCase):
+    def test_aliases_converge(self):
+        for raw, expected in (("餐饮", "food"), ("美食", "food"), ("住宿", "hotel"), ("博物馆", "cultural"),
+                              ("自然风光", "scenic"), ("风景名胜;风景名胜;湖泊", "scenic"), ("购物商圈", "shopping")):
+            self.assertEqual(normalize_category(raw), expected, f"{raw} 应归一为 {expected}")
+
+    def test_unknown_category_is_preserved_not_guessed(self):
+        """认不出来就原样保留 —— 不硬塞进某个已知类别（那等于造假）。"""
+        self.assertEqual(normalize_category("某某新品", ), "某某新品")
+
+
+class TestNodeNormalization(unittest.TestCase):
+    def test_all_legacy_spellings_land_on_one_shape(self):
+        legacy = {
+            "day": 2,
+            "location": "博斯腾湖",          # 节点里 location = 名称
+            "lnglat": [86.15, 41.76],
+            "type": "自然风光",              # 类别别名
+            "costEstimate": "¥45",           # 花费别名
+            "data_sources": {"cost_estimate": "amap"},
+            "open_time": "09:00-19:00",
+            "amap_url": "https://uri.amap.com/marker?position=86.15,41.76",
+        }
+        node = normalize_node(legacy)
+        self.assertEqual(node["name"], "博斯腾湖")
+        self.assertEqual(node["category"], "scenic")
+        self.assertEqual(node["cost"], 45.0)
+        self.assertEqual(node["cost_status"], COST_VERIFIED, "有 amap 来源即视为已核实")
+        self.assertFalse(node["estimated"])
+        self.assertEqual(node["official_url"], "https://uri.amap.com/marker?position=86.15,41.76")
+        for field in CANONICAL_FIELDS:
+            self.assertIn(field, node, f"归一化结果必须包含 {field}")
+        self.assertEqual(validate_node(node), [], "有来源的已核实节点应通过自检")
+
+    def test_missing_price_is_unknown_never_zero_and_never_estimated(self):
+        node = normalize_node({"day": 1, "name": "某酒店", "type": "住宿", "cost_estimate": "暂无供应商数据"})
+        self.assertIsNone(node["cost"])
+        self.assertEqual(node["cost_status"], COST_UNKNOWN)
+        self.assertFalse(node["estimated"], "未知不是估算，两者不能混")
+        self.assertIn("cost", node["facts_missing"])
+        self.assertEqual(validate_node(node), [], "缺价格本身不算违规，只要如实标成 unknown")
+
+    def test_estimated_when_no_sourced_price(self):
+        node = normalize_node({"name": "某点", "cost": "80"})
+        self.assertEqual(node["cost_status"], COST_ESTIMATED)
+        self.assertTrue(node["estimated"])
+
+    def test_validate_rejects_dishonest_nodes(self):
+        # 取不到价格却标成已核实 → 违规
+        bad = normalize_node({"name": "x", "location": "86.15,41.76"})
+        tampered = dict(bad, cost=None, cost_status=COST_VERIFIED)
+        self.assertIn("missing_cost_must_be_unknown", validate_node(tampered))
+        # 没有来源却声称已核实 → 违规
+        no_source = dict(bad, cost=50.0, cost_status=COST_VERIFIED, source=None)
+        self.assertIn("verified_cost_requires_source", validate_node(no_source))
+        # 缺字段 → 违规
+        self.assertTrue(any(item.startswith("missing_field:") for item in validate_node({"name": "x"})))
+
+    def test_facts_missing_reports_what_to_degrade(self):
+        node = normalize_node({"name": "只有名字的点"})
+        self.assertIn("coordinates", node["facts_missing"])
+        self.assertIn("source", node["facts_missing"])
+        self.assertIn("observed_at", node["facts_missing"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -43,20 +43,16 @@ class NegotiateResponse(BaseModel):
     plan_variants: Optional[List[Dict[str, Any]]] = []
     preference_validation: Optional[Dict[str, Any]] = None
 
-class AgentProposal(BaseModel):
-    proposal_id: str
-    agent_id: str
-    agent_name: str
-    agent_role: str
-    content: str
-    reasoning_chain: List[str]
-    fitness_score: float
-    cost_impact: float
-    status: str = "pending"
-
-class RoundtableResponse(BaseModel):
-    negotiation_id: str
-    round: int
-    proposals: List[AgentProposal]
-    consensus_summary: str
-    weight_hints: Dict[str, float]
+# 【已删除】旧的自然语言"圆桌"契约：AgentProposal / RoundtableResponse
+#
+# 删除依据（双重证据，不是凭感觉）：
+#   1. 全仓库 grep：两者**零调用**（没有任何 import 或实例化；旧 AgentProposal 的字段是
+#      content / reasoning_chain / fitness_score —— 自然语言提案，与目标架构"协调器只接受
+#      结构化提案"相冲突）；
+#   2. EVALUATION_REPORT.md:192 亦记录："schemas.py 中的 AgentProposal / RoundtableResponse
+#      是完整定义但零调用的数据模型 —— 重构的骨架已经预留，但从未接线"。
+#
+# 结构化提案的唯一权威定义在 core/agent_contracts.py：
+#   AgentInput / AgentProposal / EvidenceRef / ToolCall / FailureInfo /
+#   AgentCapability / validate_agent_proposal() / capability_registry()
+# 需要历史实现可查 git：git log -p -- ai-service/models/schemas.py
