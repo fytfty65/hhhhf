@@ -45,24 +45,55 @@ EVENT_TYPES: Dict[str, str] = {
     "trip.visited": "实际到访",
 }
 
-# 事件生产者（producer）白名单：明确"谁发的"，避免审计时只能看到"ai-service"这种粗粒度
-PRODUCERS = (
-    "intent-agent",
-    "scenic-agent",
-    "transport-agent",
-    "lodging-agent",
-    "dining-agent",
-    "budget-agent",
-    "risk-agent",
-    "culture-agent",
-    "accessibility-agent",
-    "health-agent",
-    "green-agent",
+# 事件生产者（producer）白名单。
+#
+# ⚠️ 事故记录（2026-10-03，由 tools/probe_event_stream.py 在真实 Redis 上抓出）：
+# 这份名单原来是**手写**的，结果 `emergency-agent` 与 `route-planner` 没被登记 ——
+# 它们发出的事件每次都触发 `unknown_producer`，`RedisEventStream.emit` 于是默默（只打一行
+# 告警）退回旧信封，`correlation_id / causation_id / event_id` 全部丢失：**因果链在真实链路里
+# 是断的，而单元测试全绿**（单测只测信封构造函数，不测"真实链路用了哪个 producer"）。
+# 现在：智能体生产者**从能力注册表派生**，只有非智能体生产者需要手写 —— 以后新接智能体不会再漏。
+INFRA_PRODUCERS = (
     "coordinator",
     "validator",
     "gateway",
     "web-client",
 )
+
+# 历史上登记过、当前没有对应智能体 id 的名字（旧日志/测试仍会引用，保留兼容）
+LEGACY_PRODUCERS = ("intent-agent", "scenic-agent")
+
+# 导入能力注册表失败时的兜底清单：宁可名单偏旧，也不能因为导入问题把事件链打断
+_FALLBACK_AGENT_PRODUCERS = (
+    "accessibility-agent",
+    "budget-agent",
+    "culture-agent",
+    "dining-agent",
+    "emergency-agent",
+    "green-agent",
+    "health-agent",
+    "lodging-agent",
+    "risk-agent",
+    "route-planner",
+    "transport-agent",
+)
+
+
+def _agent_producers() -> tuple[str, ...]:
+    """智能体生产者 = 能力注册表里的 agent_id（单一事实来源，避免手写名单再次漏登记）。"""
+    try:
+        from .agent_runtime import capability_registry
+
+        return tuple(sorted({item.agent_id for item in capability_registry()}))
+    except Exception:
+        return _FALLBACK_AGENT_PRODUCERS
+
+
+def known_producers() -> tuple[str, ...]:
+    return tuple(sorted(set(INFRA_PRODUCERS) | set(LEGACY_PRODUCERS) | set(_agent_producers())))
+
+
+PRODUCERS = known_producers()
 
 ENVELOPE_VERSION = 1
 
@@ -94,7 +125,7 @@ def new_event(
         raise EventValidationError("correlation_id_required")
     if event_type not in EVENT_TYPES:
         raise EventValidationError(f"unknown_event_type:{event_type}")
-    if producer not in PRODUCERS:
+    if producer not in known_producers():
         raise EventValidationError(f"unknown_producer:{producer}")
     moment = occurred_at or datetime.now(timezone.utc)
     if moment.tzinfo is None:
@@ -134,7 +165,7 @@ def validate_event(envelope: Mapping[str, Any]) -> Dict[str, Any]:
     if event_type not in EVENT_TYPES:
         raise EventValidationError(f"unknown_event_type:{event_type}")
     producer = str(envelope["producer"])
-    if producer not in PRODUCERS:
+    if producer not in known_producers():
         raise EventValidationError(f"unknown_producer:{producer}")
     try:
         parsed = datetime.fromisoformat(str(envelope["occurred_at"]).replace("Z", "+00:00"))
@@ -175,6 +206,7 @@ __all__ = [
     "EventValidationError",
     "dedupe_key",
     "event_types",
+    "known_producers",
     "new_event",
     "validate_event",
 ]
