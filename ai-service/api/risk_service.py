@@ -49,6 +49,35 @@ def _intel_budget_seconds() -> float:
 # ==========================================
 # 1. 统一数据模型：RiskReport
 # ==========================================
+def timestamp_to_ms(value: Any) -> Optional[int]:
+    """把来源给的 `retrieved_at` 归一成毫秒时间戳；识别不了就返回 None（**不猜**）。
+
+    上游格式实测有两种：ISO8601 字符串（`2026-09-22T08:00:00Z`）与毫秒整数；
+    也见过秒级浮点，所以按量级区分；小到不可能是时间戳的数字一律当"没给"。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 1e11:
+            return int(number)  # 毫秒
+        if number > 1e9:
+            return int(number * 1000)  # 秒
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return int(parsed.timestamp() * 1000)
+    return None
+
+
 @dataclass
 class RiskReport:
     """统一风险快照数据模型。
@@ -75,7 +104,17 @@ class RiskReport:
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
-        data["risk_ts"] = int(datetime.datetime.now().timestamp() * 1000)
+        # risk_ts = 这份风险画像**真正对应的时间**：取各来源 retrieved_at 里最早的一个。
+        # 为什么不是"组装时间"：给上游加分层缓存后，组装时间可能远新于数据本身
+        # （实测冷调用 6.8s、缓存命中 4ms），用组装时间会让界面谎报"刚刚同步"。
+        # 一个来源时间都拿不到时才退回当前时间；各来源自己的 retrieved_at 仍然原样保留。
+        moments = [
+            timestamp_to_ms(meta.get("retrieved_at"))
+            for meta in (self.signal_sources or {}).values()
+            if isinstance(meta, dict)
+        ]
+        known = [moment for moment in moments if moment is not None]
+        data["risk_ts"] = min(known) if known else int(datetime.datetime.now().timestamp() * 1000)
         return data
 
 

@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from core.agent_contracts import AgentInput, validate_agent_proposal
 from core.agent_runtime import EMERGENCY_AGENT_ID, emergency_handler
+from core.ttl_cache import AsyncTtlCache  # 分层 TTL 缓存（见 _risk_snapshot 的性能说明）
 
 from api.agent import (
     ExpertToolbox,
@@ -72,6 +73,20 @@ async def amap_poi(payload: Dict[str, Any]):
 _RISK_TTL_SECONDS = float(os.getenv("RISK_SNAPSHOT_TTL_SECONDS", "45"))
 _risk_cache: Dict[str, tuple] = {}
 _risk_cache_lock = asyncio.Lock()
+
+# 分层缓存：不同数据的**自然更新频率**不同，用同一个 TTL 只会两头不讨好。
+# 实测（2026-10-03）：冷调用 6,882ms、命中 45s 快照缓存 4ms，而前端轮询间隔 ~50-60s
+# 大于 45s —— 于是几乎每次轮询都在重打 weather + traffic + safety 三个上游，
+# 每个在线用户每分钟白烧 ~6.8s 服务端时间。
+# 现在改为：按来源分层缓存（安全情报最慢也最稳、天气次之、路况最短），
+# 快照缓存只负责"同一时刻的重复轮询"这一件事。
+_RISK_WEATHER_TTL_SECONDS = float(os.getenv("RISK_WEATHER_TTL_SECONDS", "180"))
+_RISK_TRAFFIC_TTL_SECONDS = float(os.getenv("RISK_TRAFFIC_TTL_SECONDS", "120"))
+_RISK_SAFETY_TTL_SECONDS = float(os.getenv("RISK_SAFETY_TTL_SECONDS", "600"))
+_risk_weather_cache = AsyncTtlCache(_RISK_WEATHER_TTL_SECONDS, name="risk-weather")
+_risk_traffic_cache = AsyncTtlCache(_RISK_TRAFFIC_TTL_SECONDS, name="risk-traffic")
+_risk_safety_cache = AsyncTtlCache(_RISK_SAFETY_TTL_SECONDS, name="risk-safety")
+
 _GLOBAL_RISK_MAX_CITIES = 6
 _GLOBAL_RISK_CONCURRENCY = 3
 
@@ -102,14 +117,36 @@ async def _risk_snapshot(city: str, coord: Any, baseline: Any):
     toolbox = ExpertToolbox()
     risk_service = RiskService()
 
-    # These three calls are independent and previously ran strictly in series:
-    # weather ~1.8s + traffic ~1.0s + safety ~8.4s = ~11s of dead time per
-    # request. Running them concurrently bounds the wait by the slowest provider
-    # instead of their sum.
-    weather_task = asyncio.create_task(toolbox.get_real_weather(city))
-    safety_task = asyncio.create_task(risk_service.get_city_safety_intel(city))
+    # 三个上游互不依赖，但现在**各自还带分层缓存**：
+    #   - 命中缓存的那一层立刻返回（实测 4ms），未命中的才真的打数据源；
+    #   - 分层之后，"路况变了但安全情报没变"不会再连累安全情报重新拉一遍（它最慢，
+    #     实测单次 ~8.4s）；
+    #   - 同一 key 的并发调用由缓存做单飞，避免推送中心与雷达同时轮询打成双倍。
+    #
+    # 关键诚实细节：不少来源**不报 retrieved_at**。缓存之后 risk_ts 只能退回"组装时间"，
+    # 那会显得比缓存里的数据更新。所以这里在**取数时刻**给缺时间戳的来源补上戳，
+    # 缓存里存的就是带戳的那份 —— 于是 risk_ts 始终反映真实数据年龄。
+    def _stamp(value: Any, moment_ms: int) -> Any:
+        if isinstance(value, dict) and not value.get("retrieved_at"):
+            return {**value, "retrieved_at": moment_ms}
+        return value
+
+    weather_key = city.strip().lower()
+    safety_key = city.strip().lower()
+
+    async def _weather_loader():
+        return _stamp(await toolbox.get_real_weather(city), int(time.time() * 1000))
+
+    async def _safety_loader():
+        return _stamp(await risk_service.get_city_safety_intel(city), int(time.time() * 1000))
+
+    async def _traffic_loader():
+        return _stamp(await toolbox.get_traffic_status(coord_str), int(time.time() * 1000))
+
+    weather_task = asyncio.create_task(_risk_weather_cache.get_or_load(weather_key, _weather_loader))
+    safety_task = asyncio.create_task(_risk_safety_cache.get_or_load(safety_key, _safety_loader))
     traffic_task = (
-        asyncio.create_task(toolbox.get_traffic_status(coord_str))
+        asyncio.create_task(_risk_traffic_cache.get_or_load(coord_str, _traffic_loader))
         if coord_str
         else None
     )
