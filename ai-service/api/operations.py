@@ -5,10 +5,14 @@ import datetime
 import json
 import os
 import time
-from typing import Any, Dict
+import uuid
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
+
+from core.agent_contracts import AgentInput, validate_agent_proposal
+from core.agent_runtime import EMERGENCY_AGENT_ID, emergency_handler
 
 from api.agent import (
     ExpertToolbox,
@@ -221,6 +225,80 @@ async def refresh_subscriptions(payload: Dict[str, Any]):
         results.append({"city": city, "snapshot": snapshot, "changes": changes, "has_change": bool(changes)})
     return {"results": results, "ts": int(datetime.datetime.now().timestamp() * 1000)}
 
+
+@router.post("/risk/replan-scope")
+async def risk_replan_scope(payload: Dict[str, Any]):
+    """风险 → 最小扰动重规划范围（旅中闭环的入口）。
+
+    做三件事：
+    1. 由 emergency-agent 产出结构化提案（受影响节点 / 保留节点 / 保留率 / 动作）；
+    2. 发出**带 correlation_id 的关联事件链**：`risk.changed` →（范围可判定时）`replan.requested`，
+       这样整条链可追踪、可重放、可审计；
+    3. 范围不可判定时**只发 risk.changed、不发 replan.requested** —— 拒绝整条路线重生成。
+
+    注意：本端点**不写入新版本**。用户确认前不覆盖原方案（`requires_user_confirmation=true`），
+    实际写入走既有的 replan_confirm 流程。
+    """
+    route = payload.get("route") or []
+    risk_event = payload.get("risk_event") or {}
+    room_id = str(payload.get("room_id") or "")
+    correlation_id = str(payload.get("correlation_id") or payload.get("trip_id") or "").strip()
+    if not correlation_id:
+        correlation_id = f"trip-{uuid.uuid4().hex[:12]}"
+
+    handler = emergency_handler()
+    raw = await handler(
+        AgentInput(
+            request_id=f"replan-scope-{uuid.uuid4().hex[:8]}",
+            agent_id=EMERGENCY_AGENT_ID,
+            domain="emergency",
+            context={"route": list(route), "risk_event": dict(risk_event)},
+        )
+    )
+    proposal = validate_agent_proposal(raw)
+
+    emitted: List[Dict[str, Any]] = []
+    risk_event_id = str(uuid.uuid4())
+    await event_bus.emit(
+        OMNI_EVENTS_STREAM,
+        "risk.changed",
+        {"risk": dict(risk_event)},
+        room_id=room_id,
+        correlation_id=correlation_id,
+        producer="risk-agent",
+        event_id=risk_event_id,
+        confidence=None,
+    )
+    emitted.append({"event_type": "risk.changed", "event_id": risk_event_id})
+
+    if proposal.status == "ok" and proposal.candidates:
+        candidate = proposal.candidates[0]
+        replan_event_id = str(uuid.uuid4())
+        await event_bus.emit(
+            OMNI_EVENTS_STREAM,
+            "replan.requested",
+            {
+                "action": candidate.get("action"),
+                "affected_nodes": candidate.get("affected_nodes"),
+                "preserved_nodes": candidate.get("preserved_nodes"),
+                "preserved_ratio": candidate.get("preserved_ratio"),
+                "requires_user_confirmation": candidate.get("requires_user_confirmation", True),
+            },
+            room_id=room_id,
+            correlation_id=correlation_id,
+            producer="emergency-agent",
+            causation_id=risk_event_id,  # 因果链：replan.requested 由这次风险变化触发
+            event_id=replan_event_id,
+        )
+        emitted.append({"event_type": "replan.requested", "event_id": replan_event_id})
+
+    return {
+        "correlation_id": correlation_id,
+        "status": proposal.status,
+        "proposal": proposal.model_dump(mode="json"),
+        "events": emitted,
+        "note": "仅产出提案与事件；用户确认前不写入新版本。",
+    }
 
 @router.get("/events/stream")
 async def events_stream(request: Request, room_id: str = ""):

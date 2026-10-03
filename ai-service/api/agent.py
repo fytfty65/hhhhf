@@ -494,6 +494,7 @@ class RedisEventStream:
         target: str = "coordinator",
         evidence: list | None = None,
         confidence: float | None = None,
+        event_id: str = "",
     ):
         """发布一条事件到 Redis Stream。
 
@@ -518,6 +519,7 @@ class RedisEventStream:
                     room_id=room_id,
                     evidence=evidence,
                     confidence=confidence,
+                    event_id=event_id or None,
                 )
             except Exception as exc:  # 协议未通过：退回旧信封，绝不因此丢事件
                 print(f"⚠️ [事件流] 协议校验未通过，退回旧信封: {exc}")
