@@ -18,9 +18,11 @@ from core.agent_contracts import AgentInput, capability_registry, validate_agent
 from core.agent_runtime import (  # noqa: E402
     DECLARED_NOT_WIRED,
     GREEN_AGENT_ID,
+    HEALTH_AGENT_ID,
     WIRED_AGENT_IDS,
     build_pool_runtime,
     green_handler,
+    health_handler,
     registry_coverage,
 )
 
@@ -116,6 +118,71 @@ class TestGreenAgent(unittest.TestCase):
         validated = validate_agent_proposal(proposal)
         self.assertEqual(validated.status, "degraded")
         self.assertEqual(validated.failure.code, "no_scorable_transport_option")
+
+
+class TestAcceptanceCriteria(unittest.TestCase):
+    """把用户写的验收标准第一条变成 CI 断言。
+
+    验收标准原文："协同真实性 —— 至少 5 个专业智能体独立产生结构化提案"。
+    注意区分两件事：**接线数**（handler 装了几个）≠ **真出提案数**（数据齐备时真的产出 ok 提案）。
+    这条测试断言后者。
+    """
+
+    def test_at_least_five_agents_produce_ok_proposals_when_data_is_present(self):
+        runtime, requests = build_pool_runtime(
+            attractions=[{"name": "博斯腾湖", "lnglat": [86.15, 41.76], "estimated": False}],
+            transport=[{"mode": "train", "estimated": True}],
+            lodging=[{"name": "酒店 A", "estimated": True}],
+            dining=[{"name": "餐厅 A", "estimated": True}],
+            risk=[{"signal": "weather", "severity": "low"}],
+            budget=[{"category": "dining", "amount": 200, "estimated": True}],
+            transport_options=[
+                {"mode": "driving", "distance_km": 120, "duration_minutes": 100},
+                {"mode": "transit", "distance_km": 120, "duration_minutes": 160},
+            ],
+            profile={"health_constraints": ["膝盖旧伤"]},
+            weather={"condition": "晴"},
+            daily_nodes=6,
+        )
+        result = asyncio.run(runtime.execute(requests))
+        ok_agents = [item["agent_id"] for item in result["proposals"] if item["status"] == "ok"]
+        self.assertGreaterEqual(
+            len(ok_agents),
+            5,
+            f"数据齐备时应有 ≥5 个智能体独立产出结构化提案，实际 {len(ok_agents)}: {ok_agents}",
+        )
+        # 每个 ok 提案都必须通过协调器那道闸（有候选、有证据）
+        for item in result["proposals"]:
+            validate_agent_proposal(item)
+
+
+class TestHealthAgent(unittest.TestCase):
+    def _run(self, context):
+        handler = health_handler()
+        request = AgentInput(request_id="h1", agent_id=HEALTH_AGENT_ID, domain="health", context=context)
+        return asyncio.run(handler(request))
+
+    def test_reduces_intensity_for_dense_schedule_and_health_constraints(self):
+        proposal = self._run({"daily_nodes": 9, "profile": {"health_constraints": ["膝盖旧伤"]}, "weather": {"condition": "小雨"}})
+        validated = validate_agent_proposal(proposal)
+        self.assertEqual(validated.status, "ok")
+        candidate = validated.candidates[0]
+        self.assertLessEqual(candidate["daily_node_limit"], 4, "有健康约束时必须压到保守强度")
+        self.assertGreaterEqual(candidate["rest_buffer_minutes"], 30)
+        # 建议必须写清依据（便于用户核对），且证据标明是估算而非实测
+        self.assertIn("膝盖旧伤", validated.explanation or "")
+        self.assertTrue(all(item.estimated for item in validated.evidence))
+
+    def test_degrades_without_any_basis(self):
+        validated = validate_agent_proposal(self._run({}))
+        self.assertEqual(validated.status, "degraded")
+        self.assertEqual(validated.candidates, [])
+        self.assertEqual(validated.failure.fallback, "conservative_pace")
+
+    def test_keeps_reasonable_schedule_untouched(self):
+        validated = validate_agent_proposal(self._run({"daily_nodes": 4, "weather": {"condition": "晴"}}))
+        self.assertEqual(validated.status, "ok")
+        self.assertEqual(validated.candidates[0]["daily_node_limit"], 4, "节奏本来就合理时不应无故压缩")
 
 
 if __name__ == "__main__":

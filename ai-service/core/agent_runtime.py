@@ -67,6 +67,7 @@ def pool_handler(agent_id: str, domain: str, *, provider: str, field: str) -> Ag
 # 只装配了 6 个 —— 注册表很丰满、运行时很骨感，而且**没有任何地方会提醒这件事**。
 # 于是这里把覆盖度做成可查询的数据（诊断接口/测试都能读），新增注册项如果没被分类会立刻被测出来。
 GREEN_AGENT_ID = "green-agent"
+HEALTH_AGENT_ID = "health-agent"
 
 WIRED_AGENT_IDS = (
     "route-planner",
@@ -76,6 +77,7 @@ WIRED_AGENT_IDS = (
     "risk-agent",
     "budget-agent",
     GREEN_AGENT_ID,
+    HEALTH_AGENT_ID,
 )
 
 # 已声明但**尚未接线**：必须写清原因（测试强制：注册表里出现的新 id 必须在此分类，不能默默漏掉）
@@ -83,7 +85,6 @@ DECLARED_NOT_WIRED: Dict[str, str] = {
     "emergency-agent": "属旅中执行闭环：replan 端点已存在，但推演阶段尚未调度（P4 一起做）",
     "culture-agent": "缺少可核实的知识来源；按注册表 fallback=omit_unsourced_fact，宁可不出提案也不编造",
     "accessibility-agent": "缺少官方无障碍数据来源；fallback=mark_unverified",
-    "health-agent": "待接 profile.features.read + weather.snapshot 后再调度",
 }
 
 
@@ -217,6 +218,88 @@ def green_handler() -> AgentHandler:
     return handle
 
 
+def health_handler() -> AgentHandler:
+    """健康 / 体力智能体：按成员画像与天气给出**每日强度上限与休息缓冲**建议。
+
+    注册表定义：tools=[profile.features.read, weather.snapshot]，timeout=3000，
+    fallback=conservative_pace，metrics=[pace_constraint_pass_rate]。
+
+    诚实口径：
+    - 这是**保守的顾问型建议**（不是医学结论），证据标 `estimated=True`；
+    - 既没有画像约束、也拿不到每日节点数 → degraded + FailureInfo（fallback=conservative_pace），
+      不猜"你体力很好"；
+    - 只在有依据时下调强度，且把**依据写进 explanation**，便于用户核对。
+    """
+
+    async def handle(request: AgentInput) -> Mapping[str, Any]:
+        context = request.context or {}
+        profile = context.get("profile") if isinstance(context.get("profile"), Mapping) else {}
+        weather = context.get("weather") if isinstance(context.get("weather"), Mapping) else {}
+        raw_daily = context.get("daily_nodes")
+        try:
+            daily_nodes = int(raw_daily) if raw_daily is not None else None
+        except (TypeError, ValueError):
+            daily_nodes = None
+        constraints = [str(item) for item in (profile.get("health_constraints") or []) if str(item).strip()]
+        condition = str(weather.get("condition") or "")
+
+        if daily_nodes is None and not constraints:
+            return {
+                "agent_id": HEALTH_AGENT_ID,
+                "domain": "health",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("health-methodology", "daily_intensity", estimated=True)],
+                "confidence": 0.0,
+                "failure": {
+                    "code": "insufficient_profile_and_schedule",
+                    "message": "既没有成员健康约束，也没有每日节点数，无法给出强度建议",
+                    "retryable": True,
+                    "fallback": "conservative_pace",
+                },
+                "explanation": "缺依据，未凭空判断体力。",
+            }
+
+        reasons: list[str] = []
+        limit = 5
+        if daily_nodes is not None:
+            baseline = min(6, max(1, daily_nodes))
+            limit = baseline
+            if daily_nodes > 6:
+                limit = 5
+                reasons.append(f"每日 {daily_nodes} 个节点偏密，建议压到 {limit} 个并留出休息")
+        if condition:
+            for marker, extra in (("雨", 1), ("雪", 1), ("高温", 1), ("大风", 1)):
+                if marker in condition:
+                    limit = max(1, limit - extra)
+                    reasons.append(f"天气含「{marker}」，再降 {extra} 个节点并增加室内替代")
+                    break
+        if constraints:
+            limit = max(1, min(limit, 4))
+            reasons.append("成员存在健康约束（" + "、".join(constraints[:3]) + "），按保守节奏安排")
+
+        candidate = {
+            "daily_node_limit": limit,
+            "rest_buffer_minutes": 30 if limit >= 4 else 45,
+            "advice": "；".join(reasons) if reasons else "维持常规节奏",
+            "constraints_considered": constraints,
+        }
+        return {
+            "agent_id": HEALTH_AGENT_ID,
+            "domain": "health",
+            "status": "ok",
+            "degraded": False,
+            "candidates": [candidate],
+            "hard_constraint_results": request.hard_constraints,
+            "evidence": [_evidence("health-methodology", "daily_intensity", estimated=True)],
+            "confidence": 0.55,
+            "explanation": "保守顾问建议（非医学结论）：" + (candidate["advice"] or "维持常规节奏"),
+        }
+
+    return handle
+
+
 class SpecialistRuntime:
     def __init__(self, handlers: Mapping[str, AgentHandler]):
         self.handlers = dict(handlers)
@@ -279,6 +362,9 @@ def build_pool_runtime(
     risk: Sequence[Mapping[str, Any]] = (),
     budget: Sequence[Mapping[str, Any]] = (),
     transport_options: Sequence[Mapping[str, Any]] = (),
+    profile: Mapping[str, Any] | None = None,
+    weather: Mapping[str, Any] | None = None,
+    daily_nodes: int | None = None,
 ) -> tuple[SpecialistRuntime, list[AgentInput]]:
     sources = {
         "route-planner": ("itinerary", attractions, "amap", "attraction_candidates"),
@@ -303,5 +389,16 @@ def build_pool_runtime(
         request_id=f"runtime-{GREEN_AGENT_ID}", agent_id=GREEN_AGENT_ID, domain="sustainability",
         context={"transport_options": list(transport_options or transport)}, hard_constraints={},
         soft_preferences={}, allowed_tools=[],
+    ))
+    # 健康 / 体力智能体：按画像与天气给出保守强度建议
+    handlers[HEALTH_AGENT_ID] = health_handler()
+    requests.append(AgentInput(
+        request_id=f"runtime-{HEALTH_AGENT_ID}", agent_id=HEALTH_AGENT_ID, domain="health",
+        context={
+            "profile": dict(profile or {}),
+            "weather": dict(weather or {}),
+            "daily_nodes": daily_nodes,
+        },
+        hard_constraints={}, soft_preferences={}, allowed_tools=[],
     ))
     return SpecialistRuntime(handlers), requests
