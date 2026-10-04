@@ -28,6 +28,22 @@
 
 const isDev = process.env.NODE_ENV !== 'production';
 
+// 网关来源（CSP 用）。必须定义在 IMG_HOSTS 之前：早先这里犯过 const 的 TDZ 坑
+// （白名单在其下方定义，引用到就"整个 next.config 加载即抛错"→ 单测/build/E2E 全红）。
+// 远程部署时 CSP 必须放行**真实的**网关来源，否则现象与 2026-09-19 瓦片事故一样：
+// 网络面板一条请求都没有、控制台刷 "Refused to connect ... connect-src"。
+// 推导逻辑在 lib/cspTargets.js（纯函数 + 单测），这里只读取与展开。
+const API_TARGETS = (() => {
+  const { gatewayTargets } = require('./lib/cspTargets.js');
+  return gatewayTargets(
+    process.env.NEXT_PUBLIC_API_BASE,
+    process.env.NEXT_PUBLIC_GATEWAY_PORT,
+    process.env.NEXT_PUBLIC_PAGE_SCHEME || 'http',
+  );
+})();
+const API_CONNECT_TARGETS = API_TARGETS.connect;
+const API_IMG_TARGETS = API_TARGETS.img;
+
 // Map/raster tile hosts. **必须同时出现在 `connect-src` 和 `img-src` 里**：
 // MapLibre GL 是用 fetch/XHR 取栅格瓦片的（不是 <img>），所以它受 `connect-src` 管 ——
 // 只写进 `img-src` 的话，浏览器会在网络层之前就把请求拦掉：DevTools 网络面板里一条都看不到、
@@ -50,10 +66,8 @@ const IMG_HOSTS = [
   'https://*.amap.com',
   // 👑 用户实拍（P3）：图片由 gateway 提供，**跨源**（前端 3000 / 网关 8080）。
   // 跨源取图同样受 img-src 管，漏了就是"图全被拦、只剩占位"——这个坑已经踩过两次。
-  // 注意：这里**不能**写 `...API_TARGETS`：API_TARGETS 定义在本文件更下面（const 的 TDZ），
-  // 会变成"整个 next.config 加载即抛错"→ 单测/build/E2E 全红。用等价的字面量最稳。
-  'http://localhost:8080',
-  'http://127.0.0.1:8080',
+  // 网关来源来自 API_IMG_TARGETS（定义在本文件**上方**，避开了早先那个 const TDZ 坑）。
+  ...API_IMG_TARGETS,
   'https://api.dicebear.com',
   'https://unpkg.com',
   'https://cdn.jsdelivr.net',
@@ -77,18 +91,13 @@ const PUSH_HOSTS = [
   'https://www.gstatic.com',
 ];
 
-const API_TARGETS = [
-  'http://localhost:8080',
-  'http://127.0.0.1:8080',
-  'ws://localhost:8080',
-  'ws://127.0.0.1:8080',
-];
+const API_TARGETS_PLACEHOLDER_REMOVED = true;
 
 function contentSecurityPolicy() {
   const scriptSrc = isDev
     ? "'self' 'unsafe-inline' 'unsafe-eval' blob:"
     : "'self' 'unsafe-inline' blob:";
-  const connectSrc = ["'self'", ...API_TARGETS, ...TILE_HOSTS, ...PUSH_HOSTS];
+  const connectSrc = ["'self'", ...API_CONNECT_TARGETS, ...TILE_HOSTS, ...PUSH_HOSTS];
   if (isDev) {
     connectSrc.push('ws://localhost:3001', 'ws://127.0.0.1:3001');
   }

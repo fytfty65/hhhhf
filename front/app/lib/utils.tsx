@@ -3,14 +3,17 @@ import React, { useState } from 'react';
 import { Camera, ExternalLink } from 'lucide-react';
 import type { PoiImageProps } from '../types';
 
+import { resolveApiBase, resolveWsBase } from './gatewayBase.ts';
+
+// 基址推导集中在 lib/gatewayBase（纯函数、有单测）：网关端口可配（NEXT_PUBLIC_GATEWAY_PORT），
+// https 页面自动用 wss。此前两处各自写死 :8080，端口一改就得改代码，也容易两边不一致。
 const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE;
-const browserApiBase = typeof window !== 'undefined'
-  ? `${window.location.protocol}//${window.location.hostname}:8080`
-  : '';
-export const API_BASE = (configuredApiBase || browserApiBase).replace(/\/$/, '');
-const configuredWsBase = process.env.NEXT_PUBLIC_WS_BASE;
-const browserWsBase = API_BASE.replace(/^http/, 'ws');
-export const WS_BASE = (configuredWsBase || browserWsBase).replace(/\/$/, '');
+export const API_BASE = resolveApiBase(
+  configuredApiBase,
+  typeof window !== 'undefined' ? window.location : undefined,
+  process.env.NEXT_PUBLIC_GATEWAY_PORT,
+);
+export const WS_BASE = resolveWsBase(API_BASE, process.env.NEXT_PUBLIC_WS_BASE);
 
 export function getAuthToken(): string {
   if (typeof window === 'undefined') return '';

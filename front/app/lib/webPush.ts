@@ -1,4 +1,11 @@
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8080` : '')).replace(/\/$/, '');
+import { resolveApiBase } from './gatewayBase.ts';
+
+// 与 lib/utils 用同一套推导（端口可配、运行期优先），不再各自写死 :8080
+const API_BASE = resolveApiBase(
+  process.env.NEXT_PUBLIC_API_BASE,
+  typeof window !== 'undefined' ? window.location : undefined,
+  process.env.NEXT_PUBLIC_GATEWAY_PORT,
+);
 
 async function pushApiJson(input: RequestInfo | URL, init: RequestInit = {}) {
   const headers = new Headers(init.headers || {});

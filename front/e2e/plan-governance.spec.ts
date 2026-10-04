@@ -402,6 +402,9 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await reachDecision(page);
 
     // 方案生成后会自动保存行程：内容里必须带 correlation_id，否则跨服务轨迹串不起来
+    // 方案生成后会自动保存行程（由 effect 触发，可能比断言晚几百毫秒）——
+    // 用轮询等待，避免"跑得快就绿、跑得慢就红"的竞态。
+    await expect.poll(() => savedTripBodies.length, { timeout: 10_000 }).toBeGreaterThan(0);
     const savedWithCorrelation = savedTripBodies.find((body) => String(body?.content || '').includes('plan-e2e-1'));
     expect(
       savedWithCorrelation,
