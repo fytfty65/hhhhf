@@ -42,6 +42,9 @@ from core.poi_pool import (
     attraction_query_limits,
     needs_widening,
     pool_supply_report,
+    required_food_candidates,
+    required_scenic_candidates,
+    top_up_category_buckets,
     widen_candidates,
 )
 
@@ -2220,7 +2223,7 @@ async def run_negotiate(msg: GatewayMessage):
             })
 
             # 自然候选连"每天一个"都凑不齐 → 补一次更宽的检索（只补一次：高德有 QPS 限制）
-            if needs_widening(_counts.get("scenic", 0), trip_days):
+            if needs_widening(_counts.get("scenic", 0), required_scenic_candidates(trip_days)):
                 widen_result = await widen_candidates(
                     toolbox.get_dynamic_pois,
                     city=target_city,
@@ -2271,8 +2274,9 @@ async def run_negotiate(msg: GatewayMessage):
         unique_attractions = deduplicate_and_diversify_pois(raw_attractions)
 
         # 美食候选同样可能因为关键词太窄而只剩几条（实测库尔勒：生产关键词 3 条，
-        # 通用兜底「美食|餐厅|小吃|本地菜」40 条）。候选太薄时补一次，只补一次。
-        if needs_widening(len(unique_foods), trip_days):
+        # 通用兜底「美食|餐厅|小吃|本地菜」40 条）。下限定成"一天两顿"：
+        # 库尔勒那种 3 条的情况必须补，否则模型只能自己编馆子（真实路线里出现过 0 个餐饮节点）。
+        if needs_widening(len(unique_foods), required_food_candidates(trip_days)):
             _food_names = [str(item.get("name") or "") for item in unique_foods if isinstance(item, dict)]
             _food_widen = await widen_candidates(
                 toolbox.get_dynamic_pois,
@@ -2281,6 +2285,9 @@ async def run_negotiate(msg: GatewayMessage):
                 types="050000",
                 limit=poi_limit,
                 existing_names=_food_names,
+                # 餐饮必须显式关掉"像不像玩点"过滤：默认 True 会把餐饮类别整类丢光，
+                # 表现成"补了却一条都没加回来"（实测事故，见 widen_candidates 的说明）
+                fetch_kwargs={"play_worthy": False},
             )
             _added_foods = _food_widen["added"]
             if _added_foods:
@@ -2510,6 +2517,16 @@ async def run_negotiate(msg: GatewayMessage):
             for p in spatial_daytime:
                 if isinstance(p, dict):
                     _day_buckets.setdefault(_day_cat(p), []).append(p)
+            # 👑 类别下限兜底（真实缺口，2026-10-04 库尔勒实测）：候选桶建在**帕累托前沿**上，
+            #    前沿会把餐饮整类挤掉 —— 餐饮候选已经有 50 个，最终 top 里却是 0 个，
+            #    于是"按类别轮流取"的均衡逻辑手里根本没有餐饮可轮，方案长期没有正经吃饭安排。
+            #    这里从**完整候选池**把缺的类别补回下限，且只补到下限（不改变前沿的取舍）。
+            _day_buckets, _topped_up = top_up_category_buckets(
+                _day_buckets, daytime_pois, trip_days=trip_days, classify=lambda item: _day_cat(item)
+            )
+            if _topped_up:
+                pool_diagnostics["category_topup"] = _topped_up
+                print(f"🧩 [候选均衡] 前沿挤掉了这些类别，已从完整候选池补回：{_topped_up}", flush=True)
             # 👑 不走回头路：spatial_daytime 已按 TSP 空间最近邻串接，分桶后【不再按适应度重排】，
             #    保留桶内空间序，仅靠轮询交错维持类别多样性，避免「东拉西扯」式回头路写进 Prompt。
 

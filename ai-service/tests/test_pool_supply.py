@@ -17,6 +17,8 @@ from core.poi_pool import (
     needs_widening,
     pool_supply_report,
     required_daytime_slots,
+    required_food_candidates,
+    required_scenic_candidates,
 )
 
 
@@ -26,11 +28,25 @@ class RequiredSlotsTests(unittest.TestCase):
         self.assertEqual(required_daytime_slots(0, 0), 1, "空输入按最少 1 天 1 个处理，不返回 0")
 
     def test_needs_widening_when_not_even_one_per_day(self):
-        self.assertTrue(needs_widening(1, 2), "2 天只有 1 个自然候选 → 该补")
-        self.assertTrue(needs_widening(0, 2))
-        self.assertFalse(needs_widening(2, 2))
-        self.assertFalse(needs_widening(9, 3))
-        self.assertTrue(needs_widening(1, 1), "至少要有 2 个才能比较，1 个就补")
+        self.assertTrue(needs_widening(1, required_scenic_candidates(2)), "2 天只有 1 个自然候选 → 该补")
+        self.assertTrue(needs_widening(0, required_scenic_candidates(2)))
+        self.assertFalse(needs_widening(2, required_scenic_candidates(2)))
+        self.assertFalse(needs_widening(9, required_scenic_candidates(3)))
+        self.assertTrue(needs_widening(1, required_scenic_candidates(1)), "至少要有 2 个才能比较，1 个就补")
+
+    def test_food_bar_is_two_meals_a_day(self):
+        """真正的事故口径：库尔勒餐饮只有 3 条时**必须**补检索。
+
+        上一版阈值用"少于天数"（3 ≥ 2 → 不补），结果模型只能自己编馆子，
+        有两次真实路线里一个餐饮节点都没有。
+        """
+        self.assertEqual(required_food_candidates(2), 4)
+        self.assertEqual(required_food_candidates(4), 8)
+        self.assertEqual(required_food_candidates(1), 4, "一天也要至少 4 个候选才有得挑")
+        self.assertTrue(needs_widening(3, required_food_candidates(2)), "3 条餐饮候选不足以支撑 2 天行程")
+        self.assertTrue(needs_widening(3, required_food_candidates(1)))
+        self.assertFalse(needs_widening(4, required_food_candidates(2)))
+        self.assertFalse(needs_widening(40, required_food_candidates(2)))
 
 
 class SupplyReportTests(unittest.TestCase):
@@ -154,6 +170,99 @@ class WidenCandidatesTests(unittest.TestCase):
         result = self._run(widen_candidates(empty_fetch, city="库尔勒", keywords="美食", existing_names=["老店"]))
         self.assertEqual(result["added_count"], 0)
         self.assertEqual(result["error"], "")
+
+    def test_fetch_kwargs_are_forwarded(self):
+        """真实事故：餐饮补检索漏传 play_worthy=False → 餐饮被"必须是玩点"整类丢掉，
+        返回空列表还一声不响。参数透传必须有测试钉死。"""
+        from core.poi_pool import widen_candidates
+
+        captured = {}
+
+        async def recording_fetch(city, *, keywords, types, limit, **kwargs):
+            captured.update({"city": city, "keywords": keywords, "types": types, "limit": limit, **kwargs})
+            return [{"name": "新店"}]
+
+        result = self._run(
+            widen_candidates(
+                recording_fetch,
+                city="库尔勒",
+                keywords=FOOD_WIDENING_KEYWORDS,
+                types="050000",
+                limit=40,
+                existing_names=[],
+                fetch_kwargs={"play_worthy": False},
+            )
+        )
+        self.assertEqual(captured.get("play_worthy"), False, f"取数参数必须透传，实际 {captured}")
+        self.assertEqual(captured.get("keywords"), FOOD_WIDENING_KEYWORDS)
+        self.assertEqual(result["added_count"], 1)
+
+    def test_agent_passes_play_worthy_false_for_food_widening(self):
+        """源码级护栏：餐饮补检索那处必须带 play_worthy=False。"""
+        import io
+        import pathlib
+
+        source = pathlib.Path(__file__).resolve().parents[1] / "api" / "agent.py"
+        with io.open(source, encoding="utf-8") as handle:
+            text = handle.read()
+        food_block = text.split("FOOD_WIDENING_KEYWORDS")[-1][:400]
+        self.assertIn("play_worthy", food_block, "餐饮补检索必须显式关掉玩点过滤")
+
+
+class CategoryFloorTests(unittest.TestCase):
+    """类别下限兜底：真实缺口是"餐饮 50 个候选，top 里 0 个"。"""
+
+    def test_floors_grow_with_trip_length(self):
+        from core.poi_pool import category_floor
+
+        self.assertEqual(category_floor("scenic", 1), 2)
+        self.assertEqual(category_floor("scenic", 4), 4)
+        self.assertEqual(category_floor("food", 1), 2)
+        self.assertEqual(category_floor("food", 3), 3)
+        self.assertEqual(category_floor("cultural", 3), 2, "人文是点缀，不该要求太多")
+        self.assertEqual(category_floor("shopping", 5), 1)
+        self.assertEqual(category_floor("other", 5), 0)
+
+    def test_food_is_topped_up_from_spare_pool(self):
+        from core.poi_pool import top_up_category_buckets
+
+        buckets = {"scenic": [{"name": "孔雀公园"}], "cultural": [{"name": "州博物馆"}], "food": [], "shopping": []}
+        spare = [
+            {"name": "孔雀公园", "kind": "scenic"},  # 已在桶里 → 不重复
+            {"name": "民杨抓饭", "kind": "food"},
+            {"name": "疆土印象新疆菜", "kind": "food"},
+            {"name": "醉美博湖鱼宴", "kind": "food"},
+        ]
+        result, added = top_up_category_buckets(
+            buckets, spare, trip_days=2, classify=lambda item: str(item.get("kind"))
+        )
+        self.assertEqual(added.get("food"), 2, f"2 天行程餐饮下限 2，实际补了 {added}")
+        self.assertEqual([item["name"] for item in result["food"]], ["民杨抓饭", "疆土印象新疆菜"])
+        self.assertEqual(len(result["scenic"]), 1, "已满足下限的类别不该被加东西")
+
+    def test_no_topup_when_buckets_already_meet_floor(self):
+        from core.poi_pool import top_up_category_buckets
+
+        buckets = {
+            "scenic": [{"name": "a"} for _ in range(4)],
+            "cultural": [{"name": "b"}, {"name": "c"}],
+            "food": [{"name": "d"}, {"name": "e"}],
+            "shopping": [{"name": "f"}],
+        }
+        result, added = top_up_category_buckets(buckets, [], trip_days=2, classify=lambda item: "food")
+        self.assertEqual(added, {})
+        self.assertEqual(len(result["food"]), 2)
+
+    def test_classifier_failure_does_not_break_the_pool(self):
+        from core.poi_pool import top_up_category_buckets
+
+        def broken(item):
+            raise RuntimeError("分类器炸了")
+
+        buckets = {"food": []}
+        result, added = top_up_category_buckets(buckets, [{"name": "x"}], trip_days=1, classify=broken)
+        self.assertEqual(added, {})
+        self.assertEqual(result["food"], [])
 
 
 if __name__ == "__main__":

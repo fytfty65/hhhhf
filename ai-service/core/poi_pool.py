@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .candidate_index import index_candidates, intent_of, normalize_text, tier_level
 
@@ -74,9 +74,90 @@ def required_daytime_slots(trip_days: int, daily_nodes: int) -> int:
     return days * per_day
 
 
-def needs_widening(available: int, days: int) -> bool:
-    """候选是否太薄：连"每天一个"都凑不齐就该补一次更宽的检索。"""
-    return int(available or 0) < max(2, int(days or 1))
+def required_scenic_candidates(trip_days: int) -> int:
+    """自然景观的下限：每天至少能有一个自然点可选。"""
+    return max(2, int(trip_days or 1))
+
+
+def required_food_candidates(trip_days: int) -> int:
+    """餐饮候选的下限：出门玩一天两顿在外面吃 → 至少 2×天数，且不少于 4。
+
+    实测教训（2026-10-04）：库尔勒餐饮一直只回 3 条（而通用兜底「美食|餐厅|小吃|本地菜」
+    能回 40 条）。上一版阈值写成"少于天数才补"，3 ≥ 2 于是从来不触发 ——
+    结果是模型只能自己编馆子，有两次真实路线里**一个餐饮节点都没有**。
+    餐饮不是配菜：一天两顿是硬需求，所以阈值按"一天两顿"给。
+    """
+    return max(4, int(trip_days or 1) * 2)
+
+
+def category_floor(intent: str, trip_days: int) -> int:
+    """交给模型的候选里，每个类别**至少**要有几个（否则模型想排也排不进去）。
+
+    真实缺口（2026-10-04，库尔勒实测）：餐饮候选补到 50 个之后，最终 top 候选里
+    依旧是 `{'scenic': 7, 'cultural': 3, 'hotel': 6}` —— 一个餐饮都没有。
+    原因是候选桶建在**帕累托前沿**上，前沿按多目标支配关系把餐饮整类挤掉了，
+    于是"按类别轮流取"的均衡逻辑手里根本没有餐饮可轮。方案因此长期没有正经吃饭安排。
+    """
+    days = max(1, int(trip_days or 1))
+    if intent == "scenic":
+        return max(2, days)
+    if intent == "food":
+        return max(2, days)  # 一天至少有一顿可选
+    if intent == "cultural":
+        return max(1, days - 1)  # 人文是点缀，不该占满
+    if intent == "shopping":
+        return 1
+    return 0
+
+
+def top_up_category_buckets(
+    buckets: Mapping[str, Sequence[Mapping[str, Any]]],
+    spare: Sequence[Mapping[str, Any]],
+    *,
+    trip_days: int,
+    classify: Callable[[Mapping[str, Any]], str],
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """把被前沿挤掉的类别从**完整候选池**补回下限。
+
+    返回 `(新 buckets, {类别: 补回数量})`。纯函数：不修改入参、按名字去重、
+    只在同类别的 spare 里取（绝不把餐饮塞进观光桶）。
+    """
+    result: Dict[str, List[Dict[str, Any]]] = {key: [dict(item) for item in items] for key, items in buckets.items()}
+    known = {str(item.get("name") or "") for items in result.values() for item in items}
+    added: Dict[str, int] = {}
+
+    for intent in ("scenic", "cultural", "food", "shopping"):
+        floor = category_floor(intent, trip_days)
+        bucket = result.setdefault(intent, [])
+        need = floor - len(bucket)
+        if need <= 0:
+            continue
+        count = 0
+        for item in spare:
+            if count >= need:
+                break
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name or name in known:
+                continue
+            try:
+                actual = str(classify(item) or "")
+            except Exception:
+                continue
+            if actual != intent:
+                continue
+            known.add(name)
+            bucket.append(dict(item))
+            count += 1
+        if count:
+            added[intent] = count
+    return result, added
+
+
+def needs_widening(available: int, required: int) -> bool:
+    """候选是否低于下限（低于就该补一次更宽的检索）。"""
+    return int(available or 0) < max(1, int(required or 1))
 
 
 async def widen_candidates(
@@ -87,6 +168,7 @@ async def widen_candidates(
     types: str = "",
     limit: int = 30,
     existing_names: Optional[Iterable[str]] = None,
+    fetch_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """候选太薄时**补一次**更宽的检索（只补一次，避免把数据源 QPS 打爆）。
 
@@ -94,13 +176,18 @@ async def widen_candidates(
     只能靠碰运气触发（两次真实探针都因为候选够多而没走到）。抽成注入 fetch 的助手后，
     去重/失败不抛/计数都能用假 fetch 做确定性单测。
 
+    `fetch_kwargs` 必须把调用方的取数参数原样带下去 —— 实测教训（2026-10-04）：
+    餐饮补检索漏传 `play_worthy=False`，于是补检索用了默认的"必须是玩点"过滤，
+    餐饮类别被整类丢掉、返回空列表，表现成"补了却一条都没加回来"，而且日志里什么都不报。
+    所以这里把参数透传做成显式契约，并用单测钉死。
+
     返回 `{added, added_count, error}`：
       - `added` 只含**新增**（按名字去重）且结构合法的记录；
       - 任何异常都不抛，只填 `error`，由调用方如实记录并继续用原候选（绝不阻断出方案）。
     """
     seen = {str(name or "") for name in (existing_names or [])}
     try:
-        extra = await fetch(city, keywords=keywords, types=types, limit=limit)
+        extra = await fetch(city, keywords=keywords, types=types, limit=limit, **dict(fetch_kwargs or {}))
     except Exception as exc:  # 补充检索失败不能影响主流程
         return {"added": [], "added_count": 0, "error": str(exc)[:120]}
 
