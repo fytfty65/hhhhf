@@ -1185,7 +1185,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
-          fd.lodging_joint || fd.reference_profile,
+          fd.lodging_joint || fd.reference_profile || fd.candidate_supply,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1207,6 +1207,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         lodgingJoint: fd.lodging_joint ?? prev?.lodgingJoint,
         // 本次是否按"参考路线画像"排的（后端只在诉求没说明白时才用，并回填依据）
         referenceProfile: fd.reference_profile ?? prev?.referenceProfile,
+        // 本次真实候选够不够（景点/餐饮各多少、有没有补检索、哪些地方靠模型知识补）
+        candidateSupply: fd.candidate_supply ?? prev?.candidateSupply,
       }));
     };
 

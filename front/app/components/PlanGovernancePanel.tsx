@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble, Bookmark } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble, Bookmark, MapPin } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
@@ -161,6 +161,21 @@ export type PlanGovernance = {
     summary?: string;
     error?: string;
   };
+  /**
+   * 候选供给：这次方案里有多少地点真的来自数据源。
+   * 为什么必须显示：数据源限流/覆盖不足时真实候选会很少，剩下的是模型知识补的 ——
+   * 用户有权知道自己看到的是"查到的"还是"想出来的"。
+   */
+  candidateSupply?: {
+    status?: string;
+    needed_daytime?: number;
+    known_daytime?: number;
+    attractions?: number;
+    foods?: number;
+    scenic?: number | null;
+    widened?: string[];
+    notes?: string[];
+  };
   /** 自动复核（critic + 确定性修补）的结果：改了什么、还剩几处门禁问题、缺哪些数据 */
   review?: {
     stopped_reason?: string;
@@ -295,7 +310,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -332,11 +347,15 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
   const hasReferenceProfileBlock = Boolean(
     referenceProfile && (referenceProfile.disclosure || (referenceProfile.reasons?.length ?? 0) > 0),
   );
+  // 供给信息只在后端真的报了数字时显示（缺字段不渲染空壳）
+  const hasCandidateSupplyBlock = Boolean(
+    candidateSupply && (typeof candidateSupply.known_daytime === 'number' || candidateSupply.status),
+  );
   if (
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
     !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock &&
-    !hasReferenceProfileBlock
+    !hasReferenceProfileBlock && !hasCandidateSupplyBlock
   ) {
     return null;
   }
@@ -346,6 +365,40 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
       className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3.5 text-left"
       aria-label="行程核对说明"
     >
+      {hasCandidateSupplyBlock && (
+        <div
+          className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0"
+          data-testid="candidate-supply-block"
+        >
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<MapPin className="h-3 w-3" />}>这次的地点有多少是查到的</SectionLabel>
+            <span
+              className={`font-mono text-[12.5px] font-bold tabular-nums ${
+                candidateSupply?.status === 'ok' ? 'text-slate-600' : 'text-amber-700'
+              }`}
+              data-testid="candidate-supply-counts"
+            >
+              真实候选 {candidateSupply?.known_daytime ?? 0}
+              {typeof candidateSupply?.needed_daytime === 'number' ? ` / 需要 ${candidateSupply.needed_daytime}` : ''}
+            </span>
+          </div>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-slate-600">
+            景点 {candidateSupply?.attractions ?? 0} 个
+            {typeof candidateSupply?.scenic === 'number' ? `（其中自然景观 ${candidateSupply.scenic} 个）` : ''}
+            ，餐饮 {candidateSupply?.foods ?? 0} 个
+            {(candidateSupply?.widened?.length ?? 0) > 0 ? `；已额外补检索：${candidateSupply?.widened?.join('、')}` : ''}
+          </p>
+          {(candidateSupply?.notes?.length ?? 0) > 0 && (
+            <ul className="mt-1.5 space-y-1">
+              {(candidateSupply?.notes || []).map((note) => (
+                <li key={note} className="text-[12.5px] leading-relaxed text-amber-800">
+                  {note}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {hasReferenceProfileBlock && (
         <div className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0" data-testid="reference-profile-block">
           <div className="flex items-center justify-between">

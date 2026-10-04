@@ -78,7 +78,7 @@ if (-not $Quick -and -not $SkipBuild -and -not $SkipE2E) {
 
 # ---- 体积与行数对比（与拆分基线同一算法） ----
 Write-Log ""
-Write-Log "=== 体积 / 行数对比（基线：3,991 行 / 1,137.5 KB JS / 147.2 KB CSS，2026-10-03 实测） ==="
+Write-Log "=== 体积 / 行数对比（基线：3,991 行 / 1,153.6 KB JS / 147.6 KB CSS，2026-10-04 实测） ==="
 $lobby = Join-Path $front 'app\ContextualLobby.tsx'
 if (Test-Path $lobby) {
   $lines = [System.IO.File]::ReadAllLines($lobby).Length
@@ -105,7 +105,7 @@ if (Test-Path $indexHtml) {
     if ($p) { $cssTotal += $p.Length }
   }
   Write-Log ("  首屏 CSS 合计: {0:N1} KB" -f ($cssTotal / 1KB))
-  Write-Log "  （首屏 JS 基线 1,137.5 KB，2026-10-03 实测记录；变大即为劣化，需说明原因或回滚该批）"
+  Write-Log "  （首屏 JS 基线 1,153.6 KB，2026-10-04 实测记录；变大即为劣化，需说明原因或回滚该批）"
 } else {
   Write-Log "  （未找到 .next/server/app/index.html，跳过一次构建产物体积对比）"
 }

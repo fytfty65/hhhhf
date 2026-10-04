@@ -276,6 +276,17 @@ const GOVERNANCE_PAYLOAD = {
     reasons: ['参考路线里自然 8 处 / 人文 0 处', '参考路线节奏「relaxed」→ 每天约 3 个节点'],
     disclosure: '这次没有额外指定偏好，所以按你参考过的 1 条路线来的：参考路线里自然 8 处 / 人文 0 处。想改就直接说（例如「这次多看人文」），诉求会覆盖画像。',
   },
+  // 候选供给：这次方案里的地点有多少真的来自数据源（真实探针里 库尔勒=景点22/自然18/美食3）
+  candidate_supply: {
+    status: 'thin',
+    needed_daytime: 10,
+    known_daytime: 7,
+    attractions: 4,
+    foods: 3,
+    scenic: 1,
+    widened: ['自然景观'],
+    notes: ['真实白天候选 7 个，少于排满 10 个白天节点所需的量；部分地点靠模型知识补，请核对'],
+  },
 };
 
 async function installMocks(page: Page) {
@@ -351,6 +362,7 @@ async function installMocks(page: Page) {
                     degradations: payload.governance.degradations,
                     lodging_joint: payload.governance.lodging_joint,
                     reference_profile: payload.governance.reference_profile,
+                    candidate_supply: payload.governance.candidate_supply,
                   }),
               }),
             });
@@ -609,6 +621,15 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByText('已核实花费', { exact: true })).toBeVisible();
     await expect(panel.getByText('可能超支')).toBeVisible();
     await expect(panel.getByText('估算花费（未核实）', { exact: true })).toBeVisible();
+
+    // 候选供给：用户必须能看到"地点有多少是查到的、多少是模型知识补的"
+    const supplyBlock = panel.getByTestId('candidate-supply-block');
+    await expect(supplyBlock).toBeVisible();
+    await expect(panel.getByTestId('candidate-supply-counts')).toContainText('真实候选 7');
+    await expect(panel.getByTestId('candidate-supply-counts')).toContainText('需要 10');
+    await expect(supplyBlock).toContainText('景点 4 个（其中自然景观 1 个），餐饮 3 个');
+    await expect(supplyBlock).toContainText('已额外补检索：自然景观');
+    await expect(supplyBlock).toContainText('部分地点靠模型知识补，请核对');
 
     // 已作调整：平替明细 + 人话说明
     await expect(panel.getByText('已作调整')).toBeVisible();
