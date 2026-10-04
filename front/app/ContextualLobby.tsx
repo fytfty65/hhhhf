@@ -66,6 +66,7 @@ import BookingHub from './components/BookingHub';
 import TripExecutionPanel from './components/TripExecutionPanel';
 import ReplanProposalPanel from './components/ReplanProposalPanel';
 import RiskPerturbationPanel from './components/RiskPerturbationPanel';
+import ReferenceRoutePanel from './components/ReferenceRoutePanel';
 import { normalizeRiskAlert, type RiskAlertView } from './lib/riskPerturbation';
 
 type WorkspaceLayer = 'plan' | 'evidence' | 'execution' | 'professional';
@@ -1184,7 +1185,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
-          fd.lodging_joint,
+          fd.lodging_joint || fd.reference_profile,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1204,6 +1205,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         degradations: fd.degradations ?? prev?.degradations,
         // 住哪的联合评估：房价之外的连锁影响（通勤 / 交通费 / 体力 / 碳排 / 可玩节点 / 预算余额）
         lodgingJoint: fd.lodging_joint ?? prev?.lodgingJoint,
+        // 本次是否按"参考路线画像"排的（后端只在诉求没说明白时才用，并回填依据）
+        referenceProfile: fd.reference_profile ?? prev?.referenceProfile,
       }));
     };
 
@@ -2198,7 +2201,12 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                       onReject={() => { void rejectReplanProposal(); }}
                     />
                   </>}
-                  {workspaceLayer === 'plan' && <PreTripPlanningPanel
+                  {workspaceLayer === 'plan' && <>
+                    {/* 参考路线学习：粘贴一条喜欢的路线 → 学成画像 → 没提更多要求时按它排 */}
+                    <div className="mb-3">
+                      <ReferenceRoutePanel />
+                    </div>
+                    <PreTripPlanningPanel
                       userId={currentUser.id}
                       tripId={planningResourceId}
                       destination={targetCityInfo?.name || initialDestination || ''}
@@ -2206,7 +2214,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                       budget={Number(budgetData?.total_budget || 0)}
                       days={totalDays.length}
                       travelers={Math.max(1, roomMembers.length)}
-                    />}
+                    />
+                  </>}
                   {workspaceLayer === 'professional' && <section className="mb-4 rounded-2xl border border-stone-200 bg-[#fbfaf7] p-4 shadow-[0_8px_30px_rgba(67,45,25,0.06)]" data-testid="professional-diagnostics">
                     <div className="flex items-start justify-between gap-3">
                       <div><h3 className="text-sm font-black text-slate-800">方案检查</h3><p className="mt-1 text-[11px] text-slate-500">这里回答三个问题：路线是否可执行、谁可能不满意、下一步要不要调整。</p></div>

@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble, Bookmark } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
@@ -124,6 +124,13 @@ export type PlanGovernance = {
       budget_remaining?: number | null;
       estimated?: boolean;
     }[];
+  };
+  /** 本次是否按"参考路线画像"排的（含依据；后端只在诉求没说明白时才用） */
+  referenceProfile?: {
+    applied?: boolean;
+    reference_count?: number;
+    reasons?: string[];
+    disclosure?: string;
   };
   /** 跨城腿的出行建议（含"票价未核实"清单） */
   transportAudit?: { legs?: TransportLeg[]; note?: string; error?: string };
@@ -288,7 +295,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -322,10 +329,14 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
     lodgingJoint &&
       ((lodgingJoint.candidates?.length ?? 0) > 0 || lodgingJoint.reason || lodgingJoint.error || lodgingJoint.note),
   );
+  const hasReferenceProfileBlock = Boolean(
+    referenceProfile && (referenceProfile.disclosure || (referenceProfile.reasons?.length ?? 0) > 0),
+  );
   if (
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
-    !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock
+    !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock &&
+    !hasReferenceProfileBlock
   ) {
     return null;
   }
@@ -335,6 +346,29 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
       className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3.5 text-left"
       aria-label="行程核对说明"
     >
+      {hasReferenceProfileBlock && (
+        <div className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0" data-testid="reference-profile-block">
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<Bookmark className="h-3 w-3" />}>这次怎么定的口味</SectionLabel>
+            <span className="font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
+              按你参考过的 {Math.max(1, referenceProfile?.reference_count ?? 1)} 条路线
+            </span>
+          </div>
+          {(referenceProfile?.reasons?.length ?? 0) > 0 && (
+            <ul className="mt-1.5 space-y-1">
+              {(referenceProfile?.reasons || []).map((reason, index) => (
+                <li key={`${reason}-${index}`} className="text-[12.5px] leading-relaxed text-slate-600">
+                  · {reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {referenceProfile?.disclosure && (
+            <p className="mt-1.5 text-[12px] leading-relaxed text-slate-500">{referenceProfile.disclosure}</p>
+          )}
+        </div>
+      )}
+
       {hasBudgetBlock && (
         <div>
           <div className="flex items-center justify-between">

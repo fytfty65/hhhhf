@@ -1,0 +1,216 @@
+'use client';
+
+/**
+ * ReferenceRoutePanel —— 「参考路线」学习入口。
+ *
+ * 用户需求原话：粘贴一条自己喜欢的路线（如小红书帖子）→ 智能体学习成画像 →
+ * 当用户没提出更多需求时，按这份偏好生成新路线。
+ *
+ * 界面口径（与后端一致，刻意"去 AI 化"）：
+ * - 报表式排印（细分割线、等宽数字、小字号标签），不写"AI 已学习你的品味"这类措辞；
+ * - 如实说明**存了什么**：默认"特征 + 出处片段"，可勾选只存特征；整篇原文不保存；
+ * - 抽不到的特征显示"未识别"，不拿默认值冒充；
+ * - 明确写出**诉求优先**：当轮说清楚的要求会覆盖画像。
+ */
+
+import React, { useCallback, useEffect, useState } from 'react';
+import { Bookmark, RefreshCw, Trash2 } from 'lucide-react';
+import { apiJson, API_BASE, getAuthToken } from '../lib/utils';
+import {
+  buildSavePayload,
+  confidenceLabel,
+  REFERENCE_ROUTE_ENDPOINT,
+  storageDisclosure,
+  summarizeProfile,
+  type ReferenceProfile,
+} from '../lib/referenceProfile';
+
+type SavedState = { profile: ReferenceProfile | null; referenceCount: number };
+
+export default function ReferenceRoutePanel() {
+  const [text, setText] = useState('');
+  const [sourceLabel, setSourceLabel] = useState('');
+  const [keepEvidence, setKeepEvidence] = useState(true);
+  const [saved, setSaved] = useState<SavedState>({ profile: null, referenceCount: 0 });
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const payload = await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_ENDPOINT}`);
+      const profile = (payload?.data?.profile ?? payload?.profile ?? null) as ReferenceProfile | null;
+      const count = Number(payload?.data?.reference_count ?? payload?.reference_count ?? 0);
+      setSaved({ profile, referenceCount: Number.isFinite(count) ? count : 0 });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '参考路线读取失败');
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async () => {
+    const built = buildSavePayload(text, sourceLabel, keepEvidence);
+    if (built.ok === false) {
+      setMessage(built.reason);
+      return;
+    }
+    setBusy(true);
+    setMessage('');
+    try {
+      const payload = await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_ENDPOINT}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAuthToken()}` },
+        body: JSON.stringify(built.payload),
+      });
+      const profile = (payload?.data?.profile ?? payload?.profile ?? null) as ReferenceProfile | null;
+      const count = Number(payload?.data?.reference_count ?? payload?.reference_count ?? 0);
+      setSaved({ profile, referenceCount: Number.isFinite(count) ? count : 0 });
+      setMessage(String(payload?.data?.note ?? payload?.note ?? '已保存抽取出的偏好特征。'));
+      setText('');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '参考路线保存失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    setMessage('');
+    try {
+      await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_ENDPOINT}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${getAuthToken()}` },
+      });
+      setSaved({ profile: null, referenceCount: 0 });
+      setMessage('已清除参考路线画像，之后的方案不再使用它。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '清除失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const summary = summarizeProfile(saved.profile);
+  const confidence = confidenceLabel(saved.profile);
+
+  return (
+    <section
+      className="rounded-xl border border-slate-200 bg-white p-4 text-left sm:p-5"
+      aria-label="参考路线学习"
+      data-testid="reference-route-panel"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <Bookmark className="h-4 w-4 text-orange-700" />
+            参考路线
+          </h3>
+          <p className="mt-1 text-xs leading-relaxed text-slate-500">
+            粘贴一条你喜欢的路线（例如小红书帖子正文）。系统会总结它的特点；
+            当你没提出更多要求时，就按这些特点排。<strong className="text-slate-700">你在诉求里说清楚的要求优先于它。</strong>
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition-colors hover:bg-slate-50"
+          title="重新读取已保存的画像"
+          aria-label="重新读取已保存的画像"
+        >
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
+
+      <label className="mt-3 block text-[11px] font-bold text-slate-500" htmlFor="reference-route-text">
+        参考路线正文
+      </label>
+      <textarea
+        id="reference-route-text"
+        data-testid="reference-route-text"
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        rows={5}
+        placeholder="把帖子正文粘贴到这里（含路线、天数、吃了什么、住了哪里、节奏怎样…）"
+        className="mt-1 w-full resize-y rounded-lg border border-slate-200 px-3 py-2 text-[12.5px] leading-relaxed text-slate-700 focus:border-orange-400 focus:outline-none"
+      />
+
+      <div className="mt-2 flex flex-wrap items-center gap-3">
+        <input
+          data-testid="reference-route-source"
+          value={sourceLabel}
+          onChange={(event) => setSourceLabel(event.target.value)}
+          placeholder="来源备注（可选，如：小红书-乌鲁木齐4天）"
+          className="min-h-9 flex-1 rounded-lg border border-slate-200 px-3 text-[12px] text-slate-700 focus:border-orange-400 focus:outline-none"
+        />
+        <label className="flex items-center gap-1.5 text-[12px] text-slate-600">
+          <input
+            type="checkbox"
+            data-testid="reference-route-keep-evidence"
+            checked={!keepEvidence}
+            onChange={(event) => setKeepEvidence(!event.target.checked)}
+          />
+          只保存特征（不留出处片段）
+        </label>
+        <button
+          type="button"
+          data-testid="reference-route-save"
+          onClick={() => void save()}
+          disabled={busy}
+          className="min-h-9 rounded-lg bg-orange-600 px-3.5 text-[12px] font-bold text-white transition-colors hover:bg-orange-700 disabled:opacity-60"
+        >
+          {busy ? '处理中…' : '学习这条路线'}
+        </button>
+      </div>
+      <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{storageDisclosure(keepEvidence)}</p>
+
+      {message && (
+        <p className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] leading-relaxed text-slate-600" data-testid="reference-route-message">
+          {message}
+        </p>
+      )}
+
+      <div className="mt-3 border-t border-slate-100 pt-2.5">
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] font-bold text-slate-500">
+            目前已学到{summary.lines.length > 0 ? `（参考 ${saved.referenceCount} 条）` : ''}
+          </p>
+          {confidence && <span className="font-mono text-[11px] tabular-nums text-slate-500">{confidence}</span>}
+        </div>
+        {summary.lines.length > 0 ? (
+          <ul className="mt-1.5 space-y-1" data-testid="reference-route-summary">
+            {summary.lines.map((line) => (
+              <li key={line} className="text-[12.5px] leading-relaxed text-slate-600">
+                · {line}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">还没有参考路线。粘贴一条后这里会列出学到的特点。</p>
+        )}
+        {summary.unknown.length > 0 && (
+          <p className="mt-1.5 text-[12px] leading-relaxed text-slate-500">
+            未识别（不会拿默认值冒充）：{summary.unknown.join('、')}
+          </p>
+        )}
+        {summary.lines.length > 0 && (
+          <button
+            type="button"
+            onClick={() => void clear()}
+            disabled={busy}
+            data-testid="reference-route-clear"
+            className="mt-2 inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-rose-200 px-3 text-[12px] font-bold text-rose-600 transition-colors hover:bg-rose-50 disabled:opacity-60"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            清除参考路线画像
+          </button>
+        )}
+        {saved.profile?.source_label && (
+          <p className="mt-2 text-[11px] text-slate-400">最近一条来源备注：{saved.profile.source_label}</p>
+        )}
+      </div>
+    </section>
+  );
+}

@@ -28,6 +28,8 @@ let savedTripBodies: any[] = [];
 // 采纳上报（user.accepted）与方案落库：用来验证"自动保存 ≠ 采纳"这条口径
 let adoptCalls: any[] = [];
 let variantSaves: any[] = [];
+// 参考路线学习：粘贴 → 保存 → 界面要能看到"学到了什么"，方案里要能看到依据
+let referenceSaves: any[] = [];
 
 // 与后端 plan_quality_snapshot / budget_report / propose_fallback 输出的字段保持一致
 const GOVERNANCE_PAYLOAD = {
@@ -257,12 +259,20 @@ const GOVERNANCE_PAYLOAD = {
       },
     ],
   },
+  // 参考路线画像披露（后端只在"当轮诉求没说明白"时才用它，并回填依据）
+  reference_profile: {
+    applied: true,
+    reference_count: 1,
+    reasons: ['参考路线里自然 8 处 / 人文 0 处', '参考路线节奏「relaxed」→ 每天约 3 个节点'],
+    disclosure: '这次没有额外指定偏好，所以按你参考过的 1 条路线来的：参考路线里自然 8 处 / 人文 0 处。想改就直接说（例如「这次多看人文」），诉求会覆盖画像。',
+  },
 };
 
 async function installMocks(page: Page) {
   savedTripBodies = [];
   adoptCalls = [];
   variantSaves = [];
+  referenceSaves = [];
   await page.addInitScript(
     (payload) => {
       localStorage.setItem('omni_user', JSON.stringify(payload.user));
@@ -328,6 +338,7 @@ async function installMocks(page: Page) {
                     constraints: payload.governance.constraints,
                     degradations: payload.governance.degradations,
                     lodging_joint: payload.governance.lodging_joint,
+                    reference_profile: payload.governance.reference_profile,
                   }),
               }),
             });
@@ -375,6 +386,43 @@ async function installMocks(page: Page) {
     adoptCalls.push(route.request().postDataJSON());
     await route.fulfill({ json: { message: '方案已采纳' } });
   });
+  // 参考路线：GET 先返回"还没学过"，POST 返回抽取出的画像
+  await page.route('**/api/v1/user/preference/reference-route', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: { data: { profile: null, reference_count: 0 } } });
+      return;
+    }
+    if (route.request().method() === 'DELETE') {
+      await route.fulfill({ json: { data: { cleared: true } } });
+      return;
+    }
+    referenceSaves.push(route.request().postDataJSON());
+    await route.fulfill({
+      json: {
+        data: {
+          profile: {
+            features: {
+              category_mix: { scenic: 8, food: 5, shopping: 2 },
+              pace: 'relaxed',
+              time_style: 'night_owl',
+              budget_tier: 'mid',
+              budget_amount: 300,
+              transport: ['walk', 'metro'],
+              lodging_style: 'homestay',
+              walking_intensity: 'high',
+            },
+            unknown: ['nodes_per_day'],
+            confidence: 0.86,
+            reference_count: 1,
+            source_label: '小红书-乌鲁木齐4天',
+          },
+          reference_count: 1,
+          evidence_kept: true,
+          note: '已保存抽取出的偏好特征，以及每个特征的出处片段（用于在界面上解释依据）；整篇原文不会被保存。',
+        },
+      },
+    });
+  });
   await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
 }
 
@@ -420,6 +468,27 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     expect(String(adoptCalls[0]?.variant_id || '')).not.toBe('');
     expect(String(adoptCalls[0]?.user_id || '')).not.toBe('');
 
+    // 参考路线学习：粘贴一条喜欢的路线 → 界面上要能看到"学到了什么"，并如实说明存了什么
+    const referencePanel = page.getByTestId('reference-route-panel');
+    await expect(referencePanel).toBeVisible();
+    await referencePanel.getByTestId('reference-route-text').fill('乌鲁木齐4天，人均300，住民宿，南山牧场看雪山，晚上夜市吃烧烤大盘鸡，节奏轻松');
+    await referencePanel.getByTestId('reference-route-save').click();
+    await expect(page.getByTestId('reference-route-summary')).toBeVisible({ timeout: 10_000 });
+    await expect(referencePanel.getByText(/自然 8/)).toBeVisible();
+    await expect(referencePanel.getByText(/节奏：轻松/)).toBeVisible();
+    await expect(referencePanel.getByText(/住宿：民宿/)).toBeVisible();
+    await expect(referencePanel.getByText(/未识别（不会拿默认值冒充）：节奏与节点数/)).toBeVisible();
+    await expect(page.getByTestId('reference-route-message')).toContainText('出处片段');
+    expect(referenceSaves.length, '保存参考路线应只发一次请求').toBe(1);
+    expect(referenceSaves[0]?.keep_evidence, '默认要保留出处片段（界面能解释依据）').toBe(true);
+
+    // 勾选"只保存特征"后，请求体必须带 keep_evidence=false（隐私口径可验证）
+    await referencePanel.getByTestId('reference-route-keep-evidence').check();
+    await referencePanel.getByTestId('reference-route-text').fill('第二条参考：想多看人文');
+    await referencePanel.getByTestId('reference-route-save').click();
+    await expect.poll(() => referenceSaves.length, { timeout: 10_000 }).toBe(2);
+    expect(referenceSaves[1]?.keep_evidence, '勾选后必须只存特征').toBe(false);
+
     // Governance is intentionally kept in the evidence layer so the default
     // plan view stays focused. Open that layer before asserting its details.
     await page.getByTestId('workspace-layer-evidence').click();
@@ -463,6 +532,13 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
 
     // 住哪更划算：房价之外的连锁影响（每天往返通勤/交通费/体力/碳排/预算余额）
     // 取不到的房价必须写成"未取到"，不能当成 0 元，也不能拿它去比"更便宜"。
+    // 参考画像披露：这次是按"你参考过的路线"排的，并且给出覆盖入口
+    // （"按你参考过的 N 条路线"同时出现在标题与披露正文里 → 用 first() 避免 strict 冲突）
+    await expect(panel.getByText('这次怎么定的口味')).toBeVisible();
+    await expect(panel.getByText('按你参考过的 1 条路线').first()).toBeVisible();
+    await expect(panel.getByText(/参考路线里自然 8 处/).first()).toBeVisible();
+    await expect(panel.getByText(/想改就直接说/).first()).toBeVisible();
+
     await expect(panel.getByText('住哪更划算')).toBeVisible();
     await expect(page.getByTestId('lodging-joint')).toBeVisible();
     await expect(panel.getByText('住 2 晚 ¥600').first()).toBeVisible();
