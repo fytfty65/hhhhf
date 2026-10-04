@@ -426,7 +426,14 @@ async function installMocks(page: Page) {
   await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
 }
 
-async function reachDecision(page: Page) {
+/**
+ * 走到"决策阶段"。
+ *
+ * `referenceText` 传入时，会在**规划之前**（诉求页）走一遍参考路线学习：
+ * 这是我们刻意摆放的位置 —— 画像的用途是"用户没提要求时按它排"，
+ * 放到规划页就变成"先排完再用"，顺序反了。
+ */
+async function reachDecision(page: Page, options: { referenceText?: string } = {}) {
   await page.getByTestId('join-room-code').fill('ROOM-E2E');
   await page.getByTestId('join-room-submit').click();
   await expect(page.getByTestId('room-code')).not.toBeEmpty();
@@ -434,7 +441,38 @@ async function reachDecision(page: Page) {
   await expect(page.getByText('进入共识沙盘')).toBeVisible({ timeout: 10_000 });
   await page.getByText('进入共识沙盘').click();
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
-  await page.locator('textarea').first().fill('带孩子去西安 3 天，预算 1200，必须住得下也要每天有正餐');
+
+  if (options.referenceText) {
+    // 面板默认折叠：先展开（顺序也在此验证 —— 它出现在"生成行程方案"之前）
+    const referencePanel = page.getByTestId('reference-route-panel');
+    await expect(referencePanel).toBeVisible();
+    await expect(page.getByText('生成行程方案')).toBeVisible();
+    await referencePanel.getByTestId('reference-route-toggle').click();
+    await referencePanel.getByTestId('reference-route-text').fill(options.referenceText);
+    await referencePanel.getByTestId('reference-route-save').click();
+    const summary = page.getByTestId('reference-route-summary');
+    await expect(summary).toBeVisible({ timeout: 10_000 });
+    // 断言限定在摘要块里：折叠表头也会显示一条摘要（"已学 1 条：内容偏好：自然 8…"），
+    // 不限定就会撞成 strict mode 冲突。
+    await expect(summary.getByText(/自然 8/)).toBeVisible();
+    await expect(summary.getByText(/节奏：轻松/)).toBeVisible();
+    await expect(summary.getByText(/住宿：民宿/)).toBeVisible();
+    await expect(referencePanel.getByText(/未识别（不会拿默认值冒充）：节奏与节点数/)).toBeVisible();
+    await expect(page.getByTestId('reference-route-message')).toContainText('出处片段');
+    expect(referenceSaves.length, '保存参考路线应只发一次请求').toBe(1);
+    expect(referenceSaves[0]?.keep_evidence, '默认要保留出处片段（界面能解释依据）').toBe(true);
+
+    // 勾选"只保存特征"后，请求体必须带 keep_evidence=false（隐私口径可验证）
+    await referencePanel.getByTestId('reference-route-keep-evidence').check();
+    await referencePanel.getByTestId('reference-route-text').fill('第二条参考：想多看人文');
+    await referencePanel.getByTestId('reference-route-save').click();
+    await expect.poll(() => referenceSaves.length, { timeout: 10_000 }).toBe(2);
+    expect(referenceSaves[1]?.keep_evidence, '勾选后必须只存特征').toBe(false);
+  }
+
+  // 用 testid 精确定位诉求输入框：展开参考路线面板后，页面上会有两个 textarea，
+  // 用 `textarea.first()` 会填错框（这个坑刚踩过）。
+  await page.getByTestId('intent-input').fill('带孩子去西安 3 天，预算 1200，必须住得下也要每天有正餐');
   await page.getByText('生成行程方案').click();
   await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 20_000 });
 }
@@ -447,7 +485,9 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await installMocks(page);
     await page.goto('/');
     await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
-    await reachDecision(page);
+    await reachDecision(page, {
+      referenceText: '乌鲁木齐4天，人均300，住民宿，南山牧场看雪山，晚上夜市吃烧烤大盘鸡，节奏轻松',
+    });
 
     // 方案生成后会自动保存行程：内容里必须带 correlation_id，否则跨服务轨迹串不起来
     // 方案生成后会自动保存行程（由 effect 触发，可能比断言晚几百毫秒）——
@@ -467,27 +507,6 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect.poll(() => adoptCalls.length, { timeout: 10_000 }).toBeGreaterThan(0);
     expect(String(adoptCalls[0]?.variant_id || '')).not.toBe('');
     expect(String(adoptCalls[0]?.user_id || '')).not.toBe('');
-
-    // 参考路线学习：粘贴一条喜欢的路线 → 界面上要能看到"学到了什么"，并如实说明存了什么
-    const referencePanel = page.getByTestId('reference-route-panel');
-    await expect(referencePanel).toBeVisible();
-    await referencePanel.getByTestId('reference-route-text').fill('乌鲁木齐4天，人均300，住民宿，南山牧场看雪山，晚上夜市吃烧烤大盘鸡，节奏轻松');
-    await referencePanel.getByTestId('reference-route-save').click();
-    await expect(page.getByTestId('reference-route-summary')).toBeVisible({ timeout: 10_000 });
-    await expect(referencePanel.getByText(/自然 8/)).toBeVisible();
-    await expect(referencePanel.getByText(/节奏：轻松/)).toBeVisible();
-    await expect(referencePanel.getByText(/住宿：民宿/)).toBeVisible();
-    await expect(referencePanel.getByText(/未识别（不会拿默认值冒充）：节奏与节点数/)).toBeVisible();
-    await expect(page.getByTestId('reference-route-message')).toContainText('出处片段');
-    expect(referenceSaves.length, '保存参考路线应只发一次请求').toBe(1);
-    expect(referenceSaves[0]?.keep_evidence, '默认要保留出处片段（界面能解释依据）').toBe(true);
-
-    // 勾选"只保存特征"后，请求体必须带 keep_evidence=false（隐私口径可验证）
-    await referencePanel.getByTestId('reference-route-keep-evidence').check();
-    await referencePanel.getByTestId('reference-route-text').fill('第二条参考：想多看人文');
-    await referencePanel.getByTestId('reference-route-save').click();
-    await expect.poll(() => referenceSaves.length, { timeout: 10_000 }).toBe(2);
-    expect(referenceSaves[1]?.keep_evidence, '勾选后必须只存特征').toBe(false);
 
     // Governance is intentionally kept in the evidence layer so the default
     // plan view stays focused. Open that layer before asserting its details.

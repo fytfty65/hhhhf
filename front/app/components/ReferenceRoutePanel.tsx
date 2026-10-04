@@ -14,7 +14,7 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Bookmark, RefreshCw, Trash2 } from 'lucide-react';
+import { Bookmark, ChevronDown, RefreshCw, Trash2 } from 'lucide-react';
 import { apiJson, API_BASE, getAuthToken } from '../lib/utils';
 import {
   buildSavePayload,
@@ -27,7 +27,8 @@ import {
 
 type SavedState = { profile: ReferenceProfile | null; referenceCount: number };
 
-export default function ReferenceRoutePanel() {
+export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   const [text, setText] = useState('');
   const [sourceLabel, setSourceLabel] = useState('');
   const [keepEvidence, setKeepEvidence] = useState(true);
@@ -103,16 +104,26 @@ export default function ReferenceRoutePanel() {
       data-testid="reference-route-panel"
     >
       <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-            <Bookmark className="h-4 w-4 text-orange-700" />
-            参考路线
-          </h3>
-          <p className="mt-1 text-xs leading-relaxed text-slate-500">
-            粘贴一条你喜欢的路线（例如小红书帖子正文）。系统会总结它的特点；
-            当你没提出更多要求时，就按这些特点排。<strong className="text-slate-700">你在诉求里说清楚的要求优先于它。</strong>
-          </p>
-        </div>
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+          data-testid="reference-route-toggle"
+          className="flex flex-1 items-start gap-2 text-left"
+        >
+          <ChevronDown className={`mt-0.5 h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? '' : '-rotate-90'}`} />
+          <span>
+            <span className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <Bookmark className="h-4 w-4 text-orange-700" />
+              参考路线（可选）
+            </span>
+            <span className="mt-1 block text-xs leading-relaxed text-slate-500">
+              {summary.lines.length > 0
+                ? `已学 ${saved.referenceCount} 条：${summary.lines[0]}${summary.lines.length > 1 ? ' 等' : ''}；你没提要求时按它排`
+                : '粘贴一条你喜欢的路线（如小红书帖子）。当你没提出更多要求时，就按它的特点排。'}
+            </span>
+          </span>
+        </button>
         <button
           type="button"
           onClick={() => void load()}
@@ -123,6 +134,13 @@ export default function ReferenceRoutePanel() {
           <RefreshCw className="h-4 w-4" />
         </button>
       </div>
+
+      {open && (
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          <p className="text-xs leading-relaxed text-slate-500">
+            <strong className="text-slate-700">你在诉求里说清楚的要求优先于它。</strong>
+            所以这里适合放"我平时就喜欢这么玩"的参考，而不是这一次的具体要求。
+          </p>
 
       <label className="mt-3 block text-[11px] font-bold text-slate-500" htmlFor="reference-route-text">
         参考路线正文
@@ -210,7 +228,9 @@ export default function ReferenceRoutePanel() {
         {saved.profile?.source_label && (
           <p className="mt-2 text-[11px] text-slate-400">最近一条来源备注：{saved.profile.source_label}</p>
         )}
+        </div>
       </div>
+      )}
     </section>
   );
 }

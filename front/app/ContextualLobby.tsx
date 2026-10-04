@@ -2154,20 +2154,27 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           )}
           <AnimatePresence mode="wait">
             {phase === 'drafting' && (
-              <DraftingPanel 
-                key="workspace-drafting-panel"
-                activeMode={activeMode} 
-                activeRole={activeRole} 
-                onModeChange={setActiveMode} 
-                onRoleChange={setActiveRole} 
-                onSubmit={handleSubmitIntent} 
-                isReady={intentsReady} 
-                userIntent={userIntent} 
-                setUserIntent={setUserIntent} 
-                apiError={apiError} 
-                historyLength={incrementalHistory.length}
-                roomMembers={roomMembers}
-              />
+              <>
+                {/* 参考路线（可选）：**必须在规划之前** —— 它的用途是"用户没提要求时按它排"，
+                    放到规划页就变成了"先排完再用"，顺序反了。默认折叠，不挤占主诉求输入。 */}
+                <div className="px-4 pt-4 sm:px-8">
+                  <ReferenceRoutePanel />
+                </div>
+                <DraftingPanel 
+                  key="workspace-drafting-panel"
+                  activeMode={activeMode} 
+                  activeRole={activeRole} 
+                  onModeChange={setActiveMode} 
+                  onRoleChange={setActiveRole} 
+                  onSubmit={handleSubmitIntent} 
+                  isReady={intentsReady} 
+                  userIntent={userIntent} 
+                  setUserIntent={setUserIntent} 
+                  apiError={apiError} 
+                  historyLength={incrementalHistory.length}
+                  roomMembers={roomMembers}
+                />
+              </>
             )}
             {phase === 'deduction' && (
               <DeductionPanel 
@@ -2201,12 +2208,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                       onReject={() => { void rejectReplanProposal(); }}
                     />
                   </>}
-                  {workspaceLayer === 'plan' && <>
-                    {/* 参考路线学习：粘贴一条喜欢的路线 → 学成画像 → 没提更多要求时按它排 */}
-                    <div className="mb-3">
-                      <ReferenceRoutePanel />
-                    </div>
-                    <PreTripPlanningPanel
+                  {workspaceLayer === 'plan' && <PreTripPlanningPanel
                       userId={currentUser.id}
                       tripId={planningResourceId}
                       destination={targetCityInfo?.name || initialDestination || ''}
@@ -2214,8 +2216,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                       budget={Number(budgetData?.total_budget || 0)}
                       days={totalDays.length}
                       travelers={Math.max(1, roomMembers.length)}
-                    />
-                  </>}
+                    />}
                   {workspaceLayer === 'professional' && <section className="mb-4 rounded-2xl border border-stone-200 bg-[#fbfaf7] p-4 shadow-[0_8px_30px_rgba(67,45,25,0.06)]" data-testid="professional-diagnostics">
                     <div className="flex items-start justify-between gap-3">
                       <div><h3 className="text-sm font-black text-slate-800">方案检查</h3><p className="mt-1 text-[11px] text-slate-500">这里回答三个问题：路线是否可执行、谁可能不满意、下一步要不要调整。</p></div>
