@@ -154,6 +154,26 @@ async function main() {
     cursorEvents.length > 0 ? `B 收到 ${cursorEvents.length} 条：${cursorEvents.slice(0, 5).map((m) => m.type).join(', ')}` : 'B 什么都没收到（协同未生效）',
   );
 
+  // ---- 4.5) 参考路线画像（可选）：先给发起者存一条"喜欢的路线"，再看推演是否采用并回填依据 ----
+  const referenceText = process.env.SMOKE_REFERENCE_TEXT || '';
+  if (referenceText) {
+    const saved = await fetch(`${BASE}/api/v1/user/preference/reference-route`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({ text: referenceText, source_label: '冒烟-参考路线' }),
+    });
+    const savedPayload = await saved.json().catch(() => ({}));
+    const profile = savedPayload?.data?.profile || savedPayload?.profile;
+    const mix = profile?.features?.category_mix
+      ? Object.entries(profile.features.category_mix).map(([key, value]) => `${key}:${value}`).join(' ')
+      : '';
+    record(
+      '参考路线已学习（只存特征 + 出处片段）',
+      saved.status === 200 && Boolean(profile),
+      `HTTP ${saved.status} ${mix} pace=${profile?.features?.pace ?? '?'} confidence=${profile?.confidence ?? '?'}`,
+    );
+  }
+
   // ---- 5) 协同推演 ----
   const startedAt = Date.now();
   const aFinal = collect(wsA, 220, FINAL_TYPES);
@@ -167,7 +187,8 @@ async function main() {
         destinations: ['库尔勒'],
         current_request: { destinations: ['库尔勒'], city: '' },
         user_preferences: {
-          intent: '去库尔勒玩2天，想看自然风景，节奏不要太赶',
+          // 可用 SMOKE_INTENT 覆盖：用来验证"诉求没说明白时按参考画像排"
+          intent: process.env.SMOKE_INTENT || '去库尔勒玩2天，想看自然风景，节奏不要太赶',
           mode: 'coop',
           role: '寻味探索',
           members: 2,
@@ -182,6 +203,19 @@ async function main() {
   const bHasFinal = bEvents.some((m) => FINAL_TYPES.includes(String(m.type)));
   record('发起者 A 收到推演结果', aHasFinal, `${aEvents.length} 条事件 / ${seconds}s`);
   record('旁观者 B 也收到同一推演结果（协同规划关键判据）', bHasFinal, `${bEvents.length} 条事件`);
+
+  // 参考画像是否真的被采用（后端只在"诉求没说明白"时才用，并回填依据）——界面上就是靠这个字段
+  const applied = aEvents
+    .map((m) => m?.payload?.reference_profile || m?.payload?.final_data?.reference_profile)
+    .find(Boolean);
+  if (referenceText) {
+    const reasons = Array.isArray(applied?.reasons) ? applied.reasons.slice(0, 2).join(' / ') : '';
+    record(
+      '推演采用了参考画像并回填依据',
+      Boolean(applied?.applied),
+      applied ? `按 ${applied.reference_count ?? '?'} 条：${reasons}` : '未回填 reference_profile（诉求可能已足够明确）',
+    );
+  }
   // 没拿到 final_route 时，把收到的类型与最后一条内容打出来 —— 用来区分"只是慢"还是"报错了"
   if (!aHasFinal) {
     const types = aEvents.map((m) => String(m.type || (m.token ? 'token' : '?')));

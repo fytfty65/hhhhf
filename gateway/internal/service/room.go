@@ -83,10 +83,27 @@ func (c *Client) triggerAgentNegotiation(wsMsg models.WSMessage) {
 	}
 
 	// 3. 构建高阶感知 Payload
+	//
+	// ⚠️ 关键：房间 WS（`/api/v1/room/:id/ws`）才是 App 实际使用的推演入口。
+	// 这里必须把**服务端画像**注入进 user_preferences，否则个性化与"参考路线画像"在真实链路里
+	// 永远不会生效 —— 实测（2026-10-04 真实推演）：全局 `/ws` 那条路有注入、房间这条路没有，
+	// 结果 ai-service 侧 `reference_profile` 为空、日志里连"参考画像"一行都没有。
+	userPreferences := map[string]interface{}{}
+	if payload, ok := wsMsg.Payload.(map[string]interface{}); ok && payload != nil {
+		if clientPrefs, ok := payload["user_preferences"].(map[string]interface{}); ok && clientPrefs != nil {
+			for key, value := range clientPrefs {
+				userPreferences[key] = value
+			}
+		}
+	}
+	userPreferences["personalized_profile"] = ProfilePayload(c.UserID)
+	userPreferences["reference_profile"] = ReferenceProfilePayload(c.UserID)
+
 	enrichedPayload := map[string]interface{}{
 		"current_request":  wsMsg.Payload,   // 当前用户的直接指令
 		"chat_history":     chatHistory,     // 群聊上下文（用于冲突仲裁）
 		"evolution_memory": feedbackHistory, // 进化记忆（用于自适应模型修正）
+		"user_preferences": userPreferences, // 客户端字段 + 服务端画像（个性化 & 参考路线）
 	}
 	wsMsg.Payload = enrichedPayload
 

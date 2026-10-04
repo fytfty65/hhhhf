@@ -26,6 +26,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 
 from api.agent import ExpertToolbox, extract_preference_signals  # noqa: E402
 from core.poi_pool import attraction_query_limits  # noqa: E402
+from core.route_profile import extract_route_profile, reference_profile_hint  # noqa: E402
 
 
 class TestScenicPreferenceParsing(unittest.TestCase):
@@ -49,6 +50,24 @@ class TestScenicPreferenceParsing(unittest.TestCase):
         for text in ("想去天山草原徒步", "想看看湖泊和森林", "安排沙漠和地质公园", "多去湿地公园"):
             with self.subTest(text=text):
                 self.assertTrue(extract_preference_signals(text)["wants_scenic"], text)
+
+    def test_vague_own_intent_stays_vague_even_when_member_intents_are_rich(self):
+        """事故回归（2026-10-04 真实推演）：发起人只说"去库尔勒玩2天"，
+        但 full_text_context 里混进了房间默认成员的占位意图（"公园慢游""文创商圈"），
+        池化信号于是变成 requirements=['自然风景','购物商圈'] —— 被当成"用户已说清楚"，
+        参考画像因此永远轮不到生效。所以**画像判据只能用发起人自己这一轮的话**。"""
+        own = extract_preference_signals("去库尔勒玩2天")
+        pooled = extract_preference_signals("去库尔勒玩2天 | 步调宽松，安排特色茶社或公园慢游 | 想逛文创商圈")
+        self.assertEqual(own["requirements"], ["常规观光、特色美食与舒适住宿"], "没提要求时是默认兜底串")
+        self.assertTrue(pooled["requirements"], "成员占位意图会污染池化信号（这正是要用 own 判据的原因）")
+        # 关键：默认兜底串**不能**被当成"用户说清楚了"，否则画像永远不生效
+        profile = extract_route_profile("自然景观很多，美食也多，节奏轻松，住民宿")
+        self.assertIsNotNone(
+            reference_profile_hint(profile, explicit_signals=own),
+            "发起人没提要求时，参考画像应当接手",
+        )
+        # 而池化信号（含成员意图）会让画像被跳过 —— 这就是当时的 bug 现象
+        self.assertIsNone(reference_profile_hint(profile, explicit_signals=pooled))
 
 
 class TestAttractionQueryLimits(unittest.TestCase):

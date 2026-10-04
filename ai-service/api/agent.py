@@ -1789,11 +1789,20 @@ async def run_negotiate(msg: GatewayMessage):
         try:
             from core.route_profile import reference_profile_hint
 
-            reference_hint = reference_profile_hint(reference_profile, explicit_signals=pref_signals)
+            # ⚠️ 判据必须只看**发起人自己这一轮说的话**（intent_str）。
+            # 实测事故（2026-10-04 真实推演）：诉求只有"去库尔勒玩2天"，但 full_text_context 里
+            # 混进了房间默认成员的占位 intent（"公园慢游"…），于是 pref_signals 变成
+            # requirements=['自然风景','购物商圈'] —— 被误判成"用户已经说清楚了"，
+            # 参考画像因此永远轮不到生效。成员意图可以参与**权重**，但不能当作"用户本人的明确诉求"。
+            own_signals = extract_preference_signals(intent_str)
+            reference_hint = reference_profile_hint(reference_profile, explicit_signals=own_signals)
             if reference_hint:
                 print(f"🧭 [参考画像] 本次采用参考路线偏好：{reference_hint['disclosure']}", flush=True)
             else:
-                print("🧭 [参考画像] 本轮诉求已足够明确，画像不参与决策（诉求优先）", flush=True)
+                print(
+                    f"🧭 [参考画像] 本轮诉求已足够明确，画像不参与决策（诉求优先）: {own_signals.get('requirements')}",
+                    flush=True,
+                )
         except Exception as _reference_exc:  # 画像出问题绝不影响出方案
             print(f"⚠️ [参考画像] 忽略（不影响主流程）: {_reference_exc}", flush=True)
 
