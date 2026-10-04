@@ -332,7 +332,7 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
                 return True
         return False
 
-    cultural_words = ["博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆", "历史", "古迹", "文化", "人文"]
+    cultural_words = ["博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆", "历史", "古迹", "文化", "人文", "人文景观"]
     excludes_cultural = bool(re.search(r"(?:不想|不要|不去|别|少|减少|去掉|换掉|排除|不需要)[^。；，,!?！?]{0,10}(?:博物馆|博物院|展馆|展览馆|纪念馆|美术馆|文化|人文)", t))
     signals: Dict[str, Any] = {
         "wants_hotel": False, "wants_food": False, "wants_scenic": False,
@@ -348,7 +348,17 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
     if any(k in t for k in ["美食", "吃", "餐厅", "特色菜", "小吃", "老字号", "夜市", "火锅", "口味", "本地菜"]) or "餐" in t:
         signals["wants_food"] = True
         signals["requirements"].append("餐饮/美食")
-    if any(k in t for k in ["风景", "自然风光", "公园", "景点", "景区", "户外", "峡谷", "草原", "温泉", "园林", "爬山", "雪山", "海岛", "湖边", "看海"]):
+    # 自然景观：只认**多字短语**，不收"景观""自然"这种宽词 ——
+    # 否则"人文景观"会被判成想看自然（用户的抱怨原话里就有这个词）。
+    scenic_phrases = [
+        "风景", "自然风光", "自然风景", "自然景观", "自然保护区", "地质公园", "湿地公园",
+        "森林公园", "山水", "公园", "景点", "景区", "户外", "峡谷", "草原", "温泉", "园林",
+        "爬山", "徒步", "雪山", "海岛", "湖边", "看海", "湖泊", "森林", "湿地", "沙漠",
+        "戈壁", "观景", "绿洲",
+    ]
+    if any(k in t for k in scenic_phrases):
+        # 实测事故（2026-10-04）：用户原话是"我想看更多的自然景观"，而词表里只有
+        # "自然风光/风景"，于是 wants_scenic=False —— 诉求被丢掉，行程排成了人文景点。
         signals["wants_scenic"] = True
         signals["requirements"].append("自然风景")
     if positive_mention(cultural_words) and not excludes_cultural:
@@ -1157,7 +1167,7 @@ class ExpertToolbox:
 
         return _re.sub(r"[\s（）()\-·]", "", str(value or "")).lower()
 
-    async def get_dynamic_pois(self, city: str, keywords: str, types: str = "110000|141200|060400|060100", limit: int = 40) -> List[Dict]:
+    async def get_dynamic_pois(self, city: str, keywords: str, types: str = "110000|141200|060400|060100", limit: int = 40, play_worthy: bool = True) -> List[Dict]:
         if not self.amap_key:
             return []
         from core.poi_pool import parse_amap_location as _parse_amap_location
@@ -1190,7 +1200,22 @@ class ExpertToolbox:
                         # 👑 还要挡住"名字里借了景点关键词、其实是设施/商店/住宿"的 POI：
                         # 实测（2026-09-19）「xx博物馆-西北门地上停车场」「xx博物馆文创空间」
                         # 「xx园林宾馆」都被当成景点排进了 7 天行程。
-                        if not is_play_worthy(poi_name, poi.get("type")):
+                        #
+                        # ⚠️ 但"必须属于玩点类别"这一条**只适用于景点检索**。实测（2026-10-04 乌鲁木齐）：
+                        # 对美食/住宿套用同一条，会把高德明明返回的 48 家餐厅、30 家酒店**全部丢掉**
+                        # （它们的类别是餐饮服务/住宿服务，永远不属于"玩点类别"），
+                        # 表现为"美食/住宿候选 = 0 → 行程只能排文庙/博物馆这类人文景点"，
+                        # 而用户明确要求了自然景观与地道美食。
+                        #
+                        # 注意**不能**整个跳过 is_play_worthy：那样连"xx酒店-停车场""xx出入口"
+                        # 都会混进来（这条测试抓过我一次）。所以只放宽 strict_type / allow_commerce：
+                        # 设施名（停车场/出入口/售票处…）在任何类别下都仍然被挡住。
+                        if not is_play_worthy(
+                            poi_name,
+                            poi.get("type"),
+                            strict_type=play_worthy,
+                            allow_commerce=not play_worthy,
+                        ):
                             continue
 
                         biz_ext = poi.get("biz_ext")
@@ -2048,23 +2073,36 @@ async def run_negotiate(msg: GatewayMessage):
         # 这类混合关键词下很容易返回大量博物馆，导致模型看到的候选池本身就失衡。
         # 分领域检索后再合并，保证自然景区、文化、人文商业和特色餐饮都有真实候选。
         async def _fetch_attraction_mix() -> List[Dict[str, Any]]:
+            from core.poi_pool import attraction_query_limits
+
+            # 配额由**诉求**决定：想看自然就把自然放大、人文收成点缀；明确排除人文就不发这次检索。
+            # 实测（2026-10-04）：固定配额下"想看自然景观"的诉求拿到的是 16/17 人文的池子。
+            limits = attraction_query_limits(
+                poi_limit,
+                wants_scenic=bool(pref_signals.get("wants_scenic")),
+                exclude_cultural=bool(pref_signals.get("exclude_cultural")),
+            )
             scenic_query = toolbox.get_dynamic_pois(
                 target_city,
                 keywords="自然风景|公园|天山|天池|草原|湖|峡谷|沙漠|绿洲|植物园|动物园|5A景区",
                 types="110000",
-                limit=poi_limit,
+                limit=limits["scenic"],
             )
-            cultural_query = toolbox.get_dynamic_pois(
-                target_city,
-                keywords="文化地标|历史古迹|博物馆|文庙|古城|遗址|非遗",
-                types="141200",
-                limit=max(20, poi_limit // 2),
+            cultural_query = (
+                toolbox.get_dynamic_pois(
+                    target_city,
+                    keywords="文化地标|历史古迹|博物馆|文庙|古城|遗址|非遗",
+                    types="141200",
+                    limit=limits["cultural"],
+                )
+                if limits["cultural"] > 0
+                else asyncio.sleep(0, result=[])
             )
             shopping_query = toolbox.get_dynamic_pois(
                 target_city,
                 keywords="特色步行街|夜市|商圈|集市|老街|文创市集",
                 types="060400|060100",
-                limit=max(16, poi_limit // 3),
+                limit=limits["shopping"],
             )
             scenic, cultural, shopping = await asyncio.gather(
                 scenic_query, cultural_query, shopping_query, return_exceptions=True
@@ -2103,8 +2141,9 @@ async def run_negotiate(msg: GatewayMessage):
             return merged
 
         attractions_task = _fetch_attraction_mix()
-        foods_task = toolbox.get_dynamic_pois(target_city, keywords="特色老字号|地方特色美食|正宗名吃|特色正餐|川菜", types="050000", limit=poi_limit)
-        hotels_task = toolbox.get_dynamic_pois(target_city, keywords="品质酒店|高端度假酒店|高分精品住宿", types="100000", limit=30)
+        # 美食/住宿**不能**套用"像不像玩点"过滤器（详见 get_dynamic_pois 里的实测说明）
+        foods_task = toolbox.get_dynamic_pois(target_city, keywords="特色老字号|地方特色美食|正宗名吃|特色正餐|本地特色菜", types="050000", limit=poi_limit, play_worthy=False)
+        hotels_task = toolbox.get_dynamic_pois(target_city, keywords="品质酒店|高端度假酒店|高分精品住宿", types="100000", limit=30, play_worthy=False)
         safety_task = wm_client.get_city_safety_intel(target_city)
         weather_task = toolbox.get_real_weather(target_city)
         traffic_task = toolbox.get_traffic_status(coord)  # 👑 免费平替：实时路况并入风控融合

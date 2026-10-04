@@ -152,6 +152,32 @@ def is_play_worthy(
 STRICT_TYPE_PLAY_INTENTS = ("cultural", "scenic", "landmark", "outdoor", "family", "photo")
 
 
+def attraction_query_limits(
+    poi_limit: int,
+    *,
+    wants_scenic: bool = False,
+    exclude_cultural: bool = False,
+) -> Dict[str, int]:
+    """按用户诉求分配三类景点检索的配额（自然 / 人文 / 逛街）。
+
+    实测背景（2026-10-04）：用户明确说"想看更多自然景观、想吃地道美食"，
+    但配额与诉求无关（自然/人文/逛街固定比例），最终池子是 **16/17 人文** ——
+    需求被"检索配额"这一层吃掉了，模型再努力也只能在人文里排序。
+    所以这里让诉求直接决定配比：想看自然就把自然放大、人文收成点缀；
+    明确排除人文时干脆不发这次检索（省一次调用，也避免"取了又全丢"）。
+    """
+    base = max(1, int(poi_limit or 1))
+    if exclude_cultural:
+        cultural = 0
+    elif wants_scenic:
+        cultural = max(6, base // 4)
+    else:
+        cultural = max(12, base // 2)
+    scenic = base if wants_scenic else max(10, base // 2)
+    shopping = max(8, base // 3)
+    return {"scenic": scenic, "cultural": cultural, "shopping": shopping}
+
+
 def candidate_from_poi(poi: Mapping[str, Any], intent: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """AMap POI（或任何同类形状）→ 候选池条目；缺名称或**不适合当景点**则丢弃。"""
     if not isinstance(poi, Mapping):

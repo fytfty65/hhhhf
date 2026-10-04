@@ -97,4 +97,12 @@ if __name__ == "__main__":
     # reload=True is a development file watcher and must never front real
     # traffic; it also cannot be combined with a worker count.
     dev_reload = os.getenv("APP_ENV", "development").strip().lower() not in {"production", "prod"}
+    # 把运行模式打出来：reload 模式在 Windows 上是"父 supervisor + 子 worker"，
+    # 子进程会**继承监听套接字**——只杀父进程就留下占住 8000 端口的孤儿，
+    # 下次启动直接 bind 失败。日志里有这一行，排查时一眼就能看出是不是 reload 模式。
+    print(
+        f"🚀 [启动] APP_ENV={os.getenv('APP_ENV')!r} reload={dev_reload} "
+        f"bind={_bind_host()}:{os.getenv('AI_SERVICE_PORT', '8000')}",
+        flush=True,
+    )
     uvicorn.run("main:app", host=_bind_host(), port=int(os.getenv("AI_SERVICE_PORT", "8000")), reload=dev_reload)
