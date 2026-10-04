@@ -80,10 +80,13 @@ go run ./cmd/push-smoke -user <user_id> -title "自检" -body "..."
 | 目的 | 命令 |
 |---|---|
 | 协同链路（双账号 + WebSocket + 推演） | `node scripts/smoke-collab.mjs` |
+| **闭环中段：用户确认 → 局部重规划 → 新版本**（含"确认前不覆盖"与保留率） | `node scripts/smoke-replan-confirm.mjs` |
 | 用户动作事件链（保存/到访/采纳） | `node scripts/smoke-plan-audit.mjs` |
-| 按关联键审计一次规划 | `ai-service/tools/trace_plan.py --recent 3` |
+| 按关联键审计一次规划（含分段耗时） | `ai-service/tools/trace_plan.py --recent 3`，加 `--correlation-id <id> --timeline` 看哪一步慢 |
 | 事件流真实写入 | `ai-service/tools/probe_event_stream.py` |
+| 候选池为什么是 0（"查不到"还是"被过滤"） | `ai-service/tools/probe_poi_queries.py <城市>` |
 | 语义缓存是否真的落 Redis | `ai-service/tools/probe_semantic_cache.py` |
+| 安全重启两个服务（清孤儿进程 + 校验运行模式） | `powershell -NoProfile -File scripts/restart-services.ps1` |
 | 前端门禁（tsc/单测/build/E2E） | `powershell -File front/scripts/split-gate.ps1` |
 | 两侧测试 | `python -m unittest`（ai-service）/ `go test ./...`（gateway） |
 
