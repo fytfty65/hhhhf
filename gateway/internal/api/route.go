@@ -172,6 +172,10 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.PUT("/user/preference", handlers.UpdateUserPreferenceHandler)
 		apiGroup.POST("/user/preference/refresh", handlers.RefreshUserPreferenceHandler)
 		apiGroup.DELETE("/user/preference", handlers.DeleteUserPreferenceHandler)
+		// 参考路线画像：用户粘贴一条喜欢的路线（如小红书帖子）→ 抽成特征存服务端（**只存特征不存原文**）
+		apiGroup.POST("/user/preference/reference-route", handlers.SaveReferenceRouteHandler)
+		apiGroup.GET("/user/preference/reference-route", handlers.GetReferenceRouteHandler)
+		apiGroup.DELETE("/user/preference/reference-route", handlers.ClearReferenceRouteHandler)
 		apiGroup.POST("/recommendation/track", handlers.TrackRecommendationEventHandler)
 		apiGroup.GET("/recommendation/metrics", handlers.RecommendationMetricsHandler)
 		// P6：埋点 A/B 漏斗（曝光 → 点击 → 采纳 → 满意）

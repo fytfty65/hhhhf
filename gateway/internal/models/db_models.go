@@ -119,7 +119,12 @@ type UserPreference struct {
 	ABVariant string
 	// 累计有效反馈样本数（用于信心度判断）
 	FeedbackCount int
-	UpdatedAt     time.Time
+	// 参考路线画像：由用户主动提供的"我喜欢的路线"（如小红书帖子）**抽取后的特征**（JSON）。
+	// ⚠️ 只存特征、**不存原文** —— 原文只在校验与抽取的那一次请求里存在。
+	ReferenceProfile string
+	// 参考路线条数（多条会按 core/route_profile.merge_profiles 的口径合并）
+	ReferenceCount int
+	UpdatedAt      time.Time
 }
 
 // NodeAnnotation 行程节点级批注（多人实时协作评论）

@@ -20,7 +20,7 @@ var DB *gorm.DB
 // Increment this value when a schema change needs an explicit, auditable
 // migration step. Migrations are applied one version at a time so a partially
 // upgraded deployment can resume safely on the next start.
-const schemaVersion = 16
+const schemaVersion = 17
 
 func migrateSchema(tx *gorm.DB, version int) error {
 	switch version {
@@ -85,6 +85,11 @@ func migrateSchema(tx *gorm.DB, version int) error {
 		return tx.AutoMigrate(&models.ProviderQualityAlertDelivery{})
 	case 16:
 		return tx.AutoMigrate(&models.ProviderQualityAlertDelivery{})
+	case 17:
+		// 参考路线画像：UserPreference 新增 reference_profile / reference_count 两列。
+		// ⚠️ 这套 schema 是**版本化**的：只改模型不会给既有库加列（v1 建表之后就不再 AutoMigrate），
+		// 必须像这里一样显式加一个版本，否则线上会出现"保存参考路线失败"（列不存在）。
+		return tx.AutoMigrate(&models.UserPreference{})
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}

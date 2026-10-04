@@ -270,6 +270,10 @@ func HandleWebSocket(c *gin.Context) {
 				// 🎯 个性化旅行画像注入：发起人与房间成员的画像一并下发给推荐引擎
 				"personalized_profile": service.ProfilePayload(userID),
 				"member_profiles":      collectMemberProfiles(roomMembers),
+				// 参考路线画像（用户主动粘贴过的"我喜欢的一条路线"抽出的特征）：
+				// 放在顶层是 ai-service 的读取口径（`user_prefs.get("reference_profile")`）；
+				// 它在 Python 侧只于**当轮诉求没说明白**时参与决策，并会把依据回填到方案里。
+				"reference_profile": service.ReferenceProfilePayload(userID),
 			}
 
 			// 将城市提取完全交给 Python 引擎处理，不再做硬编码猜测

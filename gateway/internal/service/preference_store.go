@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -484,5 +485,55 @@ func ProfilePayload(userID string) map[string]interface{} {
 		"ab_variant":      p.ABVariant,
 		"feedback_count":  p.FeedbackCount,
 		"prompt_hint":     ProfileToPrompt(p),
+		// 参考路线画像（用户主动给过的"我喜欢的一条路线"抽出来的特征）。
+		// ai-service 只在**当轮诉求没说明白**时才会用它，并且会把依据回填到方案里。
+		"reference_profile": ReferenceProfilePayload(userID),
 	}
+}
+
+// ReferenceProfilePayload 读取参考路线画像（没有就返回 nil，绝不编一份空画像）。
+func ReferenceProfilePayload(userID string) map[string]interface{} {
+	if database.DB == nil || strings.TrimSpace(userID) == "" {
+		return nil
+	}
+	var preference models.UserPreference
+	if err := database.DB.Where("user_id = ?", userID).First(&preference).Error; err != nil {
+		return nil
+	}
+	raw := strings.TrimSpace(preference.ReferenceProfile)
+	if raw == "" {
+		return nil
+	}
+	var profile map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &profile); err != nil || len(profile) == 0 {
+		return nil
+	}
+	return profile
+}
+
+// StoreReferenceProfile 保存**抽取后的特征**（调用方负责保证这里没有原文）。
+func StoreReferenceProfile(userID, profileJSON string, count int) error {
+	if database.DB == nil {
+		return errors.New("database unavailable")
+	}
+	var preference models.UserPreference
+	err := database.DB.Where("user_id = ?", userID).First(&preference).Error
+	if err != nil {
+		preference = models.UserPreference{UserID: userID, NatureRatio: 0.34, CultureRatio: 0.33, FoodRatio: 0.33, ABVariant: "control"}
+	}
+	preference.ReferenceProfile = profileJSON
+	preference.ReferenceCount = count
+	preference.UpdatedAt = time.Now().UTC()
+	return database.DB.Save(&preference).Error
+}
+
+// ClearReferenceProfile 清空参考路线画像（用户在界面上点"清除"时用）。
+func ClearReferenceProfile(userID string) error {
+	if database.DB == nil {
+		return errors.New("database unavailable")
+	}
+	return database.DB.Model(&models.UserPreference{}).
+		Where("user_id = ?", userID).
+		Updates(map[string]interface{}{"reference_profile": "", "reference_count": 0, "updated_at": time.Now().UTC()}).
+		Error
 }
