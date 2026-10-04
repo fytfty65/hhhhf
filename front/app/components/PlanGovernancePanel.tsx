@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble, Bookmark, MapPin } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble, Bookmark, MapPin, Scale } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
@@ -176,6 +176,29 @@ export type PlanGovernance = {
     widened?: string[];
     notes?: string[];
   };
+  /**
+   * 行程配比（用户口径）：默认自然景区与人文各半并穿插特色美食/住宿；明确说了偏好就加权。
+   * 自然景观只算景区 —— 城市公园单列，不顶自然的名额。
+   */
+  composition?: {
+    scenic?: number;
+    cultural?: number;
+    food?: number;
+    hotel?: number;
+    daytime?: number;
+    source?: string;
+    actual?: {
+      scenic?: number;
+      landmark?: number;
+      city_park?: number;
+      cultural?: number;
+      food?: number;
+      hotel?: number;
+      shopping?: number;
+      other?: number;
+    };
+    audit?: { ok?: boolean; notes?: string[]; deviations?: { intent?: string; target?: number; actual?: number; severity?: string }[] };
+  };
   /** 自动复核（critic + 确定性修补）的结果：改了什么、还剩几处门禁问题、缺哪些数据 */
   review?: {
     stopped_reason?: string;
@@ -310,7 +333,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -351,11 +374,15 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
   const hasCandidateSupplyBlock = Boolean(
     candidateSupply && (typeof candidateSupply.known_daytime === 'number' || candidateSupply.status),
   );
+  // 配比：后端给了目标就算有（actual/audit 可能缺，缺了就不显示对账那半句）
+  const hasCompositionBlock = Boolean(
+    composition && (typeof composition.scenic === 'number' || typeof composition.daytime === 'number'),
+  );
   if (
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
     !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock &&
-    !hasReferenceProfileBlock && !hasCandidateSupplyBlock
+    !hasReferenceProfileBlock && !hasCandidateSupplyBlock && !hasCompositionBlock
   ) {
     return null;
   }
@@ -365,6 +392,44 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
       className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3.5 text-left"
       aria-label="行程核对说明"
     >
+      {hasCompositionBlock && (
+        <div
+          className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0"
+          data-testid="composition-block"
+        >
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<Scale className="h-3 w-3" />}>这次的配比</SectionLabel>
+            <span
+              className={`font-mono text-[12.5px] font-bold tabular-nums ${
+                composition?.audit?.ok === false ? 'text-amber-700' : 'text-slate-600'
+              }`}
+              data-testid="composition-source"
+            >
+              {composition?.source === 'default_balanced' ? '默认：自然与人文各半' : '按你说的偏好加权'}
+            </span>
+          </div>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-slate-600" data-testid="composition-compare">
+            目标：自然景区 {composition?.scenic ?? 0} · 人文 {composition?.cultural ?? 0} · 特色美食{' '}
+            {composition?.food ?? 0} · 住宿 {composition?.hotel ?? 0}
+            {'　'}
+            实际：自然景区 {composition?.actual?.landmark ?? composition?.actual?.scenic ?? 0} · 人文{' '}
+            {composition?.actual?.cultural ?? 0} · 特色美食 {composition?.actual?.food ?? 0} · 住宿{' '}
+            {composition?.actual?.hotel ?? 0}
+          </p>
+          <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
+            自然景观只算景区（湖/雪山/草原/湿地这类）；城市公园另算 {composition?.actual?.city_park ?? 0} 个，不顶自然的名额。
+          </p>
+          {composition?.audit?.ok === false && (composition?.audit?.notes?.length ?? 0) > 0 && (
+            <ul className="mt-1.5 space-y-1" data-testid="composition-notes">
+              {(composition?.audit?.notes || []).map((note) => (
+                <li key={note} className="text-[12.5px] leading-relaxed text-amber-800">
+                  {note}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {hasCandidateSupplyBlock && (
         <div
           className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0"

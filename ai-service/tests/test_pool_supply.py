@@ -234,9 +234,9 @@ class CategoryFloorTests(unittest.TestCase):
             {"name": "醉美博湖鱼宴", "kind": "food"},
         ]
         result, added = top_up_category_buckets(
-            buckets, spare, trip_days=2, classify=lambda item: str(item.get("kind"))
+            buckets, spare, targets={"food": 2, "scenic": 1}, classify=lambda item: str(item.get("kind"))
         )
-        self.assertEqual(added.get("food"), 2, f"2 天行程餐饮下限 2，实际补了 {added}")
+        self.assertEqual(added.get("food"), 2, f"餐饮目标 2，实际补了 {added}")
         self.assertEqual([item["name"] for item in result["food"]], ["民杨抓饭", "疆土印象新疆菜"])
         self.assertEqual(len(result["scenic"]), 1, "已满足下限的类别不该被加东西")
 
@@ -249,7 +249,9 @@ class CategoryFloorTests(unittest.TestCase):
             "food": [{"name": "d"}, {"name": "e"}],
             "shopping": [{"name": "f"}],
         }
-        result, added = top_up_category_buckets(buckets, [], trip_days=2, classify=lambda item: "food")
+        result, added = top_up_category_buckets(
+            buckets, [], targets={"scenic": 4, "cultural": 2, "food": 2, "shopping": 1}, classify=lambda item: "food"
+        )
         self.assertEqual(added, {})
         self.assertEqual(len(result["food"]), 2)
 
@@ -260,9 +262,26 @@ class CategoryFloorTests(unittest.TestCase):
             raise RuntimeError("分类器炸了")
 
         buckets = {"food": []}
-        result, added = top_up_category_buckets(buckets, [{"name": "x"}], trip_days=1, classify=broken)
+        result, added = top_up_category_buckets(buckets, [{"name": "x"}], targets={"food": 1}, classify=broken)
         self.assertEqual(added, {})
         self.assertEqual(result["food"], [])
+
+    def test_targets_come_from_the_user_facing_composition(self):
+        """补齐目标必须跟用户口径一致（默认自然=人文各半、穿插美食），不是写死的常数。"""
+        from core.poi_pool import top_up_category_buckets
+        from core.route_composition import composition_targets
+
+        targets = composition_targets(trip_days=2, daily_nodes=5)
+        buckets = {"scenic": [], "cultural": [], "food": [], "shopping": []}
+        spare = (
+            [{"name": f"natural{i}", "kind": "scenic"} for i in range(5)]
+            + [{"name": f"culture{i}", "kind": "cultural"} for i in range(5)]
+            + [{"name": f"food{i}", "kind": "food"} for i in range(5)]
+        )
+        _, added = top_up_category_buckets(buckets, spare, targets=targets, classify=lambda item: str(item.get("kind")))
+        self.assertEqual(added.get("scenic"), targets["scenic"])
+        self.assertEqual(added.get("cultural"), targets["cultural"])
+        self.assertEqual(added.get("food"), targets["food"])
 
 
 if __name__ == "__main__":

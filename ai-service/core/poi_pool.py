@@ -114,10 +114,13 @@ def top_up_category_buckets(
     buckets: Mapping[str, Sequence[Mapping[str, Any]]],
     spare: Sequence[Mapping[str, Any]],
     *,
-    trip_days: int,
+    targets: Mapping[str, int],
     classify: Callable[[Mapping[str, Any]], str],
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
-    """把被前沿挤掉的类别从**完整候选池**补回下限。
+    """把被前沿挤掉的类别从**完整候选池**补到目标下限。
+
+    目标下限由 `core/route_composition.composition_targets` 给出（默认自然=人文各半、
+    穿插美食住宿；用户明确偏好则加权），所以"补多少"跟着用户口径走，而不是写死。
 
     返回 `(新 buckets, {类别: 补回数量})`。纯函数：不修改入参、按名字去重、
     只在同类别的 spare 里取（绝不把餐饮塞进观光桶）。
@@ -126,8 +129,8 @@ def top_up_category_buckets(
     known = {str(item.get("name") or "") for items in result.values() for item in items}
     added: Dict[str, int] = {}
 
-    for intent in ("scenic", "cultural", "food", "shopping"):
-        floor = category_floor(intent, trip_days)
+    for intent in ("scenic", "cultural", "food", "shopping", "park"):
+        floor = int(targets.get(intent, 0) or 0)
         bucket = result.setdefault(intent, [])
         need = floor - len(bucket)
         if need <= 0:
@@ -369,6 +372,12 @@ def is_play_worthy(
     if not text:
         return False
     if any(marker in text for marker in FACILITY_NAME_MARKERS):
+        return False
+    # 站点后缀：高德会把「湿地公园站」这类**公交/地铁站**标成"风景名胜;旅游景点"，
+    # 关键词检索就会把它当景点排进行程（实测 2026-10-04 库尔勒真实方案）。
+    # 只按后缀判，且放行"驿站"这类真实场所，避免误杀。
+    stripped = str(name or "").strip()
+    if stripped.endswith("站") and not stripped.endswith("驿站"):
         return False
     if not allow_commerce and any(marker in text for marker in COMMERCE_NAME_MARKERS):
         return False

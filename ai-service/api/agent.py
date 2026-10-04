@@ -47,6 +47,15 @@ from core.poi_pool import (
     top_up_category_buckets,
     widen_candidates,
 )
+# 行程配比口径（用户明确的口味）：默认自然=人文各半并穿插美食/住宿；自然景观只算景区
+# （城市公园另算一档）；用户明确说了就加权。纯函数在 core/route_composition，便于单测。
+from core.route_composition import (
+    composition_audit,
+    composition_targets,
+    count_route_composition,
+    scenic_tier,
+    summarize_targets,
+)
 
 
 def _fairness_limit_from_env() -> float:
@@ -1803,6 +1812,11 @@ async def run_negotiate(msg: GatewayMessage):
     # 👑 抽取用户偏好信号（住宿/餐饮/景点/购物），用于偏好权重、提示词与覆盖校验
     pref_signals = extract_preference_signals(full_text_context)
     print(f"🎯 [偏好信号] {pref_signals}", flush=True)
+    # 👑 只看**发起人自己这一轮说的话**：配比口径（默认自然=人文各半）与检索配额都以它为准。
+    # 实测事故（2026-10-04）：诉求"帮我安排一下就行"本身没提自然，但 room_members 里的占位 intent
+    # （"公园慢游"之类）让 pref_signals.wants_scenic=True，配比目标被算成"自然 6 / 人文 2" ——
+    # 用户根本没提自然，却拿到一份自然压倒人文的目标。成员偏好仍会通过房间公平性参与平衡。
+    own_signals = extract_preference_signals(intent_str)
     # 事件流：需求解析完成。解析出的信号是后面所有取舍的依据 —— 只留在日志里，
     # 事后就说不清"为什么给他排了这么多住宿"。producer=coordinator（解析目前内联在协调器里）。
     await event_bus.emit(OMNI_EVENTS_STREAM, "intent.parsed", {
@@ -1822,12 +1836,7 @@ async def run_negotiate(msg: GatewayMessage):
         try:
             from core.route_profile import reference_profile_hint
 
-            # ⚠️ 判据必须只看**发起人自己这一轮说的话**（intent_str）。
-            # 实测事故（2026-10-04 真实推演）：诉求只有"去库尔勒玩2天"，但 full_text_context 里
-            # 混进了房间默认成员的占位 intent（"公园慢游"…），于是 pref_signals 变成
-            # requirements=['自然风景','购物商圈'] —— 被误判成"用户已经说清楚了"，
-            # 参考画像因此永远轮不到生效。成员意图可以参与**权重**，但不能当作"用户本人的明确诉求"。
-            own_signals = extract_preference_signals(intent_str)
+            # 判据只看发起人自己说的话（own_signals 在上方统一算好，见那里的实测事故说明）。
             reference_hint = reference_profile_hint(reference_profile, explicit_signals=own_signals)
             if reference_hint:
                 print(f"🧭 [参考画像] 本次采用参考路线偏好：{reference_hint['disclosure']}", flush=True)
@@ -2138,6 +2147,24 @@ async def run_negotiate(msg: GatewayMessage):
         pool_diagnostics: Dict[str, Any] = {}
         # 提前初始化：保底路线的 except 分支也要能引用它（否则异常早于下面的赋值时会 NameError）
         candidate_supply: Dict[str, Any] = {}
+        # 行程配比目标（用户口径）：默认自然=人文各半并穿插美食/住宿；明确说了偏好就加权。
+        # 取数与排布都按它走，最后再用 composition_audit 对账，不靠"看起来挺全"。
+        composition = composition_targets(
+            trip_days=trip_days,
+            daily_nodes=target_daily_count,
+            wants_scenic=bool(own_signals.get("wants_scenic")),
+            wants_cultural=bool(own_signals.get("wants_cultural")),
+            wants_food=bool(own_signals.get("wants_food")),
+            exclude_cultural=bool(own_signals.get("exclude_cultural")),
+            wants_hotel=bool(own_signals.get("wants_hotel")),
+        )
+        print(f"⚖️ [配比目标] {summarize_targets(composition)}", flush=True)
+        if (pref_signals.get("requirements") or []) != (own_signals.get("requirements") or []):
+            print(
+                f"   （房间/历史文本里另有偏好 {pref_signals.get('requirements')}，"
+                f"它通过房间公平性参与平衡，不改你本人的默认口径）",
+                flush=True,
+            )
 
         async def _fetch_attraction_mix() -> List[Dict[str, Any]]:
             from core.route_profile import profile_to_retrieval_hints
@@ -2151,8 +2178,10 @@ async def run_negotiate(msg: GatewayMessage):
             else:
                 limits = attraction_query_limits(
                     poi_limit,
-                    wants_scenic=bool(pref_signals.get("wants_scenic")),
-                    exclude_cultural=bool(pref_signals.get("exclude_cultural")),
+                    # 配额也按发起人自己的口径：模糊诉求就该自然/人文各半，
+                    # 不能被房间占位意图带成"自然压倒人文"（实测事故，见 own_signals 处说明）
+                    wants_scenic=bool(own_signals.get("wants_scenic")),
+                    exclude_cultural=bool(own_signals.get("exclude_cultural")),
                 )
             scenic_keywords = "自然风景|公园|天山|天池|草原|湖|峡谷|沙漠|绿洲|植物园|动物园|5A景区"
             if reference_hint and reference_hint["hints"].get("extra_scenic_keywords"):
@@ -2206,6 +2235,10 @@ async def run_negotiate(msg: GatewayMessage):
                         continue
                     item = dict(item)
                     item["planning_category"] = expected if actual == "other" else actual
+                    if expected == "scenic":
+                        # 自然景观口径（用户明确要求）：只认景区/有自然词的地方；
+                        # 城市公园（孔雀公园/龙山公园…）单独一档，可以去但不顶自然景观名额。
+                        item["scenic_tier"] = scenic_tier(item.get("name"), item.get("type"))
                     kept.append(item)
                 return kept
 
@@ -2501,6 +2534,13 @@ async def run_negotiate(msg: GatewayMessage):
             def _day_cat(p):
                 return classify_poi_category(str(p.get('name') or ''), str(p.get('type') or ''), bool(p.get('is_hotel')))
 
+            def _pool_cat(p):
+                """候选池分桶用：把"城市公园"从自然景观里拆出来（口径见 core/route_composition.scenic_tier）。"""
+                category = _day_cat(p)
+                if category == "scenic" and str(p.get("scenic_tier") or "") != "landmark":
+                    return "park"
+                return category
+
             # 👑 酒店按适应度精选并限量：用户有住宿/高端诉求时高分酒店优先，但绝不
             #    让酒店挤占白天 POI 容量（此前 29 家酒店把候选池白天席位全部挤掉）
             sorted_hotels = sorted(cleaned_hotels, key=lambda x: float(x.get("fitness_score", 0) or 0), reverse=True)
@@ -2513,25 +2553,28 @@ async def run_negotiate(msg: GatewayMessage):
 
             # 👑 分类均衡候选池：把白天 POI 按类别分桶，风景区/文化/美食/购物轮流各取 1 个，
             #    保证每类都有真实 POI 进入候选池与 LLM 提示词（美食/文化不再被整体截断）
-            _day_buckets = {"scenic": [], "cultural": [], "food": [], "shopping": [], "other": []}
+            _day_buckets = {"scenic": [], "cultural": [], "food": [], "shopping": [], "park": [], "other": []}
             for p in spatial_daytime:
                 if isinstance(p, dict):
-                    _day_buckets.setdefault(_day_cat(p), []).append(p)
+                    _day_buckets.setdefault(_pool_cat(p), []).append(p)
             # 👑 类别下限兜底（真实缺口，2026-10-04 库尔勒实测）：候选桶建在**帕累托前沿**上，
             #    前沿会把餐饮整类挤掉 —— 餐饮候选已经有 50 个，最终 top 里却是 0 个，
             #    于是"按类别轮流取"的均衡逻辑手里根本没有餐饮可轮，方案长期没有正经吃饭安排。
-            #    这里从**完整候选池**把缺的类别补回下限，且只补到下限（不改变前沿的取舍）。
+            #    这里按**用户口径算出的目标配比**（默认自然=人文各半 + 穿插美食，见
+            #    core/route_composition）从完整候选池补齐，只补到下限、不改变前沿取舍。
             _day_buckets, _topped_up = top_up_category_buckets(
-                _day_buckets, daytime_pois, trip_days=trip_days, classify=lambda item: _day_cat(item)
+                _day_buckets, daytime_pois, targets=composition, classify=lambda item: _pool_cat(item)
             )
             if _topped_up:
                 pool_diagnostics["category_topup"] = _topped_up
-                print(f"🧩 [候选均衡] 前沿挤掉了这些类别，已从完整候选池补回：{_topped_up}", flush=True)
+                print(f"🧩 [候选均衡] 按目标配比补齐被前沿挤掉的类别：{_topped_up}", flush=True)
             # 👑 不走回头路：spatial_daytime 已按 TSP 空间最近邻串接，分桶后【不再按适应度重排】，
             #    保留桶内空间序，仅靠轮询交错维持类别多样性，避免「东拉西扯」式回头路写进 Prompt。
 
             _interleaved = []
-            _bucket_order = ["scenic", "cultural", "food", "shopping", "other"]
+            # 自然景区与人文先取、美食次之，城市公园排在其后（用户口径：自然景观要景区，
+            # 公园可以去但不该顶掉景区与吃饭的名额）
+            _bucket_order = ["scenic", "cultural", "food", "park", "shopping", "other"]
             while len(_interleaved) < _day_capacity:
                 _advanced = False
                 for _c in _bucket_order:
@@ -4322,6 +4365,28 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案
                             final_data["quality"] = {"error": str(_quality_exc)[:200]}
+                        # 👑 配比对账：实际排出来的构成 vs 用户口径算出的目标（默认自然=人文各半
+                        # + 穿插美食住宿；明确偏好则加权）。对不上就如实记账，进"遗留问题"。
+                        try:
+                            _route_counts = count_route_composition(
+                                final_data.get("route") or [], classify_poi_category, scenic_tier
+                            )
+                            _composition_audit = composition_audit(_route_counts, composition)
+                            final_data["composition"] = {
+                                **composition,
+                                "actual": _route_counts,
+                                "audit": _composition_audit,
+                            }
+                            print(
+                                f"⚖️ [配比对账] 实际 自然景区={_route_counts.get('landmark')}/城市公园={_route_counts.get('city_park')}"
+                                f"/人文={_route_counts.get('cultural')}/美食={_route_counts.get('food')}/住宿={_route_counts.get('hotel')}"
+                                f" | 目标 {composition.get('scenic')}/{composition.get('cultural')}/{composition.get('food')}/{composition.get('hotel')}"
+                                f" | {'一致' if _composition_audit['ok'] else _composition_audit['notes']}",
+                                flush=True,
+                            )
+                        except Exception as _comp_exc:  # 对账失败绝不影响出方案
+                            final_data["composition"] = {"error": str(_comp_exc)[:200]}
+
                         # 👑 数据降级登记：哪个数据源没取到、用户损失了什么，统一在这里说一次
                         # （文案只在 core/degradation.DATA_SOURCES 里定义，前端照抄渲染）。
                         # 放在最后：前面所有 payload 字段都已经定稿，推导才准确。

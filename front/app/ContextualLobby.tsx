@@ -1185,7 +1185,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
-          fd.lodging_joint || fd.reference_profile || fd.candidate_supply,
+          fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1209,6 +1209,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         referenceProfile: fd.reference_profile ?? prev?.referenceProfile,
         // 本次真实候选够不够（景点/餐饮各多少、有没有补检索、哪些地方靠模型知识补）
         candidateSupply: fd.candidate_supply ?? prev?.candidateSupply,
+        // 本次配比（目标 vs 实际）：默认自然=人文各半并穿插美食住宿；自然只算景区
+        composition: fd.composition ?? prev?.composition,
       }));
     };
 

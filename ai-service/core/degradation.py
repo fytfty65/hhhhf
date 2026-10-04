@@ -45,6 +45,10 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "候选地点池",
         "impact": "缺玩点/缺餐/住宿夜数不够时无法自动补，只能如实告诉你",
     },
+    "route_composition": {
+        "label": "行程配比",
+        "impact": "这一趟的自然/人文/美食/住宿数量与你说的偏好有偏差，按实际排出来的算",
+    },
     "transport_options": {
         "label": "跨城出行方式",
         "impact": "只能比时长，班次与票价按「未核实」标注",
@@ -212,6 +216,20 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                 "candidate_pool",
                 STATUS_MISSING if supply_status == "missing" else STATUS_DEGRADED,
                 supply_notes[0] if supply_notes else "本次真实候选偏少，部分地点靠模型知识补",
+            )
+        )
+
+    # 3.6) 配比对账（用户口径，2026-10-04）：这一趟排出来的自然/人文/美食/住宿数量，
+    #      与"默认自然=人文各半 + 穿插美食住宿"或"用户明确偏好加权"的目标不一致时如实说。
+    composition = _as_mapping(data.get("composition"))
+    composition_audit_data = _as_mapping(composition.get("audit"))
+    if composition_audit_data and composition_audit_data.get("ok") is False:
+        composition_notes = [str(item) for item in (composition_audit_data.get("notes") or []) if str(item).strip()]
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                "；".join(composition_notes[:2]) if composition_notes else "实际配比与目标不符",
             )
         )
 

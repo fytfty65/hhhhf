@@ -287,6 +287,21 @@ const GOVERNANCE_PAYLOAD = {
     widened: ['自然景观'],
     notes: ['真实白天候选 7 个，少于排满 10 个白天节点所需的量；部分地点靠模型知识补，请核对'],
   },
+  // 行程配比（用户口径）：默认自然景区与人文各半、穿插美食住宿；自然只算景区
+  composition: {
+    scenic: 4,
+    cultural: 4,
+    food: 2,
+    hotel: 1,
+    daytime: 10,
+    source: 'default_balanced',
+    actual: { scenic: 3, landmark: 3, city_park: 2, cultural: 2, food: 2, hotel: 1, shopping: 0, other: 0 },
+    audit: {
+      ok: false,
+      notes: ['人文 2 个，目标 4 个（偏少）'],
+      deviations: [{ intent: 'cultural', target: 4, actual: 2, severity: 'under' }],
+    },
+  },
 };
 
 async function installMocks(page: Page) {
@@ -363,6 +378,7 @@ async function installMocks(page: Page) {
                     lodging_joint: payload.governance.lodging_joint,
                     reference_profile: payload.governance.reference_profile,
                     candidate_supply: payload.governance.candidate_supply,
+                    composition: payload.governance.composition,
                   }),
               }),
             });
@@ -630,6 +646,15 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(supplyBlock).toContainText('景点 4 个（其中自然景观 1 个），餐饮 3 个');
     await expect(supplyBlock).toContainText('已额外补检索：自然景观');
     await expect(supplyBlock).toContainText('部分地点靠模型知识补，请核对');
+
+    // 配比：默认各半 + 自然只算景区（城市公园单列）+ 对不上时的偏差点
+    const compositionBlock = panel.getByTestId('composition-block');
+    await expect(compositionBlock).toBeVisible();
+    await expect(panel.getByTestId('composition-source')).toContainText('默认：自然与人文各半');
+    await expect(panel.getByTestId('composition-compare')).toContainText('目标：自然景区 4 · 人文 4 · 特色美食 2 · 住宿 1');
+    await expect(panel.getByTestId('composition-compare')).toContainText('实际：自然景区 3 · 人文 2 · 特色美食 2 · 住宿 1');
+    await expect(compositionBlock).toContainText('城市公园另算 2 个，不顶自然的名额');
+    await expect(panel.getByTestId('composition-notes')).toContainText('人文 2 个，目标 4 个（偏少）');
 
     // 已作调整：平替明细 + 人话说明
     await expect(panel.getByText('已作调整')).toBeVisible();

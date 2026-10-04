@@ -208,6 +208,28 @@ async function main() {
   const names = nodeNames(payload);
   console.log(`  路线节点（${names.length}）：${names.join('、')}`);
 
+  // 配比口径（用户 2026-10-04）：默认自然=人文各半并穿插美食/住宿；自然景观只算景区。
+  const composition = payload?.composition ?? null;
+  if (composition) {
+    const actual = composition.actual || {};
+    const audit = composition.audit || {};
+    record(
+      '方案带上了配比对账（目标 vs 实际）',
+      Boolean(audit && typeof audit.ok === 'boolean'),
+      `目标 自然景区 ${composition.scenic} / 人文 ${composition.cultural} / 美食 ${composition.food} / 住宿 ${composition.hotel}` +
+        `（${composition.source === 'default_balanced' ? '默认各半' : '按明确偏好加权'}）` +
+        ` → 实际 自然景区 ${actual.landmark ?? '?'} + 城市公园 ${actual.city_park ?? '?'} / 人文 ${actual.cultural ?? '?'} / 美食 ${actual.food ?? '?'} / 住宿 ${actual.hotel ?? '?'}` +
+        `｜${audit.ok ? '一致' : (audit.notes || []).join('；')}`,
+    );
+    record(
+      '城市公园没有被算成自然景观',
+      Number(actual.landmark ?? 0) === 0 || Number(actual.scenic ?? 0) === Number(actual.landmark ?? 0),
+      `landmark=${actual.landmark ?? '?'} scenic计数=${actual.scenic ?? '?'} city_park=${actual.city_park ?? '?'}`,
+    );
+  } else {
+    record('方案带上了配比对账（目标 vs 实际）', false, '缺 composition 字段');
+  }
+
   try {
     ws.close();
   } catch {
