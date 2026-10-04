@@ -1780,6 +1780,23 @@ async def run_negotiate(msg: GatewayMessage):
         "correlation_id": plan_correlation_id,
     }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
 
+    # 参考路线画像：用户主动提供的"我喜欢的一条路线"（例如小红书帖子）抽取出的特征。
+    # **只在当轮诉求没说明白时才参与决策** —— 用户说了什么永远优先，否则会出现
+    # "我明明说了这次看人文，却被画像排成自然"。抽不到特征（unknown）就不影响任何旋钮。
+    reference_profile = user_prefs.get("reference_profile") if isinstance(user_prefs.get("reference_profile"), dict) else None
+    reference_hint = None
+    if reference_profile:
+        try:
+            from core.route_profile import reference_profile_hint
+
+            reference_hint = reference_profile_hint(reference_profile, explicit_signals=pref_signals)
+            if reference_hint:
+                print(f"🧭 [参考画像] 本次采用参考路线偏好：{reference_hint['disclosure']}", flush=True)
+            else:
+                print("🧭 [参考画像] 本轮诉求已足够明确，画像不参与决策（诉求优先）", flush=True)
+        except Exception as _reference_exc:  # 画像出问题绝不影响出方案
+            print(f"⚠️ [参考画像] 忽略（不影响主流程）: {_reference_exc}", flush=True)
+
     # 🎯 个性化旅行画像注入：读取网关注入的画像，A/B 分组决定是否应用个性化提示词
     personalized_profile = user_prefs.get("personalized_profile") or {}
     if not isinstance(personalized_profile, dict):
@@ -1789,6 +1806,9 @@ async def run_negotiate(msg: GatewayMessage):
         member_profiles = {}
     # 🎯 融合手选角色与算法画像：手选 role 始终生效（覆盖冷启动/对照组），算法画像按 A/B 注入
     personalization_hint = build_personalization_hint(personalized_profile, member_profiles, room_members, role)
+    if reference_hint:
+        # 让模型也知道"这次是按你参考过的路线偏好来的"，而不是我们悄悄换了口味
+        personalization_hint = f"{personalization_hint} {reference_hint['disclosure']}"
 
     # 1. 👑 智能解析游玩天数（支持中文与复合词，如 "三天", "5天", "两天一夜"）
     trip_days = parse_chinese_days(full_text_context)
@@ -2074,17 +2094,26 @@ async def run_negotiate(msg: GatewayMessage):
         # 分领域检索后再合并，保证自然景区、文化、人文商业和特色餐饮都有真实候选。
         async def _fetch_attraction_mix() -> List[Dict[str, Any]]:
             from core.poi_pool import attraction_query_limits
+            from core.route_profile import profile_to_retrieval_hints
 
-            # 配额由**诉求**决定：想看自然就把自然放大、人文收成点缀；明确排除人文就不发这次检索。
+            # 配额优先来自**参考画像**（仅当本轮采用了它，即用户没说清楚偏好时），
+            # 否则按当轮诉求推断：想看自然就把自然放大、人文收成点缀；明确排除人文就不发这次检索。
             # 实测（2026-10-04）：固定配额下"想看自然景观"的诉求拿到的是 16/17 人文的池子。
-            limits = attraction_query_limits(
-                poi_limit,
-                wants_scenic=bool(pref_signals.get("wants_scenic")),
-                exclude_cultural=bool(pref_signals.get("exclude_cultural")),
-            )
+            if reference_hint and reference_profile:
+                # 用真实 poi_limit 重算（算 hint 时还不知道 poi_limit）
+                limits = profile_to_retrieval_hints(reference_profile, poi_limit=poi_limit)["quota"]
+            else:
+                limits = attraction_query_limits(
+                    poi_limit,
+                    wants_scenic=bool(pref_signals.get("wants_scenic")),
+                    exclude_cultural=bool(pref_signals.get("exclude_cultural")),
+                )
+            scenic_keywords = "自然风景|公园|天山|天池|草原|湖|峡谷|沙漠|绿洲|植物园|动物园|5A景区"
+            if reference_hint and reference_hint["hints"].get("extra_scenic_keywords"):
+                scenic_keywords = scenic_keywords + "|" + "|".join(reference_hint["hints"]["extra_scenic_keywords"])
             scenic_query = toolbox.get_dynamic_pois(
                 target_city,
-                keywords="自然风景|公园|天山|天池|草原|湖|峡谷|沙漠|绿洲|植物园|动物园|5A景区",
+                keywords=scenic_keywords,
                 types="110000",
                 limit=limits["scenic"],
             )
@@ -2884,6 +2913,14 @@ async def run_negotiate(msg: GatewayMessage):
                     print(f"⚠️ [兜底] 不确定度报告生成失败，仍下发保底路线: {_fallback_sim_exc}", flush=True)
                 # 直接发送 final_route，跳过 Post-Route 中依赖 LLM 输出的回填逻辑（保底路线已经带齐所有字段）
                 final_data["correlation_id"] = plan_correlation_id
+                if reference_hint:
+                    # 保底路线同样要披露画像依据（它也是按这份画像去候选池里挑的）
+                    final_data["reference_profile"] = {
+                        "applied": True,
+                        "reference_count": reference_hint.get("reference_count"),
+                        "reasons": reference_hint["hints"].get("reasons") or [],
+                        "disclosure": reference_hint["disclosure"],
+                    }
                 yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                 # 保底路线也必须进事件流：否则审计里这次规划只有"开始"、没有"结束"，
                 # 看起来像服务挂了（真实原因是走了候选池保底）。用 fallback=True 如实标注。
@@ -4306,6 +4343,14 @@ async def run_negotiate(msg: GatewayMessage):
                     # 把本次规划的关联键交给前端/网关：以后用户采纳、确认重规划、标记到访
                     # 都能带着同一个 correlation_id 回到事件流里（否则审计只能看到孤立的片段）
                     final_data["correlation_id"] = plan_correlation_id
+                    # 参考画像披露：这次是按"你参考过的路线偏好"来的，说清依据，并给出覆盖入口
+                    if reference_hint:
+                        final_data["reference_profile"] = {
+                            "applied": True,
+                            "reference_count": reference_hint.get("reference_count"),
+                            "reasons": reference_hint["hints"].get("reasons") or [],
+                            "disclosure": reference_hint["disclosure"],
+                        }
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
                     await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {

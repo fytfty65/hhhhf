@@ -13,6 +13,11 @@ from fastapi.responses import StreamingResponse
 
 from core.agent_contracts import AgentInput, validate_agent_proposal
 from core.agent_runtime import EMERGENCY_AGENT_ID, emergency_handler
+from core.route_profile import (  # 参考路线 → 结构化画像（纯逻辑在 core/route_profile.py）
+    extract_route_profile,
+    merge_profiles,
+    profile_to_retrieval_hints,
+)
 from core.ttl_cache import AsyncTtlCache  # 分层 TTL 缓存（见 _risk_snapshot 的性能说明）
 
 from api.agent import (
@@ -168,6 +173,31 @@ async def _risk_snapshot(city: str, coord: Any, baseline: Any):
                 _risk_cache.pop(next(iter(_risk_cache)))
 
     return snapshot, detect_risk_changes(baseline if isinstance(baseline, dict) else None, snapshot)
+
+
+@router.post("/profile/reference-route")
+async def reference_route_profile(payload: Dict[str, Any]):
+    """把用户参考的一条路线（例如小红书帖子正文）抽成**结构化画像**。
+
+    - 入参：`{text, source_label?, existing_profile?}`
+    - 出参：画像（features / evidence / unknown / confidence / reference_count）+ 检索提示
+    - 给了 `existing_profile` 就**合并**（多条参考的口径在 `core.route_profile.merge_profiles`）
+    - **不回存原文**：这里只做抽取；调用方（网关）只保存抽出来的特征
+    """
+    text = str(payload.get("text") or "")
+    if not text.strip():
+        return {"error": "text 必填（粘贴参考路线的正文；我们只保存抽出来的特征，不保存原文）"}
+    if len(text) > 20000:
+        text = text[:20000]
+    profile = extract_route_profile(text, source_label=str(payload.get("source_label") or ""))
+    existing = payload.get("existing_profile")
+    if isinstance(existing, dict) and (existing.get("features") or {}):
+        profile = merge_profiles([existing, profile])
+    return {
+        "profile": profile,
+        "hints": profile_to_retrieval_hints(profile),
+        "note": "只保存抽取后的特征，不保存原文。",
+    }
 
 
 @router.post("/risk/realtime")
