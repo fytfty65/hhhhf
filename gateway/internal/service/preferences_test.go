@@ -85,6 +85,52 @@ func TestFineTagsNoFalsePositive(t *testing.T) {
 	}
 }
 
+// 地名"假朋友"回归锁（真实事故：2026-10-04 反馈闭环验证时读出来的自相矛盾画像）。
+//
+// 用户给「塔里木胡杨林」点赞，被「宗教古迹」的关键字 **塔** 命中，
+// 于是「宗教古迹」同时出现在 liked_tags 与 disliked_tags 里 —— 画像自相矛盾，
+// 界面上还看不出来。同理「上海XX」会被当成湖海水系。
+func TestFineTagsIgnorePlaceNameFalseFriends(t *testing.T) {
+	if got := fineTagsOf("塔里木胡杨林"); hasTag(got, "宗教古迹") {
+		t.Fatalf("「塔里木」的塔不是塔建筑，不该命中宗教古迹：%v", got)
+	}
+	if got := dimOf("塔里木胡杨林"); !hasTag(got, "nature") {
+		t.Fatalf("去掉假朋友后仍应命中自然维度（胡杨林）：%v", got)
+	}
+	if got := fineTagsOf("上海博物馆"); hasTag(got, "湖海水系") {
+		t.Fatalf("「上海」的海不是水域，不该命中湖海水系：%v", got)
+	}
+	if got := dimOf("上海博物馆"); hasTag(got, "nature") {
+		t.Fatalf("上海博物馆不该被判成自然维度：%v", got)
+	}
+	// 真地点不能因为这条规则被误伤
+	for _, target := range []string{"蓬莱阁", "洱海", "西湖", "龙门石窟", "白马寺"} {
+		if got := dimOf(target); len(got) == 0 {
+			t.Fatalf("%q 应仍能命中维度，got %v", target, got)
+		}
+	}
+	if got := fineTagsOf("龙门石窟"); !hasTag(got, "宗教古迹") {
+		t.Fatalf("龙门石窟是真古迹，必须仍然命中宗教古迹：%v", got)
+	}
+}
+
+func TestContradictoryFeedbackStopsWithFalseFriends(t *testing.T) {
+	// 事故的完整形态：点赞塔里木胡杨林 + 不喜欢库车大寺 →
+	// 修好之前 宗教古迹 会同时出现在 liked 与 disliked 里
+	p := BuildProfile("user-ff", []FeedbackSample{
+		{Target: "塔里木胡杨林", Score: 1, Reason: "风景好"},
+		{Target: "库车大寺", Score: -1, Reason: "逛累了"},
+	})
+	if hasTag(p.LikedTags, "宗教古迹") {
+		t.Fatalf("点赞自然景观不该产出宗教古迹偏好：liked=%v", p.LikedTags)
+	}
+	// 粗维度必须落在自然侧（"胡杨林"的 林 属于 natureKeywords；细标签没有对应词条时，
+	// 画像会如实回退到通用标签，而不是编一个细标签出来）
+	if got := dimOf("塔里木胡杨林"); !hasTag(got, "nature") || hasTag(got, "culture") {
+		t.Fatalf("塔里木胡杨林应只落自然维度，got %v", got)
+	}
+}
+
 func TestFineCuisinePrefs(t *testing.T) {
 	// 细标签应落入 CuisinePrefs：火锅类反馈 -> 命中「火锅串串」细分标签
 	p := BuildProfile("user-f", []FeedbackSample{

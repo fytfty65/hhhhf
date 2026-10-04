@@ -44,7 +44,50 @@ var (
 	providerDeliveryDeleted         atomic.Int64
 	providerDeliveryFailures        atomic.Int64
 	providerDeliveryLastSuccessUnix atomic.Int64
+
+	// WebSocket 广播背压（真实缺口，2026-10-04 实测）：Hub 在客户端发送缓冲写满时
+	// 直接 close(Send) + 从房间删除，**既没有日志也没有指标**，所以"用户等不到方案"
+	// 在生产里表现为"什么都没发生"。而整份路书的逐字 token 流正是最容易把缓冲打满的
+	// 东西 —— 实测一次真实推演中冒烟客户端就是这样被静默踢掉，final_route 永远收不到。
+	wsTokenDropped      atomic.Int64
+	wsSlowClientDropped atomic.Int64
 )
+
+// WebSocket 背压丢弃原因（用于 RecordWSBroadcastDrop）。
+const (
+	WSDropStreamToken = "stream_token_backpressure"
+	WSDropSlowClient  = "slow_client_disconnected"
+)
+
+// RecordWSBroadcastDrop 记录一次广播背压处置。
+func RecordWSBroadcastDrop(reason string) {
+	switch reason {
+	case WSDropStreamToken:
+		wsTokenDropped.Add(1)
+	case WSDropSlowClient:
+		wsSlowClientDropped.Add(1)
+	}
+}
+
+// WSDropCount 返回某类背压处置的累计次数（调用方据此限流自己的日志）。
+func WSDropCount(reason string) int64 {
+	switch reason {
+	case WSDropStreamToken:
+		return wsTokenDropped.Load()
+	case WSDropSlowClient:
+		return wsSlowClientDropped.Load()
+	default:
+		return 0
+	}
+}
+
+// WSBroadcastDropCounters 返回背压计数器快照（供健康检查/观测端点读取）。
+func WSBroadcastDropCounters() map[string]int64 {
+	return map[string]int64{
+		WSDropStreamToken: wsTokenDropped.Load(),
+		WSDropSlowClient:  wsSlowClientDropped.Load(),
+	}
+}
 
 // Outcome names accepted by RecordBanditFeedback.
 const (

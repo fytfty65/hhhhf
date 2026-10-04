@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI, BadRequestError
 from models.schemas import GatewayMessage, NegotiateResponse
-from core.travel_utils import analyze_weather_for_planning, estimate_crowdedness, build_personalization_hint, build_profile_category_boost, build_profile_budget_gamma, build_profile_fine_tag_boost, classify_fine_tags, normalize_mode, normalize_role
+from core.travel_utils import analyze_weather_for_planning, estimate_crowdedness, build_personalization_hint, build_profile_category_boost, build_profile_budget_gamma, build_profile_fine_tag_boost, build_profile_applied, classify_fine_tags, normalize_mode, normalize_role
 from core.time_intelligence import analyze_pace, monday_closure_notes
 from core.optimization import fairness_gate, fairness_report, pareto_frontier, repair_route, select_fair_route, validate_candidate, validate_route
 from core.constraints import resolve_conflicts
@@ -2922,6 +2922,9 @@ async def run_negotiate(msg: GatewayMessage):
                     print(f"⚠️ [兜底] 不确定度报告生成失败，仍下发保底路线: {_fallback_sim_exc}", flush=True)
                 # 直接发送 final_route，跳过 Post-Route 中依赖 LLM 输出的回填逻辑（保底路线已经带齐所有字段）
                 final_data["correlation_id"] = plan_correlation_id
+                # 保底路线也必须说清"这轮有没有用上历史反馈"：否则用户只看到结果变了，
+                # 却不知道是画像起作用还是模型随机性（见 core/travel_utils.build_profile_applied）
+                final_data["profile_applied"] = build_profile_applied(personalized_profile)
                 if reference_hint:
                     # 保底路线同样要披露画像依据（它也是按这份画像去候选池里挑的）
                     final_data["reference_profile"] = {
@@ -4352,6 +4355,8 @@ async def run_negotiate(msg: GatewayMessage):
                     # 把本次规划的关联键交给前端/网关：以后用户采纳、确认重规划、标记到访
                     # 都能带着同一个 correlation_id 回到事件流里（否则审计只能看到孤立的片段）
                     final_data["correlation_id"] = plan_correlation_id
+                    # 这轮到底吃没吃进学习到的画像，作为结构化事实随结果下发（界面「这次怎么定的口味」用它）
+                    final_data["profile_applied"] = build_profile_applied(personalized_profile)
                     # 参考画像披露：这次是按"你参考过的路线偏好"来的，说清依据，并给出覆盖入口
                     if reference_hint:
                         final_data["reference_profile"] = {

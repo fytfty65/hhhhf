@@ -1,6 +1,7 @@
 package service
 
 import (
+	"gateway/internal/metrics"
 	"gateway/internal/models"
 	"log"
 	"time"
@@ -112,7 +113,23 @@ func (h *Hub) Run() {
 					case client.Send <- message:
 						// 成功将消息推入用户的发送通道
 					default:
-						// 如果用户的通道堵塞（网太卡或断网未及时上报），强制断开该用户
+						// 背压处置（2026-10-04 修正）：原来无论什么消息都直接踢人且**不留痕**，
+						// 结果是一次真实推演里客户端被逐字 token 流打满缓冲后静默断开，
+						// final_route 永远送不到，而服务端日志里什么都看不到。
+						if message.Type == "stream_token" {
+							// token 只是"逐字显示"的装饰，丢一条不影响最终方案：只丢这条，保留连接
+							metrics.RecordWSBroadcastDrop(metrics.WSDropStreamToken)
+							if n := metrics.WSDropCount(metrics.WSDropStreamToken); n <= 5 || n%500 == 0 {
+								log.Printf("[ws-backpressure] 丢弃 %d 条逐字 token（房间=%s 用户=%s 消费不及时），连接保留",
+									n, message.RoomID, client.UserID)
+							}
+							continue
+						}
+						// 结构性事件（final_route 等）不能悄悄丢：如实断开并记录，
+						// 至少让"用户没收到方案"在日志和指标里查得到。
+						metrics.RecordWSBroadcastDrop(metrics.WSDropSlowClient)
+						log.Printf("[ws-backpressure] 客户端消费不过来，断开会话：房间=%s 用户=%s 丢弃消息类型=%s（累计 %d 次；该连接收不到后续方案）",
+							message.RoomID, client.UserID, message.Type, metrics.WSDropCount(metrics.WSDropSlowClient))
 						close(client.Send)
 						delete(roomClients, client)
 					}

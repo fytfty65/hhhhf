@@ -86,8 +86,29 @@ func buildFineTagDims() map[string]string {
 	return m
 }
 
+// 地名"假朋友"（false friends）：关键字出现在这些地名里只是名字的一部分，不代表该维度。
+//
+// 实测事故（2026-10-04，真实闭环验证时从数据库读出来的）：
+// 用户给"塔里木胡杨林"点赞，被「宗教古迹」的关键字 **塔** 命中，
+// 结果 liked_tags 和 disliked_tags 里**同时**出现「宗教古迹」——画像自相矛盾，
+// 而界面上完全看不出问题在哪。同类风险还有「上海XX」（"海"当成湖海水系）。
+//
+// 处理方式刻意保守：只列**确定不含歧义**的地名（塔里木/塔克拉玛干/塔什库尔干 都不是塔建筑；
+// 上海不是海景），不搞"关键字黑名单"式的大改，避免把真实地点误删。
+var keywordFalseFriends = []string{"塔里木", "塔克拉玛干", "塔什库尔干", "上海"}
+
+// dropFalseFriends 去掉这些地名后再做关键字匹配（"塔里木胡杨林"→"胡杨林"，仍能命中 natural 的林）。
+func dropFalseFriends(target string) string {
+	cleaned := target
+	for _, name := range keywordFalseFriends {
+		cleaned = strings.ReplaceAll(cleaned, name, "")
+	}
+	return cleaned
+}
+
 // fineTagsOf 返回地点名命中的细粒度偏好标签（去重、排序）。
 func fineTagsOf(target string) []string {
+	target = dropFalseFriends(target)
 	set := map[string]bool{}
 	for _, ft := range fineTags {
 		for _, kw := range ft.keywords {
@@ -107,6 +128,7 @@ func fineTagsOf(target string) []string {
 
 // dimOf 返回地点名称所属的偏好维度（nature/culture/food，可能多标签）
 func dimOf(target string) []string {
+	target = dropFalseFriends(target)
 	dimSet := map[string]bool{}
 	for _, kw := range natureKeywords {
 		if strings.Contains(target, kw) {

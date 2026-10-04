@@ -296,3 +296,73 @@ def build_profile_budget_gamma(profile: Dict[str, Any]) -> float:
     bt = str(profile.get("budget_tendency") or "mid").strip().lower()
     # low→更省钱（惩罚放大），high→更愿花钱（惩罚弱化），mid→基线
     return {"low": 2.0, "mid": 1.0, "high": 0.3}.get(bt, 1.0)
+
+
+def build_profile_applied(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """把「这一轮规划到底有没有吃进学习到的画像」摊成结构化事实，随结果一起下发。
+
+    为什么需要它（真实缺口）：品类加成 / 细标签加成 / 消费 gamma 过去只打在标准输出里，
+    脚本和界面都断言不到，于是"反馈学习有没有改变下一次规划"只能人肉看日志 —— 而且
+    `control` 组与"冷启动还没反馈"看起来完全一样（都是空加成），极容易把 A/B 设计当成功效故障，
+    或者反过来把"其实没生效"当成生效。
+
+    所以这里如实区分四种来源，绝不把"没有加成"说成"已个性化"：
+      - no_profile      ：这一轮压根没拿到画像（网关未注入）
+      - control_group   ：有画像，但按 A/B 设计对照组不施加权重（学习对该用户无效果）
+      - cold_start      ：treatment 组但还没有任何反馈样本
+      - learned_profile ：treatment 组且已有反馈样本（是否真的产生倾斜另见 `tilted`）
+
+    注意 `source=learned_profile` **不等于**这一轮偏好被改变了：比例接近 1/3、标签为空时
+    加成会全部被噪声阈值过滤掉。所以另给 `tilted` 布尔位，避免把"读了画像"说成"改了结果"。
+    """
+    if not isinstance(profile, dict) or not profile:
+        return {
+            "source": "no_profile",
+            "variant": "unknown",
+            "feedback_count": 0,
+            "tilted": False,
+            "category_boost": {},
+            "fine_tag_boost": {},
+            "budget_gamma_scale": 1.0,
+        }
+
+    variant = str(profile.get("ab_variant") or "control")
+    try:
+        feedback_count = int(profile.get("feedback_count") or 0)
+    except (TypeError, ValueError):
+        feedback_count = 0
+
+    category_boost = build_profile_category_boost(profile)
+    fine_tag_boost = build_profile_fine_tag_boost(profile)
+    try:
+        gamma = float(build_profile_budget_gamma(profile))
+    except (TypeError, ValueError):
+        gamma = 1.0
+
+    tilted = bool(category_boost or fine_tag_boost or gamma != 1.0)
+    if variant != "treatment":
+        # 对照组：即使有反馈，按实验设计也不施加权重（这就是"学了但不生效"的真实原因）
+        source = "control_group"
+    elif feedback_count <= 0:
+        source = "cold_start"
+    else:
+        source = "learned_profile"
+
+    def _ratio(key: str) -> float:
+        try:
+            return round(float(profile.get(key) or 0.0), 4)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "source": source,
+        "variant": variant,
+        "feedback_count": feedback_count,
+        "tilted": tilted,
+        "nature_ratio": _ratio("nature_ratio"),
+        "culture_ratio": _ratio("culture_ratio"),
+        "food_ratio": _ratio("food_ratio"),
+        "category_boost": category_boost,
+        "fine_tag_boost": fine_tag_boost,
+        "budget_gamma_scale": gamma,
+    }
