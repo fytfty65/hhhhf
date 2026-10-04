@@ -45,10 +45,12 @@ var (
 	providerDeliveryFailures        atomic.Int64
 	providerDeliveryLastSuccessUnix atomic.Int64
 
-	// WebSocket 广播背压（真实缺口，2026-10-04 实测）：Hub 在客户端发送缓冲写满时
-	// 直接 close(Send) + 从房间删除，**既没有日志也没有指标**，所以"用户等不到方案"
-	// 在生产里表现为"什么都没发生"。而整份路书的逐字 token 流正是最容易把缓冲打满的
-	// 东西 —— 实测一次真实推演中冒烟客户端就是这样被静默踢掉，final_route 永远收不到。
+	// WebSocket 广播背压：Hub 在客户端发送缓冲写满时原来直接 close+踢出，
+	// **既没有日志也没有指标** —— 用户表现是"方案永远不来"，服务端却什么都看不到。
+	// 这是一个真实的静默失败面（代码级确认）；计数与日志从 2026-10-04 起补上。
+	// 注意：当天排查"脚本等 240s"时曾误判成本处丢弃所致，真正原因是脚本在房间 WS 上
+	// 等一个不会出现的 final_route（该通道只发 ai_negotiation_result）。教训写在这里，
+	// 免得下次又把"等错类型"记成"被踢了"。
 	wsTokenDropped      atomic.Int64
 	wsSlowClientDropped atomic.Int64
 )

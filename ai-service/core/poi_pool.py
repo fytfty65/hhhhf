@@ -21,6 +21,38 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Opti
 
 from .candidate_index import index_candidates, intent_of, normalize_text, tier_level
 
+# —— 供应商错误口径（真实缺口，2026-10-04 实测）——
+# 高德对「景点」查询会直接返回 status=0 / info=CUQPS_HAS_EXCEEDED_THE_LIMIT（QPS 限流）：
+#
+#   --- 景点(生产参数) ---
+#   高德原始返回: status=0 info=CUQPS_HAS_EXCEEDED_THE_LIMIT 条数=0
+#   生产 get_dynamic_pois 最终产出: 7 条
+#
+# 而 `get_dynamic_pois` 原来是 `if status == "1" and pois:` 之外一律返回空 —— 限流被当成
+# "这个地方没有景点"。后果不是报错，而是**候选池凭空变小**：模型改用自己的记忆编排地点，
+# 用户看到的是"地点不靠谱/方案不周全"，而日志里只有一行"attractions=1"。
+#
+# 所以这里把"限流可重试"与"其它错误必须说出来"变成可单测的纯逻辑。
+AMAP_RETRYABLE_INFOS = ("CUQPS_HAS_EXCEEDED_THE_LIMIT",)
+
+
+def amap_error_is_retryable(info: str) -> bool:
+    """QPS 限流是"等一下就好"，值得重试；密钥/参数类错误重试无意义。"""
+    value = str(info or "").strip().upper()
+    return any(marker in value for marker in AMAP_RETRYABLE_INFOS)
+
+
+def amap_error_note(info: str, status: Any = "") -> str:
+    """把供应商错误翻译成"对用户意味着什么"（写日志与降级说明用）。"""
+    value = str(info or "").strip()
+    if amap_error_is_retryable(value):
+        return "POI 数据源限流（QPS），本轮候选可能不完整"
+    if value.upper().startswith("INVALID_USER_KEY") or "KEY" in value.upper():
+        return "POI 数据源密钥无效或未授权，本轮无真实候选"
+    if value:
+        return f"POI 数据源返回错误 {value}（status={status}），本轮无真实候选"
+    return "POI 数据源返回空结果"
+
 # 每个意图用于检索的关键词（AMap place/text 接受自然语言关键词）
 INTENT_KEYWORDS: Dict[str, str] = {
     "cultural": "博物馆|古迹|寺庙|文化馆",

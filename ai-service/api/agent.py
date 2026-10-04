@@ -1171,7 +1171,7 @@ class ExpertToolbox:
         if not self.amap_key:
             return []
         from core.poi_pool import parse_amap_location as _parse_amap_location
-        from core.poi_pool import is_play_worthy, poi_record_from_amap
+        from core.poi_pool import is_play_worthy, poi_record_from_amap, amap_error_is_retryable, amap_error_note
         async with httpx.AsyncClient(timeout=4.0) as http_client:
             params = {
                 "key": self.amap_key, "keywords": keywords, "city": city,
@@ -1184,8 +1184,25 @@ class ExpertToolbox:
             if not str(keywords or "").strip():
                 params["types"] = types
             try:
-                resp = await http_client.get(f"{self.amap_url}/place/text", params=params)
-                data = resp.json()
+                # 👑 供应商错误不能当成"这里没有 POI"：实测高德会对景点查询返回
+                # status=0 / CUQPS_HAS_EXCEEDED_THE_LIMIT（QPS 限流），静默吞掉会让候选池
+                # 凭空变小、模型改用自己的记忆编地点。限流等 1.2s 重试一次，其它错误如实打印。
+                data: Dict[str, Any] = {}
+                for attempt in range(2):
+                    resp = await http_client.get(f"{self.amap_url}/place/text", params=params)
+                    data = resp.json()
+                    if str(data.get("status")) == "1":
+                        break
+                    info = str(data.get("info") or "")
+                    if attempt == 0 and amap_error_is_retryable(info):
+                        print(f"⚠️ [POI 检索] 高德限流（{info}），city={city} keywords={keywords!r} 等 1.2s 重试一次", flush=True)
+                        await asyncio.sleep(1.2)
+                        continue
+                    print(
+                        f"⚠️ [POI 检索] {amap_error_note(info, data.get('status'))}：city={city} keywords={keywords!r}（不编造候选）",
+                        flush=True,
+                    )
+                    break
                 if data.get("status") == "1" and data.get("pois"):
                     pois = []
                     for poi in data["pois"]:

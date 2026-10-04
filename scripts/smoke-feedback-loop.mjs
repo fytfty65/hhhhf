@@ -25,7 +25,11 @@ const PASSWORD = 'Probe#2026';
 const STAMP = String(Date.now());
 const CITY = process.env.SMOKE_CITY || '库尔勒';
 const INTENT = process.env.SMOKE_INTENT || `去${CITY}玩2天，帮我安排一下就行`;
-const FINAL_TYPES = ['final_route', 'final_route_ready'];
+// 房间 WS（/api/v1/room/:id/ws）的契约与全局 /ws 不同：service/room.go 读完整个
+// ai-service 响应后**只广播一条 `ai_negotiation_result`**，不逐字流式、也不发 final_route。
+// 之前这里只等 final_route/final_route_ready，于是每次都白等到 240s 超时 ——
+// 结论看着"能跑"，其实是在等一个这条通道根本不会出现的类型（实测教训）。
+const FINAL_TYPES = ['ai_negotiation_result', 'final_route', 'final_route_ready'];
 const PLAN_TIMEOUT_MS = Number(process.env.SMOKE_PLAN_TIMEOUT_MS || 240000);
 
 const POSITIVE_TARGETS = ['博斯腾湖', '天山天池', '巴音布鲁克草原', '塔里木胡杨林'];
@@ -222,6 +226,11 @@ async function runPlan(ws, userId, roomId, label) {
   const applied = findField(events, 'profile_applied');
   const names = collectNodeNames(events);
   const pool = findField(events, 'candidate_pool');
+  if (!FINAL_TYPES.some((type) => events.some((message) => String(message.type) === type))) {
+    // 收不到终稿时把"到底收到了什么"打出来：区分"只是慢"和"类型对不上"
+    const types = events.map((message) => String(message.type || (message.token ? 'token' : '?')));
+    note(`${label} 未收到终稿；收到的事件类型：${[...new Set(types)].join(', ') || '(空)'}`);
+  }
   console.log(
     `  ${label}：${seconds}s / ${events.length} 条事件 / 节点 ${names.length} 个 / 画像 source=${applied?.source ?? '(缺字段)'} tilted=${applied?.tilted ?? '?'} 加成=${boostVector(applied)}`,
   );
@@ -343,14 +352,15 @@ async function main() {
     JSON.stringify(second.applied?.fine_tag_boost || {}),
   );
 
-  // 6) 结果侧旁证：两轮路线品类构成对比（启发式，仅作旁证）
+  // 6) 结果侧：只打印不判定。
+  // 实测（2026-10-04）：库尔勒这一轮的候选池只有 6 个白天候选（cultural 4 / scenic 2），
+  // 画像倾斜作用在这 6 个候选上，路线构成仍然由模型的选择主导 —— 两轮自然/人文节点数
+  // 会来回抖。所以这里如实打印观察值，不把"结果一定变好"写成门禁（那会是假绿）。
   console.log('');
   console.log(`  路线品类构成：第一轮 ${JSON.stringify(first.mix)} → 第二轮 ${JSON.stringify(second.mix)}`);
   console.log(`  候选池规模：第一轮 ${JSON.stringify(first.pool ?? null)} → 第二轮 ${JSON.stringify(second.pool ?? null)}`);
-  record(
-    '第二轮自然类节点数不劣于基线（结果侧旁证，受模型随机性影响）',
-    second.mix.nature >= first.mix.nature,
-    `nature ${first.mix.nature} → ${second.mix.nature}，culture ${first.mix.culture} → ${second.mix.culture}`,
+  console.log(
+    `  观察：候选池越小，画像倾斜能改变的空间越小 —— 这次两轮自然 ${first.mix.nature}→${second.mix.nature}、人文 ${first.mix.culture}→${second.mix.culture}（模型随机性内）。`,
   );
 
   try {

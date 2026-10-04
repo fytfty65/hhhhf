@@ -113,9 +113,8 @@ func (h *Hub) Run() {
 					case client.Send <- message:
 						// 成功将消息推入用户的发送通道
 					default:
-						// 背压处置（2026-10-04 修正）：原来无论什么消息都直接踢人且**不留痕**，
-						// 结果是一次真实推演里客户端被逐字 token 流打满缓冲后静默断开，
-						// final_route 永远送不到，而服务端日志里什么都看不到。
+						// 背压处置（2026-10-04）：原来无论什么消息都直接踢人且**不留痕**，
+						// 这是一个静默失败面（用户收不到方案，服务端什么都看不到）。
 						if message.Type == "stream_token" {
 							// token 只是"逐字显示"的装饰，丢一条不影响最终方案：只丢这条，保留连接
 							metrics.RecordWSBroadcastDrop(metrics.WSDropStreamToken)
