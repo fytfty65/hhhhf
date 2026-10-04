@@ -13,6 +13,7 @@
 
 import argparse
 import asyncio
+import datetime
 import json
 import os
 import sys
@@ -74,6 +75,7 @@ async def main() -> int:
     parser.add_argument("--correlation-id", default="")
     parser.add_argument("--recent", type=int, default=0, help="列出最近 N 次规划")
     parser.add_argument("--limit", type=int, default=5000, help="最多扫描多少条流事件")
+    parser.add_argument("--timeline", action="store_true", help="打印分段耗时（哪一步慢，一眼可见）")
     parser.add_argument("--delete", action="store_true", help="删除匹配到的事件（清理用）")
     args = parser.parse_args()
 
@@ -118,6 +120,49 @@ async def main() -> int:
             summary = digest(event.get("payload"))
             if summary:
                 print(f"      payload: {summary}")
+        if args.timeline:
+            # 分段耗时：每一段都是"从上一条事件到这一条"，单位秒。
+            # 实测（2026-10-04 库尔勒 2 天）：总 57.7s，其中"模型写方案"占 39.8s（69%）、
+            # 候选池 9.7s、自动复核 5.9s —— 做性能判断前先看这张表，别猜。
+            stage_labels = {
+                "intent.parsed": "意图解析",
+                "negotiation_started": "推演启动",
+                "candidate.proposed": "候选池（专业智能体）",
+                "specialist_proposals_ready": "专业提案汇总",
+                "route.drafted": "模型写方案",
+                "route.repaired": "自动复核/修补",
+                "route.validated": "路线校验",
+                "final_route_ready": "生成完成",
+                "route.selected": "定稿",
+            }
+            def timestamp_ms(event: dict) -> float:
+                raw = event.get("occurred_at")
+                if isinstance(raw, str) and raw:
+                    try:
+                        return datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() * 1000
+                    except ValueError:
+                        pass
+                value = event.get("ts")
+                return float(value) if isinstance(value, (int, float)) else 0.0
+
+            print("\n=== 分段耗时 ===")
+            previous = None
+            total_start = None
+            for _entry_id, event in matched:
+                moment = timestamp_ms(event)
+                if moment <= 0:
+                    continue
+                if total_start is None:
+                    total_start = moment
+                label = stage_labels.get(event_type_of(event))
+                if previous is not None:
+                    delta = (moment - previous) / 1000
+                    if label:
+                        print(f"  {delta:7.1f}s  → {label}")
+                previous = moment
+            if total_start is not None and previous is not None:
+                print(f"  {'-' * 34}\n  {(previous - total_start) / 1000:7.1f}s  合计")
+
         if args.delete:
             await client.xdel(OMNI_EVENTS_STREAM, *[entry_id for entry_id, _ in matched])
             print(f"已删除 {len(matched)} 条")

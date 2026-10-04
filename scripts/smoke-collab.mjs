@@ -42,7 +42,12 @@ async function register(username) {
   return { token: String(payload.token || ''), userId: String(payload.user?.id || '') };
 }
 
-/** 收集消息，直到看到目标类型或超时。 */
+/** 收集消息，直到看到目标类型或超时。
+ *
+ * ⚠️ 判据是 **some**（任一类型到达即可）而不是 every：
+ * 实测（2026-10-04）房间 WS 只会下发其中一种最终消息，用 every 会让脚本一直干等到超时，
+ * 把它自己的等待窗口误报成"推演用了 220 秒"（真实协商只用了 57.7 秒，见事件流分段）。
+ */
 function collect(ws, seconds, wantTypes) {
   return new Promise((resolve) => {
     const seen = [];
@@ -58,7 +63,7 @@ function collect(ws, seconds, wantTypes) {
         return;
       }
       seen.push(msg);
-      if (wantTypes.length > 0 && wantTypes.every((type) => seen.some((item) => String(item.type) === type))) {
+      if (wantTypes.length > 0 && wantTypes.some((type) => seen.some((item) => String(item.type) === type))) {
         clearTimeout(timer);
         ws.removeEventListener('message', onMessage);
         resolve(seen);
