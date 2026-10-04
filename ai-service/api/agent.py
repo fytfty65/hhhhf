@@ -31,6 +31,19 @@ from core.simulation import member_utilities_for, simulate_plan
 from core import llm_config as llm_cfg  # LLM 调用参数单一来源（模型/端点/temperature/max_tokens）
 from core.llm_config import model_name  # LLM 默认值单一来源（曾与 conflict.py 各写一套）
 from core.events import new_event  # 统一事件协议信封（correlation_id / causation_id / version）
+# 候选池相关工具统一在模块级导入：实测教训（2026-10-04）—— 把它们各自写在函数内部局部导入，
+# 结果外层代码用了 `needs_widening` 却只在内层函数里导过 → NameError 让整条推演流中断，
+# 而单测全绿（因为没有任何单测覆盖这条长生成器路径）。放在顶层，缺名字在导入时就暴露。
+from core.poi_pool import (
+    FOOD_WIDENING_KEYWORDS,
+    SCENIC_WIDENING_KEYWORDS,
+    amap_error_is_retryable,
+    amap_error_note,
+    attraction_query_limits,
+    needs_widening,
+    pool_supply_report,
+    widen_candidates,
+)
 
 
 def _fairness_limit_from_env() -> float:
@@ -2118,8 +2131,12 @@ async def run_negotiate(msg: GatewayMessage):
         # 不再把所有景点类型塞进一次宽泛检索。高德在“景点|博物馆|文化地标”
         # 这类混合关键词下很容易返回大量博物馆，导致模型看到的候选池本身就失衡。
         # 分领域检索后再合并，保证自然景区、文化、人文商业和特色餐饮都有真实候选。
+        # 候选供给诊断：记录每一类真实候选有多少、有没有补检索（随方案如实下发）
+        pool_diagnostics: Dict[str, Any] = {}
+        # 提前初始化：保底路线的 except 分支也要能引用它（否则异常早于下面的赋值时会 NameError）
+        candidate_supply: Dict[str, Any] = {}
+
         async def _fetch_attraction_mix() -> List[Dict[str, Any]]:
-            from core.poi_pool import attraction_query_limits
             from core.route_profile import profile_to_retrieval_hints
 
             # 配额优先来自**参考画像**（仅当本轮采用了它，即用户没说清楚偏好时），
@@ -2193,6 +2210,36 @@ async def run_negotiate(msg: GatewayMessage):
             merged.extend(keep_for(scenic, "scenic"))
             merged.extend(keep_for(cultural, "cultural"))
             merged.extend(keep_for(shopping, "shopping"))
+
+            _counts = {"scenic": 0, "cultural": 0, "shopping": 0, "other": 0}
+            for item in merged:
+                _counts[str(item.get("planning_category") or "other")] = _counts.get(str(item.get("planning_category") or "other"), 0) + 1
+            pool_diagnostics.update({
+                "query_limits": {"scenic": limits["scenic"], "cultural": limits["cultural"], "shopping": limits["shopping"]},
+                "by_category": _counts,
+            })
+
+            # 自然候选连"每天一个"都凑不齐 → 补一次更宽的检索（只补一次：高德有 QPS 限制）
+            if needs_widening(_counts.get("scenic", 0), trip_days):
+                widen_result = await widen_candidates(
+                    toolbox.get_dynamic_pois,
+                    city=target_city,
+                    keywords=SCENIC_WIDENING_KEYWORDS,
+                    types="110000",
+                    limit=max(int(limits["scenic"]), 30),
+                    existing_names=[str(item.get("name") or "") for item in merged],
+                )
+                added = keep_for(widen_result["added"], "scenic")
+                merged.extend(added)
+                pool_diagnostics["widened"] = list(pool_diagnostics.get("widened") or []) + ["自然景观"]
+                pool_diagnostics["widened_added"] = {"自然景观": len(added)}
+                if widen_result.get("error"):
+                    pool_diagnostics["widening_error"] = widen_result["error"]
+                print(
+                    f"🔎 [候选补检索] 自然候选只有 {_counts.get('scenic', 0)} 个 → 更宽检索补回 {len(added)} 个"
+                    + (f"（错误：{widen_result['error']}）" if widen_result.get("error") else ""),
+                    flush=True,
+                )
             return merged
 
         attractions_task = _fetch_attraction_mix()
@@ -2222,6 +2269,28 @@ async def run_negotiate(msg: GatewayMessage):
 
         unique_foods = deduplicate_and_diversify_pois(raw_foods)
         unique_attractions = deduplicate_and_diversify_pois(raw_attractions)
+
+        # 美食候选同样可能因为关键词太窄而只剩几条（实测库尔勒：生产关键词 3 条，
+        # 通用兜底「美食|餐厅|小吃|本地菜」40 条）。候选太薄时补一次，只补一次。
+        if needs_widening(len(unique_foods), trip_days):
+            _food_names = [str(item.get("name") or "") for item in unique_foods if isinstance(item, dict)]
+            _food_widen = await widen_candidates(
+                toolbox.get_dynamic_pois,
+                city=target_city,
+                keywords=FOOD_WIDENING_KEYWORDS,
+                types="050000",
+                limit=poi_limit,
+                existing_names=_food_names,
+            )
+            _added_foods = _food_widen["added"]
+            if _added_foods:
+                unique_foods = list(unique_foods) + _added_foods
+                pool_diagnostics["widened"] = list(pool_diagnostics.get("widened") or []) + ["美食"]
+                pool_diagnostics.setdefault("widened_added", {})["美食"] = len(_added_foods)
+                print(f"🔎 [候选补检索] 美食候选只有 {len(_food_names)} 个 → 更宽检索补回 {len(_added_foods)} 个", flush=True)
+            if _food_widen.get("error"):
+                pool_diagnostics["widening_error"] = _food_widen["error"]
+                print(f"⚠️ [候选补检索] 美食补充检索失败（不影响主流程）: {_food_widen['error']}", flush=True)
 
         cleaned_hotels = []
         if isinstance(raw_hotels, list):
@@ -2325,6 +2394,23 @@ async def run_negotiate(msg: GatewayMessage):
                     "message": "真实候选池不足，系统不会复制地点或编造地点；已尽力均衡到各天。",
                 },
             }, ensure_ascii=False) + "\n"
+
+        # 候选供给如实披露：这次真实候选够不够、有没有补检索、供应商有没有报错。
+        # 不写清楚就是拿用户的信任换"看起来挺全"——所以既进 final_data，也进降级清单。
+        _by_category = pool_diagnostics.get("by_category") or {}
+        _widened_added = pool_diagnostics.get("widened_added") or {}
+        candidate_supply = pool_supply_report(
+            attractions=len(unique_attractions),
+            foods=len(unique_foods),
+            trip_days=trip_days,
+            daily_nodes=target_daily_count,
+            scenic=int(_by_category.get("scenic") or 0) + int(_widened_added.get("自然景观") or 0),
+            widened=pool_diagnostics.get("widened") or [],
+            provider_notes=[str(pool_diagnostics["widening_error"])] if pool_diagnostics.get("widening_error") else None,
+        )
+        candidate_supply["diagnostics"] = pool_diagnostics
+        if candidate_supply.get("status") != "ok":
+            print(f"📉 [候选供给] status={candidate_supply.get('status')} known={candidate_supply.get('known_daytime')}/{candidate_supply.get('needed_daytime')} {candidate_supply.get('notes')}", flush=True)
 
         fusion_signals = (safety_intel.get("fusion") or {}).get("signals") or []
         fusion_summary = "、".join(fusion_signals) if fusion_signals else "无显著风险增量"
@@ -2942,6 +3028,9 @@ async def run_negotiate(msg: GatewayMessage):
                 # 保底路线也必须说清"这轮有没有用上历史反馈"：否则用户只看到结果变了，
                 # 却不知道是画像起作用还是模型随机性（见 core/travel_utils.build_profile_applied）
                 final_data["profile_applied"] = build_profile_applied(personalized_profile)
+                # 保底路线正是"候选池合成"的，供给情况更要如实说（它是这版方案的全部来源）
+                if candidate_supply:
+                    final_data["candidate_supply"] = candidate_supply
                 if reference_hint:
                     # 保底路线同样要披露画像依据（它也是按这份画像去候选池里挑的）
                     final_data["reference_profile"] = {
@@ -4101,6 +4190,10 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["horizon"] = _snapshot["horizon"]
                             if _governance.get("pool_sizes"):
                                 final_data["candidate_pool"] = _governance["pool_sizes"]
+                            # 真实候选够不够、有没有补检索、供应商有没有报错：随方案下发（界面据此
+                            # 说明"哪些地点来自数据源、哪些是靠模型知识补的"）
+                            if candidate_supply:
+                                final_data["candidate_supply"] = candidate_supply
                             if _governance.get("increment"):
                                 final_data["increment"] = _governance["increment"]
                             # 升/降档 → 排序偏好（网关 ranker 下次推演会读这些键；本次的配额填充与

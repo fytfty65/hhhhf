@@ -53,6 +53,119 @@ def amap_error_note(info: str, status: Any = "") -> str:
         return f"POI 数据源返回错误 {value}（status={status}），本轮无真实候选"
     return "POI 数据源返回空结果"
 
+
+# —— 候选供给：太薄就补一次更宽的检索，并把"供给不足"如实写进方案 ——
+#
+# 实测（2026-10-04）两个真实缺口：
+#   1. 库尔勒景点查询被高德限流 → status=0 → 生产候选只剩 1 个；补一次更宽的
+#      「景点|景区|公园|…」检索能拿回真实景区（天鹅河/孔雀河/胡杨林…）。
+#   2. 库尔勒美食用生产关键词只回 3 条，而通用兜底「美食|餐厅|小吃|本地菜」回 40 条 ——
+#      关键词太窄，模型看到的美食候选就只有 3 个。
+# 所以：候选不足时**补一次**（只补一次，避免把 QPS 打爆），并且把结论告诉用户，
+# 而不是让方案看起来"就是这么点地方"。
+SCENIC_WIDENING_KEYWORDS = "景点|景区|公园|游玩|山|湖|河|草原|沙漠|峡谷|湿地|林|寺|古城"
+FOOD_WIDENING_KEYWORDS = "美食|餐厅|小吃|本地菜"
+
+
+def required_daytime_slots(trip_days: int, daily_nodes: int) -> int:
+    """排满行程需要的白天节点数（每天 daily_nodes 个）。"""
+    days = max(1, int(trip_days or 1))
+    per_day = max(1, int(daily_nodes or 1))
+    return days * per_day
+
+
+def needs_widening(available: int, days: int) -> bool:
+    """候选是否太薄：连"每天一个"都凑不齐就该补一次更宽的检索。"""
+    return int(available or 0) < max(2, int(days or 1))
+
+
+async def widen_candidates(
+    fetch: Callable[..., Awaitable[List[Dict[str, Any]]]],
+    *,
+    city: str,
+    keywords: str,
+    types: str = "",
+    limit: int = 30,
+    existing_names: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """候选太薄时**补一次**更宽的检索（只补一次，避免把数据源 QPS 打爆）。
+
+    为什么单独抽出来：这段逻辑嵌在几千行的推演生成器里时，"补检索真的跑过吗"
+    只能靠碰运气触发（两次真实探针都因为候选够多而没走到）。抽成注入 fetch 的助手后，
+    去重/失败不抛/计数都能用假 fetch 做确定性单测。
+
+    返回 `{added, added_count, error}`：
+      - `added` 只含**新增**（按名字去重）且结构合法的记录；
+      - 任何异常都不抛，只填 `error`，由调用方如实记录并继续用原候选（绝不阻断出方案）。
+    """
+    seen = {str(name or "") for name in (existing_names or [])}
+    try:
+        extra = await fetch(city, keywords=keywords, types=types, limit=limit)
+    except Exception as exc:  # 补充检索失败不能影响主流程
+        return {"added": [], "added_count": 0, "error": str(exc)[:120]}
+
+    added: List[Dict[str, Any]] = []
+    for item in extra or []:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        added.append(dict(item))
+    return {"added": added, "added_count": len(added), "error": ""}
+
+
+def pool_supply_report(
+    *,
+    attractions: int,
+    foods: int,
+    trip_days: int,
+    daily_nodes: int,
+    scenic: Optional[int] = None,
+    widened: Sequence[str] = (),
+    provider_notes: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """把"这次真实候选够不够"变成结构化事实（随方案下发，并进降级清单）。
+
+    为什么必须做：候选池太小时，模型会用自己的记忆补地点 —— 用户看到的方案"看起来挺全"，
+    实际有些地点不是数据源里的。不写清楚就是拿用户的信任换好看。
+    """
+    needed = required_daytime_slots(trip_days, daily_nodes)
+    known = max(0, int(attractions or 0)) + max(0, int(foods or 0))
+    notes = [str(item) for item in (provider_notes or []) if str(item).strip()]
+
+    if int(attractions or 0) <= 0:
+        status = "missing"
+        notes.append("这次没有取到任何真实景点候选（数据源限流或覆盖不足），方案里的地点以模型知识为主，请逐个核对")
+    elif known < needed:
+        status = "thin"
+        notes.append(
+            f"真实白天候选 {known} 个，少于排满 {needed} 个白天节点所需的量；部分地点靠模型知识补，请核对"
+        )
+    else:
+        status = "ok"
+
+    if scenic is not None and status == "ok" and int(scenic) <= 0:
+        # 有候选但一个自然点都没有：对"想看自然风景"的诉求等于没满足
+        status = "thin"
+        notes.append("候选里没有自然景观类地点，想看自然的话这一版会不满足")
+
+    widened_list = [str(item) for item in widened if str(item).strip()]
+    if widened_list:
+        notes.append("候选偏少，已额外补了一次更宽的检索：" + "、".join(widened_list))
+
+    return {
+        "status": status,
+        "needed_daytime": needed,
+        "known_daytime": known,
+        "attractions": max(0, int(attractions or 0)),
+        "foods": max(0, int(foods or 0)),
+        "scenic": None if scenic is None else max(0, int(scenic)),
+        "widened": widened_list,
+        "notes": notes,
+    }
+
 # 每个意图用于检索的关键词（AMap place/text 接受自然语言关键词）
 INTENT_KEYWORDS: Dict[str, str] = {
     "cultural": "博物馆|古迹|寺庙|文化馆",

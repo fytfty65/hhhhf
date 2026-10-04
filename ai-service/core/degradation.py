@@ -200,6 +200,21 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             _entry("price_web", STATUS_DEGRADED, f"{int(budget.get('unknown_count') or 0)} 个节点没有价格来源")
         )
 
+    # 3.5) 候选供给不足（真实缺口，2026-10-04）：数据源限流/覆盖不足时真实候选会很少，
+    #      方案里的地点会有一部分来自模型知识 —— 这件事必须在"遗留问题"里说出来，
+    #      否则"看起来挺全"的方案会被当成全部来自真实数据源。
+    supply = _as_mapping(data.get("candidate_supply"))
+    supply_status = str(supply.get("status") or "").strip()
+    if supply_status in {"thin", "missing"}:
+        supply_notes = [str(item) for item in (supply.get("notes") or []) if str(item).strip()]
+        items.append(
+            _entry(
+                "candidate_pool",
+                STATUS_MISSING if supply_status == "missing" else STATUS_DEGRADED,
+                supply_notes[0] if supply_notes else "本次真实候选偏少，部分地点靠模型知识补",
+            )
+        )
+
     # 4) 住宿价格：路线里的住宿节点一个报价都没有（高德对酒店普遍不返回价格）
     lodgings = [node for node in _route_of(data) if _looks_like_lodging(node)]
     if lodgings and not any(_has_price(node) for node in lodgings):

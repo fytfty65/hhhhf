@@ -354,13 +354,16 @@ async function main() {
 
   // 6) 结果侧：只打印不判定。
   // 实测（2026-10-04）：库尔勒这一轮的候选池只有 6 个白天候选（cultural 4 / scenic 2），
-  // 画像倾斜作用在这 6 个候选上，路线构成仍然由模型的选择主导 —— 两轮自然/人文节点数
+  // ⚠️ 口径纠正：这里的 `candidate_pool` 是**治理层的可替换候选池**（只在需要替换/配额时构建，
+  //    每个意图 limit_per_intent 条），**不是**主白天候选池。主池请看 candidate_supply
+  //    （真实探针：库尔勒 景点 22 / 自然 18 / 美食 3）。之前把它当"候选池太小"是我读错了字段。
+  // 画像倾斜作用在主池的具体候选上，路线构成仍由模型选择主导 —— 两轮自然/人文节点数
   // 会来回抖。所以这里如实打印观察值，不把"结果一定变好"写成门禁（那会是假绿）。
   console.log('');
   console.log(`  路线品类构成：第一轮 ${JSON.stringify(first.mix)} → 第二轮 ${JSON.stringify(second.mix)}`);
-  console.log(`  候选池规模：第一轮 ${JSON.stringify(first.pool ?? null)} → 第二轮 ${JSON.stringify(second.pool ?? null)}`);
+  console.log(`  可替换候选池（治理层，非主池）：第一轮 ${JSON.stringify(first.pool ?? null)} → 第二轮 ${JSON.stringify(second.pool ?? null)}`);
   console.log(
-    `  观察：候选池越小，画像倾斜能改变的空间越小 —— 这次两轮自然 ${first.mix.nature}→${second.mix.nature}、人文 ${first.mix.culture}→${second.mix.culture}（模型随机性内）。`,
+    `  观察：两轮自然 ${first.mix.nature}→${second.mix.nature}、人文 ${first.mix.culture}→${second.mix.culture}（模型随机性内）；硬判据是上面的画像加成向量。`,
   );
 
   try {
