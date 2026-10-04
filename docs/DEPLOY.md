@@ -45,11 +45,17 @@
 | **TCP 443 到这两个域名** | ❌ 均不通（对照：高德/百度 200，约 1s） |
 | 换取 Google OAuth token | ❌ 15s 超时 |
 
-结论：**配置是对的，网络到 Google 不通**。在此网络环境下 FCM 无法投递，而且**收件人的浏览器同样需要能连 Google**，
-所以"给国内朋友发浏览器推送"这条路本身就不成立。可选：
-- 给网关进程配代理（Go 默认 transport 会读 `HTTPS_PROXY`/`HTTP_PROXY`），再跑自检；
-- 把推送发送端部署到墙外；
-- 换国内推送通道（个推/极光/微信服务号）—— 工作量较大。
+结论：**配置本来就是对的，卡在网络**。本机到 Google 的 TCP 443 不通，而浏览器推送还要求
+**收件人也能连 Google**。解决办法（已采用）：给**推送这一条链路**挂本地代理。
+
+⚠️ 关键区别：**不要**用全局 `HTTPS_PROXY`。网关同时还在调国内数据源（高德 POI/路况/静态图），
+全局代理会把那些请求也绕出国 —— 那是拿"推送能不能通"换"地图能不能用"。
+所以代码里用专用变量 `FCM_HTTPS_PROXY`（见 `gateway/internal/push/push.go` 的 `senderHTTPClient`），
+只有推送客户端走代理；未配置时行为与从前完全一致（直连）。只支持 http(s) 代理，
+socks-only 的客户端请用它的混合/HTTP 端口（Clash 的 7890 就是混合端口）。
+
+实测（2026-10-04）：`FCM_HTTPS_PROXY=http://127.0.0.1:7890` 后投递成功 ——
+`{Sent:1 Invalid:[] Failed:0}`，耗时约 2.1s。
 
 **不影响**已经实现的：站内通知中心、WebSocket 实时提醒、风险订阅告警（走房间广播）。
 
@@ -58,7 +64,9 @@
 FCM_SERVICE_ACCOUNT_JSON_PATH=<服务账号 JSON 的绝对路径>
 FCM_PROJECT_ID=<Firebase 项目 id（也可只填 JSON 路径，代码会从 JSON 里读 project_id）>
 ```
-若要用代理：再加 `HTTPS_PROXY=http://127.0.0.1:<port>`（Go 默认 transport 会读取）。
+若要用代理（墙内网络基本必须）：再加一行 **`FCM_HTTPS_PROXY=http://127.0.0.1:7890`**
+（填你本地代理的 HTTP/混合端口；**不要**用全局 `HTTPS_PROXY`，原因见上）。
+注意收件人浏览器也要能连 Google，否则推送到了 FCM 也送不到浏览器。
 
 自检命令（会真的发一条推送）：
 ```

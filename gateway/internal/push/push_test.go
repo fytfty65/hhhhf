@@ -423,3 +423,33 @@ func TestSendToUserKeepsTokenOnGenericBadRequest(t *testing.T) {
 		t.Fatal("generic payload failure must retain the device token")
 	}
 }
+
+// 代理只作用于推送这条链路：网关同时还在调国内数据源（高德等），
+// 用全局 HTTPS_PROXY 会把那些请求也绕出国 —— 那才是真正的坑。
+func TestSenderHTTPClientScopesProxyToPushOnly(t *testing.T) {
+	t.Setenv("FCM_HTTPS_PROXY", "")
+	if client := senderHTTPClient(); client.Transport != nil {
+		t.Fatalf("未配置代理时必须保持直连（Transport=nil → DefaultTransport），实际: %#v", client.Transport)
+	}
+
+	t.Setenv("FCM_HTTPS_PROXY", "http://127.0.0.1:7890")
+	client := senderHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		t.Fatalf("配置代理后客户端必须带代理 Transport，实际: %#v", client.Transport)
+	}
+	request, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := transport.Proxy(request)
+	if err != nil || proxyURL == nil || proxyURL.Host != "127.0.0.1:7890" {
+		t.Fatalf("代理地址推导不对: %v err=%v", proxyURL, err)
+	}
+
+	// 写错（socks-only 端口）时按直连处理，并留下告警 —— 不静默挂一个坏代理
+	t.Setenv("FCM_HTTPS_PROXY", "socks5://127.0.0.1:1080")
+	if client := senderHTTPClient(); client.Transport != nil {
+		t.Fatalf("不支持的代理协议应按直连处理，实际: %#v", client.Transport)
+	}
+}

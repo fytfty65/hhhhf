@@ -24,7 +24,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -263,6 +265,38 @@ type Message struct {
 	Data  map[string]string
 }
 
+// senderHTTPClient 构造投递用客户端。
+//
+// 为什么**不**用全局 `HTTPS_PROXY`：FCM 的目标在墙外，而同一个网关进程还在调用国内数据源
+// （高德 POI / 路况 / 静态图等）。把全局代理打开会把那些国内请求也绕出国，变慢甚至直接失败 ——
+// 那是拿"推送能不能通"去换"地图能不能用"。所以这里只给推送这一条链路挂代理，
+// 用专用变量 `FCM_HTTPS_PROXY`（没配就是直连，行为与从前完全一致）。
+//
+// 只支持 http(s) 代理：socks-only 的客户端请用它的混合/HTTP 端口（Clash 的 7890 就是混合端口）。
+func senderHTTPClient() *http.Client {
+	timeout := 15 * time.Second
+	raw := strings.TrimSpace(os.Getenv("FCM_HTTPS_PROXY"))
+	if raw == "" {
+		return &http.Client{Timeout: timeout}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		// 配置写错时按直连处理并**明确告警**：宁可推送失败得看得见，也不要静默挂一个坏代理
+		log.Printf("⚠️ [FCM] FCM_HTTPS_PROXY 无效（只支持 http/https 代理，如 http://127.0.0.1:7890），按直连处理: %q", raw)
+		return &http.Client{Timeout: timeout}
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyURL(parsed),
+			ForceAttemptHTTP2:   true,
+			MaxIdleConns:        10,
+			IdleConnTimeout:     60 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+	}
+}
+
 // Sender 负责取 access token 并投递到 FCM HTTP v1。
 type Sender struct {
 	projectID  string
@@ -296,7 +330,7 @@ func NewSenderFromEnv() (*Sender, error) {
 	return &Sender{
 		projectID:  projectID,
 		account:    account,
-		client:     &http.Client{Timeout: 15 * time.Second},
+		client:     senderHTTPClient(),
 		fcmBaseURL: defaultFCMBaseURL,
 		now:        time.Now,
 	}, nil
