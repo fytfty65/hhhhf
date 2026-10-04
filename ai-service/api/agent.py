@@ -36,14 +36,19 @@ from core.events import new_event  # 统一事件协议信封（correlation_id /
 # 而单测全绿（因为没有任何单测覆盖这条长生成器路径）。放在顶层，缺名字在导入时就暴露。
 from core.poi_pool import (
     FOOD_WIDENING_KEYWORDS,
+    NEIGHBOR_SCENIC_KEYWORDS,
     SCENIC_WIDENING_KEYWORDS,
     amap_error_is_retryable,
     amap_error_note,
     attraction_query_limits,
+    dedupe_sub_spots,
+    filter_by_radius,
     needs_widening,
+    parent_region,
     pool_supply_report,
     required_food_candidates,
     required_scenic_candidates,
+    scenic_radius_km,
     top_up_category_buckets,
     widen_candidates,
 )
@@ -1151,6 +1156,39 @@ class ExpertToolbox:
             except Exception:
                 pass
             return ""
+
+    async def get_geocode(self, address: str) -> Dict[str, Any]:
+        """geocode 的**结构化**结果（province / city / district / level / center）。
+
+        为什么要这个：目的地的"真景区"经常不在市辖区里 —— 实测库尔勒市区检索只有 7 个市区公园
+        （全部 ≤5km），而博斯腾湖风景名胜区在 47km 外的博湖县、罗布人村寨在 75km 外的尉犁县。
+        高德 geocode 对"库尔勒"回的是 `city=巴音郭楞蒙古自治州 / district=库尔勒市 / level=区县`，
+        于是我们能**自动拿到上级区域**去补检索，而不必维护一张"市→州"的映射表。
+        """
+        if not self.amap_key or not str(address or "").strip():
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as http_client:
+                resp = await http_client.get(
+                    f"{self.amap_url}/geocode/geo",
+                    params={"key": self.amap_key, "address": str(address), "extensions": "base"},
+                )
+                data = resp.json()
+        except Exception:
+            return {}
+        if not isinstance(data, dict) or str(data.get("status")) != "1" or not data.get("geocodes"):
+            return {}
+        first = data["geocodes"][0] if isinstance(data["geocodes"], list) else {}
+        if not isinstance(first, dict):
+            return {}
+        return {
+            "province": str(first.get("province") or ""),
+            "city": str(first.get("city") or ""),
+            "district": str(first.get("district") or ""),
+            "level": str(first.get("level") or ""),
+            "adcode": str(first.get("adcode") or ""),
+            "center": str(first.get("location") or ""),
+        }
 
     # 👑 精准文旅分类码：110000(风景名胜) | 141200(博物馆展览馆) | 060400(特色步行街) | 060100(综合商场)
     async def get_place_photos(self, name: str, city: str = "") -> List[str]:
@@ -2276,6 +2314,69 @@ async def run_negotiate(msg: GatewayMessage):
                     + (f"（错误：{widen_result['error']}）" if widen_result.get("error") else ""),
                     flush=True,
                 )
+            # 目的地是县级市时，真景区往往在**周边县市**：实测库尔勒市区检索只有 7 个市区公园
+            # （全部 ≤5km），而博斯腾湖风景名胜区在 47km 外的博湖县、罗布人村寨在 75km 外的尉犁县。
+            # 所以用 geocode 拿到的上级区域（库尔勒 → 巴音郭楞蒙古自治州）再补一次"景区专用关键词"
+            # 检索，按行程长度限制距离（2 天 90km / 3-4 天 150km / 5 天以上 250km），
+            # 并去掉同一景区的子景点（博斯腾湖的芦花港/阿洪口/码头只留主景区）。
+            _neighbor_region = ""
+            _geocode: Dict[str, Any] = {}
+            try:
+                _geocode = await toolbox.get_geocode(target_city)
+                _neighbor_region = parent_region(target_city, _geocode)
+            except Exception as _geo_exc:
+                pool_diagnostics["neighbor_region_error"] = str(_geo_exc)[:120]
+
+            if _neighbor_region:
+                try:
+                    _radius = scenic_radius_km(trip_days)
+                    # 市中心坐标取 geocode 的 center（"lng,lat"）；拿不到就让距离筛选整体放行
+                    _center_text = str(_geocode.get("center") or "")
+                    _center_for_radius: List[float] = []
+                    if "," in _center_text:
+                        try:
+                            _lng_text, _, _lat_text = _center_text.partition(",")
+                            _center_for_radius = [float(_lng_text), float(_lat_text)]
+                        except ValueError:
+                            _center_for_radius = []
+                    _neighbor_raw = await toolbox.get_dynamic_pois(
+                        _neighbor_region,
+                        keywords=NEIGHBOR_SCENIC_KEYWORDS,
+                        types="110000",
+                        limit=max(20, int(limits["scenic"])),
+                    )
+                    _neighbor_scenic = keep_for(_neighbor_raw, "scenic")
+                    # 只保留真景区（城市公园在市区已经有了，不必从州里再拉一遍）
+                    _neighbor_scenic = [
+                        item for item in _neighbor_scenic if str(item.get("scenic_tier") or "") == "landmark"
+                    ]
+                    _neighbor_near, _neighbor_far = filter_by_radius(_neighbor_scenic, _center_for_radius, _radius)
+                    _neighbor_kept, _neighbor_merged = dedupe_sub_spots(_neighbor_near)
+                    _seen_neighbor = {str(item.get("name") or "") for item in merged}
+                    _neighbor_added = [
+                        item for item in _neighbor_kept if str(item.get("name") or "") not in _seen_neighbor
+                    ]
+                    for item in _neighbor_added:
+                        item["neighbor_region"] = _neighbor_region
+                    merged.extend(_neighbor_added)
+                    pool_diagnostics.update({
+                        "neighbor_region": _neighbor_region,
+                        "neighbor_radius_km": _radius,
+                        "neighbor_found": len(_neighbor_scenic),
+                        "neighbor_added": len(_neighbor_added),
+                        "neighbor_too_far": _neighbor_far,
+                        "neighbor_sub_spots_merged": _neighbor_merged,
+                    })
+                    print(
+                        f"🗺️ [周边景区] {target_city} → {_neighbor_region}（半径 {_radius}km）："
+                        f"真景区 {len(_neighbor_scenic)} 个，补入 {len(_neighbor_added)} 个，"
+                        f"太远丢弃 {_neighbor_far} 个，同景区子景点合并 {_neighbor_merged} 个",
+                        flush=True,
+                    )
+                except Exception as _neighbor_exc:
+                    pool_diagnostics["neighbor_error"] = str(_neighbor_exc)[:120]
+                    print(f"⚠️ [周边景区] 补检索失败（不影响主流程）: {_neighbor_exc}", flush=True)
+
             return merged
 
         attractions_task = _fetch_attraction_mix()
@@ -2449,6 +2550,13 @@ async def run_negotiate(msg: GatewayMessage):
             provider_notes=[str(pool_diagnostics["widening_error"])] if pool_diagnostics.get("widening_error") else None,
         )
         candidate_supply["diagnostics"] = pool_diagnostics
+        # 周边县市景区：它们离市区几十公里，必须让用户知道"要预留出行时间"，
+        # 否则一个 76km 的景区被排进 2 天行程，用户会以为是市区的点。
+        _out_of_town = [p for p in unique_attractions if isinstance(p, dict) and p.get("out_of_town")]
+        candidate_supply["out_of_town_scenic"] = len(_out_of_town)
+        candidate_supply["farthest_scenic_km"] = round(
+            max([float(p.get("distance_km") or 0) for p in _out_of_town], default=0.0), 1
+        )
         if candidate_supply.get("status") != "ok":
             print(f"📉 [候选供给] status={candidate_supply.get('status')} known={candidate_supply.get('known_daytime')}/{candidate_supply.get('needed_daytime')} {candidate_supply.get('notes')}", flush=True)
 

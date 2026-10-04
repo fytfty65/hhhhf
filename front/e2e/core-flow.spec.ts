@@ -113,7 +113,12 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await expect(page.getByText('如果这样调整，会发生什么？')).toBeVisible();
   await expect(page.getByText(/预估花销/).first()).toBeVisible();
   const closeBlackboard = page.getByTestId('close-blackboard');
-  if (await closeBlackboard.count()) await closeBlackboard.click({ force: true });
+  // 关黑板只是这条主链路的**附带动作**（不是被测行为）。实测：并发跑满负载时，
+  // 地图渲染占着 JS 线程，这次点击会一直重试到把 240s 用例预算吃光 → 整条主链路假红。
+  // 所以给它一个短超时并容错：点不掉不影响后续断言（后面会直接点卫星图）。
+  if (await closeBlackboard.count()) {
+    await closeBlackboard.click({ force: true, timeout: 5_000 }).catch(() => {});
+  }
   await page.getByRole('button', { name: '卫星图' }).click();
   await expect(page.getByRole('button', { name: '标准图' })).toBeVisible();
   const mapCanvas = page.locator('.map-visualizer-shell canvas').first();

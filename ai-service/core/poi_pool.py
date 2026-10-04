@@ -65,6 +65,114 @@ def amap_error_note(info: str, status: Any = "") -> str:
 # 而不是让方案看起来"就是这么点地方"。
 SCENIC_WIDENING_KEYWORDS = "景点|景区|公园|游玩|山|湖|河|草原|沙漠|峡谷|湿地|林|寺|古城"
 FOOD_WIDENING_KEYWORDS = "美食|餐厅|小吃|本地菜"
+# 周边县市**景区专用**关键词：只用"公园"这类词搜出来的是市区公园，
+# 真景区要靠"风景名胜区/自然保护区/沙漠/峡谷/胡杨林/地质公园"这些词才搜得到。
+NEIGHBOR_SCENIC_KEYWORDS = "风景名胜区|自然保护区|沙漠|草原|峡谷|胡杨林|地质公园|国家森林公园|湖|湿地"
+
+
+def haversine_km(origin: Any, destination: Any) -> float:
+    """两个 [lng, lat] 之间的直线距离（公里）。缺参数返回 nan（调用方按"不知道"处理）。"""
+    import math
+
+    try:
+        lon1, lat1 = float(origin[0]), float(origin[1])
+        lon2, lat2 = float(destination[0]), float(destination[1])
+    except (TypeError, ValueError, IndexError):
+        return float("nan")
+    radius = 6371.0
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    h = math.sin(d_lat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(d_lon / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(h))
+
+
+def scenic_radius_km(trip_days: int) -> int:
+    """周边景区能排进行程的最远距离（按行程长度给）：一天来回 vs 多日顺路。
+
+    实测：库尔勒的博斯腾湖风景区 47km、罗布人村寨 75km，2 天行程完全排得下；
+    而罗布湖 108km 对 2 天就太赶了。所以半径随天数放宽，而不是一刀切。
+    """
+    days = max(1, int(trip_days or 1))
+    if days <= 2:
+        return 90
+    if days <= 4:
+        return 150
+    return 250
+
+
+def parent_region(destination: str, geocode: Optional[Mapping[str, Any]]) -> str:
+    """目的地是**县级市/区县**时返回它的上级区域（州/地区/市），否则返回空串。
+
+    实测：高德 geocode 对"库尔勒"回 `city=巴音郭楞蒙古自治州 / district=库尔勒市 / level=区县`，
+    于是上级区域可以自动拿到（不用维护映射表）。返回空串表示"没有可用的上级区域"，
+    调用方就不做周边补检索 —— 宁可少搜一次，也不拿错区域的数据凑数。
+    """
+    data = geocode if isinstance(geocode, Mapping) else {}
+    city = str(data.get("city") or "").strip()
+    district = str(data.get("district") or "").strip()
+    level = str(data.get("level") or "").strip()
+    target = str(destination or "").strip()
+    if not city or not target:
+        return ""
+    if city == target:
+        return ""
+    # 只有"区县/县级市"才需要往上找；直辖市/地级市本身就已经是最大范围
+    if level and level not in ("区县", "县级市", "district"):
+        return ""
+    if district and district == city:
+        return ""
+    return city
+
+
+def filter_by_radius(
+    items: Sequence[Mapping[str, Any]],
+    center: Any,
+    radius_km: float,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """按到市中心的直线距离筛选；**没有坐标的一律保留**（宁可多给一个，也不因为缺坐标丢真景点）。
+
+    返回 `(保留的条目, 因太远丢弃的数量)`；保留的条目会带上 `distance_km`。
+    """
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        candidate = dict(item)
+        distance = haversine_km(center, candidate.get("lnglat"))
+        if distance != distance:  # nan：没有坐标
+            kept.append(candidate)
+            continue
+        if distance > float(radius_km or 0):
+            dropped += 1
+            continue
+        candidate["distance_km"] = round(float(distance), 1)
+        if distance >= 15:
+            candidate["out_of_town"] = True
+        kept.append(candidate)
+    return kept, dropped
+
+
+def dedupe_sub_spots(items: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """同一个景区的"子景点"只留最主的那一个。
+
+    实测高德返回：博斯腾湖风景名胜区 / 博斯腾湖风景名胜区芦花港 / 博斯腾湖风景名胜区阿洪口 /
+    新疆博斯腾湖莲花湖景区码头 —— 不处理的话，候选池会被同一个湖的 4 个角占满，
+    模型以为"这一带只有博斯腾湖"，其它真景区被挤出去。
+    规则：名字互相包含时保留**更短**的那个（通常是主景区名）。
+    """
+    ordered = sorted(
+        (dict(item) for item in items if isinstance(item, Mapping) and str(item.get("name") or "").strip()),
+        key=lambda item: len(str(item.get("name") or "")),
+    )
+    kept: List[Dict[str, Any]] = []
+    for item in ordered:
+        name = str(item.get("name") or "")
+        if any(name in str(existing.get("name") or "") or str(existing.get("name") or "") in name for existing in kept):
+            continue
+        kept.append(item)
+    return kept, max(0, len([item for item in items if isinstance(item, Mapping)]) - len(kept))
+
 
 
 def required_daytime_slots(trip_days: int, daily_nodes: int) -> int:
@@ -341,6 +449,8 @@ FACILITY_NAME_MARKERS = (
     "公共厕所", "洗手间", "卫生间", "充电站", "加油站", "加气站", "变电", "配电",
     # 交通枢纽
     "机场", "火车站", "汽车站", "客运站", "地铁站", "公交站", "收费站", "服务区",
+    # 景区里的"零件"（实测：博斯腾湖周边搜出一堆码头/扬水站/假山/户外舞台）
+    "码头", "扬水站", "泵站", "假山", "户外舞台", "索道站", "游客中心",
 )
 # 商业/办公/住宿类标记：对"文化/自然风景"这类玩点是硬伤，但对"逛街/夜市"意图是正常场所，
 # 所以按意图放行（allow_commerce）。

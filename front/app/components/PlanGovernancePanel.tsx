@@ -175,6 +175,9 @@ export type PlanGovernance = {
     scenic?: number | null;
     widened?: string[];
     notes?: string[];
+    /** 周边县市景区（离市区较远，方案里要预留出行时间） */
+    out_of_town_scenic?: number;
+    farthest_scenic_km?: number;
   };
   /**
    * 行程配比（用户口径）：默认自然景区与人文各半并穿插特色美食/住宿；明确说了偏好就加权。
@@ -453,6 +456,15 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
             ，餐饮 {candidateSupply?.foods ?? 0} 个
             {(candidateSupply?.widened?.length ?? 0) > 0 ? `；已额外补检索：${candidateSupply?.widened?.join('、')}` : ''}
           </p>
+          {(candidateSupply?.out_of_town_scenic ?? 0) > 0 && (
+            <p className="mt-0.5 text-[12px] leading-relaxed text-slate-500" data-testid="candidate-supply-outoftown">
+              其中周边县市景区 {candidateSupply?.out_of_town_scenic} 个
+              {typeof candidateSupply?.farthest_scenic_km === 'number' && candidateSupply.farthest_scenic_km > 0
+                ? `（最远约 ${candidateSupply.farthest_scenic_km} 公里）`
+                : ''}
+              ，排进去要预留来回时间。
+            </p>
+          )}
           {(candidateSupply?.notes?.length ?? 0) > 0 && (
             <ul className="mt-1.5 space-y-1">
               {(candidateSupply?.notes || []).map((note) => (

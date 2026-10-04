@@ -286,6 +286,8 @@ const GOVERNANCE_PAYLOAD = {
     scenic: 1,
     widened: ['自然景观'],
     notes: ['真实白天候选 7 个，少于排满 10 个白天节点所需的量；部分地点靠模型知识补，请核对'],
+    out_of_town_scenic: 2,
+    farthest_scenic_km: 76,
   },
   // 行程配比（用户口径）：默认自然景区与人文各半、穿插美食住宿；自然只算景区
   composition: {
@@ -646,6 +648,9 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(supplyBlock).toContainText('景点 4 个（其中自然景观 1 个），餐饮 3 个');
     await expect(supplyBlock).toContainText('已额外补检索：自然景观');
     await expect(supplyBlock).toContainText('部分地点靠模型知识补，请核对');
+    // 周边县市景区要说清距离（76km 的景区被排进 2 天行程，用户得知道要预留来回时间）
+    await expect(panel.getByTestId('candidate-supply-outoftown')).toContainText('周边县市景区 2 个');
+    await expect(panel.getByTestId('candidate-supply-outoftown')).toContainText('最远约 76 公里');
 
     // 配比：默认各半 + 自然只算景区（城市公园单列）+ 对不上时的偏差点
     const compositionBlock = panel.getByTestId('composition-block');
