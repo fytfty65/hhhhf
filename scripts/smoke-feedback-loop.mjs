@@ -366,10 +366,12 @@ async function main() {
   console.log(failed === 0 ? `PASS - 反馈学习闭环 ${results.length} 项全部通过` : `FAIL - ${failed}/${results.length} 项失败`);
   results.filter((item) => !item.ok).forEach((item) => console.log(`  未通过：${item.name} — ${item.detail}`));
   console.log('='.repeat(72));
-  process.exitCode = failed === 0 ? 0 : 1;
+  // 必须显式退出：Node 的 WebSocket 连接会让事件循环一直活着，
+  // 只设 process.exitCode 的话脚本"跑完了却不结束"（实测：输出全部有，进程不退）。
+  process.exit(failed === 0 ? 0 : 1);
 }
 
 main().catch((error) => {
   console.error('冒烟脚本异常:', error?.stack || error);
-  process.exitCode = 1;
+  process.exit(1);
 });

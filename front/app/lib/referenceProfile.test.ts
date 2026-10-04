@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  ALLOWED_IMAGE_TYPES,
+  MAX_IMAGE_BYTES,
+  buildOcrPayload,
   buildSavePayload,
   confidenceLabel,
+  describeOcrFailure,
+  readOcrResult,
+  REFERENCE_ROUTE_OCR_ENDPOINT,
   storageDisclosure,
   summarizeProfile,
+  validateImageFile,
 } from './referenceProfile.ts';
 
 /**
@@ -89,4 +96,68 @@ test('存储口径文案必须说清"存了什么"，且两种模式都提到不
   const stripped = storageDisclosure(false);
   assert.match(stripped, /不保存出处片段/);
   assert.match(stripped, /整篇原文也不会被保存/);
+});
+
+// ---------------------------------------------------------------------------
+// 截图识别：本地早拦 + 失败话术 + 结果解析
+// ---------------------------------------------------------------------------
+
+test('截图端点挂在参考路线下面（不另开一套路径）', () => {
+  assert.equal(REFERENCE_ROUTE_OCR_ENDPOINT, '/api/v1/user/preference/reference-route/ocr');
+});
+
+test('本地就能拦掉不支持的格式与超大图片，并给出可执行的下一步', () => {
+  assert.equal(validateImageFile({ name: 'a.png', type: 'image/png', size: 1024 }).ok, true);
+  assert.equal(validateImageFile({ name: 'a.jpg', type: 'image/jpeg', size: 1024 }).ok, true);
+  assert.equal(validateImageFile({ type: 'image/webp', size: 1024 }).ok, true);
+  assert.deepEqual(ALLOWED_IMAGE_TYPES, ['image/png', 'image/jpeg', 'image/webp']);
+
+  const heic = validateImageFile({ name: 'IMG_0001.HEIC', type: 'image/heic', size: 2048 });
+  assert.equal(heic.ok, false);
+  if (!heic.ok) assert.match(heic.reason, /HEIC/);
+
+  const big = validateImageFile({ type: 'image/png', size: MAX_IMAGE_BYTES + 1 });
+  assert.equal(big.ok, false);
+  if (!big.ok) assert.match(big.reason, /上限/);
+
+  const empty = validateImageFile({ type: 'image/png', size: 0 });
+  assert.equal(empty.ok, false);
+  const missing = validateImageFile(null);
+  assert.equal(missing.ok, false);
+  const other = validateImageFile({ type: 'application/pdf', size: 10 });
+  assert.equal(other.ok, false);
+  if (!other.ok) assert.match(other.reason, /PNG/);
+});
+
+test('识别请求体只带图片本身，不带任何用户身份字段', () => {
+  const payload = buildOcrPayload('data:image/png;base64,AAAA', 'image/png');
+  assert.deepEqual(Object.keys(payload).sort(), ['image_base64', 'mime_type']);
+  assert.equal(payload.mime_type, 'image/png');
+});
+
+test('失败原因码翻译成用户能照着做的下一步', () => {
+  assert.match(describeOcrFailure('unsupported_mime'), /PNG\/JPEG/);
+  assert.match(describeOcrFailure('no_text_in_image'), /没有识别到行程文字/);
+  assert.match(describeOcrFailure('vision_not_configured'), /粘贴文字/);
+  // 网关会加 REFERENCE_OCR_ 前缀，翻译层要能剥掉
+  assert.match(describeOcrFailure('REFERENCE_OCR_TOO_LARGE'), /压缩/);
+  // 没见过的原因码也要给出去路，不能吞掉变成"操作成功"
+  assert.match(describeOcrFailure('weird_new_code'), /粘贴文字/);
+  assert.equal(describeOcrFailure('weird_new_code', '上游原话'), '上游原话');
+});
+
+test('识别结果解析：没有文字就是失败，绝不返回空字符串当成功', () => {
+  const ok = readOcrResult({ data: { text: '第一天 博斯腾湖', note: '请核对', model: 'qwen-vl-max', warnings: [] } });
+  assert.equal(ok.ok, true);
+  if (ok.ok) {
+    assert.equal(ok.text, '第一天 博斯腾湖');
+    assert.equal(ok.model, 'qwen-vl-max');
+  }
+  const blank = readOcrResult({ data: { text: '   ' } });
+  assert.equal(blank.ok, false);
+  const failed = readOcrResult({ error: { code: 'REFERENCE_OCR_NO_TEXT_IN_IMAGE', message: '' } });
+  assert.equal(failed.ok, false);
+  if (!failed.ok) assert.match(failed.reason, /没有识别到行程文字/);
+  const missing = readOcrResult({});
+  assert.equal(missing.ok, false);
 });

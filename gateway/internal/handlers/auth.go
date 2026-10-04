@@ -257,6 +257,11 @@ func CurrentUserID(c *gin.Context) string {
 // AuthMiddleware authenticates all protected API and WebSocket routes. It
 // also rejects a client-supplied user_id/created_by that attempts to impersonate
 // another user, while preserving the request body for downstream handlers.
+//
+// maxIdentityProbeBodyBytes 是身份探测允许缓冲的请求体上限（12MB）：
+// 参考路线截图 base64 约 5.6MB，留足余量；超过就明确回 413，绝不截断。
+const maxIdentityProbeBodyBytes = 12 << 20
+
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if origin := strings.TrimSpace(c.GetHeader("Origin")); origin != "" && !originAllowed(origin) {
@@ -278,9 +283,28 @@ func AuthMiddleware() gin.HandlerFunc {
 		// Check common identity fields without binding the body twice in every
 		// handler. Restore the bytes so Gin handlers can still call ShouldBindJSON.
 		if c.Request.Body != nil && c.Request.ContentLength != 0 && c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && strings.Contains(c.GetHeader("Content-Type"), "application/json") {
-			body, err := io.ReadAll(io.LimitReader(c.Request.Body, 2<<20))
+			// 真实缺口（2026-10-04 实测）：这里原来只读 2MB 然后用这段截断内容替换请求体，
+			// 于是**任何超过 2MB 的 JSON 请求都会在 handler 眼里变成坏 JSON**，客户端收到
+			// 一句"请求数据格式不正确" —— 参考路线截图（base64 后约 5.6MB）就是这么失败的。
+			// 现在：绝不静默截断，超限直接如实回 413。
+			if c.Request.ContentLength > maxIdentityProbeBodyBytes {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
+					"error": "请求体过大", "code": "PAYLOAD_TOO_LARGE",
+					"max_bytes": maxIdentityProbeBodyBytes,
+				})
+				return
+			}
+			body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxIdentityProbeBodyBytes+1))
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "请求体读取失败", "code": "INVALID_BODY"})
+				return
+			}
+			if int64(len(body)) > maxIdentityProbeBodyBytes {
+				// ContentLength 可能是 -1（chunked），所以读完还要再判一次
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
+					"error": "请求体过大", "code": "PAYLOAD_TOO_LARGE",
+					"max_bytes": maxIdentityProbeBodyBytes,
+				})
 				return
 			}
 			c.Request.Body = io.NopCloser(bytes.NewReader(body))

@@ -53,6 +53,54 @@ func TestAuthMiddlewareRejectsIdentityImpersonation(t *testing.T) {
 	}
 }
 
+// 真实缺口（2026-10-04 实测）：身份探测中间件原来只读 2MB 就把这段截断内容当作请求体，
+// 于是超过 2MB 的合法 JSON（参考路线截图 base64 约 5.6MB）在 handler 眼里成了坏 JSON，
+// 客户端只收到"请求数据格式不正确"。下面两个用例把口径钉死：不许截断，超限如实 413。
+func TestAuthMiddlewarePreservesLargeJSONBodyForHandlers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	token, _ := newSessionToken("user-1")
+	const payloadSize = 3 << 20 // 3MB > 旧的 2MB 截断阈值
+	big := strings.Repeat("a", payloadSize)
+	r := gin.New()
+	r.POST("/protected", AuthMiddleware(), func(c *gin.Context) {
+		var body struct {
+			Blob string `json:"blob"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_JSON"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"blob_len": len(body.Blob)})
+	})
+	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{"blob":"`+big+`"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("大请求体不该被中间件截断成坏 JSON: %d %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"blob_len":3145728`) {
+		t.Fatalf("handler 必须收到完整请求体，实际 %s", res.Body.String())
+	}
+}
+
+func TestAuthMiddlewareRejectsOversizedBodyWith413NotInvalidJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	token, _ := newSessionToken("user-1")
+	r := gin.New()
+	r.POST("/protected", AuthMiddleware(), func(c *gin.Context) { c.Status(http.StatusOK) })
+	oversized := strings.Repeat("a", maxIdentityProbeBodyBytes+1024)
+	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{"blob":"`+oversized+`"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+	if res.Code != http.StatusRequestEntityTooLarge || !strings.Contains(res.Body.String(), "PAYLOAD_TOO_LARGE") {
+		t.Fatalf("超限必须如实说「太大」，而不是含糊的格式错误: %d %s", res.Code, res.Body.String())
+	}
+}
+
 func TestAuthMiddlewareRejectsMissingToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

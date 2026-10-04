@@ -132,6 +132,116 @@ func SaveReferenceRouteHandler(c *gin.Context) {
 	})
 }
 
+// referenceOcrRequest 参考路线截图识别入参。
+// 只收 base64（不落盘、不进 multipart 临时目录）：图片从浏览器到 ai-service 全程在内存里。
+type referenceOcrRequest struct {
+	ImageBase64 string `json:"image_base64"`
+	MimeType    string `json:"mime_type"`
+}
+
+// 6MB base64 ≈ 4.4MB 原图；ai-service 侧还有 4MB 硬上限。这里先拦一道，
+// 避免把超大请求体转发过去白烧一次带宽。
+const referenceImageMaxBase64Chars = 6 * 1024 * 1024
+
+func ocrStatusFor(code string) int {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "too_large":
+		return http.StatusRequestEntityTooLarge
+	case "unsupported_mime", "not_base64", "empty_image":
+		return http.StatusBadRequest
+	case "no_text_in_image", "empty_transcription":
+		return http.StatusUnprocessableEntity
+	case "vision_not_configured", "vision_call_failed":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+// RecognizeReferenceRouteHandler POST /api/v1/user/preference/reference-route/ocr
+//
+// 参考路线**截图 → 文字**：把图片交给 ai-service 的视觉模型原样抄成文字，回给前端让
+// 用户**先核对再决定是否学习**。三条硬约束：
+//  1. **不存图片**：网关不落盘、不写库（响应里显式回 `image_stored:false`，便于前端如实告知）；
+//  2. **不臆造**：识别不了就把原因码/原因话说回前端（HEIC、超限、纯风景图、模型故障）；
+//  3. 登录才可用：否则这就是一个匿名的免费 OCR 网关。
+func RecognizeReferenceRouteHandler(c *gin.Context) {
+	if _, ok := currentUserIDOrReject(c); !ok {
+		return
+	}
+	var req referenceOcrRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		planningError(c, http.StatusBadRequest, "INVALID_JSON", "请求数据格式不正确", nil)
+		return
+	}
+	image := strings.TrimSpace(req.ImageBase64)
+	if image == "" {
+		planningError(c, http.StatusBadRequest, "REFERENCE_IMAGE_REQUIRED", "请先选择一张路线截图", nil)
+		return
+	}
+	if len(image) > referenceImageMaxBase64Chars {
+		planningError(c, http.StatusRequestEntityTooLarge, "REFERENCE_IMAGE_TOO_LARGE", "图片过大，请压缩或只截取路线部分", nil)
+		return
+	}
+
+	body, err := json.Marshal(gin.H{"image_base64": image, "mime_type": strings.TrimSpace(req.MimeType)})
+	if err != nil {
+		planningError(c, http.StatusInternalServerError, "REFERENCE_ENCODE_FAILED", "参考路线处理失败", nil)
+		return
+	}
+	data, status, err := callAI(c, "/api/v1/profile/reference-route/ocr", body)
+	if err != nil || status != http.StatusOK {
+		planningError(c, http.StatusBadGateway, "REFERENCE_OCR_UNAVAILABLE", "图片识别服务暂不可用，请改用粘贴文字", nil)
+		return
+	}
+
+	var parsed struct {
+		OK          bool     `json:"ok"`
+		Code        string   `json:"code"`
+		Message     string   `json:"message"`
+		Text        string   `json:"text"`
+		Model       string   `json:"model"`
+		Chars       int      `json:"chars"`
+		Warnings    []string `json:"warnings"`
+		Note        string   `json:"note"`
+		PrivacyNote string   `json:"privacy_note"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		planningError(c, http.StatusBadGateway, "REFERENCE_OCR_UNPARSABLE", "图片识别结果不可用，请改用粘贴文字", nil)
+		return
+	}
+	if !parsed.OK || strings.TrimSpace(parsed.Text) == "" {
+		code := strings.TrimSpace(parsed.Code)
+		if code == "" {
+			code = "ocr_failed"
+		}
+		message := strings.TrimSpace(parsed.Message)
+		if message == "" {
+			message = "没能从这张图里读出文字，请改用粘贴文字或换一张截图"
+		}
+		planningError(c, ocrStatusFor(code), "REFERENCE_OCR_"+strings.ToUpper(code), message, map[string]string{
+			"privacy_note": parsed.PrivacyNote,
+			"image_stored": "false",
+		})
+		return
+	}
+
+	note := strings.TrimSpace(parsed.Note)
+	if note == "" {
+		note = "识别结果请先核对（可能有错字/漏字），确认后再点学习；服务端不保存图片。"
+	}
+	planningData(c, gin.H{
+		"text":         parsed.Text,
+		"model":        parsed.Model,
+		"chars":        parsed.Chars,
+		"warnings":     parsed.Warnings,
+		"note":         note,
+		"privacy_note": parsed.PrivacyNote,
+		// 显式事实：图片没有被保存（前端据此如实告知用户，而不是靠文案承诺）
+		"image_stored": false,
+	})
+}
+
 // ClearReferenceRouteHandler DELETE /api/v1/user/preference/reference-route
 func ClearReferenceRouteHandler(c *gin.Context) {
 	userID, ok := currentUserIDOrReject(c)

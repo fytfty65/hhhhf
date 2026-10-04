@@ -176,6 +176,8 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/user/preference/reference-route", handlers.SaveReferenceRouteHandler)
 		apiGroup.GET("/user/preference/reference-route", handlers.GetReferenceRouteHandler)
 		apiGroup.DELETE("/user/preference/reference-route", handlers.ClearReferenceRouteHandler)
+		// 参考路线截图识别：上传小红书/朋友圈截图 → 出文字 → 用户核对后再学习（图片不落库）
+		apiGroup.POST("/user/preference/reference-route/ocr", handlers.RecognizeReferenceRouteHandler)
 		apiGroup.POST("/recommendation/track", handlers.TrackRecommendationEventHandler)
 		apiGroup.GET("/recommendation/metrics", handlers.RecommendationMetricsHandler)
 		// P6：埋点 A/B 漏斗（曝光 → 点击 → 采纳 → 满意）

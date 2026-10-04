@@ -200,6 +200,30 @@ async def reference_route_profile(payload: Dict[str, Any]):
     }
 
 
+@router.post("/profile/reference-route/ocr")
+async def reference_route_ocr(payload: Dict[str, Any]):
+    """参考路线**截图 → 文字**（路线截图往往比复制正文更省事）。
+
+    契约刻意做小做硬：
+    - 只回**文字**，不回画像 —— 识别结果必须先给用户核对，再由用户决定是否学习，
+      否则"识别错一个地名"会被静默抽成偏好；
+    - 不保存图片：图片只在内存里转给视觉模型（`core/route_ocr`）；
+    - 识别不了就如实回 `ok=false` + 原因码（HEIC/超限/纯风景图/模型故障），
+      **绝不返回一段兜底行程**。
+    """
+    from core.route_ocr import IMAGE_PRIVACY_NOTE, OcrUnavailable, recognize_route_text
+
+    image = payload.get("image_base64") or payload.get("image") or ""
+    try:
+        result = await recognize_route_text(str(image))
+    except OcrUnavailable as exc:
+        return {**exc.to_dict(), "privacy_note": IMAGE_PRIVACY_NOTE}
+    return {
+        **result,
+        "note": "识别结果请先核对（可能有错字/漏字），确认后再点学习；服务端不保存图片。",
+    }
+
+
 @router.post("/risk/realtime")
 async def risk_realtime(payload: Dict[str, Any]):
     city = str(payload.get("city") or payload.get("target_city") or "").strip()

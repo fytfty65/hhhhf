@@ -14,14 +14,20 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Bookmark, ChevronDown, RefreshCw, Trash2 } from 'lucide-react';
+import { Bookmark, ChevronDown, ImageUp, RefreshCw, Trash2 } from 'lucide-react';
 import { apiJson, API_BASE, getAuthToken } from '../lib/utils';
 import {
+  buildOcrPayload,
   buildSavePayload,
   confidenceLabel,
+  describeOcrFailure,
+  OCR_PRIVACY_NOTE,
+  readOcrResult,
   REFERENCE_ROUTE_ENDPOINT,
+  REFERENCE_ROUTE_OCR_ENDPOINT,
   storageDisclosure,
   summarizeProfile,
+  validateImageFile,
   type ReferenceProfile,
 } from '../lib/referenceProfile';
 
@@ -35,6 +41,11 @@ export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOp
   const [saved, setSaved] = useState<SavedState>({ profile: null, referenceCount: 0 });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  // 截图识别：识别中 / 识别说明 / 识别失败（失败原因一定要说出来，不能让用户干等）
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrNote, setOcrNote] = useState('');
+  const [ocrError, setOcrError] = useState('');
+  const [pickedName, setPickedName] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -76,6 +87,65 @@ export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOp
       setBusy(false);
     }
   };
+
+  /**
+   * 截图 → 文字。两条硬口径：
+   *  1. 识别出的文字只**填进输入框**，绝不自动学习 —— 识别错一个地名不会被静默学成偏好；
+   *  2. 识别不了就把原因说出来（格式/体积/没文字/服务不可用），并给出去路（粘贴文字）。
+   */
+  const recognizeImage = useCallback(async (file: File | null | undefined) => {
+    const check = validateImageFile(file);
+    if (check.ok === false) {
+      setOcrError(check.reason);
+      setOcrNote('');
+      return;
+    }
+    setPickedName(file?.name ? `${file.name}（${Math.max(1, Math.round(Number(file.size) / 1024))}KB）` : '已选择截图');
+    setOcrBusy(true);
+    setOcrError('');
+    setOcrNote('');
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('图片读取失败，请重新选择文件'));
+        reader.readAsDataURL(file as File);
+      });
+      const payload = await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_OCR_ENDPOINT}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAuthToken()}` },
+        body: JSON.stringify(buildOcrPayload(dataUrl, String(file?.type || ''))),
+      });
+      const result = readOcrResult(payload);
+      if (result.ok === false) {
+        setOcrError(result.reason);
+        return;
+      }
+      setText(result.text);
+      setSourceLabel((current) => current || '截图识别');
+      setOcrNote([result.note, ...(result.warnings || [])].filter(Boolean).join(' '));
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code
+        || (/REFERENCE_OCR_[A-Z_]+/.exec(error instanceof Error ? error.message : '') || [])[0]
+        || null;
+      setOcrError(describeOcrFailure(code, error instanceof Error ? error.message : undefined));
+    } finally {
+      setOcrBusy(false);
+    }
+  }, []);
+
+  const handlePaste = useCallback(
+    (event: React.ClipboardEvent<HTMLDivElement>) => {
+      const items = Array.from(event.clipboardData?.items || []);
+      const imageItem = items.find((item) => String(item.type || '').startsWith('image/'));
+      if (!imageItem) return; // 纯文字粘贴照旧走输入框，不拦截
+      const file = imageItem.getAsFile();
+      if (!file) return;
+      event.preventDefault();
+      void recognizeImage(file);
+    },
+    [recognizeImage],
+  );
 
   const clear = async () => {
     setBusy(true);
@@ -145,6 +215,64 @@ export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOp
       <label className="mt-3 block text-[11px] font-bold text-slate-500" htmlFor="reference-route-text">
         参考路线正文
       </label>
+
+      {/* 截图入口：小红书路线常常是一张图，复制正文很麻烦。识别结果只填进输入框，由用户核对后再学习。 */}
+      <div
+        className="mt-1.5 rounded-lg border border-dashed border-slate-200 bg-slate-50/60 px-3 py-2.5"
+        data-testid="reference-route-image-block"
+        onPaste={handlePaste}
+      >
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <label
+            className={`inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-[12px] font-bold text-slate-700 transition-colors hover:bg-slate-50 ${ocrBusy ? 'opacity-60' : ''}`}
+          >
+            <ImageUp className="h-3.5 w-3.5 text-orange-700" />
+            {ocrBusy ? '识别中…' : '上传截图识别文字'}
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              className="sr-only"
+              data-testid="reference-route-image-input"
+              disabled={ocrBusy}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                // 清空 value：同一张图再选一次也要能触发（否则第二次没有任何反应）
+                event.target.value = '';
+                void recognizeImage(file);
+              }}
+            />
+          </label>
+          <span className="text-[11px] text-slate-400">也可以把截图直接粘贴到这里（Ctrl+V）</span>
+          {pickedName && !ocrBusy && (
+            <span className="font-mono text-[11px] tabular-nums text-slate-500" data-testid="reference-route-image-name">
+              {pickedName}
+            </span>
+          )}
+          {ocrBusy && (
+            <span className="text-[11px] text-slate-500" data-testid="reference-route-ocr-status" role="status">
+              正在识别截图里的文字…
+            </span>
+          )}
+        </div>
+        {ocrError && (
+          <p
+            className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[12px] leading-relaxed text-rose-700"
+            data-testid="reference-route-ocr-error"
+            role="alert"
+          >
+            {ocrError}
+          </p>
+        )}
+        {ocrNote && !ocrError && (
+          <p className="mt-2 text-[11.5px] leading-relaxed text-slate-600" data-testid="reference-route-ocr-note">
+            {ocrNote}
+          </p>
+        )}
+        <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400" data-testid="reference-route-ocr-privacy">
+          {OCR_PRIVACY_NOTE}
+        </p>
+      </div>
+
       <textarea
         id="reference-route-text"
         data-testid="reference-route-text"

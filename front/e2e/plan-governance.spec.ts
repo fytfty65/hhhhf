@@ -30,6 +30,16 @@ let adoptCalls: any[] = [];
 let variantSaves: any[] = [];
 // 参考路线学习：粘贴 → 保存 → 界面要能看到"学到了什么"，方案里要能看到依据
 let referenceSaves: any[] = [];
+// 截图识别：上传图片 → 出文字 → 用户核对后再学习（识别本身不许写画像）
+let ocrCalls: any[] = [];
+let ocrMode: 'ok' | 'no_text' = 'ok';
+
+// 一张最小合法 PNG（1×1）：E2E 会把识别接口 mock 掉，这里只验证"文件真的被读成 data URL 发出去了"
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+  'base64',
+);
+const OCR_TEXT = 'Day1 上午 博斯腾湖 环湖骑行 门票45元\n住宿 孔雀河边民宿 一晚180元';
 
 // 与后端 plan_quality_snapshot / budget_report / propose_fallback 输出的字段保持一致
 const GOVERNANCE_PAYLOAD = {
@@ -273,6 +283,8 @@ async function installMocks(page: Page) {
   adoptCalls = [];
   variantSaves = [];
   referenceSaves = [];
+  ocrCalls = [];
+  ocrMode = 'ok';
   await page.addInitScript(
     (payload) => {
       localStorage.setItem('omni_user', JSON.stringify(payload.user));
@@ -423,6 +435,30 @@ async function installMocks(page: Page) {
       },
     });
   });
+  // 截图识别：真实后端会走视觉模型；这里按契约返回识别文字或如实的失败原因
+  await page.route('**/api/v1/user/preference/reference-route/ocr', async (route) => {
+    ocrCalls.push(route.request().postDataJSON());
+    if (ocrMode === 'no_text') {
+      await route.fulfill({
+        status: 422,
+        json: { error: { code: 'REFERENCE_OCR_NO_TEXT_IN_IMAGE', message: '这张图里没有识别到行程文字' } },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        data: {
+          text: OCR_TEXT,
+          model: 'qwen-vl-max',
+          chars: OCR_TEXT.length,
+          warnings: [],
+          note: '识别结果请先核对（可能有错字/漏字），确认后再点学习；服务端不保存图片。',
+          privacy_note: '图片只用于本次文字识别，不会保存到服务端。',
+          image_stored: false,
+        },
+      },
+    });
+  });
   await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
 }
 
@@ -478,6 +514,59 @@ async function reachDecision(page: Page, options: { referenceText?: string } = {
 }
 
 test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）', () => {
+  test('参考路线截图识别：识别只填文字不学习，失败与不支持格式都如实说', async ({ page }) => {
+    test.setTimeout(90_000);
+    await installMocks(page);
+    await page.goto('/');
+    await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
+
+    // 走到"诉求页"（参考路线面板在规划之前就出现）
+    await page.getByTestId('join-room-code').fill('ROOM-E2E');
+    await page.getByTestId('join-room-submit').click();
+    await expect(page.getByTestId('room-code')).not.toBeEmpty();
+    await page.getByTestId('begin-plan').click();
+    await expect(page.getByText('进入共识沙盘')).toBeVisible({ timeout: 10_000 });
+    await page.getByText('进入共识沙盘').click();
+    await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
+
+    const panel = page.getByTestId('reference-route-panel');
+    await panel.getByTestId('reference-route-toggle').click();
+    // 隐私口径必须在动手之前就说清楚：图片不保存、识别结果要核对
+    await expect(panel.getByTestId('reference-route-ocr-privacy')).toContainText('不会保存到服务端');
+    await expect(panel.getByTestId('reference-route-ocr-privacy')).toContainText('核对');
+
+    // 1) 上传截图 → 文字填进输入框，但**不自动学习**
+    await panel
+      .getByTestId('reference-route-image-input')
+      .setInputFiles({ name: 'xiaohongshu.png', mimeType: 'image/png', buffer: TINY_PNG });
+    await expect(panel.getByTestId('reference-route-text')).toHaveValue(OCR_TEXT);
+    await expect(panel.getByTestId('reference-route-ocr-note')).toContainText('核对');
+    await expect(panel.getByTestId('reference-route-image-name')).toContainText('xiaohongshu.png');
+    expect(ocrCalls.length, '应只发一次识别请求').toBe(1);
+    expect(String(ocrCalls[0]?.image_base64 || '').startsWith('data:image/png;base64,'), '图片应以 data URL 发出').toBe(true);
+    expect(referenceSaves.length, '识别不等于学习：不许自动写画像').toBe(0);
+
+    // 2) 用户核对后手动点"学习这条路线"，这时才落库
+    await panel.getByTestId('reference-route-save').click();
+    await expect.poll(() => referenceSaves.length, { timeout: 10_000 }).toBe(1);
+    expect(String(referenceSaves[0]?.text || '')).toContain('博斯腾湖');
+
+    // 3) 本地就能拦掉不支持的格式：不许白发一次请求，且要说清怎么办
+    await panel
+      .getByTestId('reference-route-image-input')
+      .setInputFiles({ name: 'x.gif', mimeType: 'image/gif', buffer: TINY_PNG });
+    await expect(panel.getByTestId('reference-route-ocr-error')).toContainText('PNG');
+    expect(ocrCalls.length, '格式不支持时不该发识别请求').toBe(1);
+
+    // 4) 后端说"图里没有文字"时，如实转达原因，且不往输入框塞任何东西
+    ocrMode = 'no_text';
+    await panel
+      .getByTestId('reference-route-image-input')
+      .setInputFiles({ name: 'scenery.png', mimeType: 'image/png', buffer: TINY_PNG });
+    await expect(panel.getByTestId('reference-route-ocr-error')).toContainText('没有识别到行程文字');
+    await expect(panel.getByTestId('reference-route-text')).toHaveValue('');
+  });
+
   test('渲染四段说明并留下视觉基线截图', async ({ page }) => {
     // 这条要走完整流程 + 截图，机器负载高时 45s 会不够（实测在并发构建时超时过）
     test.setTimeout(90_000);

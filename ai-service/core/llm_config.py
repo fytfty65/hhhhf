@@ -28,6 +28,9 @@ DEFAULT_LONG_MAX_TOKENS = 16384
 # 端点兜底也要统一：conflict.py 原来兜底到本地 Ollama（http://localhost:11434/v1 + "ollama"），
 # 而部署目标是 DashScope 兼容口 —— 环境变量一漏配就会去连一个根本不存在的本地模型服务。
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# 视觉模型（参考路线截图识别）单独一个默认值：主推演模型是纯文本模型，
+# 拿它去读图会直接报错，所以不能复用 LLM_MODEL_NAME。
+DEFAULT_VISION_MODEL = "qwen-vl-max"
 
 
 def base_url(override: Optional[str] = None) -> str:
@@ -47,6 +50,13 @@ def model_name(override: Optional[str] = None) -> str:
     if override and str(override).strip():
         return str(override).strip()
     return str(os.getenv("LLM_MODEL_NAME") or DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME
+
+
+def vision_model(override: Optional[str] = None) -> str:
+    """视觉模型名：显式传入 > LLM_VISION_MODEL > 默认值。"""
+    if override and str(override).strip():
+        return str(override).strip()
+    return str(os.getenv("LLM_VISION_MODEL") or DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
 
 
 def temperature(default: float = DEFAULT_TEMPERATURE) -> float:
