@@ -109,16 +109,20 @@ def scenic_radius_km(trip_days: int, distance_tolerance: str = "normal") -> int:
     return 250
 
 
-def park_cap(trip_days: int, *, scenic_only: bool = False) -> int:
-    """城市公园最多排几个（用户口径：可以限量）。
+def park_cap(trip_days: int, *, scenic_only: bool = False, wants_park: bool = False) -> int:
+    """城市公园最多排几个（用户口径 2026-10-04：**默认 1~2 个**，喜欢可以再要）。
 
-    - 默认："每天最多 1 个"——公园是顺路的落脚点，不该占掉景区与吃饭的名额；
-    - `scenic_only`（用户明确"只想看自然"）：**0 个**。按用户对自然景观的定义，
-      城市公园不算自然景观；既然他只要自然，就不该拿公园凑数。
+    - 默认：整个行程 1~2 个（2 天及以上给 2 个，1 天给 1 个）——
+      公园是顺路落脚点，不该占掉景区与吃饭的名额；
+    - 用户明确说"想逛公园/游乐园"（`wants_park`）→ 放宽到每天 1 个（"后续再添加"）；
+    - `scenic_only`（用户明确"只想看自然"）：**0 个**，按他对自然景观的定义，城市公园不算自然景观。
     """
+    days = max(1, int(trip_days or 1))
     if scenic_only:
         return 0
-    return max(1, int(trip_days or 1))
+    if wants_park:
+        return max(2, days)
+    return min(2, days)
 
 
 def parent_region(destination: str, geocode: Optional[Mapping[str, Any]]) -> str:

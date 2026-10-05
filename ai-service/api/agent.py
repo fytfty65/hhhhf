@@ -57,6 +57,7 @@ from core.poi_pool import (
 # （城市公园另算一档）；用户明确说了就加权。纯函数在 core/route_composition，便于单测。
 from core.route_composition import (
     composition_audit,
+    composition_hint as composition_hint_text,
     composition_targets,
     count_route_composition,
     repair_forbidden_categories,
@@ -441,6 +442,12 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
     if any(k in t for k in ["购物", "商场", "商圈", "商业街", "逛街"]):
         signals["wants_shopping"] = True
         signals["requirements"].append("购物商圈")
+    # 城市公园：默认限量（1~2 个），用户**明确想逛公园/乐园**时放宽 ——
+    # "喜欢的话后续再添加"这条产品口径就落在这个信号上。
+    park_words = ["公园", "游乐园", "动物园", "植物园", "乐园", "园林"]
+    if any(k in t for k in park_words) and positive_mention(park_words):
+        signals["wants_park"] = True
+        signals["requirements"].append("城市公园/乐园")
     if distance_tolerance == "high":
         signals["requirements"].append("不介意跑远（跨景区）")
     elif distance_tolerance == "low":
@@ -2257,6 +2264,15 @@ async def run_negotiate(msg: GatewayMessage):
             wants_hotel=bool(own_signals.get("wants_hotel")),
         )
         print(f"⚖️ [配比目标] {summarize_targets(composition)}", flush=True)
+        # 目标配比写进提示词（软约束 + "不要为凑数硬塞"）——只靠候选池与事后对账补不回
+        # "模型自己排偏"（实测默认那轮人文 2 vs 目标 4）。
+        _scenic_only_flag = bool(own_signals.get("exclude_cultural")) and bool(own_signals.get("wants_scenic"))
+        composition_hint = composition_hint_text(
+            composition,
+            park_cap=park_cap(
+                trip_days, scenic_only=_scenic_only_flag, wants_park=bool(own_signals.get("wants_park"))
+            ),
+        )
         if (pref_signals.get("requirements") or []) != (own_signals.get("requirements") or []):
             print(
                 f"   （房间/历史文本里另有偏好 {pref_signals.get('requirements')}，"
@@ -2981,13 +2997,16 @@ async def run_negotiate(msg: GatewayMessage):
             #    用户明确"只想看自然"时 **0 个** —— 按他的定义公园不算自然景观，不该拿公园凑数。
             #    公园是顺路落脚点，不能占掉景区与吃饭的名额（真实事故：12 节点里 5 个是公园）。
             _scenic_only = bool(own_signals.get("exclude_cultural")) and bool(own_signals.get("wants_scenic"))
-            _park_allowed = park_cap(trip_days, scenic_only=_scenic_only)
+            _park_allowed = park_cap(
+                trip_days, scenic_only=_scenic_only, wants_park=bool(own_signals.get("wants_park"))
+            )
             if len(_day_buckets.get("park") or []) > _park_allowed:
                 _park_dropped = len(_day_buckets["park"]) - _park_allowed
                 _day_buckets["park"] = (_day_buckets["park"] or [])[:_park_allowed]
                 pool_diagnostics["park_capped"] = {"allowed": _park_allowed, "dropped": _park_dropped}
                 print(
-                    f"🌳 [公园限量] 城市公园最多 {_park_allowed} 个（{'你只看了自然，公园不算自然景观' if _scenic_only else '每天最多一个'}），"
+                    f"🌳 [公园限量] 城市公园整趟最多 {_park_allowed} 个"
+                    f"（{'你只看了自然，公园不算自然景观' if _scenic_only else ('你想逛公园，已放宽' if own_signals.get('wants_park') else '默认 1~2 个；想多逛公园可以直接说')}），"
                     f"本次候选里砍掉 {_park_dropped} 个",
                     flush=True,
                 )
@@ -3180,6 +3199,9 @@ async def run_negotiate(msg: GatewayMessage):
 
 【个性化画像（A/B 实验注入，软约束）】:
 {personalization_hint}
+
+【本次目标配比（软约束，但**不要为凑数硬塞**）】:
+{composition_hint}
 
 【候选文旅 POI 底座数据 (已附带标准预估花销)】:
 {json.dumps(prompt_pool_data, ensure_ascii=False)}
@@ -4738,37 +4760,22 @@ async def run_negotiate(msg: GatewayMessage):
                                 _fetcher = getattr(toolbox, "get_real_time_web_price", None)
                                 if _targets and _fetcher:
                                     async def _lookup(_item: Dict[str, Any]) -> Dict[str, Any]:
-                                        """查一个节点的价格：**带出处**（URL + 原文片段），拿不到就如实 None。"""
-                                        from core.web_price_tool import (
-                                            build_observation,
-                                            pick_price_from_rows,
-                                            search_texts,
-                                        )
+                                        """查一个节点的价格：搜索 + **能直抓官方页面就直抓**，带出处。
+
+                                        统一走 `web_price_tool.lookup_price`（一处口径）：
+                                        摘要抽价 → 命中白名单页面再抓正文抽价 → 拿不到如实 None。
+                                        """
+                                        from core.web_price_tool import lookup_price
 
                                         _name = str(_item.get("name") or "")
                                         try:
-                                            _rows = await search_texts(
-                                                f"{target_city} {_name} 门票 价格 人均 每晚", max_results=3
-                                            )
-                                        except Exception:
-                                            _rows = []
-                                        # 统一用 pick_price_from_rows：它会**优先挑有出处的那条**
-                                        # （搜狗的聚合块有价格但没 URL，直接用会得到"有价无源"）
-                                        _best = pick_price_from_rows(_rows)
-                                        if _best is None:
+                                            return await lookup_price(_name, target_city, max_results=3)
+                                        except Exception as _lookup_exc:
+                                            from core.web_price_tool import build_observation
+
                                             return build_observation(
                                                 name=_name, value=None, source="web", provider="search"
-                                            )
-                                        return build_observation(
-                                            name=_name,
-                                            value=float(_best["value"]),
-                                            source="web",
-                                            source_url=str(_best.get("url") or ""),
-                                            excerpt=str(_best.get("excerpt") or ""),
-                                            provider=str(_best.get("provider") or ""),
-                                            publisher=str(_best.get("publisher") or ""),
-                                            source_date=str(_best.get("source_date") or ""),
-                                        )
+                                            ) | {"error": f"{type(_lookup_exc).__name__}: {str(_lookup_exc)[:120]}"}
 
                                     _observations = await asyncio.wait_for(
                                         asyncio.gather(*[_lookup(item) for item in _targets]),
@@ -4929,6 +4936,18 @@ async def run_negotiate(msg: GatewayMessage):
                                 # 用户明说不要人文时，"一个都不许有"要当成硬判据（目标 0 默认会被跳过）
                                 forbidden=("cultural",) if own_signals.get("exclude_cultural") else (),
                             )
+                            # 城市公园上限也要对账：候选池限了量，但模型仍可能多排 —— 超了就说出来，
+                            # 不能让"默认 1~2 个"只活在候选池那一步（实测路线里出现过 3 个公园 > 上限 2）。
+                            _urban_park = int(_route_counts.get("city_park") or 0)
+                            if _urban_park > int(_park_allowed or 0):
+                                _composition_audit["notes"] = list(_composition_audit.get("notes") or []) + [
+                                    f"城市公园排了 {_urban_park} 个，超过上限 {_park_allowed} 个（想把公园换成景区/吃饭可以直接说）"
+                                ]
+                                _composition_audit["ok"] = False
+                                _composition_audit["deviations"] = list(_composition_audit.get("deviations") or []) + [
+                                    {"intent": "city_park", "target": int(_park_allowed or 0), "actual": _urban_park, "severity": "over"}
+                                ]
+                            composition["park_cap"] = int(_park_allowed or 0)
                             final_data["composition"] = {
                                 **composition,
                                 "actual": _route_counts,

@@ -589,5 +589,151 @@ class PacingAndCacheTests(unittest.TestCase):
         self.assertEqual(web_price_tool.last_search_attempts[0]["provider"], "cache")
 
 
+class DailyQuotaTests(unittest.TestCase):
+    """日请求上限开关（用户口径：避免无意中超量）。"""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        self.tmp.close()
+        os.unlink(self.tmp.name)
+        self.env = mock.patch.dict(os.environ, {
+            "WEB_PRICE_USAGE_FILE": self.tmp.name,
+            "WEB_PRICE_DAILY_MAX_REQUESTS": "2",
+        }, clear=False)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        try:
+            os.unlink(self.tmp.name)
+        except OSError:
+            pass
+
+    def test_usage_counts_and_quota_left(self):
+        from core.web_price_tool import daily_quota_left, read_usage, record_request
+
+        self.assertEqual(read_usage()["requests"], 0)
+        self.assertEqual(daily_quota_left(), 2)
+        record_request()
+        self.assertEqual(daily_quota_left(), 1)
+        record_request(2)
+        self.assertEqual(daily_quota_left(), 0)
+
+    def test_exhausted_quota_blocks_the_search_and_says_why(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        web_price_tool._search_cache.clear()
+        web_price_tool.record_request(5)
+        calls = {"n": 0}
+
+        async def fake_sogou(query, max_results=3):
+            calls["n"] += 1
+            return [{"title": "x", "url": "https://x"}]
+
+        with mock.patch("core.web_price_tool.fetch_sogou", fake_sogou):
+            rows = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+        self.assertEqual(rows, [])
+        self.assertEqual(calls["n"], 0, "配额用完后不该再发请求")
+        self.assertEqual(web_price_tool.last_search_attempts[0]["provider"], "quota")
+        self.assertIn("配额已用完", web_price_tool.last_search_attempts[0]["error"])
+
+    def test_requests_are_recorded_on_success(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        web_price_tool._search_cache.clear()
+        web_price_tool._last_search_at = 0.0
+
+        async def fake_sogou(query, max_results=3):
+            return [{"title": "门票45元", "url": "https://x", "provider": "sogou"}]
+
+        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou", "WEB_PRICE_MIN_INTERVAL_SECONDS": "0"}, clear=False):
+            with mock.patch("core.web_price_tool.fetch_sogou", fake_sogou):
+                asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+        self.assertEqual(web_price_tool.read_usage()["requests"], 1)
+
+
+class HotelAllowlistTests(unittest.TestCase):
+    """酒店集团官网纳入默认白名单（用户口径）；民宿平台靠用户自己配置。"""
+
+    def test_hotel_group_official_pages_are_allowed(self):
+        for url in (
+            "https://www.ihg.com/holidayinn/hotels/cn/zh/korla/rate",
+            "https://www.marriott.com/hotels/travel/rate",
+            "https://www.huazhu.com/hotel/123",
+        ):
+            allowed, reason = host_is_allowed(url)
+            self.assertTrue(allowed, f"{url} 应被允许：{reason}")
+
+    def test_booking_platforms_stay_blocked(self):
+        allowed, reason = host_is_allowed("https://hotels.ctrip.com/hotel/1.html")
+        self.assertFalse(allowed)
+        self.assertIn("平台电商页", reason)
+
+    def test_user_configured_domain_still_works(self):
+        with mock.patch.dict(os.environ, {"WEB_PRICE_HOST_SUFFIXES": "mybnb.example.com"}, clear=False):
+            allowed, reason = host_is_allowed("https://mybnb.example.com/room/1")
+        self.assertTrue(allowed, reason)
+
+
+class PageFetchIntegrationTests(unittest.TestCase):
+    """命中白名单页面时**直抓正文**取价（比摘要可靠）。"""
+
+    def test_official_page_price_wins_over_snippet(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3):
+            return [
+                {"title": "某酒店", "snippet": "每晚 999 元", "url": "https://hotels.ctrip.com/x", "provider": "sogou"},
+                {"title": "官方房价", "url": "https://www.huazhu.com/hotel/123", "provider": "sogou"},
+            ]
+
+        async def fake_fetch(url, **_kwargs):
+            return {"ok": True, "url": url, "text": "标准间 每晚 288 元 含早", "retrieved_at": 1.0}
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            with mock.patch("core.web_price_tool.fetch_page_text", fake_fetch):
+                observation = asyncio.run(web_price_tool.lookup_price("某酒店", "库尔勒"))
+        self.assertEqual(observation["value"], 288.0, "应优先用官方页面正文里的价格")
+        self.assertEqual(observation["source"], "web_page")
+        self.assertEqual(observation["provider"], "official_page")
+        self.assertEqual(observation["source_url"], "https://www.huazhu.com/hotel/123")
+        self.assertTrue(observation["estimated"], "抓来的页面价仍是估算，不能标已核实")
+
+    def test_falls_back_to_snippet_when_page_unavailable(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3):
+            return [{"title": "博斯腾湖", "snippet": "门票45元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou", "cite_site": "相约久久"}]
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            observation = asyncio.run(web_price_tool.lookup_price("博斯腾湖", "库尔勒"))
+        self.assertEqual(observation["value"], 45.0)
+        self.assertEqual(observation["source"], "web")
+        self.assertEqual(observation["publisher"], "相约久久")
+
+    def test_nothing_found_is_honest_none(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3):
+            return [{"title": "无关", "snippet": "今天天气不错", "url": "https://www.sogou.com/link?url=y"}]
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            observation = asyncio.run(web_price_tool.lookup_price("某酒店", "库尔勒"))
+        self.assertIsNone(observation["value"])
+        self.assertTrue(observation["estimated"])
+
+
 if __name__ == "__main__":
     unittest.main()

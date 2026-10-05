@@ -36,11 +36,18 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
-# 允许直接抓取的域名后缀：政府/事业单位这类公开页面。
-# 平台电商页（携程/美团/点评…）不在其中：它们的价格在登录态接口里，抓页面拿不到，
-# 而且抓取违反其服务条款 —— 与其"看起来能拿到"不如明确不做。
-# 景区官网各异，靠 `WEB_PRICE_HOST_SUFFIXES` 显式扩充（配置决策，不做隐藏假设）。
-DEFAULT_OFFICIAL_SUFFIXES = (".gov.cn", "gov.cn", ".gov.com.cn", ".org.cn", ".museum.cn")
+# 允许直接抓取的域名后缀：
+#   ① 政府/事业单位这类明显公开的页面；
+#   ② **酒店集团官网**（公开房价页）—— 用户口径 2026-10-04："可以加入酒店官网/民宿平台的可读页面"。
+#      民宿平台多数要登录，不在默认清单里；需要时用 `WEB_PRICE_HOST_SUFFIXES` 自己加。
+# 平台电商页（携程/美团/点评…）仍然明确不做：价格在登录态接口里、页面抓不到，抓取也违反其条款。
+DEFAULT_OFFICIAL_SUFFIXES = (
+    ".gov.cn", "gov.cn", ".gov.com.cn", ".org.cn", ".museum.cn",
+    # 酒店集团官网（公开可读的房价页）
+    "ihg.com", "marriott.com", "hilton.com", "hyatt.com", "accor.com", "wyndhamhotels.com",
+    "bestwestern.com", "radissonhotels.com", "huazhu.com", "jinjianghotels.com", "jinjiang.com",
+    "hworld.com", "7daysinn.cn", "homeinns.com", "motel168.com", "rujia.com", "vlovehotel.com",
+)
 BLOCKED_HOST_MARKERS = (
     "ctrip.com", "meituan.com", "dianping.com", "qunar.com", "fliggy.com", "taobao.com", "tmall.com",
     "tuniu.com", "ly.com", "elong.com", "booking.com", "agoda.com", "airbnb.",
@@ -65,6 +72,66 @@ _PRICE_PATTERNS = (
 )
 FREE_MARKER = "免费"
 CONTEXT_MARKERS = ("门票", "票价", "人均", "每晚", "房价", "价格", "费用", "起")
+
+
+def budget_daily_max_requests() -> int:
+    """联网取价的**每日请求上限**（默认 120）。
+
+    用户口径 2026-10-04：加一个日请求上限开关，避免无意中超量（批量预热几千个 POI 时尤其重要）。
+    达到上限就不再发起请求，并**如实说明"今天配额用完了"**，而不是静默失败。
+    """
+    raw = str(os.getenv("WEB_PRICE_DAILY_MAX_REQUESTS") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 120
+    return value if value > 0 else 120
+
+
+def usage_state_path() -> str:
+    raw = str(os.getenv("WEB_PRICE_USAGE_FILE") or "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web_price_usage.json")
+
+
+def _today() -> str:
+    import datetime
+
+    return datetime.date.today().isoformat()
+
+
+def read_usage() -> Dict[str, Any]:
+    """读当日用量（`{date, requests}`）；文件缺失/损坏一律当成 0，绝不因此报错。"""
+    import json
+
+    path = usage_state_path()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict) and str(data.get("date")) == _today():
+            return {"date": data.get("date"), "requests": int(data.get("requests") or 0)}
+    except Exception:
+        pass
+    return {"date": _today(), "requests": 0}
+
+
+def record_request(count: int = 1) -> Dict[str, Any]:
+    """记一次请求（原子性不做强保证：这是配额保护，不是计费系统）。返回最新用量。"""
+    import json
+
+    state = read_usage()
+    state["requests"] = int(state.get("requests") or 0) + max(0, int(count))
+    try:
+        with open(usage_state_path(), "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False)
+    except Exception:
+        pass
+    return state
+
+
+def daily_quota_left() -> int:
+    return max(0, budget_daily_max_requests() - int(read_usage().get("requests") or 0))
 
 
 def price_timeout_seconds() -> float:
@@ -444,6 +511,15 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
         last_search_attempts = [{"provider": "cache", "ok": True, "results": len(cached[1])}]
         return [dict(row) for row in cached[1]]
 
+    # 日请求上限：到顶就不再发请求，并如实说明原因（用户口径：避免无意中超量）
+    if daily_quota_left() <= 0:
+        last_search_attempts = [{
+            "provider": "quota",
+            "ok": False,
+            "error": f"今日联网取价配额已用完（上限 {budget_daily_max_requests()} 次）",
+        }]
+        return []
+
     async with _search_lock:
         cached = _search_cache.get(cache_key)
         if cached and (_time.monotonic() - cached[0]) < search_cache_ttl_seconds():
@@ -457,6 +533,7 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
             if provider == "sogou":
                 try:
                     rows = await fetch_sogou(query, max_results=max_results)
+                    record_request()  # 计入日配额（无论成败都算一次真实请求）
                     attempts.append({"provider": "sogou", "ok": bool(rows), "results": len(rows)})
                     if rows:
                         _last_search_at = _time.monotonic()
@@ -468,6 +545,7 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
             elif provider == "search":
                 try:
                     rows = await search_duckduckgo(query, max_results=max_results)
+                    record_request()
                     attempts.append({"provider": "search", "ok": bool(rows), "results": len(rows)})
                     if rows:
                         _last_search_at = _time.monotonic()
@@ -533,6 +611,69 @@ async def search_result_count(query: str, *, max_results: int = 3) -> int:
     """诊断用：真正搜一次，返回结果条数（走同一套提供方顺序与代理处理）。"""
     rows = await search_texts(query, max_results=max_results)
     return len(rows)
+
+
+async def lookup_price(name: str, city: str, *, max_results: int = 3) -> Dict[str, Any]:
+    """一个地点的取价：先搜，再**能直抓官方页面就直抓**（用户口径：加入酒店官网/民宿白名单）。
+
+    顺序与口径：
+      1. 搜索 → 从摘要里抽价（门票/景区类命中率最高）；
+      2. 若命中的链接在**允许清单**里（政府页/酒店集团官网/用户配置域名），直抓该页面，
+         从**页面正文**抽价 —— 这比摘要可靠（摘要可能只是标题里的数字）；
+      3. 两者都拿不到 → 返回 `value=None` 并说明，绝不填数字。
+
+    页面来的价格仍标 `source="web_page"`（⇒ estimated）：我们抓的是公开页面文本，
+    不等于官方报价接口，不能冒充"已核实"。
+    """
+    query = f"{city} {name} 门票 价格 人均 每晚"
+    try:
+        rows = await search_texts(query, max_results=max_results)
+    except Exception as exc:
+        return build_observation(name=name, value=None, source="web", provider=",".join(enabled_providers())) | {
+            "error": f"{type(exc).__name__}: {str(exc)[:120]}"
+        }
+
+    snippet_pick = pick_price_from_rows(rows)
+    page_url = ""
+    for row in rows or []:
+        candidate_url = str(row.get("url") or row.get("href") or "")
+        if candidate_url and host_is_allowed(candidate_url)[0]:
+            page_url = candidate_url
+            break
+
+    if page_url:
+        page = await fetch_page_text(page_url)
+        if page.get("ok"):
+            candidates = extract_price_candidates(str(page.get("text") or ""))
+            if candidates:
+                best = candidates[0]
+                return build_observation(
+                    name=name,
+                    value=float(best["value"]),
+                    source="web_page",
+                    source_url=page_url,
+                    excerpt=str(best.get("excerpt") or ""),
+                    provider="official_page",
+                )
+
+    if snippet_pick is not None:
+        return build_observation(
+            name=name,
+            value=float(snippet_pick["value"]),
+            source="web",
+            source_url=str(snippet_pick.get("url") or ""),
+            excerpt=str(snippet_pick.get("excerpt") or ""),
+            provider=str(snippet_pick.get("provider") or ""),
+            publisher=str(snippet_pick.get("publisher") or ""),
+            source_date=str(snippet_pick.get("source_date") or ""),
+        )
+    return build_observation(
+        name=name,
+        value=None,
+        source="web",
+        provider=",".join(enabled_providers()),
+        source_url=page_url,
+    )
 
 
 def build_observation(

@@ -185,6 +185,31 @@ def summarize_targets(targets: Mapping[str, Any]) -> str:
     return base + "（按你这轮明确说的偏好加权）"
 
 
+def composition_hint(targets: Mapping[str, Any], *, park_cap: Optional[int] = None) -> str:
+    """给模型的**目标配比提示**（用户 2026-10-04 把这件事交给我们定）。
+
+    口径（为什么这么写）：
+      - 写进去有用：实测默认那轮模型把人文排成 2 个（目标 4），只靠候选池与事后对账补不回来；
+      - 但不能写成死指标：模型会为了凑数硬塞一个博物馆 —— 所以明确写"不要为凑数硬塞"，
+        并给出优先级（用户明说的诉求 > 配比目标）；
+      - 必须重申"自然景观 = 景区，城市公园不算"，否则它又会拿公园充自然；
+      - 用户明确排除的类别一个都不要排。
+    """
+    scenic = int(targets.get("scenic", 0) or 0)
+    cultural = int(targets.get("cultural", 0) or 0)
+    food = int(targets.get("food", 0) or 0)
+    hotel = int(targets.get("hotel", 0) or 0)
+    lines = [
+        f"白天节点大致按「自然景区 {scenic} · 人文 {cultural} · 特色美食 {food}」分配，住宿 {hotel} 处（按夜数）。",
+        "自然景观只算**景区**（湖/雪山/草原/沙漠/峡谷/湿地森林/国家级景点）；城市公园**不算**自然景观，"
+        + (f"全程最多 {park_cap} 个。" if park_cap is not None else "不要拿它充数。"),
+        "美食要**穿插到每一天**，不要集中在一两天；住宿按夜数收尾。",
+        "**不要为了凑数量硬塞**：候选里没有合适的，就少排一个并说明；宁可少，也不要排一个不合适的地点。",
+        "用户在诉求里明确说过的偏好 > 这份配比；用户明确排除的类别（例如说的不要人文）一个都不要排。",
+    ]
+    return "\n".join(lines)
+
+
 COMPOSITION_LABELS = {"scenic": "自然景区", "cultural": "人文", "food": "特色美食", "hotel": "住宿"}
 
 

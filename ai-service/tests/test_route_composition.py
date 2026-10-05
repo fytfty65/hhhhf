@@ -227,20 +227,30 @@ class StationNameTests(unittest.TestCase):
 
 
 class ParkCapTests(unittest.TestCase):
-    """城市公园限量（用户口径：可以限量；只想看自然时一个都不要）。"""
+    """城市公园限量（用户口径 2026-10-04：**默认 1~2 个**，喜欢可以再要）。"""
 
-    def test_default_cap_is_one_park_per_day(self):
+    def test_default_cap_is_one_or_two_for_the_whole_trip(self):
         from core.poi_pool import park_cap
 
-        self.assertEqual(park_cap(2), 2)
-        self.assertEqual(park_cap(4), 4)
         self.assertEqual(park_cap(1), 1)
+        self.assertEqual(park_cap(2), 2)
+        self.assertEqual(park_cap(4), 2, "默认是整趟 1~2 个，不随天数线性增长")
+        self.assertEqual(park_cap(7), 2)
+
+    def test_user_asking_for_parks_loosens_the_cap(self):
+        """"如果用户喜欢后续再添加"：明确想逛公园/乐园时放宽到每天一个。"""
+        from core.poi_pool import park_cap
+
+        self.assertEqual(park_cap(3, wants_park=True), 3)
+        self.assertEqual(park_cap(5, wants_park=True), 5)
+        self.assertGreater(park_cap(4, wants_park=True), park_cap(4))
 
     def test_scenic_only_trip_allows_no_city_park(self):
         from core.poi_pool import park_cap
 
         self.assertEqual(park_cap(3, scenic_only=True), 0)
         self.assertEqual(park_cap(1, scenic_only=True), 0)
+        self.assertEqual(park_cap(3, scenic_only=True, wants_park=True), 0, "只要自然时不因'想逛公园'破例")
 
 
 class IntentDrivenCompositionTests(unittest.TestCase):
@@ -267,6 +277,36 @@ class IntentDrivenCompositionTests(unittest.TestCase):
         targets = composition_targets(trip_days=3, daily_nodes=5, wants_scenic=True, exclude_cultural=True)
         audit = composition_audit({"scenic": 10, "cultural": 2, "food": 3, "hotel": 2}, targets)
         self.assertTrue(audit["ok"], audit["notes"])
+
+
+class CompositionHintTests(unittest.TestCase):
+    """目标配比写进提示词：要给出数字，但必须写清"不要为凑数硬塞"。"""
+
+    def test_hint_carries_targets_and_the_no_padding_rule(self):
+        from core.route_composition import composition_hint, composition_targets
+
+        targets = composition_targets(trip_days=2, daily_nodes=5)
+        text = composition_hint(targets, park_cap=2)
+        self.assertIn(f"自然景区 {targets['scenic']}", text)
+        self.assertIn(f"人文 {targets['cultural']}", text)
+        self.assertIn("不要为了凑数量硬塞", text)
+        self.assertIn("城市公园", text)
+        self.assertIn("最多 2 个", text)
+        self.assertIn("美食要**穿插到每一天**", text)
+
+    def test_hint_states_user_preference_priority_and_exclusions(self):
+        from core.route_composition import composition_hint, composition_targets
+
+        targets = composition_targets(trip_days=3, daily_nodes=5, wants_scenic=True, exclude_cultural=True)
+        text = composition_hint(targets, park_cap=0)
+        self.assertIn("明确说过的偏好 > 这份配比", text)
+        self.assertIn("明确排除的类别", text)
+
+    def test_hint_without_park_cap_says_do_not_pad_with_parks(self):
+        from core.route_composition import composition_hint, composition_targets
+
+        text = composition_hint(composition_targets(trip_days=2, daily_nodes=5))
+        self.assertIn("不要拿它充数", text)
 
 
 if __name__ == "__main__":
