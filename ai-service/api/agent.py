@@ -1885,6 +1885,24 @@ async def run_negotiate(msg: GatewayMessage):
         payload.get("correlation_id") or payload.get("plan_id") or payload.get("trip_id") or ""
     ).strip() or f"plan-{uuid.uuid4().hex[:12]}"
 
+    # ⏱️ 分段耗时记号（2026-10-05）：横向对照发现单次推演从 57–90s 涨到 139–191s，
+    #    但"慢在哪一段"只能靠猜。这里在几个关键节点打点，出方案时打一行汇总
+    #    （纯观测，不改任何行为；`work/plan-quality-matrix.md` 的耗时才有得对照）。
+    import time as _stage_time
+
+    _stage_marks: Dict[str, float] = {"开始": _stage_time.monotonic()}
+
+    def _stage(name: str) -> None:
+        _stage_marks[name] = _stage_time.monotonic()
+
+    def _stage_summary() -> str:
+        names = list(_stage_marks.keys())
+        parts = []
+        for index in range(1, len(names)):
+            parts.append(f"{names[index]}={_stage_marks[names[index]] - _stage_marks[names[index - 1]]:.1f}s")
+        total = _stage_marks[names[-1]] - _stage_marks[names[0]]
+        return " ".join(parts) + f" | 总计={total:.1f}s"
+
     user_prefs = payload.get("user_preferences") or payload.get("current_request", {}).get("user_preferences", {})
     if not isinstance(user_prefs, dict):
         user_prefs = {}
@@ -2516,6 +2534,7 @@ async def run_negotiate(msg: GatewayMessage):
             safety_intel, target_city,
             weather=weather_data, traffic=traffic_data, is_weekend=is_weekend
         )
+        _stage("取数与风控")
 
         unique_foods = deduplicate_and_diversify_pois(raw_foods)
         unique_attractions = deduplicate_and_diversify_pois(raw_attractions)
@@ -2806,6 +2825,7 @@ async def run_negotiate(msg: GatewayMessage):
                     print(f"   · {_conflict.get('code')}：{_conflict.get('detail')}", flush=True)
             except Exception as _conflict_exc:  # 分歧记录失败绝不影响出方案
                 specialist_runtime_result["proposal_conflicts"] = {"error": str(_conflict_exc)[:200]}
+            _stage("专业提案与协商")
             _gated = apply_candidate_gates(
                 {"attractions": unique_attractions, "dining": unique_foods, "lodging": cleaned_hotels},
                 specialist_runtime_result,
@@ -4803,6 +4823,7 @@ async def run_negotiate(msg: GatewayMessage):
 
                             # 👑 价格补全（有界）：只查**缺价**节点、并发执行、整体超时保护；
                             # 来源标为 web → 结构上仍是"估算"，必须标明，不会冒充已验证价格。
+                            _stage("候选池与模型写方案")
                             try:
                                 from core.price_sources import (
                                     merge_observations,
@@ -4977,6 +4998,7 @@ async def run_negotiate(msg: GatewayMessage):
                                     }
                                 except Exception:
                                     final_data["price_audit"] = {"error": f"{type(_price_exc).__name__}: {str(_price_exc)[:180]}"}
+                            _stage("联网取价")
 
                             # 👑 跨城腿的出行方式比较（有界：最多 2 段；票价无来源就标未核实）
                             try:
@@ -5685,6 +5707,7 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _closeout_exc:  # 收口失败绝不影响出方案（但要留痕）
                             final_data["hard_constraint_closeout"] = {"error": str(_closeout_exc)[:200]}
                             print(f"⚠️ [硬约束收口] 失败（不影响出方案）: {_closeout_exc}", flush=True)
+                        _stage("硬约束修复与收口")
                         _final_fairness = fairness_report(final_data["route"], fairness_members or room_members)
                         _fairness_meta = final_data.get("fairness") or {}
                         _threshold = float(_fairness_meta.get("threshold", 0.15) or 0.15)
@@ -5768,7 +5791,10 @@ async def run_negotiate(msg: GatewayMessage):
                             "reasons": reference_hint["hints"].get("reasons") or [],
                             "disclosure": reference_hint["disclosure"],
                         }
+                    _stage("配图与校验")
+                    print(f"⏱️ [分段耗时] {_stage_summary()}", flush=True)
                     yield json.dumps({"type": "final_route", "payload": final_data}, ensure_ascii=False) + "\n"
+                    _stage("事件流与推送")
                     # 事件流：行程生成完成事件（emit 到全局 Redis Stream）
                     await event_bus.emit(OMNI_EVENTS_STREAM, "final_route_ready", {
                         "room_id": room_id, "user_id": user_id, "city": target_city,
@@ -5856,6 +5882,10 @@ async def run_negotiate(msg: GatewayMessage):
                     if final_stitched_path:
                         yield json.dumps({"actual_path": final_stitched_path}, ensure_ascii=False) + "\n"
                         print(f"🛣️ [精准链路推送] 成功下发 {len(final_stitched_path)} 个对齐的高德路网坐标！")
+                    # ⏱️ 收尾（路网拼装 / 事件流 / 语义缓存）也计时：实测这段在 final_route 之后
+                    #    还要花几十秒，而服务端整个请求的耗时是把它算进去的。
+                    _stage("路网与推送")
+                    print(f"⏱️ [分段耗时·含收尾] {_stage_summary()}", flush=True)
             except Exception as e:
                 # ⚠️ 这个 except 覆盖的范围**远不止**"路网拼装"（从最终门禁到下发都在里面），
                 #    所以标题容易把人带偏 —— 实测（2026-10-05）配比对账里一个 ValueError
