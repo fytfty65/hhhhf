@@ -600,6 +600,19 @@ class SpecialistRuntime:
             raw = await asyncio.wait_for(handler(request), timeout=capability.timeout_ms / 1000)
             payload = raw.model_dump(mode="python") if isinstance(raw, AgentProposal) else dict(raw)
             payload["latency_ms"] = max(0, round((time.perf_counter() - started) * 1000))
+            # 👑 输入契约回带：每个提案都要写明"我是基于哪一版事实提的"。
+            #    实测（2026-10-04）：只有候选池类 handler 会回带 `hard_constraint_results`，
+            #    绿色出行/健康/应急/预算这几个提案里根本没有 → 对齐检查一上就点名了 4 个。
+            #    与其逐个 handler 改（以后新增还会漏），不如在运行时出口统一盖章：
+            #    盖的就是 handler 收到的 request.hard_constraints —— 这是事实，不是补写。
+            if request.hard_constraints:
+                existing = payload.get("hard_constraint_results")
+                if not isinstance(existing, Mapping) or not existing:
+                    payload["hard_constraint_results"] = dict(request.hard_constraints)
+                else:
+                    merged = dict(request.hard_constraints)
+                    merged.update({str(key): value for key, value in existing.items()})
+                    payload["hard_constraint_results"] = merged
             return validate_agent_proposal(payload)
         except asyncio.TimeoutError:
             return AgentProposal(
@@ -644,7 +657,35 @@ def build_pool_runtime(
     risk_event: Mapping[str, Any] | None = None,
     nights: int | None = None,
     budget_total: float | None = None,
+    facts: Mapping[str, Any] | None = None,
 ) -> tuple[SpecialistRuntime, list[AgentInput]]:
+    """装配专业智能体运行时。
+
+    `facts` 是这一轮的**统一事实快照**（core/plan_facts.build_request_facts）：
+    它把"用户说了什么、有什么约束"变成每个智能体输入契约里的硬约束 ——
+    此前这里是空的，每个智能体只看得到自己的候选池，谁也不知道
+    "用户不要博物馆""他不介意跑远"，所谓协同其实只是各算各的。
+    现在每个提案都会带着 `facts_version`（来自输入契约），协调器据此校验
+    "大家是不是基于同一版事实"。
+    """
+    hard_constraints: dict[str, Any] = {}
+    soft_preferences: dict[str, Any] = {}
+    if isinstance(facts, Mapping) and facts:
+        from core.plan_facts import facts_version as _facts_version
+
+        constraints = facts.get("constraints") if isinstance(facts.get("constraints"), Mapping) else {}
+        for key, entry in constraints.items():
+            value = entry.get("value") if isinstance(entry, Mapping) else entry
+            if value is None:
+                continue
+            hard_constraints[str(key)] = value
+        decisions = facts.get("decisions") if isinstance(facts.get("decisions"), Mapping) else {}
+        targets_entry = decisions.get("composition_targets") if isinstance(decisions, Mapping) else None
+        targets = targets_entry.get("value") if isinstance(targets_entry, Mapping) else None
+        if isinstance(targets, Mapping):
+            soft_preferences["composition_targets"] = dict(targets)
+        hard_constraints["facts_version"] = str(facts.get("facts_version") or _facts_version(facts))
+
     sources = {
         "route-planner": ("itinerary", attractions, "amap", "attraction_candidates"),
         "transport-agent": ("transport", transport, "transport.provider", "transport_candidates"),
@@ -665,15 +706,17 @@ def build_pool_runtime(
             handlers[agent_id] = pool_handler(agent_id, domain, provider=provider, field=field)
         requests.append(AgentInput(
             request_id=f"runtime-{agent_id}", agent_id=agent_id, domain=domain,
-            context={"candidates": list(candidates)}, hard_constraints={},
-            soft_preferences={}, allowed_tools=[],
+            context={"candidates": list(candidates)},
+            hard_constraints=dict(hard_constraints),
+            soft_preferences=dict(soft_preferences), allowed_tools=[],
         ))
     # 绿色出行智能体：基于碳排方法学独立提案（此前只在注册表里声明，从未被调度）
     handlers[GREEN_AGENT_ID] = green_handler()
     requests.append(AgentInput(
         request_id=f"runtime-{GREEN_AGENT_ID}", agent_id=GREEN_AGENT_ID, domain="sustainability",
-        context={"transport_options": list(transport_options or transport)}, hard_constraints={},
-        soft_preferences={}, allowed_tools=[],
+        context={"transport_options": list(transport_options or transport)},
+        hard_constraints=dict(hard_constraints),
+        soft_preferences=dict(soft_preferences), allowed_tools=[],
     ))
     # 健康 / 体力智能体：按画像与天气给出保守强度建议
     handlers[HEALTH_AGENT_ID] = health_handler()
@@ -684,13 +727,13 @@ def build_pool_runtime(
             "weather": dict(weather or {}),
             "daily_nodes": daily_nodes,
         },
-        hard_constraints={}, soft_preferences={}, allowed_tools=[],
+        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences), allowed_tools=[],
     ))
     # 应急智能体：把风险事件转成最小扰动重规划动作提案（旅中闭环的入口）
     handlers[EMERGENCY_AGENT_ID] = emergency_handler()
     requests.append(AgentInput(
         request_id=f"runtime-{EMERGENCY_AGENT_ID}", agent_id=EMERGENCY_AGENT_ID, domain="emergency",
-        context={"route": list(route), "risk_event": dict(risk_event or {})}, hard_constraints={},
-        soft_preferences={}, allowed_tools=[],
+        context={"route": list(route), "risk_event": dict(risk_event or {})},
+        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences), allowed_tools=[],
     ))
     return SpecialistRuntime(handlers), requests

@@ -2245,6 +2245,22 @@ async def run_negotiate(msg: GatewayMessage):
                 flush=True,
             )
 
+        # 👑 统一事实快照（提案阶段的输入契约）：用户说的 + 约束 + 目标配比，一次算好，
+        #    后面每个专业智能体的输入契约里都带同一版 `facts_version` ——
+        #    这样"多智能体协同"才有共同的讨论前提（此前各智能体拿到的约束是空的）。
+        from core.plan_facts import build_request_facts, proposal_facts_alignment
+
+        request_facts = build_request_facts(
+            correlation_id=plan_correlation_id,
+            city=target_city,
+            trip_days=trip_days,
+            intent=intent_str,
+            signals=own_signals,
+            composition=composition,
+        )
+        facts_version_string = str(request_facts.get("facts_version") or "")
+        print(f"🧾 [统一事实] 快照 {facts_version_string}（约束 {len(request_facts.get('constraints') or {})} 项）", flush=True)
+
         async def _fetch_attraction_mix() -> List[Dict[str, Any]]:
             from core.route_profile import profile_to_retrieval_hints
 
@@ -2499,8 +2515,17 @@ async def run_negotiate(msg: GatewayMessage):
                 dining=unique_foods,
                 risk=[safety_intel] if isinstance(safety_intel, dict) else [],
                 budget=[],
+                facts=request_facts,
             )
             specialist_runtime_result = await _runtime.execute(_runtime_requests)
+            # 提案是否基于**同一版事实**：不基于就如实点名（每个提案都从输入契约里带 facts_version）
+            _facts_alignment = proposal_facts_alignment(
+                specialist_runtime_result.get("proposals"), facts_version_string
+            )
+            specialist_runtime_result["facts_version"] = facts_version_string
+            specialist_runtime_result["facts_alignment"] = _facts_alignment
+            if not _facts_alignment.get("aligned"):
+                print(f"⚠️ [统一事实] 有提案不是基于同一版事实：{_facts_alignment.get('mismatched')}", flush=True)
             _gated = apply_candidate_gates(
                 {"attractions": unique_attractions, "dining": unique_foods, "lodging": cleaned_hotels},
                 specialist_runtime_result,
@@ -2544,6 +2569,11 @@ async def run_negotiate(msg: GatewayMessage):
                 "status": specialist_runtime_result.get("status"),
                 "completed": specialist_runtime_result.get("completed", 0),
                 "degraded": specialist_runtime_result.get("degraded", 0),
+                "facts_version": facts_version_string,
+                "facts_aligned": bool((specialist_runtime_result.get("facts_alignment") or {}).get("aligned")),
+                "hard_constraints": sorted(
+                    key for key in ((request_facts.get("constraints") or {}).keys())
+                ),
             }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
         except Exception as _runtime_error:
             specialist_runtime_result = {
@@ -4705,6 +4735,9 @@ async def run_negotiate(msg: GatewayMessage):
                                 degradations=final_data.get("degradations"),
                             )
                             final_data["facts"] = _facts
+                            # 事实记录里也带上提案阶段那一版快照的版本号：整轮规划可对齐
+                            _facts["facts_version"] = facts_version_string
+                            _facts["proposal_alignment"] = specialist_runtime_result.get("facts_alignment")
                             await event_bus.emit(OMNI_EVENTS_STREAM, "plan.facts.ready", {
                                 "room_id": room_id,
                                 "user_id": user_id,

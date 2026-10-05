@@ -21,6 +21,8 @@ travel_feasibility / profile_applied / exclusion_repair / degradations / optimiz
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -208,11 +210,96 @@ def _value(facts: Mapping[str, Any], section: str, key: str) -> Any:
     return entry.get("value") if isinstance(entry, Mapping) else None
 
 
+def build_request_facts(
+    *,
+    correlation_id: str,
+    city: str,
+    trip_days: int,
+    intent: str,
+    signals: Mapping[str, Any],
+    composition: Optional[Mapping[str, Any]] = None,
+    generated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """**提案阶段**用的基础事实快照：请求 + 约束（+ 若有则目标配比）。
+
+    为什么要有这一层：specialist 运行时此前拿到的 `hard_constraints` 是**空的** ——
+    每个智能体自己看候选池，谁也不知道"用户说了不要博物馆""他不介意跑远"。
+    于是"多智能体协同"实际上只是各算各的（提案与裁决各看各的），
+    出了问题也无法回答"你们是基于同一份事实讨论的吗"。
+    """
+    facts = build_plan_facts(
+        correlation_id=correlation_id,
+        city=city,
+        trip_days=trip_days,
+        intent=intent,
+        signals=signals,
+        composition=composition,
+        supply=None,
+        feasibility=None,
+        profile_applied=None,
+        reference_profile=None,
+        route=None,
+        degradations=None,
+        generated_at=generated_at,
+    )
+    facts["stage"] = "request"
+    facts["facts_version"] = facts_version(facts)
+    return facts
+
+
+def facts_version(facts: Mapping[str, Any]) -> str:
+    """事实版本：请求 + 约束的稳定摘要（同一版事实 → 同一个版本号）。
+
+    做法简单但够用：把 request/constraints 规范化成 JSON 再取 sha1 前 8 位，
+    前缀带 schema 版本。任何消费方都能用它回答"我们看的是同一版事实吗"。
+    """
+    data = facts if isinstance(facts, Mapping) else {}
+    payload = {
+        "schema_version": data.get("schema_version"),
+        "request": {key: _as_mapping(entry).get("value") for key, entry in sorted(_as_mapping(data.get("request")).items())},
+        "constraints": {key: _as_mapping(entry).get("value") for key, entry in sorted(_as_mapping(data.get("constraints")).items())},
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:8]
+    return f"facts-v{data.get('schema_version') or FACTS_SCHEMA_VERSION}-{digest}"
+
+
+def proposal_facts_alignment(proposals: Any, expected_version: str) -> Dict[str, Any]:
+    """校验每个提案是否基于**同一版事实**（不基于就如实点名，不装作协同成功）。
+
+    提案里的事实版本由 specialist 运行时从它的输入契约里带出来
+    （`hard_constraint_results.facts_version`）；这里只做对齐检查。
+    """
+    expected = str(expected_version or "")
+    mismatched: List[Dict[str, Any]] = []
+    seen_versions: List[str] = []
+    for proposal in proposals or []:
+        if not isinstance(proposal, Mapping):
+            continue
+        constraints = _as_mapping(proposal.get("hard_constraint_results"))
+        version = str(constraints.get("facts_version") or "")
+        if version:
+            seen_versions.append(version)
+        if not version or version != expected:
+            mismatched.append({
+                "agent_id": str(proposal.get("agent_id") or "unknown"),
+                "facts_version": version or "(未携带)",
+            })
+    return {
+        "aligned": not mismatched,
+        "expected": expected,
+        "mismatched": mismatched,
+        "checked": len(seen_versions),
+        "versions": sorted(set(seen_versions)),
+    }
+
+
 def summarize_facts(facts: Mapping[str, Any]) -> Dict[str, Any]:
     """事实记录 → 事件流里那一条**摘要**（不塞整份 payload，事件流要保持轻）。"""
     data = facts if isinstance(facts, Mapping) else {}
     return {
         "schema_version": data.get("schema_version"),
+        "facts_version": data.get("facts_version"),
         "city": _value(data, "request", "city"),
         "nodes": _value(data, "outcome", "nodes"),
         "supply_status": _value(data, "suppliers", "supply_status"),
