@@ -344,6 +344,7 @@ const GOVERNANCE_PAYLOAD = {
         },
       ],
       notes: ['协商一轮后分歧全部解决'],
+      convergence: { code: 'converged', reason: '分歧已全部解决，协商结束' },
     },
   },
 };
@@ -720,6 +721,8 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByTestId('negotiation-revision')).toContainText('route-planner 按裁决重提');
     await expect(panel.getByTestId('negotiation-revision')).toContainText('分歧 1 条 → 0 条');
     await expect(panel.getByTestId('negotiation-revision')).toContainText('max_far_scenic 上限 3，去掉 10 条');
+    // 为什么停在这里（收敛判断）：不许默默停
+    await expect(panel.getByTestId('negotiation-revision')).toContainText('分歧已全部解决，协商结束');
 
     // 已作调整：平替明细 + 人话说明
     await expect(panel.getByText('已作调整')).toBeVisible();

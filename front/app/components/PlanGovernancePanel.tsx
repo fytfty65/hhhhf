@@ -198,6 +198,8 @@ export type PlanGovernance = {
       resolved?: string[];
       changed?: { agent_id?: string; applied?: Record<string, { limit?: number; dropped_count?: number; dropped?: string[] }>; candidates_after?: number }[];
       notes?: string[];
+      /** 为什么停在这里（收敛判断）：已解决 / 达到轮次上限 / 重提无进展 */
+      convergence?: { code?: string; reason?: string };
       error?: string;
     };
     notes?: string[];
@@ -532,6 +534,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                 {(negotiation.revision.resolved?.length ?? 0) > 0
                   ? `（已解决：${negotiation.revision.resolved?.join('、')}）`
                   : ''}
+                {negotiation.revision.convergence?.reason ? `｜${negotiation.revision.convergence.reason}` : ''}
               </p>
               {(negotiation.revision.changed?.length ?? 0) > 0 && (
                 <ul className="mt-0.5 space-y-0.5">

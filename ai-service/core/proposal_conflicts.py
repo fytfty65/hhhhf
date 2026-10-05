@@ -426,6 +426,8 @@ def evaluate_revisions(
     before: Sequence[Mapping[str, Any]],
     after: Sequence[Mapping[str, Any]],
     revised: Mapping[str, Mapping[str, Any]],
+    *,
+    round_index: int = 1,
 ) -> Dict[str, Any]:
     """协商一轮后的结果：分歧解掉了几条、还剩几条、谁真的重提了（含去掉了什么）。"""
     before_codes = {str(_as_mapping(item).get("code") or "") for item in before or []}
@@ -441,7 +443,7 @@ def evaluate_revisions(
                 "candidates_after": len(_candidates_of(entry)),
             })
     return {
-        "round": 1,
+        "round": int(round_index),
         "revised_agents": sorted(str(key) for key in (revised or {})),
         "changed": changed,
         "conflicts_before": sorted(before_codes),
@@ -450,9 +452,48 @@ def evaluate_revisions(
         "remaining": sorted(after_codes),
         "resolved_all": not after_codes,
         "notes": (
-            ["协商一轮后分歧全部解决"] if not after_codes and before_codes
-            else ([f"协商一轮后仍有分歧：{'、'.join(sorted(after_codes))}"] if after_codes else [])
+            ["本轮分歧全部解决"] if not after_codes and before_codes
+            else ([f"本轮后仍有分歧：{'、'.join(sorted(after_codes))}"] if after_codes else [])
         ),
+    }
+
+
+def should_continue_negotiation(
+    before: Sequence[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]],
+    *,
+    round_index: int = 1,
+    max_rounds: int = 2,
+) -> Dict[str, Any]:
+    """要不要再来一轮协商？三个停下来的理由都要说清楚（不许默默停）。
+
+    为什么必须做收敛判断（2026-10-04）：
+      固定只跑一轮的话，"重提后分歧没变"和"分歧解决了"在记录上长得一样；
+      而无限重提又会把推演拖长。所以按**分歧是否真的减少**决定，并给硬上限：
+        - 没有分歧了 → 停（已收敛）；
+        - 达到轮次上限 → 停（交硬约束过滤兜底，并如实说明还有几条没消解）；
+        - 重提后分歧**一条都没少** → 停（再提也没用，别空转）。
+    """
+    before_codes = {str(_as_mapping(item).get("code") or "") for item in before or []}
+    after_codes = {str(_as_mapping(item).get("code") or "") for item in after or []}
+    if not after_codes:
+        return {"continue": False, "reason": "分歧已全部解决，协商结束", "code": "converged"}
+    if int(round_index) >= max(1, int(max_rounds)):
+        return {
+            "continue": False,
+            "reason": f"达到 {max_rounds} 轮上限，剩余分歧交硬约束过滤兜底",
+            "code": "max_rounds",
+        }
+    if after_codes == before_codes:
+        return {
+            "continue": False,
+            "reason": "重提后分歧一条都没减少，继续协商没有意义",
+            "code": "no_progress",
+        }
+    return {
+        "continue": True,
+        "reason": f"分歧从 {len(before_codes)} 条减少到 {len(after_codes)} 条，再协商一轮",
+        "code": "progress",
     }
 
 

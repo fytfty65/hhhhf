@@ -2557,6 +2557,7 @@ async def run_negotiate(msg: GatewayMessage):
                     build_proposal_conflicts,
                     build_revision_directives,
                     evaluate_revisions,
+                    should_continue_negotiation,
                 )
 
                 _conflict_facts = build_proposal_conflicts(
@@ -2569,51 +2570,58 @@ async def run_negotiate(msg: GatewayMessage):
                     nights=max(1, trip_days - 1),
                 )
 
-                # 👑 协商回环（一轮，有界）：把裁决变成相关智能体的**新输入契约**，让它们重提。
-                #    这才是"协商"而不是"协调器裁断"——只有真的回灌 + 允许重提，分歧才可能消解。
-                _directives = build_revision_directives(
-                    _conflict_facts.get("conflicts"),
-                    trip_days=trip_days,
-                    forbidden_categories=("cultural",) if own_signals.get("exclude_cultural") else (),
-                )
-                if _directives:
+                # 👑 协商回环（**有界多轮 + 收敛判断**）：把裁决变成相关智能体的新输入契约，
+                #    让它们重提；然后看分歧有没有减少，决定要不要再来一轮。
+                #    为什么要收敛判断：固定跑一轮的话，"分歧没变"和"分歧解决了"看起来一样；
+                #    而无限重提又会拖长推演。所以：最多 NEGOTIATION_MAX_ROUNDS 轮，
+                #    每轮记录 分歧 before→after，最后如实说明为什么停。
+                NEGOTIATION_MAX_ROUNDS = 2
+                _revision_rounds: List[Dict[str, Any]] = []
+                _current_conflicts = list(_conflict_facts.get("conflicts") or [])
+                if _current_conflicts:
                     try:
-                        _revised: Dict[str, Any] = {}
-                        _revised_pools: Dict[str, Any] = {}
-                        for _agent_id, _directive in _directives.items():
-                            _pool_by_domain = {
-                                "route-planner": unique_attractions,
-                                "dining-agent": unique_foods,
-                                "lodging-agent": cleaned_hotels,
-                            }
-                            _domain = "itinerary" if _agent_id == "route-planner" else (
-                                "dining" if _agent_id == "dining-agent" else "lodging"
+                        for _round_index in range(1, NEGOTIATION_MAX_ROUNDS + 1):
+                            _directives = build_revision_directives(
+                                _current_conflicts,
+                                trip_days=trip_days,
+                                forbidden_categories=("cultural",) if own_signals.get("exclude_cultural") else (),
                             )
-                            _pool = _pool_by_domain.get(_agent_id)
-                            if _pool is None:
-                                continue
-                            _revision_runtime, _revision_requests = build_pool_runtime(
-                                attractions=_pool if _agent_id == "route-planner" else (),
-                                dining=_pool if _agent_id == "dining-agent" else (),
-                                lodging=_pool if _agent_id == "lodging-agent" else (),
-                                facts=request_facts,
-                            )
-                            # 只跑目标智能体，并在它的输入契约里加上裁决指令
-                            _target_requests = [
-                                _req for _req in _revision_requests if _req.agent_id == _agent_id
-                            ]
-                            for _req in _target_requests:
-                                _req.hard_constraints.update(_directive.get("hard_constraints") or {})
-                                _req.context["revision_directive"] = str(_directive.get("message") or "")
-                                _req.context["revision_reason"] = str(_directive.get("reason") or "")
-                            _revision_result = await _revision_runtime.execute(_target_requests)
-                            for _proposal in _revision_result.get("proposals") or []:
-                                _revised[str(_proposal.get("agent_id"))] = _proposal
-                                if _agent_id == "route-planner":
-                                    _revised_pools["attractions"] = [
-                                        dict(item) for item in (_proposal.get("candidates") or []) if isinstance(item, dict)
-                                    ]
-                        if _revised:
+                            if not _directives:
+                                break
+                            _revised: Dict[str, Any] = {}
+                            _revised_pools: Dict[str, Any] = {}
+                            for _agent_id, _directive in _directives.items():
+                                _pool_by_domain = {
+                                    "route-planner": unique_attractions,
+                                    "dining-agent": unique_foods,
+                                    "lodging-agent": cleaned_hotels,
+                                }
+                                _pool = _pool_by_domain.get(_agent_id)
+                                if _pool is None:
+                                    continue
+                                _revision_runtime, _revision_requests = build_pool_runtime(
+                                    attractions=_pool if _agent_id == "route-planner" else (),
+                                    dining=_pool if _agent_id == "dining-agent" else (),
+                                    lodging=_pool if _agent_id == "lodging-agent" else (),
+                                    facts=request_facts,
+                                )
+                                # 只跑目标智能体，并在它的输入契约里加上裁决指令
+                                _target_requests = [
+                                    _req for _req in _revision_requests if _req.agent_id == _agent_id
+                                ]
+                                for _req in _target_requests:
+                                    _req.hard_constraints.update(_directive.get("hard_constraints") or {})
+                                    _req.context["revision_directive"] = str(_directive.get("message") or "")
+                                    _req.context["revision_reason"] = str(_directive.get("reason") or "")
+                                _revision_result = await _revision_runtime.execute(_target_requests)
+                                for _proposal in _revision_result.get("proposals") or []:
+                                    _revised[str(_proposal.get("agent_id"))] = _proposal
+                                    if _agent_id == "route-planner":
+                                        _revised_pools["attractions"] = [
+                                            dict(item) for item in (_proposal.get("candidates") or []) if isinstance(item, dict)
+                                        ]
+                            if not _revised:
+                                break
                             # 用重提结果覆盖原提案，并把这些候选真正用于后续方案
                             _merged_proposals = []
                             for _proposal in specialist_runtime_result.get("proposals") or []:
@@ -2631,24 +2639,56 @@ async def run_negotiate(msg: GatewayMessage):
                                 budget_total=float(total_calc_budget) if total_calc_budget else None,
                                 nights=max(1, trip_days - 1),
                             )
-                            _revision_record = evaluate_revisions(
-                                _conflict_facts.get("conflicts"),
+                            _round_record = evaluate_revisions(
+                                _current_conflicts,
                                 _after_facts.get("conflicts"),
                                 _revised,
+                                round_index=_round_index,
                             )
-                            _conflict_facts["revision"] = _revision_record
-                            specialist_runtime_result["proposal_conflicts"] = _conflict_facts
+                            _convergence = should_continue_negotiation(
+                                _current_conflicts,
+                                _after_facts.get("conflicts"),
+                                round_index=_round_index,
+                                max_rounds=NEGOTIATION_MAX_ROUNDS,
+                            )
+                            _round_record["convergence"] = _convergence
+                            _revision_rounds.append(_round_record)
+                            _current_conflicts = list(_after_facts.get("conflicts") or [])
                             print(
-                                f"🔁 [协商回环] 重提智能体 {_revision_record['revised_agents']}；"
-                                f"分歧 {_revision_record['conflicts_before']} → {_revision_record['conflicts_after']}"
-                                + (f"；{'；'.join(_revision_record['notes'])}" if _revision_record["notes"] else ""),
+                                f"🔁 [协商回环] 第 {_round_index} 轮：重提 {_round_record['revised_agents']}；"
+                                f"分歧 {_round_record['conflicts_before']} → {_round_record['conflicts_after']}"
+                                f"｜{_convergence['reason']}",
                                 flush=True,
                             )
-                            for _item in _revision_record.get("changed") or []:
+                            for _item in _round_record.get("changed") or []:
                                 print(
                                     f"   · {_item['agent_id']} 按裁决重提：{_item.get('applied')}",
                                     flush=True,
                                 )
+                            if not _convergence["continue"]:
+                                break
+                        _conflict_facts["conflicts"] = _current_conflicts
+                        _conflict_facts["revision"] = {
+                            "rounds": _revision_rounds,
+                            "max_rounds": NEGOTIATION_MAX_ROUNDS,
+                            "final_conflicts": _current_conflicts,
+                            # 兼容旧字段（界面/事实里已有的取值）
+                            "round": len(_revision_rounds),
+                            "revised_agents": sorted({a for item in _revision_rounds for a in item.get("revised_agents") or []}),
+                            "conflicts_before": _revision_rounds[0]["conflicts_before"] if _revision_rounds else [],
+                            "conflicts_after": _current_conflicts,
+                            "resolved": sorted({c for item in _revision_rounds for c in item.get("resolved") or []}),
+                            "changed": [c for item in _revision_rounds for c in item.get("changed") or []][:4],
+                            "notes": _revision_rounds[-1]["notes"] if _revision_rounds else [],
+                            "convergence": (_revision_rounds[-1].get("convergence") if _revision_rounds else {}),
+                        }
+                        specialist_runtime_result["proposal_conflicts"] = _conflict_facts
+                        if _current_conflicts:
+                            print(
+                                f"⚠️ [协商回环] {len(_revision_rounds)} 轮后仍有分歧：{_current_conflicts}"
+                                f"（已交硬约束过滤兜底）",
+                                flush=True,
+                            )
                     except Exception as _revision_exc:  # 协商失败绝不影响出方案（硬约束层仍会兜住）
                         _conflict_facts["revision"] = {"error": str(_revision_exc)[:200]}
                         print(f"⚠️ [协商回环] 重提失败（不影响出方案）: {_revision_exc}", flush=True)

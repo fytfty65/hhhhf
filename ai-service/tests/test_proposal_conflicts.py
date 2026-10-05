@@ -494,5 +494,47 @@ class LodgingBudgetTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in proposal["candidates"]], ["贵酒店"])
 
 
+class ConvergenceTests(unittest.TestCase):
+    """收敛判断：三条停下来的理由都要说清楚（不许默默停）。"""
+
+    def _check(self, before, after, round_index=1, max_rounds=2):
+        from core.proposal_conflicts import should_continue_negotiation
+
+        return should_continue_negotiation(before, after, round_index=round_index, max_rounds=max_rounds)
+
+    def test_stops_when_all_resolved(self):
+        result = self._check([{"code": "a"}], [])
+        self.assertFalse(result["continue"])
+        self.assertEqual(result["code"], "converged")
+        self.assertIn("全部解决", result["reason"])
+
+    def test_stops_at_round_cap_and_says_so(self):
+        result = self._check([{"code": "a"}, {"code": "b"}], [{"code": "b"}], round_index=2, max_rounds=2)
+        self.assertFalse(result["continue"])
+        self.assertEqual(result["code"], "max_rounds")
+        self.assertIn("2 轮上限", result["reason"])
+        self.assertIn("硬约束过滤兜底", result["reason"])
+
+    def test_stops_when_no_progress(self):
+        result = self._check([{"code": "a"}], [{"code": "a"}], round_index=1, max_rounds=2)
+        self.assertFalse(result["continue"])
+        self.assertEqual(result["code"], "no_progress")
+        self.assertIn("一条都没减少", result["reason"])
+
+    def test_continues_when_conflicts_shrank(self):
+        result = self._check([{"code": "a"}, {"code": "b"}], [{"code": "b"}], round_index=1, max_rounds=2)
+        self.assertTrue(result["continue"])
+        self.assertEqual(result["code"], "progress")
+        self.assertIn("减少到 1 条", result["reason"])
+
+    def test_round_index_is_recorded(self):
+        from core.proposal_conflicts import evaluate_revisions
+
+        backward = evaluate_revisions([{"code": "a"}], [], {"route-planner": {"agent_id": "route-planner"}}, round_index=1)
+        second = evaluate_revisions([{"code": "a"}], [], {"route-planner": {"agent_id": "route-planner"}}, round_index=2)
+        self.assertEqual(backward["round"], 1)
+        self.assertEqual(second["round"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
