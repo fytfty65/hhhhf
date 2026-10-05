@@ -4683,6 +4683,42 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _degrade_exc:  # 登记失败绝不影响出方案
                             final_data["degradations"] = {"error": str(_degrade_exc)[:200]}
 
+                        # 👑 统一事实记录（闭环第①段）：把"依据了什么/决定了什么/缺了什么"
+                        #    收成**一份带出处与核实状态**的事实，随方案下发并发一条事件。
+                        #    为什么放在最后：前面所有字段（供给/配比/硬约束/画像/降级）都已定稿，
+                        #    这份记录才是这一轮真正的事实快照。
+                        try:
+                            from core.plan_facts import build_plan_facts, summarize_facts
+
+                            _facts = build_plan_facts(
+                                correlation_id=plan_correlation_id,
+                                city=target_city,
+                                trip_days=trip_days,
+                                intent=intent_str,
+                                signals=own_signals,
+                                composition=composition,
+                                supply=candidate_supply,
+                                feasibility=final_data.get("travel_feasibility"),
+                                profile_applied=final_data.get("profile_applied"),
+                                reference_profile=final_data.get("reference_profile"),
+                                route=final_data.get("route"),
+                                degradations=final_data.get("degradations"),
+                            )
+                            final_data["facts"] = _facts
+                            await event_bus.emit(OMNI_EVENTS_STREAM, "plan.facts.ready", {
+                                "room_id": room_id,
+                                "user_id": user_id,
+                                **summarize_facts(_facts),
+                            }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
+                            _gaps = len(_facts.get("gaps") or [])
+                            print(
+                                f"🧾 [统一事实] schema=v{_facts.get('schema_version')} 城市={target_city} "
+                                f"节点={len(final_data.get('route') or [])} 缺口={_gaps} 条",
+                                flush=True,
+                            )
+                        except Exception as _facts_exc:  # 事实记录失败绝不影响出方案
+                            final_data["facts"] = {"error": str(_facts_exc)[:200]}
+
                     # 👑 ③ 实景图补齐 + ①② 影像兜底（放在下发前最后一步）
                     # 顺序很重要：先尽力拿**真照片**（高德官方，最多 8 个节点、并发 + 整体超时），
                     # 拿不到的才给卫星影像/街道图兜底，并如实标注"位置示意，非实景照片"。

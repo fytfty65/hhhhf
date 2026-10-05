@@ -50,6 +50,9 @@ EVENT_TYPES: Dict[str, str] = {
     "reasoning_step": "推演推理步骤",
     "specialist_proposals_ready": "专业提案就绪",
     "final_route_ready": "行程生成完成",
+    # 统一事实记录（闭环第①段）：一次规划"依据了什么/决定了什么/缺了什么"，
+    # 带出处与核实状态，供其它智能体与界面读同一份事实（而不是各取一个字段各推一遍）。
+    "plan.facts.ready": "规划事实就绪",
 }
 
 # 缺口台账：**已登记但代码里还没有发点**的事件类型。
