@@ -230,6 +230,8 @@ async function main() {
     priceAudit
       ? `已核实 ${priceAudit.verified_count ?? '?'} / 未核实 ${priceAudit.unknown_count ?? '?'}｜` +
         `取价源可达=${priceAudit.provider_reachable ?? '(未诊断)'}` +
+        (priceAudit.skipped_reason ? `｜补价这一步没跑：${priceAudit.skipped_reason}` : '') +
+        (priceAudit.error ? `｜补价报错：${String(priceAudit.error).slice(0, 120)}` : '') +
         (priceAudit.provider_status?.error
           ? `（${String(priceAudit.provider_status.error).slice(0, 90)}）`
           : '')

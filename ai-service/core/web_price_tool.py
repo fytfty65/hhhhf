@@ -86,9 +86,9 @@ def price_max_nodes() -> int:
 
 
 def enabled_providers() -> List[str]:
-    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "search,official_page").strip()
+    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "sogou,search,official_page").strip()
     items = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    return items or ["search"]
+    return items or ["sogou"]
 
 
 def search_proxy() -> str:
@@ -189,47 +189,318 @@ async def fetch_page_text(url: str, *, timeout: Optional[float] = None) -> Dict[
 
 
 async def probe_providers(*, query: str = "库尔勒 门票 价格") -> Dict[str, Any]:
-    """诊断每个取价提供方能不能用（本机实测：DuckDuckGo 直接失败，会在这里如实暴露）。"""
+    """诊断每个取价提供方能不能用。**第一个能用的就停**，且每个源都有独立超时预算。
+
+    实测教训（2026-10-04）：早先这里会把所有提供方都试一遍（搜狗 2s + DuckDuckGo 10s），
+    调用方用 `wait_for(10s)` 包着 → 诊断超时，异常把**整个补价功能**带走了
+    （方案里显示"补价报错：TimeoutError"，而其实搜狗明明是好的）。
+    诊断永远不能比它诊断的功能更脆弱。
+    """
+    import asyncio
+
     results: Dict[str, Any] = {}
     providers = enabled_providers()
-    if "search" in providers:
-        try:
-            count = await search_result_count(query, max_results=3)
-            results["search"] = {"ok": count > 0, "results": count, "proxy": bool(search_proxy())}
-        except Exception as exc:
-            proxy = search_proxy()
-            hint = "国际线路不通时，设置 WEB_SEARCH_PROXY（只作用于本模块，不动全局代理）"
-            if proxy and "ConnectError" in f"{type(exc).__name__}{exc}":
-                hint = f"已配置代理 {proxy} 但连不上：先确认代理在运行（端口/进程）"
-            results["search"] = {
-                "ok": False,
-                "error": f"{type(exc).__name__}: {str(exc)[:140]}",
-                "proxy": bool(proxy),
-                "hint": hint,
+    per_provider_budget = max(3.0, min(8.0, price_timeout_seconds()))
+    for provider in providers:
+        if provider == "sogou":
+            try:
+                rows = await asyncio.wait_for(fetch_sogou(query, max_results=3), timeout=per_provider_budget + 2)
+                results["sogou"] = {"ok": bool(rows), "results": len(rows)}
+                if rows:
+                    break  # 第一个能用的就够，别再花时间试别的
+            except Exception as exc:
+                results["sogou"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:140]}"}
+        elif provider == "search":
+            try:
+                rows = await asyncio.wait_for(search_duckduckgo(query, max_results=3), timeout=per_provider_budget + 2)
+                results["search"] = {"ok": bool(rows), "results": len(rows), "proxy": bool(search_proxy())}
+                if rows:
+                    break
+            except Exception as exc:
+                proxy = search_proxy()
+                hint = "国际线路不通时，设置 WEB_SEARCH_PROXY（只作用于本模块，不动全局代理）"
+                if proxy and "ConnectError" in f"{type(exc).__name__}{exc}":
+                    hint = f"已配置代理 {proxy} 但连不上：先确认代理在运行（端口/进程）"
+                results["search"] = {
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:140]}",
+                    "proxy": bool(proxy),
+                    "hint": hint,
+                }
+        elif provider == "official_page":
+            # 注意：这一项只是**声明能力**（有允许清单、可按 URL 抓取），不是"可达性"。
+            # 早先这里写 ok=True，结果 reachable 变成 true —— 而搜索明明失败了，
+            # 于界面上会显示"取价源可达"，是彻头彻尾的误导。能力与可达性必须分开。
+            results["official_page"] = {
+                "configured": True,
+                "mode": "allowlist",
+                "suffixes": list(official_host_suffixes())[:4],
             }
-    if "official_page" in providers:
-        # 注意：这一项只是**声明能力**（有允许清单、可按 URL 抓取），不是"可达性"。
-        # 早先这里写 ok=True，结果 reachable 变成 true —— 而搜索明明失败了，
-        # 于界面上会显示"取价源可达"，是彻头彻尾的误导。能力与可达性必须分开。
-        results["official_page"] = {
-            "configured": True,
-            "mode": "allowlist",
-            "suffixes": list(official_host_suffixes())[:4],
-        }
-    # 可达性只由**真正去取数的提供方**决定（当前是搜索；官方页面要给定 URL 才知道通不通）
-    probed = [item for key, item in results.items() if key == "search"]
+    # 可达性只由**真正去取数的提供方**决定（官方页面要给定 URL 才知道通不通）
+    probed = [item for key, item in results.items() if key in {"sogou", "search"}]
     return {
         "providers": results,
         "reachable": any(item.get("ok") for item in probed) if probed else False,
-        "probed": ["search"] if probed else [],
+        "probed": sorted(key for key in results if key in {"sogou", "search"}),
     }
 
 
-async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, Any]]:
-    """搜一次并返回原始结果（带代理与超时配置）—— 供推演里的取价与诊断共用。
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0 Safari/537.36"
+)
+SOGOU_HOME = "https://www.sogou.com/"
+SOGOU_SEARCH = "https://www.sogou.com/web"
 
-    与 `search_result_count` 同一套代理处理：显式 `proxy=` + 调用期间覆盖
-    HTTP(S)_PROXY，结束后立刻恢复（绝不把代理留在进程环境里）。
+
+def _strip_tags(fragment: str) -> str:
+    import html as _html
+
+    text = re.sub(r"<[^>]+>", "", fragment or "")
+    return _html.unescape(text).strip()
+
+
+def parse_sogou_results(body: str, limit: int = 8) -> List[Dict[str, Any]]:
+    """解析搜狗结果页（真实结构，2026-10-04 抓取样本验证）。
+
+    每个结果块形如：
+      <div class="vrwrap" id="sogou_vr_..._wrap_1">
+        <h3 class="vr-title"><a href="/link?url=…">标题</a></h3>
+        <div class="fz-mid space-txt …" id="cacheresult_summary_1">摘要（常含"门票价格:大河口45元"）</div>
+        <a class="citeLinkClass" …><span>相约久久旅游网</span><span>https://www.meet99.com/j…</span><span>2026-09-19</span>
+    所以能同时拿到**标题、摘要、来源站名、来源 URL、日期** —— 出处齐全，用户可核对。
+    """
+    rows: List[Dict[str, Any]] = []
+    if not body:
+        return rows
+    blocks = re.split(r'(?=<div class="vrwrap")', body)[1:]
+    for block in blocks[:limit]:
+        # 标题：先取整个 <h3 class="vr-title">…</h3>，再从里面找第一个 href ——
+        # 比"一条正则同时匹配属性和锚文本"稳得多（实测后者在真实页面上会漏 URL）。
+        title_html = ""
+        href = ""
+        title_match = re.search(r'<h3 class="vr-title">(.*?)</h3>', block, flags=re.S)
+        if title_match:
+            title_html = title_match.group(1)
+            anchor = re.search(r'<a[^>]*href="([^"]+)"', title_html)
+            if anchor:
+                href = anchor.group(1)
+        if not href:
+            # 兜底：引用链接（cite）与标题指向同一篇，别让出处空着
+            cite_anchor = re.search(r'<a class="citeLinkClass"[^>]*href="([^"]+)"', block)
+            if cite_anchor:
+                href = cite_anchor.group(1)
+        snippet_match = re.search(r'<div class="fz-mid[^"]*"[^>]*>(.*?)</div>', block, flags=re.S)
+        cite_match = re.search(r'<a class="citeLinkClass".*?</a>', block, flags=re.S)
+        title = _strip_tags(title_html)
+        snippet = _strip_tags(snippet_match.group(1)) if snippet_match else ""
+        if not title and not snippet:
+            continue
+        cite_site = cite_url = cite_date = ""
+        if cite_match:
+            spans = re.findall(r"<span[^>]*>(.*?)</span>", cite_match.group(0), flags=re.S)
+            cleaned = [_strip_tags(item) for item in spans]
+            cite_site = cleaned[0] if cleaned else ""
+            cite_url = cleaned[1] if len(cleaned) > 1 else ""
+            cite_date = cleaned[2] if len(cleaned) > 2 else ""
+        absolute = f"https://www.sogou.com{href}" if href.startswith("/") else href
+        rows.append({
+            "title": title[:160],
+            "url": absolute,
+            "snippet": snippet[:300],
+            # 引用信息（站名/真实 URL/日期）：搜索跳转链接之外，给出可读来源与**发布日期**
+            # （价格会过期，用户需要知道这条信息是什么时候的）
+            "cite_site": cite_site[:60],
+            "cite_url": cite_url[:160],
+            "cite_date": cite_date[:40],
+            "provider": "sogou",
+        })
+    return rows
+
+
+async def fetch_sogou(query: str, *, max_results: int = 5) -> List[Dict[str, Any]]:
+    """用搜狗搜一次（国内直连可达；DuckDuckGo/Bing 在本机不可达）。
+
+    先访问首页拿会话 cookie 再搜 —— 实测不带会话时 bing 会返回填充推荐，
+    搜狗同样需要一次首页访问才稳定。
+    """
+    import httpx
+
+    timeout = price_timeout_seconds()
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"},
+    ) as client:
+        try:
+            await client.get(SOGOU_HOME)
+        except Exception:
+            pass  # 首页拿不到也继续试搜索
+        response = await client.get(SOGOU_SEARCH, params={"query": query})
+        if response.status_code >= 400:
+            raise RuntimeError(f"sogou HTTP {response.status_code}")
+        return parse_sogou_results(response.text, limit=max_results)
+
+
+def price_budget_seconds() -> float:
+    """一次规划里"联网取价"这条链路的**总时间预算**（默认 25s）。
+
+    为什么要按预算反推能查几个：实测（2026-10-04）搜狗单次约 2.5s，加上 1.2s 节流，
+    每个节点约 3.7s —— 12 个节点要 44s，被调用方 12s 的 wait_for 掐断，
+    整个补价功能就废了（而且表现成 TimeoutError）。现在改成：
+    按预算算"这次能查几个"，查不完的**如实留给「需要你确认」**，而不是硬超时。
+    """
+    raw = str(os.getenv("WEB_PRICE_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 25.0
+    return value if value > 0 else 25.0
+
+
+def affordable_target_count(max_nodes: int, *, budget_seconds: Optional[float] = None) -> int:
+    """在时间预算内**大概**能查几个节点（单节点 ≈ 节流间隔 + 单次搜索耗时）。"""
+    budget = float(budget_seconds if budget_seconds is not None else price_budget_seconds())
+    per_node = max(1.0, search_min_interval_seconds() + 3.0)
+    return max(1, min(int(max_nodes or 1), int(budget // per_node) or 1))
+
+
+def search_min_interval_seconds() -> float:
+    """同一搜索源两次请求之间的最小间隔（默认 1.2s）。
+
+    实测（2026-10-04）：连续快速请求搜狗后，接下来几次会拿到"填充/无结果"页面，
+    表现为"同一个地点一会儿能搜到价、一会儿搜不到"。节流不是可选项，是可用性的一部分。
+    """
+    raw = str(os.getenv("WEB_PRICE_MIN_INTERVAL_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 1.2
+    return value if value >= 0 else 1.2
+
+
+def search_cache_ttl_seconds() -> float:
+    raw = str(os.getenv("WEB_SEARCH_CACHE_TTL_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 6 * 3600.0
+    return value if value > 0 else 6 * 3600.0
+
+
+def pick_price_from_rows(rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """从搜索结果里挑一条价格：**优先有出处的**（纯函数，单测覆盖）。
+
+    为什么不是"第一条有价格的就行"：实测搜狗会返回若干"无标题锚点"的聚合块，
+    价格在里面但没有 URL —— 直接用就会得到"有价格、没来源"这种最糟的组合。
+    这里按 (有 URL, 有发布日期, 有上下文) 排序后取第一条。
+    """
+    best: Optional[Dict[str, Any]] = None
+    best_score: tuple = ()
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        text = f"{row.get('title') or ''} {row.get('snippet') or row.get('body') or ''}"
+        candidates = extract_price_candidates(text)
+        if not candidates:
+            continue
+        candidate = candidates[0]
+        url = str(row.get("url") or row.get("href") or "")
+        score = (
+            1 if url else 0,
+            1 if str(row.get("cite_date") or "") else 0,
+            1 if candidate.get("has_context") else 0,
+        )
+        if best is None or score > best_score:
+            best = {
+                "value": float(candidate["value"]),
+                "excerpt": str(candidate.get("excerpt") or ""),
+                "url": url,
+                "publisher": str(row.get("cite_site") or ""),
+                "source_date": str(row.get("cite_date") or ""),
+                "provider": str(row.get("provider") or ""),
+            }
+            best_score = score
+    return best
+
+
+async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, Any]]:
+    """按配置的提供方顺序搜一次，返回**第一个有结果**的提供方给出的结果。
+
+    顺序默认 `sogou,search,official_page`（搜狗国内直连可达；DuckDuckGo 在境外网络可用）。
+    带**同一进程内的节流与结果缓存**：
+      - 两次搜索至少间隔 `WEB_PRICE_MIN_INTERVAL_SECONDS`（默认 1.2s）—— 防限流；
+      - 相同 query 在 `WEB_SEARCH_CACHE_TTL_SECONDS`（默认 6h）内直接复用 —— 少打扰对方站点；
+    每个提供方的成败都记进 `last_search_attempts`，供诊断与"为什么没取到"的披露。
+    """
+    global last_search_attempts, _last_search_at  # noqa: PLW0603 - 模块级诊断/节流状态
+
+    import asyncio
+    import time as _time
+
+    cache_key = f"{','.join(enabled_providers())}|{max_results}|{query}"
+    cached = _search_cache.get(cache_key)
+    if cached and (_time.monotonic() - cached[0]) < search_cache_ttl_seconds():
+        last_search_attempts = [{"provider": "cache", "ok": True, "results": len(cached[1])}]
+        return [dict(row) for row in cached[1]]
+
+    async with _search_lock:
+        cached = _search_cache.get(cache_key)
+        if cached and (_time.monotonic() - cached[0]) < search_cache_ttl_seconds():
+            last_search_attempts = [{"provider": "cache", "ok": True, "results": len(cached[1])}]
+            return [dict(row) for row in cached[1]]
+        gap = search_min_interval_seconds() - (_time.monotonic() - _last_search_at)
+        if gap > 0:
+            await asyncio.sleep(gap)
+        attempts: List[Dict[str, Any]] = []
+        for provider in enabled_providers():
+            if provider == "sogou":
+                try:
+                    rows = await fetch_sogou(query, max_results=max_results)
+                    attempts.append({"provider": "sogou", "ok": bool(rows), "results": len(rows)})
+                    if rows:
+                        _last_search_at = _time.monotonic()
+                        _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
+                        last_search_attempts = attempts
+                        return rows
+                except Exception as exc:
+                    attempts.append({"provider": "sogou", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+            elif provider == "search":
+                try:
+                    rows = await search_duckduckgo(query, max_results=max_results)
+                    attempts.append({"provider": "search", "ok": bool(rows), "results": len(rows)})
+                    if rows:
+                        _last_search_at = _time.monotonic()
+                        _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
+                        last_search_attempts = attempts
+                        return rows
+                except Exception as exc:
+                    attempts.append({"provider": "search", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+            # official_page 不是通用搜索，跳过
+        _last_search_at = _time.monotonic()
+        last_search_attempts = attempts
+        return []
+
+
+last_search_attempts: List[Dict[str, Any]] = []
+_last_search_at: float = 0.0
+_search_cache: Dict[str, Any] = {}
+try:  # 锁在导入时创建（同进程内串行化搜索，避免互相触发限流）
+    import asyncio as _asyncio
+
+    _search_lock = _asyncio.Lock()
+except Exception:  # pragma: no cover - 极端环境下退化为无锁
+    _search_lock = None
+
+
+async def search_duckduckgo(query: str, *, max_results: int = 3) -> List[Dict[str, Any]]:
+    """DuckDuckGo（境外网络可用）。**把 WEB_SEARCH_PROXY 传进搜索引擎**。
+
+    实测教训（2026-10-04）：这个模块最初只把代理给了 httpx（抓页面那条路径），
+    而 DuckDuckGo 搜索根本没走代理 —— 于是界面上写着"可配置 WEB_SEARCH_PROXY 让搜索走代理"，
+    配了也照样连不通。文档承诺与代码行为必须一致，所以这里显式传 `proxy=`，
+    并额外在调用期间设置 HTTP(S)_PROXY 环境变量（DDGS 内部用 requests/urllib3，
+    两层都覆盖），调用结束立刻恢复现场。
     """
     import asyncio
 
@@ -247,7 +518,7 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
                 kwargs["proxy"] = proxy
             with DDGS(**kwargs) as ddgs:
                 rows = list(ddgs.text(query, max_results=max_results))
-            return [row for row in rows if isinstance(row, dict)]
+            return [{**row, "provider": "search"} for row in rows if isinstance(row, dict)]
         finally:
             for key, value in saved.items():
                 if value is None:
@@ -259,14 +530,7 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
 
 
 async def search_result_count(query: str, *, max_results: int = 3) -> int:
-    """真正去搜一次（供诊断使用），**把 WEB_SEARCH_PROXY 传进搜索引擎**。
-
-    实测教训（2026-10-04）：这个模块最初只把代理给了 httpx（抓页面那条路径），
-    而 DuckDuckGo 搜索根本没走代理 —— 于是界面上写着"可配置 WEB_SEARCH_PROXY 让搜索走代理"，
-    配了也照样连不通。文档承诺与代码行为必须一致，所以这里显式传 `proxy=`，
-    并额外在调用期间设置 HTTP(S)_PROXY 环境变量（DDGS 内部用 requests/urllib3，
-    两层都覆盖），调用结束立刻恢复现场。
-    """
+    """诊断用：真正搜一次，返回结果条数（走同一套提供方顺序与代理处理）。"""
     rows = await search_texts(query, max_results=max_results)
     return len(rows)
 
@@ -280,8 +544,14 @@ def build_observation(
     excerpt: str = "",
     provider: str = "",
     retrieved_at: Optional[float] = None,
+    publisher: str = "",
+    source_date: str = "",
 ) -> Dict[str, Any]:
-    """一条取价结果：**必须带出处**，并明确它是估算而不是已核实。"""
+    """一条取价结果：**必须带出处**，并明确它是估算而不是已核实。
+
+    `publisher`/`source_date` 是给"这条价格什么时候发的"用的 —— 价格会过期，
+    用户需要判断新鲜度（真实搜狗结果里带发布日期，如 2026-09-19）。
+    """
     verified_sources = {"provider", "vendor", "official", "amap"}
     return {
         "name": str(name or ""),
@@ -291,6 +561,8 @@ def build_observation(
         "source_url": str(source_url or ""),
         "excerpt": str(excerpt or "")[:160],
         "provider": str(provider or ""),
+        "publisher": str(publisher or "")[:60],
+        "source_date": str(source_date or "")[:40],
         "retrieved_at": float(retrieved_at or time.time()),
         # 搜索/网页来的价格永远是估算：不允许写成 verified
         "verified": str(source) in verified_sources,

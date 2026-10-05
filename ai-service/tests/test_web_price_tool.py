@@ -106,7 +106,8 @@ class ConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
-            self.assertEqual(enabled_providers(), ["search", "official_page"])
+            # 默认顺序把**国内直连可达**的搜狗放前面（实测 DuckDuckGo/Bing 在本机不可达）
+            self.assertEqual(enabled_providers(), ["sogou", "search", "official_page"])
             self.assertEqual(search_proxy(), "")
 
     def test_env_overrides_are_honoured(self):
@@ -129,7 +130,7 @@ class ConfigTests(unittest.TestCase):
         }, clear=True):
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
-            self.assertEqual(enabled_providers(), ["search"])
+            self.assertEqual(enabled_providers(), ["sogou"])
 
 
 class ObservationTests(unittest.TestCase):
@@ -350,7 +351,7 @@ class ProxyWiringTests(unittest.TestCase):
             "WEB_PRICE_PROVIDERS": "search",
         }, clear=True):
             with mock.patch(
-                "core.web_price_tool.search_result_count",
+                "core.web_price_tool.search_duckduckgo",
                 side_effect=RuntimeError("ConnectError: error sending request"),
             ):
                 report = asyncio.run(web_price_tool.probe_providers())
@@ -358,6 +359,18 @@ class ProxyWiringTests(unittest.TestCase):
         self.assertFalse(entry["ok"])
         self.assertIn("已配置代理", entry["hint"])
         self.assertIn("确认代理在运行", entry["hint"])
+
+    def test_sogou_provider_failure_is_reported(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou"}, clear=True):
+            with mock.patch("core.web_price_tool.fetch_sogou", side_effect=RuntimeError("HTTP 503")):
+                report = asyncio.run(web_price_tool.probe_providers())
+        self.assertFalse(report["providers"]["sogou"]["ok"])
+        self.assertIn("503", report["providers"]["sogou"]["error"])
+        self.assertFalse(report["reachable"])
 
 
 class SourceLinkTests(unittest.TestCase):
@@ -411,6 +424,169 @@ class SourceLinkTests(unittest.TestCase):
             now=1_700_000_001.0,
         )
         self.assertEqual(pending_price_report(merged["plan"])["pending"], [])
+
+
+class SogouParserTests(unittest.TestCase):
+    """解析规则必须对**真实页面**有效（下面片段是 2026-10-04 抓下来的原文，未改写结构）。"""
+
+    REAL_BLOCK = (
+        '<div class="vrwrap" id="sogou_vr_30000000_wrap_1"><h3 class="vr-title">'
+        '<a name="dttl" target="_blank" href="/link?url=hedJjaC291PfuReBFiyDfBZqKaVfbyJfPUq2S9IRa1SU6uBpJIO7XLNjXxqiwmf-">'
+        '2026新疆<em>博斯腾湖</em>旅游攻略-<em>博斯腾湖</em>自助游-<em>博斯腾湖门票</em>交通天气景...</a></h3>'
+        '<div class="fz-mid space-txt base-ellipsis clamp2" id="cacheresult_summary_1">'
+        '<em>博斯腾湖门票价格:大河口45元</em> 西海龙宫水世界198元 景区开放时间: 9:00--18:00。 '
+        '信息纠错 景区电话: 0996-6621611,0996-6622638</div>  '
+        '<a class="citeLinkClass" target="_blank" href="/link?url=hedJjaC291PfuReBFiyDfBZqKaVfbyJfPUq2S9IRa1SU6uBpJIO7XLNjXxqiwmf-">'
+        '<img class="footerIcon" src="https://cdn-yb.icon.qq.com/zuowei_dir/www_meet99_com.ico" alt="cite">'
+        '<span>相约久久旅游网</span> <span>https://www.meet99.com/j...</span> <span>2026-09-19</span></a></div>'
+    )
+
+    def test_parses_title_snippet_and_provenance_from_real_markup(self):
+        from core.web_price_tool import parse_sogou_results
+
+        rows = parse_sogou_results(self.REAL_BLOCK)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertIn("博斯腾湖", row["title"])
+        self.assertNotIn("<em>", row["title"], "标签要去掉")
+        self.assertIn("大河口45元", row["snippet"])
+        self.assertTrue(row["url"].startswith("https://www.sogou.com/link?url="))
+        self.assertEqual(row["cite_site"], "相约久久旅游网")
+        self.assertIn("meet99.com", row["cite_url"])
+        self.assertEqual(row["cite_date"], "2026-09-19")
+        self.assertEqual(row["provider"], "sogou")
+
+    def test_price_is_extractable_from_the_real_snippet(self):
+        from core.web_price_tool import extract_price_candidates, parse_sogou_results
+
+        snippet = parse_sogou_results(self.REAL_BLOCK)[0]["snippet"]
+        values = {item["value"] for item in extract_price_candidates(snippet)}
+        self.assertIn(45.0, values, "真实摘要里的'大河口45元'必须能抽出来")
+        self.assertIn(198.0, values)
+
+    def test_empty_or_garbage_body_yields_nothing(self):
+        from core.web_price_tool import parse_sogou_results
+
+        self.assertEqual(parse_sogou_results(""), [])
+        self.assertEqual(parse_sogou_results("<html><body>没有结果</body></html>"), [])
+
+
+class ProviderOrderTests(unittest.TestCase):
+    """按配置顺序试提供方，第一个有结果的就用；全失败要留下尝试记录（供披露原因）。"""
+
+    def test_first_provider_with_results_wins(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def fake_sogou(query, max_results=3):
+            return [{"title": "门票45元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou"}]
+
+        async def fake_ddg(query, max_results=3):
+            raise AssertionError("搜狗有结果时不该再去问 DuckDuckGo")
+
+        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou,search"}, clear=True):
+            with mock.patch("core.web_price_tool.fetch_sogou", fake_sogou):
+                with mock.patch("core.web_price_tool.search_duckduckgo", fake_ddg):
+                    rows = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(web_price_tool.last_search_attempts[0]["provider"], "sogou")
+        self.assertTrue(web_price_tool.last_search_attempts[0]["ok"])
+
+    def test_all_providers_failing_records_attempts_and_returns_empty(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def broken(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou,search"}, clear=True):
+            with mock.patch("core.web_price_tool.fetch_sogou", broken):
+                with mock.patch("core.web_price_tool.search_duckduckgo", broken):
+                    rows = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+        self.assertEqual(rows, [])
+        providers = [item["provider"] for item in web_price_tool.last_search_attempts]
+        self.assertEqual(providers, ["sogou", "search"], "两个源都要试过并留痕")
+        self.assertTrue(all(item["ok"] is False for item in web_price_tool.last_search_attempts))
+
+
+class PickPriceTests(unittest.TestCase):
+    """挑结果时**优先有出处的**：搜狗的聚合块有价格但没 URL，直接用会得到"有价无源"。"""
+
+    def test_row_with_url_wins_over_row_without(self):
+        from core.web_price_tool import pick_price_from_rows
+
+        rows = [
+            {"title": "", "snippet": "门票价格 45元/人 区间车 无区间车", "provider": "sogou"},
+            {
+                "title": "2026博斯腾湖旅游攻略",
+                "snippet": "博斯腾湖门票价格:大河口45元",
+                "url": "https://www.sogou.com/link?url=abc",
+                "cite_site": "相约久久旅游网",
+                "cite_date": "2026-09-19",
+                "provider": "sogou",
+            },
+        ]
+        best = pick_price_from_rows(rows)
+        self.assertEqual(best["value"], 45.0)
+        self.assertEqual(best["url"], "https://www.sogou.com/link?url=abc")
+        self.assertEqual(best["publisher"], "相约久久旅游网")
+        self.assertEqual(best["source_date"], "2026-09-19")
+
+    def test_free_still_counts_as_a_price(self):
+        from core.web_price_tool import pick_price_from_rows
+
+        best = pick_price_from_rows([{"title": "博物馆", "snippet": "门票价格：免费", "url": "https://x"}])
+        self.assertEqual(best["value"], 0.0)
+
+    def test_no_prices_returns_none(self):
+        from core.web_price_tool import pick_price_from_rows
+
+        self.assertIsNone(pick_price_from_rows([{"title": "无关内容", "snippet": "今天天气不错"}]))
+        self.assertIsNone(pick_price_from_rows([]))
+
+
+class PacingAndCacheTests(unittest.TestCase):
+    """节流与缓存：实测连续快速请求会被限流（同一地点一会儿有一会儿没有）。"""
+
+    def test_min_interval_and_cache_ttl_are_configurable(self):
+        from core.web_price_tool import search_cache_ttl_seconds, search_min_interval_seconds
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(search_min_interval_seconds(), 1.2)
+            self.assertEqual(search_cache_ttl_seconds(), 6 * 3600.0)
+        with mock.patch.dict(os.environ, {
+            "WEB_PRICE_MIN_INTERVAL_SECONDS": "0.3",
+            "WEB_SEARCH_CACHE_TTL_SECONDS": "60",
+        }, clear=True):
+            self.assertEqual(search_min_interval_seconds(), 0.3)
+            self.assertEqual(search_cache_ttl_seconds(), 60.0)
+
+    def test_same_query_is_served_from_cache_without_second_request(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        calls = {"n": 0}
+
+        async def fake_sogou(query, max_results=3):
+            calls["n"] += 1
+            return [{"title": "门票45元", "url": "https://x", "provider": "sogou"}]
+
+        web_price_tool._search_cache.clear()
+        web_price_tool._last_search_at = 0.0
+        with mock.patch.dict(os.environ, {
+            "WEB_PRICE_PROVIDERS": "sogou",
+            "WEB_PRICE_MIN_INTERVAL_SECONDS": "0",
+        }, clear=True):
+            with mock.patch("core.web_price_tool.fetch_sogou", fake_sogou):
+                first = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+                second = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(calls["n"], 1, "第二次应命中缓存，不再打扰对方站点")
+        self.assertEqual(web_price_tool.last_search_attempts[0]["provider"], "cache")
 
 
 if __name__ == "__main__":

@@ -4725,22 +4725,23 @@ async def run_negotiate(msg: GatewayMessage):
                                 # 实测（2026-10-04）本机 DuckDuckGo 直接失败（回退 bing 也返回 None），
                                 # 于是"一个价都没补上"——如果不诊断，用户只会看到一片"未取到"，
                                 # 根本不知道是搜索源不可达。现在把原因如实写进 price_audit 与降级清单。
-                                from core.web_price_tool import price_max_nodes, probe_providers
+                                from core.web_price_tool import (
+                                    affordable_target_count,
+                                    price_budget_seconds,
+                                    price_max_nodes,
+                                )
 
-                                _targets = pending_price_targets(final_data, limit=price_max_nodes())
+                                _price_budget = price_budget_seconds()
+                                _price_node_cap = affordable_target_count(price_max_nodes(), budget_seconds=_price_budget)
+                                _targets = pending_price_targets(final_data, limit=_price_node_cap)
+                                _pending_total = len(pending_price_report(final_data)["pending"])
                                 _fetcher = getattr(toolbox, "get_real_time_web_price", None)
-                                _provider_report: Dict[str, Any] = {}
                                 if _targets and _fetcher:
-                                    try:
-                                        _provider_report = await asyncio.wait_for(probe_providers(), timeout=10.0)
-                                    except Exception as _probe_exc:
-                                        _provider_report = {"reachable": False, "error": str(_probe_exc)[:160]}
-
                                     async def _lookup(_item: Dict[str, Any]) -> Dict[str, Any]:
                                         """查一个节点的价格：**带出处**（URL + 原文片段），拿不到就如实 None。"""
                                         from core.web_price_tool import (
                                             build_observation,
-                                            extract_price_candidates,
+                                            pick_price_from_rows,
                                             search_texts,
                                         )
 
@@ -4751,15 +4752,9 @@ async def run_negotiate(msg: GatewayMessage):
                                             )
                                         except Exception:
                                             _rows = []
-                                        _best = None
-                                        _best_row: Dict[str, Any] = {}
-                                        for _row in _rows:
-                                            _text = f"{_row.get('title') or ''} {_row.get('body') or ''}"
-                                            _cands = extract_price_candidates(_text)
-                                            if _cands:
-                                                _best = _cands[0]
-                                                _best_row = _row
-                                                break
+                                        # 统一用 pick_price_from_rows：它会**优先挑有出处的那条**
+                                        # （搜狗的聚合块有价格但没 URL，直接用会得到"有价无源"）
+                                        _best = pick_price_from_rows(_rows)
                                         if _best is None:
                                             return build_observation(
                                                 name=_name, value=None, source="web", provider="search"
@@ -4768,20 +4763,38 @@ async def run_negotiate(msg: GatewayMessage):
                                             name=_name,
                                             value=float(_best["value"]),
                                             source="web",
-                                            source_url=str(_best_row.get("href") or ""),
+                                            source_url=str(_best.get("url") or ""),
                                             excerpt=str(_best.get("excerpt") or ""),
-                                            provider="search",
+                                            provider=str(_best.get("provider") or ""),
+                                            publisher=str(_best.get("publisher") or ""),
+                                            source_date=str(_best.get("source_date") or ""),
                                         )
 
                                     _observations = await asyncio.wait_for(
                                         asyncio.gather(*[_lookup(item) for item in _targets]),
-                                        timeout=12.0,
+                                        timeout=_price_budget,
                                     )
                                     _merged = merge_observations(final_data, list(_observations))
                                     if _merged["updated"]:
                                         final_data["route"] = _merged["plan"]["route"]
                                     _report = pending_price_report(final_data)
-                                    _search_status = (_provider_report.get("providers") or {}).get("search") or {}
+                                    # 取价源状态**从真实取价尝试里推导**（而不是再单独诊断一次）：
+                                    # 单测/实测都表明"诊断比功能本身更容易超时"，
+                                    # 早先那次 TimeoutError 就是这样把整个补价带走的。
+                                    from core.web_price_tool import last_search_attempts as _attempts
+
+                                    _reachable = None
+                                    _attempt_error = ""
+                                    if _attempts:
+                                        _reachable = any(bool(item.get("ok")) for item in _attempts)
+                                        for _attempt in _attempts:
+                                            if not _attempt.get("ok") and _attempt.get("error"):
+                                                _attempt_error = str(_attempt["error"])[:160]
+                                                break
+                                    _filled = [
+                                        item for item in (_observations or [])
+                                        if isinstance(item, Mapping) and item.get("value") is not None
+                                    ]
                                     final_data["price_audit"] = {
                                         **_merged["coverage"],
                                         "updated": len(_merged["updated"]),
@@ -4790,30 +4803,54 @@ async def run_negotiate(msg: GatewayMessage):
                                         "pending": _report["pending"],
                                         "pending_summary": _report["summary"],
                                         # 取价源的可达性与失败原因（用户能看到"为什么没价"）
-                                        "provider_reachable": bool(_provider_report.get("reachable")),
-                                        "provider_status": _search_status,
+                                        "provider_reachable": _reachable,
+                                        "provider_attempts": list(_attempts or [])[:4],
+                                        "provider_status": {"error": _attempt_error} if _attempt_error else {},
+                                        "looked_up": len(_targets),
+                                        "filled_from_web": len(_filled),
+                                        # 预算只够查这么多：剩下的如实留给「需要你确认」，
+                                        # 不让用户以为"系统把该查的都查了"
+                                        "budget_seconds": _price_budget,
+                                        "not_looked_up": max(0, _pending_total - len(_targets)),
                                     }
-                                    if _provider_report and not _provider_report.get("reachable"):
-                                        print(
-                                            f"⚠️ [联网取价] 搜索源不可达，{len(_targets)} 个缺价节点没能补价："
-                                            f"{str(_search_status.get('error') or _provider_report.get('error') or '未知原因')[:120]}",
-                                            flush=True,
-                                        )
+                                    print(
+                                        f"🌐 [联网取价] 查了 {len(_targets)}/{_pending_total} 个缺价节点，补到 {len(_filled)} 条"
+                                        f"（预算 {_price_budget:.0f}s，来源可达={_reachable}）"
+                                        + (f"；失败原因：{_attempt_error}" if _attempt_error else ""),
+                                        flush=True,
+                                    )
                                 else:
                                     _coverage = price_coverage(final_data)
                                     _report = pending_price_report(final_data)
+                                    # 这一步**没跑**时要写清原因：是"没有缺价节点"还是"取价函数缺失"，
+                                    # 否则界面上只能看到"未核实"，无法判断是没查还是查了没结果。
+                                    _skip_reason = (
+                                        "所有节点都已有可核实价格，无需补价"
+                                        if not _targets
+                                        else "取价函数不可用（工具箱未提供 get_real_time_web_price）"
+                                    )
                                     final_data["price_audit"] = {
                                         **_coverage,
                                         "pending": _report["pending"],
                                         "pending_summary": _report["summary"],
+                                        # 没跑这一步也要留痕：否则界面只能显示"未核实"，
+                                        # 分不清是"没去查"还是"查了没结果"
+                                        "provider_reachable": None,
+                                        "skipped_reason": _skip_reason,
                                     }
                             except Exception as _price_exc:  # 价格补全失败绝不能影响出方案
+                                # 但要**说出来**：早先这里只写 coverage，把异常咽掉了 ——
+                                # 于是"补价这一整段没跑"在界面上长得跟"查了没结果"一模一样。
+                                print(f"⚠️ [价格补全] 这一步失败（不影响出方案）: {type(_price_exc).__name__}: {_price_exc}", flush=True)
                                 try:
                                     from core.price_sources import price_coverage as _coverage
 
-                                    final_data["price_audit"] = _coverage(final_data)
+                                    final_data["price_audit"] = {
+                                        **_coverage(final_data),
+                                        "error": f"{type(_price_exc).__name__}: {str(_price_exc)[:180]}",
+                                    }
                                 except Exception:
-                                    pass
+                                    final_data["price_audit"] = {"error": f"{type(_price_exc).__name__}: {str(_price_exc)[:180]}"}
 
                             # 👑 跨城腿的出行方式比较（有界：最多 2 段；票价无来源就标未核实）
                             try:
