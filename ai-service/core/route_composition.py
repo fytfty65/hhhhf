@@ -262,6 +262,118 @@ def composition_audit(
     }
 
 
+def trim_category_over_cap(
+    route: Sequence[Mapping[str, Any]],
+    *,
+    cap: int,
+    classify,
+    scenic_tier_of=None,
+    category: str = "city_park",
+    pool: Sequence[Mapping[str, Any]] = (),
+    replacement_preference: Sequence[str] = ("scenic", "food"),
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """把**超过上限的城市公园**从路线里换掉或移出（用户口径：默认 1~2 个）。
+
+    为什么要有这一步：候选池限量只管住了"模型能看到什么"，模型照样能多排
+    （实测出现过路线里 3 个公园 > 上限 2）。口径要落到**最终路线**上，而不是只写在日志里。
+
+    规则（保守、可解释）：
+      - 保留路线里**前 `cap` 个**公园（顺序即优先级），其余逐个处理；
+      - 优先从候选池**同类替换**：按 `replacement_preference`（默认自然景区 → 美食）找候选，
+        且不与路线重名、本身不是城市公园（不能拿公园换公园）；
+      - 没有可替换的 → 移出该节点，并如实记动作；
+      - 绝不触碰非公园节点。
+    `category="city_park"` 时用 `scenic_tier_of` 判定"这是不是城市公园"（与配比对账同一口径）。
+    """
+    route_list = [dict(node) for node in route or [] if isinstance(node, Mapping)]
+    limit = max(0, int(cap or 0))
+
+    def category_of(node: Mapping[str, Any]) -> str:
+        name = str(node.get("name") or node.get("location") or "")
+        poi_type = str(node.get("type") or "")
+        is_hotel = bool(node.get("is_hotel")) or any(
+            word in name for word in ("酒店", "民宿", "宾馆", "客栈", "旅馆")
+        )
+        if is_hotel:
+            return "hotel"
+        try:
+            base = str(classify(name, poi_type, is_hotel) or "other")
+        except Exception:
+            return "other"
+        if category == "city_park" and base == "scenic" and scenic_tier_of is not None:
+            tier = str(scenic_tier_of(name, poi_type) or "")
+            return "city_park" if tier == "city_park" else base
+        return base
+
+    park_indexes = [index for index, node in enumerate(route_list) if category_of(node) == category]
+    if len(park_indexes) <= limit:
+        return route_list, []
+
+    existing_names = {str(node.get("name") or node.get("location") or "") for node in route_list}
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for item in pool or []:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in existing_names:
+            continue
+        item_category = category_of(item)
+        if item_category in {category, "other", "hotel"}:
+            continue
+        if category == "city_park" and item_category == "scenic" and scenic_tier_of is not None:
+            # 只接受**真景区**来替换公园（不能再换一个公园进来）
+            if str(scenic_tier_of(str(item.get("name") or ""), str(item.get("type") or "")) or "") != "landmark":
+                continue
+        buckets.setdefault(item_category, []).append(dict(item))
+
+    actions: List[Dict[str, Any]] = []
+    for index in park_indexes[limit:]:
+        node = route_list[index]
+        original = str(node.get("name") or node.get("location") or "")
+        replacement: Optional[Dict[str, Any]] = None
+        for wanted in replacement_preference:
+            bucket = buckets.get(str(wanted)) or []
+            while bucket:
+                candidate = bucket.pop(0)
+                name = str(candidate.get("name") or "")
+                if not name or name in existing_names:
+                    continue
+                replacement = candidate
+                existing_names.add(name)
+                break
+            if replacement is not None:
+                break
+        if replacement is not None:
+            merged = dict(node)
+            merged["name"] = replacement.get("name")
+            merged["location"] = replacement.get("name")
+            merged["type"] = replacement.get("type")
+            if replacement.get("lnglat"):
+                merged["lnglat"] = replacement.get("lnglat")
+            merged["replaced_from"] = original
+            merged["replacement_reason"] = "city_park_over_cap"
+            route_list[index] = merged
+            actions.append({
+                "code": "park_over_cap_replaced",
+                "day": node.get("day"),
+                "from": original,
+                "to": str(replacement.get("name") or ""),
+                "reason": f"城市公园超过上限 {limit} 个，已换成同类可去的点",
+            })
+        else:
+            route_list[index] = {**dict(node), "_drop": True}
+            actions.append({
+                "code": "park_over_cap_dropped",
+                "day": node.get("day"),
+                "from": original,
+                "reason": f"城市公园超过上限 {limit} 个，且候选池里没有可替换的点，已移出",
+            })
+    kept = [node for node in route_list if not node.get("_drop")]
+    for node in kept:
+        node.pop("_drop", None)
+    return kept, actions
+
+
 def count_route_composition(route: Sequence[Mapping[str, Any]], classify, scenic_tier_of=None) -> Dict[str, int]:
     """数一遍路线里的节点构成。
 

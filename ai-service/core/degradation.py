@@ -254,6 +254,29 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.9) 城市公园限量落到实处（2026-10-04 用户口径：默认 1~2 个）：路线里超出的已被
+    #      换成景区/美食或移出，动过什么要写清楚，别让用户以为方案自己"少了两个地方"。
+    park_trim = _as_mapping(data.get("park_trim"))
+    park_actions = [item for item in (park_trim.get("actions") or []) if isinstance(item, Mapping)]
+    if park_actions:
+        replaced = [item for item in park_actions if str(item.get("code")) == "park_over_cap_replaced"]
+        dropped = [item for item in park_actions if str(item.get("code")) == "park_over_cap_dropped"]
+        parts = []
+        if replaced:
+            parts.append(
+                "已替换 " + str(len(replaced)) + " 处（"
+                + "、".join(f"{item.get('from')}→{item.get('to')}" for item in replaced[:2]) + "）"
+            )
+        if dropped:
+            parts.append("已移出 " + str(len(dropped)) + " 处（" + "、".join(str(item.get("from")) for item in dropped[:2]) + "）")
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                f"城市公园超过上限 {park_trim.get('cap')} 个：" + "；".join(parts) + "（想把公园换成景区可以直接说）",
+            )
+        )
+
     # 3.8) 明确排除项的实际处置（2026-10-04）：用户说"不要博物馆"，方案里真出现过又被换掉/移出的，
     #      也要写清楚 —— 让用户知道系统按他的禁令动过什么，而不是悄悄改了。
     exclusion = _as_mapping(data.get("exclusion_repair"))

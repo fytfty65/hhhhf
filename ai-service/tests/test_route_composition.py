@@ -9,7 +9,12 @@
 用例里的高德类别字符串都是真实探针抓到的原文（库尔勒 / 郑州），不是编的。
 """
 
+import os
 import unittest
+
+# 城市公园限量/替换的测试要用**真实的** classify_poi_category（api.agent 导入时会构造 LLM 客户端，
+# 缺 key 直接抛错，这是刻意的），所以先给个假 key 让导入跑通。
+os.environ.setdefault("LLM_API_KEY", "test-key-not-used")
 
 from core.route_composition import (
     composition_audit,
@@ -307,6 +312,140 @@ class CompositionHintTests(unittest.TestCase):
 
         text = composition_hint(composition_targets(trip_days=2, daily_nodes=5))
         self.assertIn("不要拿它充数", text)
+
+
+class ParkTrimTests(unittest.TestCase):
+    """公园限量落到最终路线：超出的换成真景区/美食，换不了就移出（用户口径默认 1~2 个）。"""
+
+    def _classify(self):
+        from api.agent import classify_poi_category
+
+        return classify_poi_category
+
+    def _route(self):
+        return [
+            {"day": 1, "name": "孔雀公园", "type": "风景名胜;公园广场;公园"},
+            {"day": 1, "name": "库尔勒市湿地公园", "type": "风景名胜;公园广场;公园"},
+            {"day": 2, "name": "劳动公园", "type": "风景名胜;公园广场;公园"},
+            {"day": 2, "name": "巴音郭楞蒙古自治州博物馆", "type": "科教文化服务;博物馆;博物馆"},
+        ]
+
+    def _pool(self):
+        return [
+            {"name": "博斯腾湖风景名胜区", "type": "风景名胜;风景名胜;国家级景点", "lnglat": [86.76, 41.98]},
+            {"name": "老四号拌面", "type": "餐饮服务;中餐厅", "lnglat": [86.2, 41.7]},
+            {"name": "胡杨公园", "type": "风景名胜;公园广场;公园"},
+        ]
+
+    def test_extra_parks_are_replaced_with_real_scenery_first(self):
+        from core.route_composition import trim_category_over_cap, scenic_tier
+
+        route, actions = trim_category_over_cap(
+            self._route(), cap=2, classify=self._classify(), scenic_tier_of=scenic_tier, pool=self._pool()
+        )
+        names = [item["name"] for item in route]
+        # 湿地公园算真景区（自然词），不在公园计数里；城市公园是孔雀公园/劳动公园 → 上限 2 不用动
+        self.assertEqual(len(actions), 0, f"上限 2 且城市公园只有 2 个，不该动：{actions}")
+
+    def test_cap_one_replaces_the_extra_park_with_landmark(self):
+        from core.route_composition import scenic_tier, trim_category_over_cap
+
+        route, actions = trim_category_over_cap(
+            self._route(), cap=1, classify=self._classify(), scenic_tier_of=scenic_tier, pool=self._pool()
+        )
+        names = [item["name"] for item in route]
+        self.assertEqual(len(actions), 1, actions)
+        self.assertIn(actions[0]["code"], {"park_over_cap_replaced", "park_over_cap_dropped"})
+        if actions[0]["code"] == "park_over_cap_replaced":
+            self.assertIn("博斯腾湖风景名胜区", names, "优先换成真景区")
+            self.assertNotIn("劳动公园", names)
+
+    def test_drops_when_no_replacement_available(self):
+        from core.route_composition import scenic_tier, trim_category_over_cap
+
+        route, actions = trim_category_over_cap(
+            self._route(), cap=1, classify=self._classify(), scenic_tier_of=scenic_tier, pool=[]
+        )
+        names = [item["name"] for item in route]
+        self.assertEqual(actions[0]["code"], "park_over_cap_dropped")
+        self.assertEqual(len(names), 3, "移出一个公园后应剩 3 个节点")
+        self.assertIn("巴音郭楞蒙古自治州博物馆", names, "非公园节点不能被碰")
+
+    def test_scenic_only_cap_zero_removes_all_city_parks(self):
+        from core.route_composition import scenic_tier, trim_category_over_cap
+
+        route, actions = trim_category_over_cap(
+            self._route(), cap=0, classify=self._classify(), scenic_tier_of=scenic_tier, pool=self._pool()
+        )
+        names = [item["name"] for item in route]
+        self.assertNotIn("孔雀公园", names)
+        self.assertNotIn("劳动公园", names)
+        self.assertIn("库尔勒市湿地公园", names, "湿地公园是真景区，不在公园口径里")
+        self.assertEqual(len(actions), 2)
+
+    def test_never_replaces_a_park_with_another_park(self):
+        from core.route_composition import scenic_tier, trim_category_over_cap
+
+        pool = [{"name": "又一个公园", "type": "风景名胜;公园广场;公园"}]
+        route, actions = trim_category_over_cap(
+            self._route(), cap=1, classify=self._classify(), scenic_tier_of=scenic_tier, pool=pool
+        )
+        names = [item["name"] for item in route]
+        self.assertNotIn("又一个公园", names, "不能拿公园换公园")
+        self.assertEqual(actions[0]["code"], "park_over_cap_dropped")
+
+    def test_shopping_street_is_not_used_as_a_park_replacement(self):
+        """替换偏好是"景区 → 美食"：候选池里只有步行街时应当**移出**，而不是换成逛街（实测踩到）。"""
+        from core.route_composition import scenic_tier, trim_category_over_cap
+
+        pool = [{"name": "恒友广场步行街", "type": "购物服务;购物相关场所;购物相关场所"}]
+        route, actions = trim_category_over_cap(
+            self._route(), cap=1, classify=self._classify(), scenic_tier_of=scenic_tier, pool=pool
+        )
+        names = [item["name"] for item in route]
+        self.assertNotIn("恒友广场步行街", names, "公园不该被换成购物街")
+        self.assertEqual(actions[0]["code"], "park_over_cap_dropped", actions[0])
+
+    def test_food_is_used_when_no_landmark_available(self):
+        from core.route_composition import scenic_tier, trim_category_over_cap
+
+        pool = [{"name": "老四号拌面", "type": "餐饮服务;中餐厅"}]
+        route, actions = trim_category_over_cap(
+            self._route(), cap=1, classify=self._classify(), scenic_tier_of=scenic_tier, pool=pool
+        )
+        names = [item["name"] for item in route]
+        self.assertIn("老四号拌面", names, "没有景区时用美食替换（总比逛街贴近口径）")
+        self.assertEqual(actions[0]["code"], "park_over_cap_replaced")
+
+    def test_no_parks_means_no_actions(self):
+        from core.route_composition import scenic_tier, trim_category_over_cap
+
+        route = [{"day": 1, "name": "博斯腾湖风景名胜区", "type": "风景名胜;风景名胜;国家级景点"}]
+        kept, actions = trim_category_over_cap(
+            route, cap=0, classify=self._classify(), scenic_tier_of=scenic_tier, pool=self._pool()
+        )
+        self.assertEqual(actions, [])
+        self.assertEqual(len(kept), 1)
+
+
+class ParkTrimDisclosureTests(unittest.TestCase):
+    def test_trim_is_disclosed_with_names(self):
+        from core.degradation import collect_degradations
+
+        payload = {
+            "park_trim": {
+                "cap": 1,
+                "actions": [
+                    {"code": "park_over_cap_replaced", "from": "劳动公园", "to": "博斯腾湖风景名胜区"},
+                    {"code": "park_over_cap_dropped", "from": "孔雀公园"},
+                ],
+            }
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if "公园超过上限" in str(item.get("reason"))), None)
+        self.assertIsNotNone(entry, items)
+        self.assertIn("劳动公园→博斯腾湖风景名胜区", str(entry.get("reason")))
+        self.assertIn("孔雀公园", str(entry.get("reason")))
 
 
 if __name__ == "__main__":

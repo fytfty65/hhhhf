@@ -63,6 +63,7 @@ from core.route_composition import (
     repair_forbidden_categories,
     scenic_tier,
     summarize_targets,
+    trim_category_over_cap,
 )
 
 
@@ -4923,6 +4924,47 @@ async def run_negotiate(msg: GatewayMessage):
                                     )
                             except Exception as _exclusion_exc:  # 修复失败绝不影响出方案
                                 final_data["exclusion_repair"] = {"error": str(_exclusion_exc)[:200]}
+
+                        # 👑 城市公园限量落到**最终路线**上：候选池限量只管住"模型能看到什么"，
+                        #    模型照样能多排（实测 3 个 > 上限 2）。这里把超出的换成真景区/美食，
+                        #    换不了就移出，并留痕（与远景区修复同一套路）。
+                        try:
+                            _park_trim_pool: List[Dict[str, Any]] = [
+                                dict(item)
+                                for item in list(unique_attractions or []) + list(unique_foods or [])
+                                if isinstance(item, dict)
+                            ]
+                            _park_trimmed, _park_actions = trim_category_over_cap(
+                                final_data.get("route") or [],
+                                cap=int(_park_allowed or 0),
+                                classify=classify_poi_category,
+                                scenic_tier_of=scenic_tier,
+                                category="city_park",
+                                pool=_park_trim_pool,
+                            )
+                            if _park_actions:
+                                final_data["route"] = _park_trimmed
+                                final_data["park_trim"] = {"cap": int(_park_allowed or 0), "actions": _park_actions}
+                                await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
+                                    "room_id": room_id, "city": target_city,
+                                    "action_count": len(_park_actions),
+                                    "action_codes": sorted({str(item.get("code")) for item in _park_actions}),
+                                    "examples": [
+                                        f"{item.get('from')} → {item.get('to') or '（移出）'}"
+                                        for item in _park_actions[:4]
+                                    ],
+                                    "correlation_id": plan_correlation_id,
+                                }, room_id, correlation_id=plan_correlation_id, producer="validator")
+                                print(
+                                    f"🌳 [公园限量] 路线里超出的公园已处理 {len(_park_actions)} 处："
+                                    + "；".join(
+                                        f"{item.get('from')} → {item.get('to') or '（移出）'}"
+                                        for item in _park_actions[:3]
+                                    ),
+                                    flush=True,
+                                )
+                        except Exception as _park_exc:  # 修复失败绝不影响出方案（对账仍会报超限）
+                            final_data["park_trim"] = {"error": str(_park_exc)[:200]}
 
                         # 👑 配比对账：实际排出来的构成 vs 用户口径算出的目标（默认自然=人文各半
                         # + 穿插美食住宿；明确偏好则加权）。对不上就如实记账，进"遗留问题"。
