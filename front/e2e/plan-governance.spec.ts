@@ -304,6 +304,33 @@ const GOVERNANCE_PAYLOAD = {
       deviations: [{ intent: 'cultural', target: 4, actual: 2, severity: 'under' }],
     },
   },
+  // 协商纪要：谁参与、站在什么立场、争了什么、裁决凭什么、谁没参与
+  negotiation: {
+    facts_version: 'facts-v1-e2etest1',
+    agents: [
+      { agent_id: 'route-planner', domain: 'itinerary', prefers: '远景区', candidates: 12, status: 'ok' },
+      { agent_id: 'health-agent', domain: 'health', prefers: '保守强度', candidates: 1, status: 'ok' },
+      { agent_id: 'dining-agent', domain: 'dining', prefers: '本地餐饮', candidates: 9, status: 'ok' },
+    ],
+    inactive: [{ agent_id: 'budget-agent', reason: 'candidate_pool_empty' }],
+    conflicts: [
+      {
+        code: 'far_scenic_vs_daily_intensity',
+        between: ['route-planner', 'health-agent'],
+        detail: '路线侧有 2 个远景区（博斯腾湖、罗布人村寨），体力侧建议每天最多 4 个节点',
+        severity: 'negotiable',
+      },
+    ],
+    arbitration: [
+      {
+        code: 'far_scenic_vs_daily_intensity',
+        decision: '保留远景区，但**一天最多一个**，其余移出当天',
+        mechanism: 'core/travel_feasibility.repair_day_overload（硬约束过滤阶段执行）',
+        why: '你明确表示不介意跑远',
+      },
+    ],
+    notes: ['没有参与博弈的智能体：budget-agent'],
+  },
 };
 
 async function installMocks(page: Page) {
@@ -381,6 +408,7 @@ async function installMocks(page: Page) {
                     reference_profile: payload.governance.reference_profile,
                     candidate_supply: payload.governance.candidate_supply,
                     composition: payload.governance.composition,
+                    negotiation: payload.governance.negotiation,
                   }),
               }),
             });
@@ -660,6 +688,18 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByTestId('composition-compare')).toContainText('实际：自然景区 3 · 人文 2 · 特色美食 2 · 住宿 1');
     await expect(compositionBlock).toContainText('城市公园另算 2 个，不顶自然的名额');
     await expect(panel.getByTestId('composition-notes')).toContainText('人文 2 个，目标 4 个（偏少）');
+
+    // 协商纪要：谁参与 + 立场、分歧、裁决（含执行层）、谁没参与 —— 多智能体协同要看得见
+    const negotiationBlock = panel.getByTestId('negotiation-block');
+    await expect(negotiationBlock).toBeVisible();
+    await expect(panel.getByTestId('negotiation-version')).toContainText('facts-v1-e2etest1');
+    await expect(panel.getByTestId('negotiation-stances')).toContainText('route-planner：远景区（12 个候选）');
+    await expect(panel.getByTestId('negotiation-stances')).toContainText('health-agent：保守强度');
+    await expect(panel.getByTestId('negotiation-conflicts')).toContainText('分歧（可协商）');
+    await expect(panel.getByTestId('negotiation-conflicts')).toContainText('路线侧有 2 个远景区');
+    await expect(panel.getByTestId('negotiation-arbitration')).toContainText('一天最多一个');
+    await expect(panel.getByTestId('negotiation-arbitration')).toContainText('repair_day_overload');
+    await expect(panel.getByTestId('negotiation-inactive')).toContainText('budget-agent（candidate_pool_empty）');
 
     // 已作调整：平替明细 + 人话说明
     await expect(panel.getByText('已作调整')).toBeVisible();

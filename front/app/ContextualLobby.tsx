@@ -1185,7 +1185,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
-          fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition,
+          fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition || fd.negotiation,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1211,6 +1211,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         candidateSupply: fd.candidate_supply ?? prev?.candidateSupply,
         // 本次配比（目标 vs 实际）：默认自然=人文各半并穿插美食住宿；自然只算景区
         composition: fd.composition ?? prev?.composition,
+        // 本次协商纪要：谁参与、站在什么立场、争了什么、裁决凭什么
+        negotiation: fd.negotiation ?? prev?.negotiation,
       }));
     };
 

@@ -205,6 +205,23 @@ async function main() {
     record('供给充足时不产生多余的降级条目', supplyDegradation.length === 0, `降级条目 ${degradations.length} 条`);
   }
 
+  // 协商纪要（多智能体协同要看得见）：谁参与、站在什么立场、争了什么、裁决凭什么
+  const negotiation = payload?.negotiation ?? null;
+  record(
+    '方案带上了协商纪要（参与/分歧/裁决/未参与）',
+    Boolean(negotiation && Array.isArray(negotiation.agents)),
+    negotiation
+      ? `参与 ${negotiation.agents?.length ?? 0} 个 · 分歧 ${negotiation.conflicts?.length ?? 0} 条 · ` +
+        `裁决 ${negotiation.arbitration?.length ?? 0} 条 · 未参与 ${negotiation.inactive?.length ?? 0} 个` +
+        (negotiation.conflicts?.length ? `｜${negotiation.conflicts.map((item) => item.code).join(',')}` : '')
+      : '缺 negotiation 字段（用户在界面上看不到协商过程）',
+  );
+  if (negotiation?.agents?.length) {
+    console.log(
+      `  协商：${negotiation.agents.slice(0, 6).map((item) => `${item.agent_id}→${item.prefers}`).join(' | ')}`,
+    );
+  }
+
   const names = nodeNames(payload);
   console.log(`  路线节点（${names.length}）：${names.join('、')}`);
 

@@ -4824,11 +4824,53 @@ async def run_negotiate(msg: GatewayMessage):
                                 degradations=final_data.get("degradations"),
                             )
                             final_data["facts"] = _facts
+                            # 👑 协商纪要（给用户看的紧凑版）：谁参与了、站在什么立场、
+                            #    争了什么、裁决凭什么、谁没参与 —— 多智能体协同要看得见，
+                            #    而不是只活在事件流里。
+                            _conflict_record = specialist_runtime_result.get("proposal_conflicts") or {}
+                            final_data["negotiation"] = {
+                                "facts_version": facts_version_string,
+                                "agents": [
+                                    {
+                                        "agent_id": str(item.get("agent_id") or ""),
+                                        "domain": str(item.get("domain") or ""),
+                                        "prefers": str(item.get("prefers") or ""),
+                                        "candidates": int(item.get("candidates") or 0),
+                                        "status": str(item.get("status") or ""),
+                                    }
+                                    for item in (_conflict_record.get("stances") or [])[:12]
+                                ],
+                                "inactive": [
+                                    {
+                                        "agent_id": str(item.get("agent_id") or ""),
+                                        "reason": str(item.get("reason") or "")[:120],
+                                    }
+                                    for item in (_conflict_record.get("inactive") or [])[:8]
+                                ],
+                                "conflicts": [
+                                    {
+                                        "code": str(item.get("code") or ""),
+                                        "between": [str(name) for name in (item.get("between") or [])],
+                                        "detail": str(item.get("detail") or "")[:240],
+                                        "severity": str(item.get("severity") or ""),
+                                    }
+                                    for item in (_conflict_record.get("conflicts") or [])[:6]
+                                ],
+                                "arbitration": [
+                                    {
+                                        "code": str(item.get("code") or ""),
+                                        "decision": str(item.get("decision") or "")[:200],
+                                        "mechanism": str(item.get("mechanism") or "")[:160],
+                                        "why": str(item.get("why") or "")[:200],
+                                    }
+                                    for item in (_conflict_record.get("arbitration") or [])[:6]
+                                ],
+                                "notes": [str(item)[:200] for item in (_conflict_record.get("notes") or [])[:4]],
+                            }
                             # 事实记录里也带上提案阶段那一版快照的版本号：整轮规划可对齐
                             _facts["facts_version"] = facts_version_string
                             _facts["proposal_alignment"] = specialist_runtime_result.get("facts_alignment")
                             # 提案分歧与裁决也进事实记录（"当时分歧在哪、凭什么这么定"）
-                            _conflict_record = specialist_runtime_result.get("proposal_conflicts") or {}
                             _facts["proposal_conflicts"] = {
                                 "codes": [str(item.get("code")) for item in _conflict_record.get("conflicts") or []],
                                 "arbitration": [

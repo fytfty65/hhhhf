@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble, Bookmark, MapPin, Scale } from 'lucide-react';
+import { ReceiptText, SlidersHorizontal, CalendarRange, Route, Target, AlertTriangle, BedDouble, Bookmark, MapPin, Scale, Users } from 'lucide-react';
 
 type GateFailure = { code?: string; detail?: string };
 type Substitution = { from?: string; node?: string; to?: string; saving?: number | null; reason?: string; kind?: string };
@@ -180,6 +180,18 @@ export type PlanGovernance = {
     farthest_scenic_km?: number;
   };
   /**
+   * 协商纪要（多智能体协同要看得见）：谁参与、站在什么立场、争了什么、裁决凭什么、
+   * 谁没参与（含原因）。没有这一块，用户在界面上只能看到结果，看不到协商过程。
+   */
+  negotiation?: {
+    facts_version?: string;
+    agents?: { agent_id?: string; domain?: string; prefers?: string; candidates?: number; status?: string }[];
+    inactive?: { agent_id?: string; reason?: string }[];
+    conflicts?: { code?: string; between?: string[]; detail?: string; severity?: string }[];
+    arbitration?: { code?: string; decision?: string; mechanism?: string; why?: string }[];
+    notes?: string[];
+  };
+  /**
    * 行程配比（用户口径）：默认自然景区与人文各半并穿插特色美食/住宿；明确说了偏好就加权。
    * 自然景观只算景区 —— 城市公园单列，不顶自然的名额。
    */
@@ -336,7 +348,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -377,6 +389,13 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
   const hasCandidateSupplyBlock = Boolean(
     candidateSupply && (typeof candidateSupply.known_daytime === 'number' || candidateSupply.status),
   );
+  // 协商纪要：后端给了智能体列表或分歧/裁决就显示
+  const hasNegotiationBlock = Boolean(
+    negotiation &&
+      ((negotiation.agents?.length ?? 0) > 0 ||
+        (negotiation.conflicts?.length ?? 0) > 0 ||
+        (negotiation.inactive?.length ?? 0) > 0),
+  );
   // 配比：后端给了目标就算有（actual/audit 可能缺，缺了就不显示对账那半句）
   const hasCompositionBlock = Boolean(
     composition && (typeof composition.scenic === 'number' || typeof composition.daytime === 'number'),
@@ -385,7 +404,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
     !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock &&
-    !hasReferenceProfileBlock && !hasCandidateSupplyBlock && !hasCompositionBlock
+    !hasReferenceProfileBlock && !hasCandidateSupplyBlock && !hasCompositionBlock && !hasNegotiationBlock
   ) {
     return null;
   }
@@ -430,6 +449,68 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+      {hasNegotiationBlock && (
+        <div
+          className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0"
+          data-testid="negotiation-block"
+        >
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<Users className="h-3 w-3" />}>本次协商纪要</SectionLabel>
+            <span className="font-mono text-[11px] tabular-nums text-slate-400" data-testid="negotiation-version">
+              {negotiation?.facts_version || ''}
+            </span>
+          </div>
+
+          {/* 参与的智能体：谁站在什么立场（不是"AI 已优化"，而是各自的主张） */}
+          {(negotiation?.agents?.length ?? 0) > 0 && (
+            <ul className="mt-1.5 space-y-0.5" data-testid="negotiation-stances">
+              {(negotiation?.agents || []).map((agent) => (
+                <li key={`${agent.agent_id}-${agent.domain}`} className="text-[12.5px] leading-relaxed text-slate-600">
+                  · {agent.agent_id}
+                  {agent.prefers ? `：${agent.prefers}` : ''}
+                  {typeof agent.candidates === 'number' ? `（${agent.candidates} 个候选）` : ''}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* 分歧：有就逐条写清楚；没有也明说是"检查过且一致" */}
+          {(negotiation?.conflicts?.length ?? 0) > 0 ? (
+            <div className="mt-2" data-testid="negotiation-conflicts">
+              {(negotiation?.conflicts || []).map((conflict) => (
+                <p key={conflict.code} className="text-[12.5px] leading-relaxed text-amber-800">
+                  分歧（{conflict.severity === 'hard' ? '硬冲突' : '可协商'}）：
+                  {conflict.detail || conflict.code}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-[12.5px] leading-relaxed text-slate-500" data-testid="negotiation-no-conflicts">
+              {negotiation?.notes?.[0] || '这次各智能体没有显式分歧。'}
+            </p>
+          )}
+
+          {/* 裁决：决定 + 凭什么 + 由哪一层执行 */}
+          {(negotiation?.arbitration?.length ?? 0) > 0 && (
+            <ul className="mt-1.5 space-y-1" data-testid="negotiation-arbitration">
+              {(negotiation?.arbitration || []).map((item) => (
+                <li key={`${item.code}-${item.decision}`} className="text-[12.5px] leading-relaxed text-slate-600">
+                  · 裁决：{item.decision}
+                  {item.why ? `（${item.why}）` : ''}
+                  {item.mechanism ? <span className="text-slate-400">　由 {item.mechanism} 执行</span> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* 没参与的：如实列出，不假装协同过 */}
+          {(negotiation?.inactive?.length ?? 0) > 0 && (
+            <p className="mt-1.5 text-[11.5px] leading-relaxed text-slate-400" data-testid="negotiation-inactive">
+              这轮没有参与博弈：{(negotiation?.inactive || []).map((item) => `${item.agent_id}（${item.reason}）`).join('；')}
+            </p>
           )}
         </div>
       )}
