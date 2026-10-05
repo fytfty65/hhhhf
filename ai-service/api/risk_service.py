@@ -25,6 +25,23 @@ from typing import List, Dict, Any, Optional, Protocol
 
 import httpx
 
+# 👑 共享 SSL 上下文（2026-10-05，看门狗实测）：httpx 构造客户端时会**同步**建 SSL 上下文，
+#    本机实测 `httpx.AsyncClient(timeout=6.0)` 要 0.87s（传入已有上下文只要 0.05s），
+#    而这段是**阻塞事件循环**的。风控这一层有 3 个情报源 + 1 个气象预警接口，
+#    每个都新建客户端，于是"取数与风控"里有一大截其实是在本地建上下文。
+try:
+    import ssl as _ssl
+
+    _SHARED_SSL_CONTEXT: Optional["_ssl.SSLContext"] = _ssl.create_default_context()
+except Exception:  # pragma: no cover - 建不出来就退回 httpx 默认行为
+    _SHARED_SSL_CONTEXT = None
+
+
+def _http_client(**kwargs) -> "httpx.AsyncClient":
+    if _SHARED_SSL_CONTEXT is not None:
+        kwargs.setdefault("verify", _SHARED_SSL_CONTEXT)
+    return httpx.AsyncClient(**kwargs)
+
 
 def _intel_cache_ttl_seconds() -> float:
     """TTL for cached city safety intelligence (default 15 minutes)."""
@@ -143,7 +160,7 @@ class WorldMonitorProvider:
 
     async def fetch(self, city: str) -> Optional[Dict[str, Any]]:
         try:
-            async with httpx.AsyncClient(timeout=2.5) as http_client:
+            async with _http_client(timeout=2.5) as http_client:
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
                 resp = await http_client.get(
                     f"{self.base_url}/api/v1/intelligence/risk",
@@ -171,7 +188,7 @@ class GDELTProvider:
     async def fetch(self, city: str) -> Optional[Dict[str, Any]]:
         try:
             query = f'"{city}" (protest OR crime OR accident OR safety OR security)'
-            async with httpx.AsyncClient(timeout=4.0) as http_client:
+            async with _http_client(timeout=4.0) as http_client:
                 resp = await http_client.get(
                     self.gdelt_url,
                     params={"query": query, "mode": "artlist", "maxrecords": "25", "format": "json", "timespan": "30d"},
@@ -624,7 +641,7 @@ class RiskService:
         if not endpoint:
             return None
         try:
-            async with httpx.AsyncClient(timeout=1.8, follow_redirects=True) as http_client:
+            async with _http_client(timeout=1.8, follow_redirects=True) as http_client:
                 resp = await http_client.get(endpoint, params={"p": 1, "pageSize": 50})
                 if resp.status_code != 200:
                     return None

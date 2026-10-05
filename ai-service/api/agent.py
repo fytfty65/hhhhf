@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
@@ -91,6 +92,260 @@ def _fairness_limit_from_env() -> float:
 # 表现成"大家一起排队等到超时"；有界并发反而更快也更省配额。
 _TRAVEL_OPTIONS_SEMAPHORE = asyncio.Semaphore(8)
 _TRAVEL_OPTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+# —— 取数细分的耗时账本（2026-10-05）——
+# 分段耗时显示「取数与风控」要 28–34s，但里面是十几次高德调用并发跑，
+# 只看总数无法判断该优化谁。这里按"调用种类"累计**墙钟时间与次数**，
+# 出方案时打一行汇总（纯观测，不改变任何行为）。
+_FETCH_TIMING: Dict[str, float] = {}
+_FETCH_COUNTS: Dict[str, int] = {}
+
+
+# 👑 全进程的**高德请求闸门**（2026-10-05 实测，反直觉但数据很清楚）：
+#    高德对同一把 key 的 QPS 限制很紧，**并发请求不但更慢，还会静默丢掉整条查询**。
+#    同一台机器、同一把 key 的实测：
+#      · 单个 `place/text`：0.39~0.44s，status=1；
+#      · 5 个并发：总 12.86s，单个 10.52 / 8.0 / 5.46 / 3.02 / 0.42s，其中 1 个 status=0（被限流）；
+#      · 并发 2：总 1.32s，但 7 个里 **2 个 status=0** —— 那两条查询什么都没查到；
+#      · 串行：7 个共 2.69s，全部 status=1。
+#    所以这里给**所有高德请求**加同一道闸门（并发 1 + 最小间隔），
+#    而不是只管 `place/text`：天气/路况/地理编码用的是同一把 key，
+#    它们在别的协程里并发跑，一样会把这把 key 顶到限流上 ——
+#    这解释了"应用里单次请求要 3.6s，而单独跑只要 0.4s"。
+#    间隔可用 AMAP_MIN_INTERVAL_SECONDS 调（默认 0.15s：比 QPS 上限留一点余量，又不白等）。
+_AMAP_GATE_LOCKS: Dict[int, asyncio.Lock] = {}
+_AMAP_LAST_AT_BY_LOOP: Dict[int, float] = {}
+# 闸门自身的账本：进了几次、排队等了多久、真正占着闸门多久。
+# 实测（2026-10-05）：加闸门后单次请求从 3.6s 掉回 0.44s，但阶段总耗时没变 ——
+# 那就必须能回答"到底有多少个高德请求在排队"，否则没法判断该减请求还是该放开并发。
+_AMAP_GATE_STATS: Dict[str, float] = {"count": 0.0, "wait": 0.0, "held": 0.0}
+# 高德 POI 实景图缓存（按 POI id）：同一个 POI 常出现在多个关键词查询里，
+# 不缓存就会把同一张图问好几遍 —— 而每次问都在占用同一把 key 的 QPS。
+_AMAP_PHOTO_CACHE: Dict[str, List[str]] = {}
+
+
+def amap_gate_summary() -> str:
+    return (
+        f"请求={int(_AMAP_GATE_STATS['count'])} 排队={_AMAP_GATE_STATS['wait']:.1f}s "
+        f"占用={_AMAP_GATE_STATS['held']:.1f}s"
+    )
+
+
+# —— 事件循环卡顿探针（2026-10-05）——
+# 实测：单发高德 `place/text` 只要 0.4s，但在应用里同一时刻要 4.2s。
+# `time.monotonic()` 量到的是**墙钟**，如果事件循环被本地 CPU 活（分类/去重/帕累托）
+# 堵住，等待响应的协程就会被推迟、表现成"请求变慢"。这个探针用"每 50ms 该醒一次、
+# 实际醒了多久"来量化卡顿，避免把"本地算得慢"误判成"供应商慢"。
+class LoopLagProbe:
+    def __init__(self, interval: float = 0.05) -> None:
+        self.interval = float(interval)
+        self.max_lag = 0.0
+        self.total_lag = 0.0
+        self.samples = 0
+        self._task: Optional[asyncio.Task] = None
+
+    async def _run(self) -> None:
+        while True:
+            started = time.monotonic()
+            await asyncio.sleep(self.interval)
+            lag = max(0.0, (time.monotonic() - started) - self.interval)
+            self.max_lag = max(self.max_lag, lag)
+            self.total_lag += lag
+            self.samples += 1
+
+    def start(self) -> "LoopLagProbe":
+        try:
+            self._task = asyncio.ensure_future(self._run())
+        except RuntimeError:
+            self._task = None
+        return self
+
+    def stop(self) -> "LoopLagProbe":
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        return self
+
+    def summary(self) -> str:
+        return f"最大卡顿={self.max_lag * 1000:.0f}ms 累计={self.total_lag:.1f}s/{self.samples}次"
+
+
+class LoopWatchdog:
+    """线程看门狗：事件循环**卡住时立刻打印它卡在哪一行**。
+
+    为什么必须用线程：`LoopLagProbe` 自己也跑在事件循环里，等它被调度到时卡顿已经结束，
+    只能告诉你"卡了 19.7 秒"，告诉不了"卡在哪儿"。这个看门狗是真正的 OS 线程，
+    每 0.5s 检查一次心跳；心跳超过阈值没更新就 `sys._current_frames()` 把主线程栈打出来。
+    只在 `PLAN_LOOP_WATCHDOG=1` 时启用（默认关，生产不引入线程）。
+    """
+
+    def __init__(self, threshold: float = 2.0) -> None:
+        self.threshold = float(threshold)
+        self.heartbeat = time.monotonic()
+        self._stop = False
+        self._thread: Optional[Any] = None
+        self._task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def enabled() -> bool:
+        return str(os.getenv("PLAN_LOOP_WATCHDOG") or "").strip() in {"1", "true", "on", "yes"}
+
+    async def _beat(self) -> None:
+        while not self._stop:
+            self.heartbeat = time.monotonic()
+            await asyncio.sleep(0.1)
+
+    def _watch(self) -> None:
+        import threading
+        import traceback
+
+        main_thread = threading.main_thread()
+        while not self._stop:
+            time.sleep(0.5)
+            stalled = time.monotonic() - self.heartbeat
+            if stalled <= self.threshold:
+                continue
+            frame = sys._current_frames().get(main_thread.ident)
+            print(f"🐌 [事件循环看门狗] 卡住 {stalled:.1f}s，主线程栈：", flush=True)
+            if frame is not None:
+                for line in traceback.format_stack(frame)[-12:]:
+                    print("    " + line.strip(), flush=True)
+
+    def start(self) -> "LoopWatchdog":
+        if not self.enabled():
+            return self
+        import threading
+
+        self._thread = threading.Thread(target=self._watch, name="plan-loop-watchdog", daemon=True)
+        self._thread.start()
+        self._task = asyncio.ensure_future(self._beat())
+        return self
+
+    def stop(self) -> "LoopWatchdog":
+        self._stop = True
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        return self
+
+
+def _amap_gate_lock() -> asyncio.Lock:
+    """拿到**当前事件循环**的闸门锁。
+
+    ⚠️ 不能把一个模块级 `asyncio.Lock()` 跨事件循环用：它第一次 acquire 时会绑定到当时
+    那个 loop，之后从另一个 loop 再 acquire 会抛 "bound to a different event loop"
+    （单测里每个用例一个 `asyncio.run` 就是这种情况 —— 实测被这条抓过一次，
+    表现成"并发那几种出行方式整段查不到"）。按 loop 分开存，生产（单 loop）行为不变。
+    """
+    key = id(asyncio.get_running_loop())
+    lock = _AMAP_GATE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _AMAP_GATE_LOCKS[key] = lock
+    return lock
+
+
+def amap_min_interval_seconds() -> float:
+    raw = str(os.getenv("AMAP_MIN_INTERVAL_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.15
+    return value if value >= 0 else 0.15
+
+
+class AmapGate:
+    """高德请求闸门：全进程串行 + 最小间隔（用法：`async with AmapGate("weather"):`）。
+
+    为什么不是"限并发数"就完事：实测并发 2 时总耗时确实掉到 1.32s，
+    但代价是 7 条查询里有 2 条被限流成 status=0、**静默返回空**。
+    对规划来说"快但少了一半候选"比"慢一点但候选完整"更糟 ——
+    候选少了会直接改变方案质量，而用户看不到这个差别。
+
+    `name` 只为计时用：把"哪一类高德调用占着闸门多久"记进 `_FETCH_TIMING`，
+    否则只知道总数、不知道该减哪一种请求。
+    """
+
+    def __init__(self, name: str = "unknown") -> None:
+        self.name = str(name or "unknown")
+
+    async def __aenter__(self) -> "AmapGate":
+        lock = _amap_gate_lock()
+        _wait_started = time.monotonic()
+        await lock.acquire()
+        key = id(asyncio.get_running_loop())
+        _AMAP_GATE_STATS["count"] = float(_AMAP_GATE_STATS.get("count") or 0.0) + 1.0
+        _AMAP_GATE_STATS["wait"] = float(_AMAP_GATE_STATS.get("wait") or 0.0) + (time.monotonic() - _wait_started)
+        try:
+            gap = amap_min_interval_seconds() - (time.monotonic() - float(_AMAP_LAST_AT_BY_LOOP.get(key) or 0.0))
+            if gap > 0:
+                await asyncio.sleep(gap)
+            _AMAP_LAST_AT_BY_LOOP[key] = time.monotonic()
+        except BaseException:
+            if lock.locked():
+                lock.release()
+            raise
+        self._held_started = time.monotonic()
+        return self
+
+    async def __aexit__(self, *_exc) -> bool:
+        _started = float(getattr(self, "_held_started", 0.0) or 0.0)
+        if _started:
+            _held = time.monotonic() - _started
+            _AMAP_GATE_STATS["held"] = float(_AMAP_GATE_STATS.get("held") or 0.0) + _held
+            _note_fetch(f"gate:{self.name}", _held)
+        lock = _AMAP_GATE_LOCKS.get(id(asyncio.get_running_loop()))
+        if lock is not None and lock.locked():
+            lock.release()
+        return False
+
+
+
+def _note_fetch(name: str, seconds: float, count: int = 1) -> None:
+    _FETCH_TIMING[name] = float(_FETCH_TIMING.get(name) or 0.0) + max(0.0, float(seconds))
+    _FETCH_COUNTS[name] = int(_FETCH_COUNTS.get(name) or 0) + max(0, int(count))
+
+
+def reset_fetch_timing() -> None:
+    _FETCH_TIMING.clear()
+    _FETCH_COUNTS.clear()
+    _AMAP_GATE_STATS["count"] = 0.0
+    _AMAP_GATE_STATS["wait"] = 0.0
+    _AMAP_GATE_STATS["held"] = 0.0
+
+
+def fetch_timing_summary() -> str:
+    if not _FETCH_TIMING:
+        return "（没有取数计时）"
+    parts = [
+        f"{name}={_FETCH_TIMING[name]:.1f}s×{_FETCH_COUNTS.get(name, 0)}"
+        for name in sorted(_FETCH_TIMING, key=lambda key: -_FETCH_TIMING[key])
+    ]
+    return " ".join(parts)
+
+
+
+# 👑 共享 SSL 上下文（2026-10-05，看门狗抓到的栈 —— 这条是本轮最大的性能发现）：
+#    httpx 在**构造客户端**时会同步调用 `ssl.create_default_context()`，
+#    在本机实测：`httpx.AsyncClient(timeout=6.0)` 要 **0.87s**，而传入一个已有上下文只要 **0.05s**（17 倍）。
+#    这是**同步**调用，会把整个事件循环堵住 —— 看门狗栈显示卡顿就发生在
+#    `get_dynamic_pois → httpx.AsyncClient.__init__ → _config.create_ssl_context → ssl.create_default_context`。
+#    一次推演要建十来个客户端（5~7 个 POI 查询 + 天气 + 路况 + 每个城市坐标 + 每一对出行方式），
+#    于是"供应商很慢"的假象（单个 place/text 从 0.4s 变成 4.2s）其实全是本地在建 SSL 上下文。
+#    在**导入时**建一次，之后所有客户端都复用它。
+try:
+    import ssl as _ssl
+
+    SHARED_SSL_CONTEXT: Optional["_ssl.SSLContext"] = _ssl.create_default_context()
+except Exception:  # pragma: no cover - 建不出来就退回 httpx 默认行为（宁可慢，不要起不来）
+    SHARED_SSL_CONTEXT = None
+
+
+def _http_client(timeout: float) -> "httpx.AsyncClient":
+    """建一个复用了共享 SSL 上下文的 httpx 客户端（见 SHARED_SSL_CONTEXT 的实测说明）。"""
+    if SHARED_SSL_CONTEXT is not None:
+        return httpx.AsyncClient(timeout=timeout, verify=SHARED_SSL_CONTEXT)
+    return httpx.AsyncClient(timeout=timeout)
 
 
 def _straight_line_km(origin: str, destination: str) -> Optional[float]:
@@ -1236,19 +1491,47 @@ class ExpertToolbox:
         return " | ".join(str(item.get("body") or "") for item in results if isinstance(item, dict))
 
     async def get_coordinates(self, address: str) -> str:
-        async with httpx.AsyncClient(timeout=3.0) as http_client:
+        """城市/地址 → "lng,lat"（带进程内缓存 + **硬超时 + 快兜底**）。
+
+        为什么要有超时和兜底（2026-10-05 实测，闸门计时抓到的）：
+        `gate:geocode/geo=20.0s×2` —— 两次同一个城市的 geocode 占着闸门 **20 秒**
+        （`get_coordinates` 在一次推演里被调了两次：先用一次，再作为并发取数的一路）。
+        而单独从命令行打同一个 geocode 只要 **0.17~0.36s**，`place/text` 也只要 0.4s。
+        既然"为什么在应用里会慢 30 倍"还没有定论，就不要把出方案卡在一个**只是想拿个城市中心点**
+        的调用上：给它 2s 的硬期限，超时就用 `place/text`（实测 0.4s）兜底，并把这件事打出来。
+        坐标本身是稳定事实，按地址缓存 6 小时，第二次调用不再发请求。
+        """
+        cache_key = f"coord:{str(address or '').strip()}"
+        cached = _cache_get(cache_key)
+        if cached:
+            return str(cached)
+        async with _http_client(3.0) as http_client:
             try:
                 params = {"address": address, "key": self.amap_key}
-                resp = await http_client.get(f"{self.amap_url}/geocode/geo", params=params)
-                data = resp.json()
-                if data.get("status") == "1" and data.get("geocodes"):
-                    return str(data["geocodes"][0]["location"])
+                try:
+                    async with AmapGate("geocode/geo"):
+                        resp = await asyncio.wait_for(
+                            http_client.get(f"{self.amap_url}/geocode/geo", params=params),
+                            timeout=2.0,
+                        )
+                    data = resp.json()
+                    if data.get("status") == "1" and data.get("geocodes"):
+                        location = str(data["geocodes"][0]["location"])
+                        _cache_set(cache_key, location, ttl=6 * 3600)
+                        return location
+                except asyncio.TimeoutError:
+                    # 如实说：不是没查，是查太慢，改用快兜底
+                    print(f"⚠️ [地理编码] geocode 超过 2s（地址={address!r}），改用 place/text 兜底", flush=True)
+                    _note_fetch("geocode/geo(超时)", 2.0)
 
                 search_params = {"keywords": address, "key": self.amap_key}
-                search_resp = await http_client.get(f"{self.amap_url}/place/text", params=search_params)
+                async with AmapGate("place/text(坐标)"):
+                    search_resp = await http_client.get(f"{self.amap_url}/place/text", params=search_params)
                 search_data = search_resp.json()
                 if search_data.get("status") == "1" and search_data.get("pois"):
-                    return str(search_data["pois"][0]["location"])
+                    location = str(search_data["pois"][0]["location"])
+                    _cache_set(cache_key, location, ttl=6 * 3600)
+                    return location
             except Exception:
                 pass
             return ""
@@ -1264,11 +1547,12 @@ class ExpertToolbox:
         if not self.amap_key or not str(address or "").strip():
             return {}
         try:
-            async with httpx.AsyncClient(timeout=4.0) as http_client:
-                resp = await http_client.get(
-                    f"{self.amap_url}/geocode/geo",
-                    params={"key": self.amap_key, "address": str(address), "extensions": "base"},
-                )
+            async with _http_client(4.0) as http_client:
+                async with AmapGate("geocode/geo(结构化)"):
+                    resp = await http_client.get(
+                        f"{self.amap_url}/geocode/geo",
+                        params={"key": self.amap_key, "address": str(address), "extensions": "base"},
+                    )
                 data = resp.json()
         except Exception:
             return {}
@@ -1299,7 +1583,7 @@ class ExpertToolbox:
         from core.poi_photos import amap_photo_urls, amap_place_text_url
 
         try:
-            async with httpx.AsyncClient(timeout=5.0) as http_client:
+            async with _http_client(5.0) as http_client:
                 resp = await http_client.get(amap_place_text_url(str(name), city, self.amap_key))
                 data = resp.json()
         except Exception:
@@ -1331,7 +1615,7 @@ class ExpertToolbox:
             return []
         from core.poi_pool import parse_amap_location as _parse_amap_location
         from core.poi_pool import is_play_worthy, poi_record_from_amap, amap_error_is_retryable, amap_error_note
-        async with httpx.AsyncClient(timeout=4.0) as http_client:
+        async with _http_client(6.0) as http_client:
             params = {
                 "key": self.amap_key, "keywords": keywords, "city": city,
                 "sortrule": "weight", "offset": limit, "page": 1, "extensions": "all"
@@ -1348,8 +1632,15 @@ class ExpertToolbox:
                 # 凭空变小、模型改用自己的记忆编地点。限流等 1.2s 重试一次，其它错误如实打印。
                 data: Dict[str, Any] = {}
                 for attempt in range(2):
-                    resp = await http_client.get(f"{self.amap_url}/place/text", params=params)
-                    data = resp.json()
+                    _search_started = time.monotonic()
+                    # 走高德闸门（见 AmapGate 的实测说明）：并发会被限流、更慢，
+                    # 而且会静默丢掉整条查询
+                    async with AmapGate("place/text"):
+                        _fetch_started = time.monotonic()
+                        _note_fetch("place/text(排队)", _fetch_started - _search_started)
+                        resp = await http_client.get(f"{self.amap_url}/place/text", params=params)
+                        data = resp.json()
+                        _note_fetch("place/text(请求)", time.monotonic() - _fetch_started)
                     if str(data.get("status")) == "1":
                         break
                     info = str(data.get("info") or "")
@@ -1418,38 +1709,63 @@ class ExpertToolbox:
                                 amap_key=self.amap_key or "",
                             )
                         )
-                    # 👑 实景图增强：对未返回实拍照片但含高德 ID 的 POI，批量调用 place/detail 按 ID 补齐真实照片
+                    # 👑 实景图增强：对未返回实拍照片但含高德 ID 的 POI，按 ID 补齐真实照片。
+                    #    ⚠️ 三个约束都是实测逼出来的（2026-10-05）：这一批原来一次并发 12 个
+                    #    `place/detail`，5 个查询就是 ~60 个**不受闸门约束**的并发请求，
+                    #    把同一把 key 的 QPS 顶爆 —— 后果是同一时刻的 `place/text` 每只要等 4.7s
+                    #    （闸门计时：`gate:place/text=23.4s×5`，而单发只要 0.4s）。
+                    #    所以：① 也走闸门（不再有突发）；② 按 POI id 缓存（同一个 POI 常出现在
+                    #    多个查询里，不必重复问）；③ 每查询上限从 12 降到 8。
                     no_photo_pois = [p for p in pois if not p.get("photos") and p.get("id")]
                     if no_photo_pois:
                         try:
-                            detail_ids = [p["id"] for p in no_photo_pois[:12]]
-                            detail_tasks = [
-                                http_client.get(f"{self.amap_url}/place/detail",
-                                                params={"key": self.amap_key, "id": pid})
-                                for pid in detail_ids
-                            ]
-                            detail_resps = await asyncio.gather(*detail_tasks, return_exceptions=True)
-                            id_to_photos = {}
-                            for pid, dresp in zip(detail_ids, detail_resps):
-                                if isinstance(dresp, Exception):
-                                    continue
-                                try:
-                                    dj = dresp.json()
-                                    if dj.get("status") == "1" and dj.get("pois"):
-                                        urls = []
-                                        for ph in dj["pois"][0].get("photos", []):
-                                            if isinstance(ph, dict) and ph.get("url"):
-                                                u = str(ph["url"]).strip()
-                                                if u.startswith("//"):
-                                                    u = "https:" + u
-                                                elif u.startswith("http://"):
-                                                    u = "https://" + u[len("http://"):]
-                                                if u.startswith("https://"):
-                                                    urls.append(u)
-                                        if urls:
-                                            id_to_photos[pid] = urls[:3]
-                                except Exception:
-                                    continue
+                            detail_ids = []
+                            for _item in no_photo_pois:
+                                _pid = str(_item["id"])
+                                if _pid not in detail_ids:
+                                    detail_ids.append(_pid)
+                            detail_ids = detail_ids[:8]
+                            id_to_photos: Dict[str, Any] = {
+                                pid: list(_AMAP_PHOTO_CACHE[pid]) for pid in detail_ids if pid in _AMAP_PHOTO_CACHE
+                            }
+                            _todo = [pid for pid in detail_ids if pid not in id_to_photos]
+                            _note_fetch("place/detail(缓存命中)", 0.0, len(detail_ids) - len(_todo))
+                            if _todo:
+                                _detail_started = time.monotonic()
+                                detail_tasks = [
+                                    self._amap_get(
+                                        http_client,
+                                        f"{self.amap_url}/place/detail",
+                                        params={"key": self.amap_key, "id": pid},
+                                    )
+                                    for pid in _todo
+                                ]
+                                detail_resps = await asyncio.gather(*detail_tasks, return_exceptions=True)
+                                _note_fetch("place/detail(补图)", time.monotonic() - _detail_started, len(_todo))
+                                for pid, dresp in zip(_todo, detail_resps):
+                                    if isinstance(dresp, Exception):
+                                        continue
+                                    try:
+                                        dj = dresp.json()
+                                        if dj.get("status") == "1" and dj.get("pois"):
+                                            urls = []
+                                            for ph in dj["pois"][0].get("photos", []):
+                                                if isinstance(ph, dict) and ph.get("url"):
+                                                    u = str(ph["url"]).strip()
+                                                    if u.startswith("//"):
+                                                        u = "https:" + u
+                                                    elif u.startswith("http://"):
+                                                        u = "https://" + u[len("http://"):]
+                                                    if u.startswith("https://"):
+                                                        urls.append(u)
+                                            if urls:
+                                                id_to_photos[pid] = urls[:3]
+                                                # 同一个 POI 在别的查询里还会再出现，缓存起来不再问
+                                                if len(_AMAP_PHOTO_CACHE) >= 512:
+                                                    _AMAP_PHOTO_CACHE.clear()
+                                                _AMAP_PHOTO_CACHE[str(pid)] = list(urls[:3])
+                                    except Exception:
+                                        continue
                             for p in pois:
                                 if not p.get("photos") and p.get("id") in id_to_photos:
                                     p["photos"] = id_to_photos[p["id"]]
@@ -1469,10 +1785,10 @@ class ExpertToolbox:
         if cached:
             return cached
 
-        async with httpx.AsyncClient(timeout=3.0) as http_client:
+        async with _http_client(3.0) as http_client:
             params = {"key": self.amap_key, "location": location_coord, "radius": 5000, "level": 5}
             try:
-                resp = await http_client.get(f"{self.amap_url}/traffic/status/circle", params=params)
+                resp = await self._amap_get(http_client, f"{self.amap_url}/traffic/status/circle", params=params)
                 data = resp.json()
                 if data.get("status") == "1" and "trafficinfo" in data:
                     info = data["trafficinfo"]
@@ -1526,20 +1842,31 @@ class ExpertToolbox:
 
         _straight_km = _straight_line_km(origin_lnglat, dest_lnglat)
         async with _TRAVEL_OPTIONS_SEMAPHORE:
-            async with httpx.AsyncClient(timeout=3.5) as http_client:
+            async with _http_client(3.5) as http_client:
                 tasks = [
                     # 策略 10（高德默认）：躲避拥堵 + 路程较短 + 尽量缩短时间，返回多条路线取 paths[0]，
                     # 避免 strategy=0（速度优先）在往返时因高速/环线绕出明显更远的“理论最快”路线
-                    http_client.get(f"{self.amap_url}/direction/driving", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "strategy": 10}),
+                    self._amap_get(http_client, f"{self.amap_url}/direction/driving", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "strategy": 10}),
                 ]
                 names = ["driving"]
                 if _straight_km is None or _straight_km <= 3.0:
-                    tasks.append(http_client.get(f"{self.amap_url}/direction/walking", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat}))
+                    tasks.append(self._amap_get(http_client, f"{self.amap_url}/direction/walking", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat}))
                     names.append("walking")
                 if city and (_straight_km is None or _straight_km <= 40.0):
-                    tasks.append(http_client.get(f"{self.amap_url}/direction/transit/integrated", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "city": city, "cityd": city}))
+                    tasks.append(self._amap_get(http_client, f"{self.amap_url}/direction/transit/integrated", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "city": city, "cityd": city}))
                     names.append("transit")
                 return await self._collect_travel_options(http_client, tasks, names, _pair_key)
+
+    @staticmethod
+    async def _amap_get(http_client, url: str, **kwargs):
+        """走**全局高德闸门**的 GET（见 AmapGate 的实测说明）。
+
+        凡是打到高德同一把 key 的请求都要走它：并发不但被服务端排队得更慢，
+        还会有一部分被限流成 status=0、**静默返回空**（路线/天气/路况会凭空缺失）。
+        """
+        _kind = url.rsplit("/", 1)[-1] or "amap"
+        async with AmapGate(_kind):
+            return await http_client.get(url, **kwargs)
 
     async def _collect_travel_options(self, http_client, tasks, names, cache_key: str) -> Dict[str, Any]:
         try:
@@ -1619,8 +1946,8 @@ class ExpertToolbox:
             return cached
 
         try:
-            async with httpx.AsyncClient(timeout=3.5) as http_client:
-                geo_resp = await http_client.get(f"{self.amap_url}/geocode/geo", params={"address": city, "key": self.amap_key})
+            async with _http_client(3.5) as http_client:
+                geo_resp = await self._amap_get(http_client, f"{self.amap_url}/geocode/geo", params={"address": city, "key": self.amap_key})
                 geo_data = geo_resp.json()
                 adcode = ""
                 if geo_data.get("status") == "1" and geo_data.get("geocodes"):
@@ -1628,7 +1955,8 @@ class ExpertToolbox:
                 if not adcode:
                     return {}
 
-                weather_resp = await http_client.get(
+                weather_resp = await self._amap_get(
+                    http_client,
                     f"{self.amap_url}/weather/weatherInfo",
                     params={"city": adcode, "key": self.amap_key, "extensions": "all"}
                 )
@@ -1674,7 +2002,7 @@ class ExpertToolbox:
         # 心知天气兜底（密钥已在环境变量中配置）
         if self.seniverse_key:
             try:
-                async with httpx.AsyncClient(timeout=3.5) as http_client:
+                async with _http_client(3.5) as http_client:
                     now_resp = await http_client.get(
                         "https://api.seniverse.com/v3/weather/now.json",
                         params={"key": self.seniverse_key, "location": str(location_coord_or_city), "language": "zh-Hans", "unit": "c"}
@@ -1939,6 +2267,7 @@ async def run_negotiate(msg: GatewayMessage):
     #    （纯观测，不改任何行为；`work/plan-quality-matrix.md` 的耗时才有得对照）。
     import time as _stage_time
 
+    reset_fetch_timing()
     _stage_marks: Dict[str, float] = {"开始": _stage_time.monotonic()}
 
     def _stage(name: str) -> None:
@@ -2560,6 +2889,8 @@ async def run_negotiate(msg: GatewayMessage):
             return merged
 
         attractions_task = _fetch_attraction_mix()
+        _loop_probe = LoopLagProbe().start()
+        _watchdog = LoopWatchdog().start()
         # 美食/住宿**不能**套用"像不像玩点"过滤器（详见 get_dynamic_pois 里的实测说明）
         foods_task = toolbox.get_dynamic_pois(target_city, keywords="特色老字号|地方特色美食|正宗名吃|特色正餐|本地特色菜", types="050000", limit=poi_limit, play_worthy=False)
         hotels_task = toolbox.get_dynamic_pois(target_city, keywords="品质酒店|高端度假酒店|高分精品住宿", types="100000", limit=30, play_worthy=False)
@@ -2577,6 +2908,15 @@ async def run_negotiate(msg: GatewayMessage):
                 coord_task, attractions_task, foods_task, hotels_task, safety_task, weather_task, traffic_task
             )
 
+        _loop_probe.stop()
+        _watchdog.stop()
+        print(
+            f"⏱️ [取数细分] {fetch_timing_summary()}｜闸门：{amap_gate_summary()}｜事件循环：{_loop_probe.summary()}",
+            flush=True,
+        )
+        # 事件循环卡顿分段快照：明确"是哪一段把循环堵住了"（否则只知道总卡顿）
+        _snap = LoopLagProbe().start()
+
         # 👑 免费平替 WorldMonitor：本地多源聚合风控（高德实时天气 + 实时交通 + 官方气象预警公开接口）动态融合 CII
         is_weekend = datetime.datetime.now().weekday() >= 5
         safety_intel = await wm_client.aggregate_city_risk(
@@ -2585,8 +2925,14 @@ async def run_negotiate(msg: GatewayMessage):
         )
         _stage("取数与风控")
 
+        # 事件循环卡顿分段快照：明确"是哪一段把循环堵住了"（否则只知道总卡顿）。
+        # 只在真的卡了（>0.5s）时打日志，否则每次推演都刷四行没用的 0ms。
+        _snap = LoopLagProbe().start()
         unique_foods = deduplicate_and_diversify_pois(raw_foods)
         unique_attractions = deduplicate_and_diversify_pois(raw_attractions)
+        if _snap.max_lag > 0.5:
+            print(f"⏱️ [卡顿·去重] {_snap.summary()}", flush=True)
+        _snap = LoopLagProbe().start()
 
         # 美食候选同样可能因为关键词太窄而只剩几条（实测库尔勒：生产关键词 3 条，
         # 通用兜底「美食|餐厅|小吃|本地菜」40 条）。下限定成"一天两顿"：
@@ -3074,6 +3420,9 @@ async def run_negotiate(msg: GatewayMessage):
             # 👑 空间排序先取完整顺序（不在此处过早截断），后续按类别均衡挑选，
             #    避免美食/文化类 POI 被「TSP 头部截断」整体挤出候选池
             spatial_daytime = route_optimizer.optimize_and_sort(pareto_daytime, max_nodes=max(len(pareto_daytime), 1))
+            if _snap.max_lag > 0.5:
+                print(f"⏱️ [卡顿·帕累托+空间排序] {_snap.summary()}", flush=True)
+            _snap = LoopLagProbe().start()
 
             def _day_cat(p):
                 return classify_poi_category(str(p.get('name') or ''), str(p.get('type') or ''), bool(p.get('is_hotel')))
@@ -3172,6 +3521,9 @@ async def run_negotiate(msg: GatewayMessage):
 
             top_candidates = _interleaved + _room_candidates
             final_candidates = top_candidates
+            if _snap.max_lag > 0.5:
+                print(f"⏱️ [卡顿·分桶与均衡] {_snap.summary()}", flush=True)
+            _snap.stop()
 
             # 写入 Redis 黑板
             await blackboard.write(f"room_{target_city}_context", {
