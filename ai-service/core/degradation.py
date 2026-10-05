@@ -196,13 +196,13 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
         # 取价源不可达要说清楚"不是没查，是查不了"，并把可配置的出口指出来
         status = _as_mapping(price_audit.get("provider_status"))
         reason = str(status.get("error") or "搜索源不可达")[:120]
-        items.append(
-            _entry(
-                "price_web",
-                STATUS_MISSING,
-                f"联网取价不可用（{reason}）；可配置 WEB_SEARCH_PROXY 让搜索走代理，或继续用「需要你确认」核对",
-            )
-        )
+        # 每个源的具体原因（2026-10-05 实测需要）：只说"不可达"看不出是"被反爬挡住"还是"没查"
+        summary = str(price_audit.get("provider_summary") or "").strip()
+        detail = f"联网取价不可用（{reason}）"
+        if summary:
+            detail += f"；各源情况：{summary[:160]}"
+        detail += "。可配置 WEB_SEARCH_PROXY 让搜索走代理，或把景区/酒店官网加进允许清单"
+        items.append(_entry("price_web", STATUS_MISSING, detail))
     else:
         unknown_ratio = float(price_audit.get("unknown_ratio") or 0.0)
         verified_ratio = float(price_audit.get("verified_ratio") or 0.0)

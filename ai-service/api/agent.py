@@ -5281,19 +5281,18 @@ async def run_negotiate(msg: GatewayMessage):
                                                 name=_name, value=None, source="web", provider="search"
                                             ) | {"error": f"{type(_lookup_exc).__name__}: {str(_lookup_exc)[:120]}"}
 
-                                    # 👑 **每个节点各自扣减剩余预算**，不再用整体 wait_for 一刀切。
-                                    #    实测事故（2026-10-05 矩阵 4 个场景里 3 个）：整体
-                                    #    `wait_for(gather(...), 25s)` 一超时就抛 TimeoutError，**已经查到的
-                                    #    价格全部丢掉**，price_audit 只剩一个 error —— 界面上表现成
-                                    #    "取价这一步压根没跑"（查了几个/补到几条/来源可达全是 —）。
-                                    #    现在每个点自己带 deadline，超时只影响那一个点，其余结果照收。
-                                    #    而且每个点拿的是**公平份额**（总预算/点数，下限=单点超时）：
-                                    #    否则第一个慢点就能吃光全部预算，后面几个点全部"没轮到"
-                                    #    （实测就是这么出现"查了 5 个、补到 0 条"的）。
+                                    # 👑 **逐点、按共享 deadline 顺序查**（2026-10-05 实测修正）：
+                                    #    上一版是"6 个点并发 + 每点公平份额 7.5s"。但取价底层
+                                    #    （`search_texts`）在同一进程里是**串行**的（有全局锁 + 节流），
+                                    #    并发只是排队：排在第 6 位的点要等前面 5 个跑完，早就超过了自己的
+                                    #    7.5s 份额 → 实测表现成"6 个点全部超预算、来源可达=None"，
+                                    #    而其实一个搜索都还没发出去。
+                                    #    现在改成顺序执行 + 共享 deadline：每个点用"剩余时间"作上限，
+                                    #    第一个点慢一点也不会把后面的判死；预算用完的点如实标"没轮到"。
                                     import time as _time
 
                                     _deadline = _time.monotonic() + float(_price_budget)
-                                    _fair_share = max(
+                                    _per_point_cap = max(
                                         float(price_timeout_seconds()),
                                         float(_price_budget) / max(1, len(_targets)),
                                     )
@@ -5309,7 +5308,7 @@ async def run_negotiate(msg: GatewayMessage):
                                             ) | {"timeout": True, "error": "整体预算已用完，这个点没轮到"}
                                         try:
                                             return await asyncio.wait_for(
-                                                _lookup(_item), timeout=min(_remaining, _fair_share)
+                                                _lookup(_item), timeout=min(_remaining, _per_point_cap)
                                             )
                                         except asyncio.TimeoutError:
                                             return build_observation(
@@ -5320,9 +5319,9 @@ async def run_negotiate(msg: GatewayMessage):
                                                 name=_name, value=None, source="web", provider="search"
                                             ) | {"error": f"{type(_bounded_exc).__name__}: {str(_bounded_exc)[:120]}"}
 
-                                    _observations = await asyncio.gather(
-                                        *[_lookup_bounded(item) for item in _targets]
-                                    )
+                                    _observations = []
+                                    for _item in _targets:
+                                        _observations.append(await _lookup_bounded(_item))
                                     _merged = merge_observations(final_data, list(_observations))
                                     if _merged["updated"]:
                                         final_data["route"] = _merged["plan"]["route"]
@@ -5359,6 +5358,18 @@ async def run_negotiate(msg: GatewayMessage):
                                         item for item in (_observations or [])
                                         if isinstance(item, Mapping) and item.get("timeout")
                                     ]
+                                    # 👑 每个取价源的**具体失败原因**汇总（2026-10-05 实测需要）：
+                                    #    "来源可达=False" 太笼统 —— 用户/我们看不出是"所有源都被反爬挡住"
+                                    #    还是"我们根本没查"。这里把每个源的真实原因拼成一句人话。
+                                    _provider_summary = "；".join(
+                                        f"{item.get('provider')}："
+                                        + (
+                                            str(item.get("error"))[:60]
+                                            if item.get("error")
+                                            else ("0 条结果" if not item.get("ok") else f"{item.get('results')} 条结果")
+                                        )
+                                        for item in list(_attempts or [])[:5]
+                                    )
                                     if not _attempt_error and _timed_out:
                                         _attempt_error = str(_timed_out[0].get("error") or "单点取价超预算")[:160]
                                     final_data["price_audit"] = {
@@ -5372,6 +5383,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         "provider_reachable": _reachable,
                                         "provider_attempts": list(_attempts or [])[:4],
                                         "provider_states": _provider_state,
+                                        "provider_summary": _provider_summary,
                                         "provider_status": {"error": _attempt_error} if _attempt_error else {},
                                         "looked_up": len(_targets),
                                         "filled_from_web": len(_filled),

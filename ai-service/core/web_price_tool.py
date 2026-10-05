@@ -53,6 +53,21 @@ BLOCKED_HOST_MARKERS = (
     "tuniu.com", "ly.com", "elong.com", "booking.com", "agoda.com", "airbnb.",
 )
 
+# 👑 共享 SSL 上下文（2026-10-05 实测的性能发现，与 api/agent.py 同一处理）：
+#    httpx 构造客户端时会**同步**建 SSL 上下文，本机实测 0.87s vs 传入已有上下文 0.05s，
+#    而这段是**阻塞事件循环**的 —— 取价链路每个节点都要建客户端，累积起来很可观。
+try:
+    import ssl as _ssl
+
+    _SHARED_SSL_CONTEXT: Optional["_ssl.SSLContext"] = _ssl.create_default_context()
+except Exception:  # pragma: no cover - 建不出来就退回 httpx 默认行为
+    _SHARED_SSL_CONTEXT = None
+
+
+def _ssl_verify_kwargs() -> Dict[str, Any]:
+    """给 httpx 客户端用的 `verify=`（没有共享上下文时返回空字典，走默认行为）。"""
+    return {"verify": _SHARED_SSL_CONTEXT} if _SHARED_SSL_CONTEXT is not None else {}
+
 
 def official_host_suffixes() -> tuple[str, ...]:
     """允许清单 = 默认（政府/事业单位）+ 环境变量里显式补充的景区官网域名。"""
@@ -72,6 +87,12 @@ _PRICE_PATTERNS = (
 )
 FREE_MARKER = "免费"
 CONTEXT_MARKERS = ("门票", "票价", "人均", "每晚", "房价", "价格", "费用", "起")
+# 明确的价格语境（比"免费/带单位"更能说明这就是我们要的那个价）
+STRONG_PRICE_MARKERS = ("门票", "票价", "全价", "半价", "房价", "人均", "每晚", "价格")
+# 「免费」只有在这些**门票语境**里才算价格（其余"免费"多是别的意思，见 extract_price_candidates）
+FREE_PRICE_MARKERS = ("门票免费", "免门票", "免票", "免费开放", "免费入园", "免费参观", "免费游览", "免费进入")
+# 这些"免费"与价格无关，出现即不算
+FREE_PRICE_EXCLUSIONS = ("取消", "停车", "wifi", "WiFi", "WIFI", "号码布", "马拉松", "赠", "领取", "试用", "退")
 
 
 def budget_daily_max_requests() -> int:
@@ -153,7 +174,9 @@ def price_max_nodes() -> int:
 
 
 def enabled_providers() -> List[str]:
-    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "sogou,search,official_page").strip()
+    # 默认顺序的由来（2026-10-05 实测）：搜狗/必应已被反爬打成填充页、DuckDuckGo 时通时不通，
+    # 而**百度在同期能返回真结果**（1.25MB / 31 个结果块，第一个标题就带价格）。
+    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "baidu,sogou,search,official_page").strip()
     items = [item.strip().lower() for item in raw.split(",") if item.strip()]
     return items or ["sogou"]
 
@@ -213,14 +236,29 @@ def extract_price_candidates(text: str) -> List[Dict[str, Any]]:
             seen.add(amount)
             start = max(0, match.start() - 12)
             end = min(len(value), match.end() + 12)
+            window = value[start:end]
+            # 「免费」必须**在门票语境里**才算价格（2026-10-05 实测的错价）：
+            #   · "凭号码布免费游"（马拉松）→ 被当成博斯腾湖门票 ¥0；
+            #   · "18:00前可免费取消"（酒店条款）→ 被当成房价 ¥0。
+            # 这两个都是**假数据**，比"没取到"糟得多。只有出现下面这些明确说法才认。
+            if amount == 0.0:
+                if not any(marker in window for marker in FREE_PRICE_MARKERS):
+                    continue
+                if any(marker in window for marker in FREE_PRICE_EXCLUSIONS):
+                    continue
+            # 上下文分强弱（2026-10-05 实测）：一条摘要里可能同时出现"门票45元"和"环湖免费"，
+            # 只按"有没有上下文 + 数值升序"排，会把 免费(0) 排在 45 前面 —— 挑出来的是错的那个。
+            # 所以：**门票/票价/房价/人均 这类明确的价格语境 > 免费 > 其它带单位的数字 > 无上下文**。
+            strong = any(marker in window for marker in STRONG_PRICE_MARKERS)
             found.append({
                 "value": amount,
                 "currency": "CNY",
-                "excerpt": value[start:end].strip(),
-                "has_context": any(marker in value[start:end] for marker in CONTEXT_MARKERS) or forced is not None,
+                "excerpt": window.strip(),
+                "has_context": any(marker in window for marker in CONTEXT_MARKERS) or forced is not None,
+                "context_strength": 0 if strong else (1 if forced is not None else (2 if any(marker in window for marker in CONTEXT_MARKERS) else 3)),
             })
-    # 有上下文的排前面（"门票45元" 比孤立的 "45元" 可信）
-    found.sort(key=lambda item: (not item["has_context"], item["value"]))
+    # 语境强的排前面，其次数值小的（同一语境下"起价"通常更接近门槛价）
+    found.sort(key=lambda item: (item["context_strength"], item["value"]))
     return found
 
 
@@ -242,6 +280,7 @@ async def fetch_page_text(url: str, *, timeout: Optional[float] = None) -> Dict[
             follow_redirects=True,
             headers={"User-Agent": "OmniRoute/1.0 (+travel planning; contact: local)"},
             proxy=proxy or None,
+            **_ssl_verify_kwargs(),
         ) as client:
             response = await client.get(url)
             if response.status_code >= 400:
@@ -269,7 +308,15 @@ async def probe_providers(*, query: str = "库尔勒 门票 价格") -> Dict[str
     providers = enabled_providers()
     per_provider_budget = max(3.0, min(8.0, price_timeout_seconds()))
     for provider in providers:
-        if provider == "sogou":
+        if provider == "baidu":
+            try:
+                rows = await asyncio.wait_for(fetch_baidu(query, max_results=3), timeout=per_provider_budget + 2)
+                results["baidu"] = {"ok": bool(rows), "results": len(rows)}
+                if rows:
+                    break  # 第一个能用的就够，别再花时间试别的
+            except Exception as exc:
+                results["baidu"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:140]}"}
+        elif provider == "sogou":
             try:
                 rows = await asyncio.wait_for(fetch_sogou(query, max_results=3), timeout=per_provider_budget + 2)
                 results["sogou"] = {"ok": bool(rows), "results": len(rows)}
@@ -303,13 +350,19 @@ async def probe_providers(*, query: str = "库尔勒 门票 价格") -> Dict[str
                 "mode": "allowlist",
                 "suffixes": list(official_host_suffixes())[:4],
             }
-    # 可达性只由**真正去取数的提供方**决定（官方页面要给定 URL 才知道通不通）
-    probed = [item for key, item in results.items() if key in {"sogou", "search"}]
+    # 可达性只由**真正去取数的提供方**决定（官方页面要给定 URL 才知道通不通）。
+    # ⚠️ 这个集合必须跟着"能真的取数的源"一起更新：漏掉 baidu 会让"百度明明返回了 3 条结果、
+    #    界面上却写着'取价源不可达'"（2026-10-05 实测就是这么误导的）。
+    probed = [item for key, item in results.items() if key in SEARCH_PROVIDERS]
     return {
         "providers": results,
         "reachable": any(item.get("ok") for item in probed) if probed else False,
-        "probed": sorted(key for key in results if key in {"sogou", "search"}),
+        "probed": sorted(key for key in results if key in SEARCH_PROVIDERS),
     }
+
+
+# 真正"去网上搜"的源（official_page 只声明能力，不算可达性）
+SEARCH_PROVIDERS = ("baidu", "sogou", "search")
 
 
 USER_AGENT = (
@@ -398,6 +451,7 @@ async def fetch_sogou(query: str, *, max_results: int = 5) -> List[Dict[str, Any
         timeout=timeout,
         follow_redirects=True,
         headers={"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"},
+        **_ssl_verify_kwargs(),
     ) as client:
         try:
             await client.get(SOGOU_HOME)
@@ -407,6 +461,171 @@ async def fetch_sogou(query: str, *, max_results: int = 5) -> List[Dict[str, Any
         if response.status_code >= 400:
             raise RuntimeError(f"sogou HTTP {response.status_code}")
         return parse_sogou_results(response.text, limit=max_results)
+
+
+# —— 百度：搜狗被反爬打死之后的**国内可用替代**（2026-10-05 实测）——
+# 同一时刻的实测对照：
+#   · 搜狗：HTTP 200 但只有 5.4KB 的"填充页"，结果块里 0 个含查询词（等于没有结果）；
+#   · 必应国内：不带会话返回填充推荐，0 个相关块；
+#   · DuckDuckGo：连通性时好时坏，实测连查 5 个查询全部 0 行（装了代理也一样）；
+#   · **百度：HTTP 200 / 1.25MB / 31 个结果块，第一个标题就是「博斯腾湖门票45元…」**。
+# 所以百度成为默认顺序里的第二个源，而且是"有真结果"的那个。
+BAIDU_SEARCH = "https://www.baidu.com/s"
+BAIDU_HOME = "https://www.baidu.com/"
+# 进程内的百度会话缓存（cookie + 上次拿会话的时间）：避免每个取价点都去访问首页，
+# 也避免"一次推演 6 个点连着查"被百度当成机器人（见 fetch_baidu 的说明）。
+BAIDU_SESSION_TTL_SECONDS = 1800.0
+_BAIDU_COOKIES: Dict[str, str] = {}
+_BAIDU_SESSION_AT: float = 0.0
+
+
+def parse_baidu_results(html: str, *, limit: int = 5) -> List[Dict[str, Any]]:
+    """解析百度搜索结果页（纯函数、单测覆盖真实样本）。
+
+    只取**结果容器**里的条目（`result c-container` / `result-op c-container`），
+    跳过"相关搜索/热搜/工具栏"这些非结果块。URL 用容器上的 `mu="真实地址"` ——
+    百度自己的 `<a href>` 是 `baidu.com/link?url=...` 跳转，指向不明；
+    `mu` 是真实落地页，出处才说得清。
+    """
+    import html as _html
+    import re as _re
+
+    text = str(html or "")
+    if not text:
+        return []
+    # 以结果容器为界切片：容器之后到下一个容器之前就是一个结果。
+    # ⚠️ 切片要从**容器的 `<div` 开头**起（不是从 class 属性起）：否则属性文本会被当成正文，
+    #    没有 <h3> 的那些 widget 块会把 `class="result-op c-container ..."` 原样漏进摘要里。
+    markers = [match.start() for match in _re.finditer(r'class="[^"]*result(?:-op)? c-container[^"]*"', text)]
+    rows: List[Dict[str, Any]] = []
+    for index, start in enumerate(markers):
+        end = markers[index + 1] if index + 1 < len(markers) else min(len(text), start + 12000)
+        block = text[start:end]
+        head = text.rfind("<div", max(0, start - 400), start)
+        if head != -1:
+            block = text[head:end]
+
+        # 百度自己的内部 widget（热搜/推荐/百科聚合）不是搜索结果，跳过
+        tpl_match = _re.search(r'\stpl="([^"]+)"', block[:400])
+        tpl = tpl_match.group(1) if tpl_match else ""
+        mu_match = _re.search(r'\smu="([^"]+)"', block[:600])
+        mu = _html.unescape(mu_match.group(1)).strip() if mu_match else ""
+        if tpl in {"right_citation_aggregated", "new_baikan_index", "recommend_list"}:
+            continue
+        mu_host = _host_of(mu)
+        if mu in {"", "null"} or mu_host.startswith(("nourl.", "recommend_list.", "top.baidu.")):
+            continue
+
+        title_match = _re.search(r"<h3[^>]*>(.*?)</h3>", block, _re.S)
+        title = ""
+        if title_match:
+            title = _re.sub(r"<[^>]+>", "", title_match.group(1))
+            title = _html.unescape(_re.sub(r"\s+", " ", title)).strip()
+
+        url = mu
+        if not url:
+            link_match = _re.search(r'href="(http[^"]+)"', block)
+            if link_match:
+                url = _html.unescape(link_match.group(1)).strip()
+
+        # 摘要：把整块去掉标签后的文本拿来做兜底，但**先去掉标题**（标题会重复出现）
+        plain = _re.sub(r"<script.*?</script>", " ", block, flags=_re.S)
+        plain = _re.sub(r"<style.*?</style>", " ", plain, flags=_re.S)
+        plain = _html.unescape(_re.sub(r"<[^>]+>", " ", plain))
+        plain = _re.sub(r"\s+", " ", plain).strip()
+        # 百科实体卡这类块的正文里混着**渲染用的内联 JSON**（实测：
+        # `…景区 - 百度百科","size":"md"},"abstract":"新疆…`）。它不是给用户看的文本，
+        # 留着会污染抽价（把 JSON 里的数字当价格）。见到 JSON 断点就截断。
+        for _marker in ('","', '"},"', '":{"', '","size', '"}'):
+            _cut = plain.find(_marker)
+            if _cut != -1:
+                plain = plain[:_cut]
+        plain = plain.strip().strip('"\',')
+        snippet = plain.replace(title, " ", 1).strip() if title else plain
+        snippet = snippet[:300]
+
+        if not title and not snippet:
+            continue
+        rows.append({
+            "title": title,
+            "snippet": snippet,
+            "url": url,
+            "provider": "baidu",
+            "cite_site": _host_of(url),
+        })
+        if len(rows) >= max(1, int(limit or 1)):
+            break
+    return rows
+
+
+def _host_of(url: str) -> str:
+    raw = str(url or "")
+    if "//" not in raw:
+        return ""
+    return raw.split("//", 1)[-1].split("/", 1)[0]
+
+
+async def fetch_baidu(query: str, *, max_results: int = 5) -> List[Dict[str, Any]]:
+    """用百度搜一次（国内直连可达；实测是当前唯一**真的返回结果**的通用搜索源）。
+
+    ⚠️ **必须先访问首页拿会话 cookie**（BAIDUID/BIDUPSID）**并稍等一下**：
+    实测（2026-10-05）不拿会话直接查，前几次能返回真结果，随后就被跳到
+    `wappass.baidu.com/.../captcha`「百度安全验证」；而"访问首页→紧接着立刻查"
+    同样会被判成机器人。更狠的是**一次推演里 6 个取价点连着查**（每个都访问首页 + 搜索
+    = 12 个请求）会立刻触发验证 —— 所以会话要**缓存复用**：进程内保留 cookie，
+    30 分钟内不再重复访问首页，每个取价点只发 1 个请求。
+    """
+    import asyncio
+    import httpx
+
+    global _BAIDU_COOKIES, _BAIDU_SESSION_AT  # noqa: PLW0603 - 进程内会话缓存
+
+    async with httpx.AsyncClient(
+        timeout=price_timeout_seconds(),
+        follow_redirects=True,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+        **_ssl_verify_kwargs(),
+    ) as client:
+        if _BAIDU_COOKIES and (time.monotonic() - _BAIDU_SESSION_AT) < BAIDU_SESSION_TTL_SECONDS:
+            for name, value in _BAIDU_COOKIES.items():
+                try:
+                    client.cookies.set(name, value, domain=".baidu.com")
+                except Exception:
+                    continue
+        last_error = ""
+        for attempt in range(2):
+            need_home = not _BAIDU_COOKIES or (time.monotonic() - _BAIDU_SESSION_AT) >= BAIDU_SESSION_TTL_SECONDS
+            if need_home or attempt > 0:
+                try:
+                    home = await client.get(BAIDU_HOME)
+                    _BAIDU_COOKIES = {cookie.name: cookie.value for cookie in client.cookies.jar}
+                    _BAIDU_SESSION_AT = time.monotonic()
+                    _ = home
+                except Exception:
+                    pass  # 首页拿不到也继续试搜索（可能仍然可用）
+                await asyncio.sleep(0.5 if attempt == 0 else 1.5)
+            response = await client.get(BAIDU_SEARCH, params={"wd": query, "rn": 20})
+            if response.status_code >= 400:
+                last_error = f"baidu HTTP {response.status_code}"
+                continue
+            text = response.text
+            head = text[:3000]
+            if "百度安全验证" in head or "wappass.baidu.com" in head:
+                last_error = "baidu 返回安全验证页（需要会话/被限流）"
+                # 丢掉脏会话，下一轮重新拿
+                _BAIDU_COOKIES = {}
+                _BAIDU_SESSION_AT = 0.0
+                client.cookies.clear()
+                continue
+            rows = parse_baidu_results(text, limit=max_results)
+            if rows or attempt == 1:
+                return rows
+            last_error = "baidu 结果页没有可用结果块"
+        raise RuntimeError(last_error or "baidu 失败")
 
 
 def price_budget_seconds() -> float:
@@ -465,11 +684,13 @@ def search_cache_ttl_seconds() -> float:
 
 
 def pick_price_from_rows(rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """从搜索结果里挑一条价格：**优先有出处的**（纯函数，单测覆盖）。
+    """从搜索结果里挑一条价格：**优先有出处、出处更可信的**（纯函数，单测覆盖）。
 
     为什么不是"第一条有价格的就行"：实测搜狗会返回若干"无标题锚点"的聚合块，
     价格在里面但没有 URL —— 直接用就会得到"有价格、没来源"这种最糟的组合。
-    这里按 (有 URL, 有发布日期, 有上下文) 排序后取第一条。
+    排序用 (有 URL, 出处是否官方/政府域名, 有发布日期, 语境强度)：
+    官方来源（gov/景区官网/酒店集团官网）比自媒体聚合页可信得多 —— 实测同一个景区，
+    gov 页面写"45元"、自媒体写"免费/以现场为准"，谁该被采信不言而喻。
     """
     best: Optional[Dict[str, Any]] = None
     best_score: tuple = ()
@@ -482,10 +703,15 @@ def pick_price_from_rows(rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str
             continue
         candidate = candidates[0]
         url = str(row.get("url") or row.get("href") or "")
+        try:
+            official = bool(url) and host_is_allowed(url)[0]
+        except Exception:
+            official = False
         score = (
             1 if url else 0,
+            1 if official else 0,
             1 if str(row.get("cite_date") or "") else 0,
-            1 if candidate.get("has_context") else 0,
+            -int(candidate.get("context_strength") or 3),
         )
         if best is None or score > best_score:
             best = {
@@ -495,6 +721,7 @@ def pick_price_from_rows(rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str
                 "publisher": str(row.get("cite_site") or ""),
                 "source_date": str(row.get("cite_date") or ""),
                 "provider": str(row.get("provider") or ""),
+                "official_source": official,
             }
             best_score = score
     return best
@@ -571,6 +798,20 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
                 except Exception as exc:
                     attempts.append({"provider": "sogou", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
                     _note_provider_result("sogou", False)
+            elif provider == "baidu":
+                try:
+                    rows = await fetch_baidu(query, max_results=max_results)
+                    record_request()
+                    attempts.append({"provider": "baidu", "ok": bool(rows), "results": len(rows)})
+                    _note_provider_result("baidu", bool(rows))
+                    if rows:
+                        _last_search_at = _time.monotonic()
+                        _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
+                        last_search_attempts = attempts
+                        return rows
+                except Exception as exc:
+                    attempts.append({"provider": "baidu", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+                    _note_provider_result("baidu", False)
             elif provider == "search":
                 try:
                     rows = await search_duckduckgo(query, max_results=max_results)

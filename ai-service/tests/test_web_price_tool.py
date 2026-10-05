@@ -148,8 +148,9 @@ class ConfigTests(unittest.TestCase):
         with isolated_env():
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
-            # 默认顺序把**国内直连可达**的搜狗放前面（实测 DuckDuckGo/Bing 在本机不可达）
-            self.assertEqual(enabled_providers(), ["sogou", "search", "official_page"])
+            # 默认顺序把**当前真的能返回结果**的源放前面（2026-10-05 实测：百度能返回真结果，
+            # 搜狗/必应被打成填充页，DuckDuckGo 时通时不通）
+            self.assertEqual(enabled_providers(), ["baidu", "sogou", "search", "official_page"])
             self.assertEqual(search_proxy(), "")
 
     def test_env_overrides_are_honoured(self):
@@ -576,8 +577,37 @@ class PickPriceTests(unittest.TestCase):
     def test_free_still_counts_as_a_price(self):
         from core.web_price_tool import pick_price_from_rows
 
-        best = pick_price_from_rows([{"title": "博物馆", "snippet": "门票价格：免费", "url": "https://x"}])
+        best = pick_price_from_rows([{"title": "博物馆", "snippet": "门票免费，无需预约", "url": "https://x"}])
         self.assertEqual(best["value"], 0.0)
+
+    def test_free_outside_a_ticket_context_is_not_a_price(self):
+        """实测错价（2026-10-05）：这两条都不是价格，却都被抽成了 ¥0。"""
+        from core.web_price_tool import extract_price_candidates, pick_price_from_rows
+
+        # 马拉松参赛者的免费福利 → 不是景区门票
+        marathon = extract_price_candidates("凭号码布免费游,2025库尔勒半马选手福利")
+        self.assertEqual(marathon, [], marathon)
+        # 酒店取消条款 → 不是房价
+        cancel = extract_price_candidates("餐食 今天18:00前可免费取消 · 可住时段 14:00 后")
+        self.assertEqual(cancel, [], cancel)
+        self.assertIsNone(
+            pick_price_from_rows([
+                {"title": "2025库尔勒半马", "snippet": "凭号码布免费游", "url": "https://www.xjkel.gov.cn/x"},
+            ])
+        )
+
+    def test_official_source_wins_over_self_media(self):
+        """同一个景区：政府页面 vs 自媒体，出处更可信的那个要被采信。"""
+        from core.web_price_tool import pick_price_from_rows
+
+        rows = [
+            {"title": "博斯腾湖门票优惠", "snippet": "门票 30元 起（以现场为准）", "url": "https://www.163.com/dy/article/x.html", "cite_site": "www.163.com"},
+            {"title": "博斯腾湖景区门票价格公示", "snippet": "门票价格 45元/人", "url": "https://www.xjkel.gov.cn/notice/1.html", "cite_site": "www.xjkel.gov.cn"},
+        ]
+        best = pick_price_from_rows(rows)
+        self.assertEqual(best["value"], 45.0, best)
+        self.assertTrue(best["official_source"], best)
+        self.assertEqual(best["publisher"], "www.xjkel.gov.cn")
 
     def test_no_prices_returns_none(self):
         from core.web_price_tool import pick_price_from_rows
@@ -817,14 +847,20 @@ class PriceStepBudgetTests(unittest.TestCase):
         text = self._source()
         self.assertIn("_lookup_bounded", text, "取价必须逐点限时，而不是整体一刀切")
         self.assertIn("_deadline = _time.monotonic()", text)
-        self.assertIn("asyncio.wait_for(\n                                                _lookup(_item), timeout=min(_remaining, _fair_share)", text)
+        self.assertIn("asyncio.wait_for(\n                                                _lookup(_item), timeout=min(_remaining, _per_point_cap)", text)
 
-    def test_each_lookup_gets_a_fair_share_of_the_budget(self):
-        """只按"剩余预算"给每个点限时，第一个慢点就能吃光全部预算 —— 后面几个点全部
-        "没轮到"，实测表现就是"查了 5 个、补到 0 条"（2026-10-05 矩阵 3/4 个场景）。"""
+    def test_lookups_are_sequential_with_a_shared_deadline(self):
+        """取价底层是**串行**的（全局锁 + 节流），所以并发只会排队。
+
+        实测（2026-10-05）：6 个点并发 + 每点 7.5s 份额时，排在第 6 位的点要等前面跑完，
+        早就超过自己的份额 → "6 个点全部超预算、来源可达=None"，而实际一个搜索都没发出去。
+        做法：顺序执行 + 共享 deadline（每点上限 = min(剩余时间, 单点上限)）。
+        """
         text = self._source()
-        self.assertIn("_fair_share = max(", text)
-        self.assertIn("float(_price_budget) / max(1, len(_targets))", text)
+        self.assertIn("_per_point_cap = max(", text)
+        self.assertIn("for _item in _targets:", text)
+        self.assertIn("_observations.append(await _lookup_bounded(_item))", text)
+        self.assertNotIn("asyncio.gather(\n                                        *[_lookup_bounded(item) for item in _targets]", text)
 
     def test_the_whole_price_step_is_not_wrapped_in_a_global_timeout(self):
         text = self._source()
@@ -995,6 +1031,118 @@ class ProviderCooldownTests(unittest.TestCase):
         override = [item for item in web_price_tool.last_search_attempts if item.get("cooldown_overridden")]
         self.assertTrue(override, web_price_tool.last_search_attempts)
         self.assertIn("冷却", str(override[0].get("error")))
+
+
+class BaiduProviderTests(unittest.TestCase):
+    """百度作为国内可用搜索源（2026-10-05 实测：搜狗/必应被打成填充页、DuckDuckGo 时通时不通）。
+
+    样本结构照抄**真实**百度结果页（tools/dump_baidu_sample.py 抓到的那一份），
+    标题/摘要/落地页都是真实内容，只是把巨大的 JSON 内联数据裁掉了。
+    """
+
+    SAMPLE = """
+    <div class="result-op c-container new-pmd" srcid="62744" id="1" tpl="right_citation_aggregated" mu="null">
+      <div class="c-container"><h3><a href="http://www.baidu.com/link?url=xxx">热搜榜</a></h3></div>
+    </div>
+    <div class="result-op c-container new-pmd" srcid="51527" id="3" tpl="sg_kg_entity_san"
+         mu="https://baike.baidu.com/item/%E5%8D%9A%E6%96%AF%E8%85%BE%E6%B9%96">
+      <div class="c-container"><h3><a href="http://www.baidu.com/link?url=yyy">
+        <em>巴音郭楞蒙古自治州博斯腾湖景区</em>(新疆维吾尔自治区巴音...</a></h3>
+        <div class="summary-text_15QGa">新疆维吾尔自治区巴音郭楞蒙古自治州的国家5A级旅游景区</div>
+      </div>
+    </div>
+    <div class="result c-container xpath-log new-pmd" srcid="1599" id="4" tpl="www_index"
+         mu="https://baijiahao.baidu.com/s?id=1877664545352972512&amp;wfr=spider&amp;for=pc">
+      <div class="cosc-card"><div><h3 class="cosc-title">
+        <a href="http://www.baidu.com/link?url=zzz"><span><!--s-text--><em>博斯腾湖门票45元</em>被说“踩坑”环湖免费与景区收费,游客该分开看<!--/s-text--></span></a>
+        </h3><div class="summary-text_15QGa">博斯腾湖门票45元 被说“踩坑”环湖免费与景区收费 ,游客该分开看 一场有关博斯腾湖旅游体验的争论</div>
+      </div></div>
+    </div>
+    <div class="result c-container xpath-log new-pmd" srcid="1701" id="5" tpl="www_index"
+         mu="https://www.cncn.com/jingdian/12345">
+      <div class="c-container"><h3><a href="http://www.baidu.com/link?url=www">
+        <em>博斯腾湖门票_博斯腾门票价格_博斯腾门票多少钱</em></a></h3>
+        <div class="summary-text_15QGa">单票 -\\-南岸景区成人票50元</div>
+      </div>
+    </div>
+    """
+
+    def test_real_baidu_markup_is_parsed(self):
+        from core.web_price_tool import parse_baidu_results
+
+        rows = parse_baidu_results(self.SAMPLE, limit=5)
+        titles = [row["title"] for row in rows]
+        self.assertEqual(len(rows), 3, titles)
+        self.assertTrue(any("博斯腾湖门票45元" in title for title in titles), titles)
+        self.assertTrue(any("博斯腾湖门票_" in title for title in titles), titles)
+        # 百度内部 widget（热搜榜）不是搜索结果，要跳过
+        self.assertFalse(any("热搜" in title for title in titles), titles)
+        # 百科实体卡是真结果（保留），但它的正文里混着渲染用的内联 JSON —— 不能漏进摘要
+        for row in rows:
+            self.assertNotIn('"size"', row["snippet"], row)
+            self.assertNotIn('":', row["snippet"], row)
+
+    def test_real_destination_url_comes_from_mu_not_the_redirect(self):
+        from core.web_price_tool import parse_baidu_results
+
+        rows = parse_baidu_results(self.SAMPLE, limit=5)
+        entry = next(row for row in rows if "45元" in row["title"])
+        self.assertTrue(entry["url"].startswith("https://baijiahao.baidu.com/s?"), entry["url"])
+        self.assertIn("&wfr=spider", entry["url"], "HTML 实体要还原")
+        self.assertEqual(entry["cite_site"], "baijiahao.baidu.com")
+        self.assertEqual(entry["provider"], "baidu")
+
+    def test_price_is_extractable_from_the_real_row(self):
+        from core.web_price_tool import parse_baidu_results, pick_price_from_rows
+
+        rows = parse_baidu_results(self.SAMPLE, limit=5)
+        best = pick_price_from_rows(rows)
+        self.assertIsNotNone(best)
+        self.assertEqual(best["value"], 45.0, best)
+        self.assertEqual(best["publisher"], "baijiahao.baidu.com")
+
+    def test_empty_or_garbage_html_yields_nothing(self):
+        from core.web_price_tool import parse_baidu_results
+
+        self.assertEqual(parse_baidu_results("", limit=3), [])
+        self.assertEqual(parse_baidu_results("<html><body>nothing</body></html>", limit=3), [])
+
+    def test_baidu_is_first_in_the_default_order(self):
+        from core.web_price_tool import enabled_providers
+
+        with isolated_env():
+            self.assertEqual(enabled_providers()[0], "baidu", enabled_providers())
+
+
+class PriceContextRankingTests(unittest.TestCase):
+    """同一条摘要里"门票45元"和"环湖免费"同时出现时，不能挑 免费（2026-10-05 实测挑错了）。"""
+
+    def test_ticket_context_beats_free(self):
+        from core.web_price_tool import extract_price_candidates, pick_price_from_rows
+
+        rows = [{
+            "title": "博斯腾湖门票45元被说“踩坑”环湖免费与景区收费",
+            "snippet": "焦点不是45元门票，而是游客为什么付费。环湖免费。",
+            "url": "https://baijiahao.baidu.com/s?id=1",
+            "provider": "baidu",
+            "cite_site": "baijiahao.baidu.com",
+        }]
+        best = pick_price_from_rows(rows)
+        self.assertEqual(best["value"], 45.0, best)
+        # 直接抽取时，语境强的也要排在前面
+        candidates = extract_price_candidates(rows[0]["title"] + " " + rows[0]["snippet"])
+        self.assertEqual(candidates[0]["value"], 45.0, candidates)
+
+    def test_free_still_wins_when_it_is_the_ticket_price(self):
+        from core.web_price_tool import pick_price_from_rows
+
+        rows = [{
+            "title": "孔雀河景观带门票免费开放",
+            "snippet": "门票：免费",
+            "url": "https://www.xinjiang.gov.cn/x",
+            "provider": "baidu",
+        }]
+        self.assertEqual(pick_price_from_rows(rows)["value"], 0.0)
 
 
 if __name__ == "__main__":
