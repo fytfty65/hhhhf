@@ -222,6 +222,20 @@ async function main() {
     );
   }
 
+  // 价格核对 + 取价源可达性：用户要知道"为什么没有价格"（是没查，还是查不了）
+  const priceAudit = payload?.price_audit ?? null;
+  record(
+    '方案带上了价格核对与取价源状态',
+    Boolean(priceAudit),
+    priceAudit
+      ? `已核实 ${priceAudit.verified_count ?? '?'} / 未核实 ${priceAudit.unknown_count ?? '?'}｜` +
+        `取价源可达=${priceAudit.provider_reachable ?? '(未诊断)'}` +
+        (priceAudit.provider_status?.error
+          ? `（${String(priceAudit.provider_status.error).slice(0, 90)}）`
+          : '')
+      : '缺 price_audit 字段',
+  );
+
   const names = nodeNames(payload);
   console.log(`  路线节点（${names.length}）：${names.join('、')}`);
 

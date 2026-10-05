@@ -4715,11 +4715,21 @@ async def run_negotiate(msg: GatewayMessage):
                                     summarize_merge,
                                 )
 
-                                # 补价节点数 3 → 8（有界）：太少会导致"未取到"一大片，
-                                # 用户看到的全是"需要你确认"。并发执行 + 整体超时保护不变。
-                                _targets = pending_price_targets(final_data, limit=8)
+                                # 补价节点数改为**可配置**（默认 12），并且先诊断"取价源通不通"：
+                                # 实测（2026-10-04）本机 DuckDuckGo 直接失败（回退 bing 也返回 None），
+                                # 于是"一个价都没补上"——如果不诊断，用户只会看到一片"未取到"，
+                                # 根本不知道是搜索源不可达。现在把原因如实写进 price_audit 与降级清单。
+                                from core.web_price_tool import price_max_nodes, probe_providers
+
+                                _targets = pending_price_targets(final_data, limit=price_max_nodes())
                                 _fetcher = getattr(toolbox, "get_real_time_web_price", None)
+                                _provider_report: Dict[str, Any] = {}
                                 if _targets and _fetcher:
+                                    try:
+                                        _provider_report = await asyncio.wait_for(probe_providers(), timeout=10.0)
+                                    except Exception as _probe_exc:
+                                        _provider_report = {"reachable": False, "error": str(_probe_exc)[:160]}
+
                                     async def _lookup(_item: Dict[str, Any]) -> Dict[str, Any]:
                                         try:
                                             _text = await _fetcher(target_city, str(_item.get("name") or ""))
@@ -4739,6 +4749,7 @@ async def run_negotiate(msg: GatewayMessage):
                                     if _merged["updated"]:
                                         final_data["route"] = _merged["plan"]["route"]
                                     _report = pending_price_report(final_data)
+                                    _search_status = (_provider_report.get("providers") or {}).get("search") or {}
                                     final_data["price_audit"] = {
                                         **_merged["coverage"],
                                         "updated": len(_merged["updated"]),
@@ -4746,7 +4757,16 @@ async def run_negotiate(msg: GatewayMessage):
                                         "summary": summarize_merge(_merged),
                                         "pending": _report["pending"],
                                         "pending_summary": _report["summary"],
+                                        # 取价源的可达性与失败原因（用户能看到"为什么没价"）
+                                        "provider_reachable": bool(_provider_report.get("reachable")),
+                                        "provider_status": _search_status,
                                     }
+                                    if _provider_report and not _provider_report.get("reachable"):
+                                        print(
+                                            f"⚠️ [联网取价] 搜索源不可达，{len(_targets)} 个缺价节点没能补价："
+                                            f"{str(_search_status.get('error') or _provider_report.get('error') or '未知原因')[:120]}",
+                                            flush=True,
+                                        )
                                 else:
                                     _coverage = price_coverage(final_data)
                                     _report = pending_price_report(final_data)
