@@ -3939,6 +3939,8 @@ async def run_negotiate(msg: GatewayMessage):
                         temperature=llm_temperature,
                         max_tokens=llm_cfg.max_tokens(long_output=True)
                     )
+                    _llm_started = time.monotonic()
+                    _prompt_chars = len(str(system_prompt or ""))
 
                     yield json.dumps({"token": "[神经链路已建立] 开始接收流式推演 tokens...\n"}, ensure_ascii=False) + "\n"
                     token_count = 0
@@ -3954,6 +3956,17 @@ async def run_negotiate(msg: GatewayMessage):
                                 if token_count % 600 == 0:
                                     yield json.dumps({"token": f"\n[生成进度] 已输出 {token_count} tokens，正在编织完整 {trip_days} 天行程...\n"}, ensure_ascii=False) + "\n"
                     llm_call_succeeded = True
+                    # 👑 主推演耗时账（2026-10-05）：这一段现在是总时长里唯一的大头（44~69s / 占 6 成以上），
+                    #    所以必须能回答"是提示词太长、还是模型吐字太慢、还是有重试"：
+                    #    prompt 字符数 / 输出 token 数 / 吐字速度 / 这次是第几次尝试。
+                    _llm_seconds = max(0.001, time.monotonic() - _llm_started)
+                    print(
+                        f"⏱️ [主推演] prompt={_prompt_chars} 字符（≈{_prompt_chars // 2} tokens）"
+                        f"｜输出≈{token_count} tokens｜{_llm_seconds:.1f}s"
+                        f"（≈{token_count / _llm_seconds:.1f} tok/s）｜attempt={attempt + 1}"
+                        f"｜max_tokens={llm_cfg.max_tokens(long_output=True)}",
+                        flush=True,
+                    )
                     break
                 except (BadRequestError,) as e:
                     # 平台侧业务错误（如欠费/参数错）：不重试
