@@ -2552,14 +2552,102 @@ async def run_negotiate(msg: GatewayMessage):
             # 👑 提案分歧显式化（闭环第②–④段之间）：谁站在什么立场 / 谁和谁冲突 / 裁决凭什么。
             #    没有这一条，"多智能体协同"在审计上跟"并行各算一遍"没有区别。
             try:
-                from core.proposal_conflicts import build_proposal_conflicts
+                from core.proposal_conflicts import (
+                    build_proposal_conflicts,
+                    build_revision_directives,
+                    evaluate_revisions,
+                )
 
                 _conflict_facts = build_proposal_conflicts(
                     specialist_runtime_result.get("proposals"),
                     forbidden_categories=("cultural",) if own_signals.get("exclude_cultural") else (),
                     distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
                     classify=classify_poi_category,
+                    trip_days=trip_days,
                 )
+
+                # 👑 协商回环（一轮，有界）：把裁决变成相关智能体的**新输入契约**，让它们重提。
+                #    这才是"协商"而不是"协调器裁断"——只有真的回灌 + 允许重提，分歧才可能消解。
+                _directives = build_revision_directives(
+                    _conflict_facts.get("conflicts"),
+                    trip_days=trip_days,
+                    forbidden_categories=("cultural",) if own_signals.get("exclude_cultural") else (),
+                )
+                if _directives:
+                    try:
+                        _revised: Dict[str, Any] = {}
+                        _revised_pools: Dict[str, Any] = {}
+                        for _agent_id, _directive in _directives.items():
+                            _pool_by_domain = {
+                                "route-planner": unique_attractions,
+                                "dining-agent": unique_foods,
+                                "lodging-agent": cleaned_hotels,
+                            }
+                            _domain = "itinerary" if _agent_id == "route-planner" else (
+                                "dining" if _agent_id == "dining-agent" else "lodging"
+                            )
+                            _pool = _pool_by_domain.get(_agent_id)
+                            if _pool is None:
+                                continue
+                            _revision_runtime, _revision_requests = build_pool_runtime(
+                                attractions=_pool if _agent_id == "route-planner" else (),
+                                dining=_pool if _agent_id == "dining-agent" else (),
+                                lodging=_pool if _agent_id == "lodging-agent" else (),
+                                facts=request_facts,
+                            )
+                            # 只跑目标智能体，并在它的输入契约里加上裁决指令
+                            _target_requests = [
+                                _req for _req in _revision_requests if _req.agent_id == _agent_id
+                            ]
+                            for _req in _target_requests:
+                                _req.hard_constraints.update(_directive.get("hard_constraints") or {})
+                                _req.context["revision_directive"] = str(_directive.get("message") or "")
+                                _req.context["revision_reason"] = str(_directive.get("reason") or "")
+                            _revision_result = await _revision_runtime.execute(_target_requests)
+                            for _proposal in _revision_result.get("proposals") or []:
+                                _revised[str(_proposal.get("agent_id"))] = _proposal
+                                if _agent_id == "route-planner":
+                                    _revised_pools["attractions"] = [
+                                        dict(item) for item in (_proposal.get("candidates") or []) if isinstance(item, dict)
+                                    ]
+                        if _revised:
+                            # 用重提结果覆盖原提案，并把这些候选真正用于后续方案
+                            _merged_proposals = []
+                            for _proposal in specialist_runtime_result.get("proposals") or []:
+                                _agent_id = str(_proposal.get("agent_id") or "")
+                                _merged_proposals.append(_revised.get(_agent_id, _proposal))
+                            specialist_runtime_result["proposals"] = _merged_proposals
+                            if _revised_pools.get("attractions"):
+                                unique_attractions = _revised_pools["attractions"]
+                            _after_facts = build_proposal_conflicts(
+                                _merged_proposals,
+                                forbidden_categories=("cultural",) if own_signals.get("exclude_cultural") else (),
+                                distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
+                                classify=classify_poi_category,
+                                trip_days=trip_days,
+                            )
+                            _revision_record = evaluate_revisions(
+                                _conflict_facts.get("conflicts"),
+                                _after_facts.get("conflicts"),
+                                _revised,
+                            )
+                            _conflict_facts["revision"] = _revision_record
+                            specialist_runtime_result["proposal_conflicts"] = _conflict_facts
+                            print(
+                                f"🔁 [协商回环] 重提智能体 {_revision_record['revised_agents']}；"
+                                f"分歧 {_revision_record['conflicts_before']} → {_revision_record['conflicts_after']}"
+                                + (f"；{'；'.join(_revision_record['notes'])}" if _revision_record["notes"] else ""),
+                                flush=True,
+                            )
+                            for _item in _revision_record.get("changed") or []:
+                                print(
+                                    f"   · {_item['agent_id']} 按裁决重提：{_item.get('applied')}",
+                                    flush=True,
+                                )
+                    except Exception as _revision_exc:  # 协商失败绝不影响出方案（硬约束层仍会兜住）
+                        _conflict_facts["revision"] = {"error": str(_revision_exc)[:200]}
+                        print(f"⚠️ [协商回环] 重提失败（不影响出方案）: {_revision_exc}", flush=True)
+
                 specialist_runtime_result["proposal_conflicts"] = _conflict_facts
                 _codes = [str(item.get("code")) for item in _conflict_facts.get("conflicts") or []]
                 await event_bus.emit(OMNI_EVENTS_STREAM, "proposal.conflicts", {
@@ -4866,6 +4954,30 @@ async def run_negotiate(msg: GatewayMessage):
                                     for item in (_conflict_record.get("arbitration") or [])[:6]
                                 ],
                                 "notes": [str(item)[:200] for item in (_conflict_record.get("notes") or [])[:4]],
+                                # 协商回环的结果（分歧解掉没、谁按裁决重提了什么）
+                                "revision": (
+                                    {
+                                        "round": int((_conflict_record.get("revision") or {}).get("round") or 1),
+                                        "revised_agents": [
+                                            str(name) for name in (_conflict_record.get("revision") or {}).get("revised_agents") or []
+                                        ],
+                                        "conflicts_before": list((_conflict_record.get("revision") or {}).get("conflicts_before") or []),
+                                        "conflicts_after": list((_conflict_record.get("revision") or {}).get("conflicts_after") or []),
+                                        "resolved": list((_conflict_record.get("revision") or {}).get("resolved") or []),
+                                        "changed": [
+                                            {
+                                                "agent_id": str(item.get("agent_id") or ""),
+                                                "applied": item.get("applied") or {},
+                                                "candidates_after": item.get("candidates_after"),
+                                            }
+                                            for item in ((_conflict_record.get("revision") or {}).get("changed") or [])[:3]
+                                        ],
+                                        "notes": [str(item)[:200] for item in ((_conflict_record.get("revision") or {}).get("notes") or [])[:3]],
+                                        "error": str((_conflict_record.get("revision") or {}).get("error") or "")[:200],
+                                    }
+                                    if _conflict_record.get("revision")
+                                    else None
+                                ),
                             }
                             # 事实记录里也带上提案阶段那一版快照的版本号：整轮规划可对齐
                             _facts["facts_version"] = facts_version_string

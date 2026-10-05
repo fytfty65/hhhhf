@@ -189,6 +189,17 @@ export type PlanGovernance = {
     inactive?: { agent_id?: string; reason?: string }[];
     conflicts?: { code?: string; between?: string[]; detail?: string; severity?: string }[];
     arbitration?: { code?: string; decision?: string; mechanism?: string; why?: string }[];
+    /** 协商回环的结果：分歧解掉没、谁按裁决重提了什么（"协商"而不是"裁断"的证据） */
+    revision?: {
+      round?: number;
+      revised_agents?: string[];
+      conflicts_before?: string[];
+      conflicts_after?: string[];
+      resolved?: string[];
+      changed?: { agent_id?: string; applied?: Record<string, { limit?: number; dropped_count?: number; dropped?: string[] }>; candidates_after?: number }[];
+      notes?: string[];
+      error?: string;
+    };
     notes?: string[];
   };
   /**
@@ -504,6 +515,46 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                 </li>
               ))}
             </ul>
+          )}
+
+          {/* 协商回环：分歧有没有真的被"重提"解决（不是只裁断一句） */}
+          {negotiation?.revision && (
+            <div className="mt-1.5" data-testid="negotiation-revision">
+              <p className="text-[12.5px] leading-relaxed text-slate-600">
+                协商第 {negotiation.revision.round ?? 1} 轮：
+                {(negotiation.revision.revised_agents?.length ?? 0) > 0
+                  ? `${negotiation.revision.revised_agents?.join('、')} 按裁决重提`
+                  : '没有智能体需要重提'}
+                ；
+                {(negotiation.revision.conflicts_before?.length ?? 0) > 0
+                  ? `分歧 ${negotiation.revision.conflicts_before?.length} 条 → ${negotiation.revision.conflicts_after?.length ?? 0} 条`
+                  : '本轮无分歧'}
+                {(negotiation.revision.resolved?.length ?? 0) > 0
+                  ? `（已解决：${negotiation.revision.resolved?.join('、')}）`
+                  : ''}
+              </p>
+              {(negotiation.revision.changed?.length ?? 0) > 0 && (
+                <ul className="mt-0.5 space-y-0.5">
+                  {(negotiation.revision.changed || []).map((item) => {
+                    const applied = item.applied || {};
+                    const parts = Object.entries(applied).map(([key, value]) => {
+                      const limit = value?.limit;
+                      const dropped = value?.dropped_count ?? value?.dropped?.length ?? 0;
+                      return `${key} 上限 ${limit ?? '?'}，去掉 ${dropped} 条`;
+                    });
+                    return (
+                      <li key={item.agent_id} className="text-[12px] leading-relaxed text-slate-500">
+                        · {item.agent_id}：{parts.join('；')}
+                        {typeof item.candidates_after === 'number' ? `（重提后 ${item.candidates_after} 个候选）` : ''}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {negotiation.revision.error && (
+                <p className="text-[12px] leading-relaxed text-amber-800">协商重提失败：{negotiation.revision.error}</p>
+              )}
+            </div>
           )}
 
           {/* 没参与的：如实列出，不假装协同过 */}

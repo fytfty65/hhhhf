@@ -89,6 +89,10 @@ class AgentProposal(BaseModel):
     status: Literal["ok", "degraded", "failed"]
     candidates: List[Dict[str, Any]] = Field(default_factory=list)
     hard_constraint_results: Dict[str, Any] = Field(default_factory=dict)
+    # 协商回环用：这一版提案**按裁决去掉了什么**（例如 max_far_scenic 砍掉 3 个远景区）。
+    # 必须有这个字段：模型是 extra="forbid"，没有它"重提"的痕迹会被契约丢掉，
+    # 协商在审计上看起来就像什么都没发生。
+    applied_constraints: Dict[str, Any] = Field(default_factory=dict)
     evidence: List[EvidenceRef] = Field(default_factory=list)
     tool_calls: List[ToolCall] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)

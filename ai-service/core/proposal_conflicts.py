@@ -151,26 +151,46 @@ def detect_conflicts(
     forbidden_categories: Sequence[str] = (),
     distance_tolerance: str = "normal",
     classify=None,
+    trip_days: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """只报能由提案信号直接推出的分歧；推不出就返回空列表（不编戏）。"""
+    """只报能由提案信号直接推出的分歧；推不出就返回空列表（不编戏）。
+
+    "跑远 vs 体力"的判据（2026-10-04 修正）：一天最多只能安排一个远景区，
+    所以只要**候选里的远景区数量超过行程天数**，就必然有远景区排不进去 ——
+    这才是可观测、可协商的分歧。旧的"体力上限 ≤4"判据几乎永不触发（默认每天 5-6 个节点），
+    留着它只会让这一层看起来在工作。
+    """
     rows = [item for item in (proposals or []) if isinstance(item, Mapping)]
     by_agent = {str(item.get("agent_id") or ""): item for item in rows}
     conflicts: List[Dict[str, Any]] = []
 
-    # ① 跑远 vs 体力：路线侧有 2 个以上远景区，而体力侧建议每天 ≤4 个节点
+    # ① 跑远 vs 体力/天数：候选里的远景区比天数还多 → 必然有排不进去的
     route = by_agent.get("route-planner")
     health = by_agent.get("health-agent")
-    if route and health:
+    if route:
         far = _far_candidates(_candidates_of(route))
-        limit = _health_limit(health)
-        if len(far) >= 2 and limit is not None and limit <= 4:
+        limit = _health_limit(health) if health else None
+        days = None
+        try:
+            days = int(trip_days) if trip_days is not None else None
+        except (TypeError, ValueError):
+            days = None
+        exceeds_days = days is not None and len(far) > max(1, days)
+        exceeds_intensity = limit is not None and limit <= 4 and len(far) >= 2
+        if len(far) >= 2 and (exceeds_days or exceeds_intensity):
+            between = ["route-planner"] + (["health-agent"] if health else [])
+            if exceeds_days:
+                detail = (f"候选里有 {len(far)} 个远景区（{'、'.join(far[:3])}…），"
+                          f"而行程只有 {days} 天、一天最多去一个 → 必然有排不进去的")
+            else:
+                detail = (f"路线侧有 {len(far)} 个远景区（{'、'.join(far[:3])}），"
+                          f"体力侧建议每天最多 {limit} 个节点")
             conflicts.append({
                 "code": "far_scenic_vs_daily_intensity",
-                "between": ["route-planner", "health-agent"],
+                "between": between,
                 "severity": "negotiable",
-                "detail": f"路线侧有 {len(far)} 个远景区（{'、'.join(far[:3])}），"
-                          f"体力侧建议每天最多 {limit} 个节点",
-                "evidence": {"far_scenic": far[:5], "daily_node_limit": limit},
+                "detail": detail,
+                "evidence": {"far_scenic": far[:5], "trip_days": days, "daily_node_limit": limit},
             })
 
     # ② 低碳 vs 自驾：绿色出行给出了明显更低碳的选项，而候选里有自驾/包车
@@ -273,12 +293,89 @@ def arbitrate_conflicts(
     return decisions
 
 
+def build_revision_directives(
+    conflicts: Sequence[Mapping[str, Any]],
+    *,
+    trip_days: Optional[int] = None,
+    forbidden_categories: Sequence[str] = (),
+) -> Dict[str, Dict[str, Any]]:
+    """把裁决回灌成**可执行的指令**：谁要重提、按什么约束重提。
+
+    这是"协商"与"协调器裁断"的分界线：只有真的把裁决变成相关智能体的新输入契约，
+    并允许它们重提一轮，才叫协商；否则只是记了一条决定。
+    指令必须是**可判定**的（数量/类别上限），不能是"请你更环保一些"这种没法执行的话。
+    """
+    directives: Dict[str, Dict[str, Any]] = {}
+    for conflict in conflicts or []:
+        entry = _as_mapping(conflict)
+        code = str(entry.get("code") or "")
+        if code == "far_scenic_vs_daily_intensity":
+            try:
+                limit = max(1, int(trip_days)) if trip_days is not None else 1
+            except (TypeError, ValueError):
+                limit = 1
+            directives["route-planner"] = {
+                "reason": "一天最多安排一个远景区",
+                "hard_constraints": {"max_far_scenic": limit},
+                "message": f"请按「一天最多一个远景区」重提：最多保留 {limit} 个远景区（优先留近的）",
+            }
+        elif code == "forbidden_category_in_proposals":
+            for agent_id in entry.get("between") or []:
+                directives[str(agent_id)] = {
+                    "reason": "用户明确排除了该类别",
+                    "hard_constraints": {},
+                    "message": "请重提：不要包含用户明确排除的类别",
+                }
+        elif code == "low_carbon_vs_driving":
+            directives.setdefault("transport-agent", {
+                "reason": "低碳与自驾存在差异",
+                "hard_constraints": {},
+                "message": "请重提：标明各交通方式的碳排差异，供裁决参考",
+            })
+    return directives
+
+
+def evaluate_revisions(
+    before: Sequence[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]],
+    revised: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """协商一轮后的结果：分歧解掉了几条、还剩几条、谁真的重提了（含去掉了什么）。"""
+    before_codes = {str(_as_mapping(item).get("code") or "") for item in before or []}
+    after_codes = {str(_as_mapping(item).get("code") or "") for item in after or []}
+    changed: List[Dict[str, Any]] = []
+    for agent_id, proposal in (revised or {}).items():
+        entry = _as_mapping(proposal)
+        applied = _as_mapping(entry.get("applied_constraints"))
+        if applied:
+            changed.append({
+                "agent_id": str(agent_id),
+                "applied": applied,
+                "candidates_after": len(_candidates_of(entry)),
+            })
+    return {
+        "round": 1,
+        "revised_agents": sorted(str(key) for key in (revised or {})),
+        "changed": changed,
+        "conflicts_before": sorted(before_codes),
+        "conflicts_after": sorted(after_codes),
+        "resolved": sorted(before_codes - after_codes),
+        "remaining": sorted(after_codes),
+        "resolved_all": not after_codes,
+        "notes": (
+            ["协商一轮后分歧全部解决"] if not after_codes and before_codes
+            else ([f"协商一轮后仍有分歧：{'、'.join(sorted(after_codes))}"] if after_codes else [])
+        ),
+    }
+
+
 def build_proposal_conflicts(
     proposals: Any,
     *,
     forbidden_categories: Sequence[str] = (),
     distance_tolerance: str = "normal",
     classify=None,
+    trip_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     """把三件事合成一条事实（立场 + 分歧 + 裁决），随方案下发并发事件。"""
     summary = summarize_stances(proposals)
@@ -287,6 +384,7 @@ def build_proposal_conflicts(
         forbidden_categories=forbidden_categories,
         distance_tolerance=distance_tolerance,
         classify=classify,
+        trip_days=trip_days,
     )
     arbitration = arbitrate_conflicts(
         conflicts,

@@ -330,6 +330,21 @@ const GOVERNANCE_PAYLOAD = {
       },
     ],
     notes: ['没有参与博弈的智能体：budget-agent'],
+    revision: {
+      round: 1,
+      revised_agents: ['route-planner'],
+      conflicts_before: ['far_scenic_vs_daily_intensity'],
+      conflicts_after: [],
+      resolved: ['far_scenic_vs_daily_intensity'],
+      changed: [
+        {
+          agent_id: 'route-planner',
+          applied: { max_far_scenic: { limit: 3, dropped_count: 10, dropped: ['胡杨林', '自然草原'] } },
+          candidates_after: 3,
+        },
+      ],
+      notes: ['协商一轮后分歧全部解决'],
+    },
   },
 };
 
@@ -700,6 +715,11 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByTestId('negotiation-arbitration')).toContainText('一天最多一个');
     await expect(panel.getByTestId('negotiation-arbitration')).toContainText('repair_day_overload');
     await expect(panel.getByTestId('negotiation-inactive')).toContainText('budget-agent（candidate_pool_empty）');
+    // 协商回环：分歧真的被"重提"解决了（不是只裁断一句）
+    await expect(panel.getByTestId('negotiation-revision')).toContainText('协商第 1 轮');
+    await expect(panel.getByTestId('negotiation-revision')).toContainText('route-planner 按裁决重提');
+    await expect(panel.getByTestId('negotiation-revision')).toContainText('分歧 1 条 → 0 条');
+    await expect(panel.getByTestId('negotiation-revision')).toContainText('max_far_scenic 上限 3，去掉 10 条');
 
     // 已作调整：平替明细 + 人话说明
     await expect(panel.getByText('已作调整')).toBeVisible();

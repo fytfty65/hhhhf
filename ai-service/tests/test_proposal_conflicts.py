@@ -259,5 +259,158 @@ class ClassifierImpactTests(unittest.TestCase):
         self.assertEqual(counts["scenic"], 1)
 
 
+class RevisionDirectiveTests(unittest.TestCase):
+    """协商回环第一步：把裁决变成**可执行的指令**（数量/类别上限），而不是一句漂亮话。"""
+
+    def test_far_scenic_conflict_produces_a_numeric_directive(self):
+        from core.proposal_conflicts import build_revision_directives
+
+        directives = build_revision_directives(
+            [{"code": "far_scenic_vs_daily_intensity", "between": ["route-planner", "health-agent"]}],
+            trip_days=3,
+        )
+        self.assertIn("route-planner", directives)
+        self.assertEqual(directives["route-planner"]["hard_constraints"]["max_far_scenic"], 3)
+        self.assertIn("一天最多一个远景区", directives["route-planner"]["message"])
+
+    def test_forbidden_conflict_targets_the_offending_agents(self):
+        from core.proposal_conflicts import build_revision_directives
+
+        directives = build_revision_directives(
+            [{"code": "forbidden_category_in_proposals", "between": ["dining-agent"]}],
+            forbidden_categories=("cultural",),
+        )
+        self.assertIn("dining-agent", directives)
+        self.assertIn("排除", directives["dining-agent"]["message"])
+
+    def test_no_conflicts_means_no_directives(self):
+        from core.proposal_conflicts import build_revision_directives
+
+        self.assertEqual(build_revision_directives([]), {})
+
+
+class ContractLimitTests(unittest.TestCase):
+    """智能体必须能**真的按裁决重提**，否则再协商一轮就是走过场。"""
+
+    def _handle(self, rows, constraints):
+        import asyncio
+
+        from core.agent_runtime import pool_handler
+        from core.agent_contracts import AgentInput
+
+        handler = pool_handler("route-planner", "itinerary", provider="amap", field="attraction_candidates")
+        request = AgentInput(
+            request_id="r1", agent_id="route-planner", domain="itinerary",
+            context={"candidates": rows}, hard_constraints=constraints, soft_preferences={}, allowed_tools=[],
+        )
+        return asyncio.run(handler(request))
+
+    def test_max_far_scenic_keeps_the_nearest_ones(self):
+        rows = [
+            {"name": "近景区", "distance_km": 45},
+            {"name": "中景区", "distance_km": 80},
+            {"name": "远景区", "distance_km": 270},
+            {"name": "市区点"},
+        ]
+        proposal = self._handle(rows, {"max_far_scenic": 1})
+        names = [item["name"] for item in proposal["candidates"]]
+        self.assertIn("近景区", names)
+        self.assertNotIn("远景区", names, "超限的远景区必须被去掉")
+        self.assertEqual(proposal["applied_constraints"]["max_far_scenic"]["dropped_count"], 2)
+        self.assertIn("按协商裁决重提", proposal["explanation"])
+
+    def test_candidate_cap_trims_total(self):
+        rows = [{"name": f"点{i}"} for i in range(10)]
+        proposal = self._handle(rows, {"candidate_cap": 4})
+        self.assertEqual(len(proposal["candidates"]), 4)
+        self.assertEqual(proposal["applied_constraints"]["candidate_cap"]["dropped_count"], 6)
+        self.assertEqual(len(proposal["applied_constraints"]["candidate_cap"]["dropped"]), 6)
+
+    def test_no_constraints_means_untouched(self):
+        rows = [{"name": "远景区", "distance_km": 270}, {"name": "点"}]
+        proposal = self._handle(rows, {})
+        self.assertEqual(len(proposal["candidates"]), 2)
+        self.assertNotIn("applied_constraints", proposal)
+
+    def test_out_of_town_flag_counts_as_far(self):
+        rows = [{"name": "周边景区", "out_of_town": True}, {"name": "近处", "distance_km": 3}]
+        proposal = self._handle(rows, {"max_far_scenic": 0})
+        self.assertEqual([item["name"] for item in proposal["candidates"]], ["近处"])
+
+
+class NegotiationLoopTests(unittest.TestCase):
+    """整条回环：远景区超天数 → 检测 → 指令 → 重提 → 再检测（分歧应消失）。"""
+
+    def _first_round(self, far_count=6, trip_days=3):
+        import asyncio
+
+        from core.agent_runtime import build_pool_runtime
+        from core.plan_facts import build_request_facts
+
+        facts = build_request_facts(
+            correlation_id="plan-loop-1",
+            city="库尔勒",
+            trip_days=trip_days,
+            intent="去库尔勒玩3天，不考虑距离，只想看自然景观",
+            signals={"wants_scenic": True, "requirements": ["自然风景"]},
+            composition=None,
+        )
+        attractions = [
+            {"name": f"远景区{i}", "distance_km": 45 + i * 20, "type": "风景名胜;风景名胜;国家级景点"}
+            for i in range(far_count)
+        ] + [{"name": "市区公园", "type": "风景名胜;公园广场;公园"}]
+        runtime, requests = build_pool_runtime(attractions=attractions, facts=facts)
+        result = asyncio.run(runtime.execute(requests))
+        return facts, attractions, result
+
+    def test_loop_resolves_the_far_scenic_conflict(self):
+        import asyncio
+
+        from core.agent_runtime import build_pool_runtime
+        from core.proposal_conflicts import (
+            build_proposal_conflicts,
+            build_revision_directives,
+            evaluate_revisions,
+        )
+
+        facts, attractions, first = self._first_round(far_count=6, trip_days=3)
+        before = build_proposal_conflicts(first["proposals"], trip_days=3)
+        codes_before = [item["code"] for item in before["conflicts"]]
+        self.assertIn("far_scenic_vs_daily_intensity", codes_before, before["notes"])
+
+        directives = build_revision_directives(before["conflicts"], trip_days=3)
+        runtime, requests = build_pool_runtime(attractions=attractions, facts=facts)
+        target = [req for req in requests if req.agent_id == "route-planner"]
+        for req in target:
+            req.hard_constraints.update(directives["route-planner"]["hard_constraints"])
+            req.context["revision_directive"] = directives["route-planner"]["message"]
+        revised_result = asyncio.run(runtime.execute(target))
+        revised = {str(item["agent_id"]): item for item in revised_result["proposals"]}
+
+        merged = [revised.get(str(item["agent_id"]), item) for item in first["proposals"]]
+        after = build_proposal_conflicts(merged, trip_days=3)
+        record = evaluate_revisions(before["conflicts"], after["conflicts"], revised)
+
+        self.assertEqual(record["revised_agents"], ["route-planner"])
+        self.assertTrue(record["resolved_all"], record)
+        self.assertEqual([item["code"] for item in after["conflicts"]], [])
+        self.assertEqual(record["resolved"], ["far_scenic_vs_daily_intensity"])
+        self.assertTrue(record["changed"], "重提要说明按裁决去掉了什么")
+        self.assertEqual(record["changed"][0]["applied"]["max_far_scenic"]["limit"], 3)
+
+    def test_loop_reports_remaining_conflicts_honestly(self):
+        from core.proposal_conflicts import evaluate_revisions
+
+        record = evaluate_revisions(
+            [{"code": "a"}, {"code": "b"}],
+            [{"code": "b"}],
+            {"route-planner": {"agent_id": "route-planner", "candidates": []}},
+        )
+        self.assertEqual(record["resolved"], ["a"])
+        self.assertEqual(record["remaining"], ["b"])
+        self.assertFalse(record["resolved_all"])
+        self.assertTrue(any("仍有分歧" in note for note in record["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main()

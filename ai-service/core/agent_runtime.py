@@ -28,12 +28,69 @@ def _evidence(provider: str, field: str, *, estimated: bool = False) -> dict[str
     }
 
 
+def _apply_contract_limits(rows: list[dict[str, Any]], hard_constraints: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """按输入契约里的**数量/距离上限**裁剪候选，返回 `(裁剪后, 应用记录)`。
+
+    为什么需要：协商回环里，协调器把裁决回灌给相关智能体后，智能体必须能**真的按裁决重提** ——
+    否则"再协商一轮"就是走过场（重提结果一模一样，分歧永远不消）。
+    这里实现的都是可判定、可解释的硬限制：
+      - `max_far_scenic`：最多保留 N 个"远景区"（`distance_km >= 40` 或 `out_of_town`），
+        按距离从近到远保留（远的先让位）；
+      - `candidate_cap`：候选总数上限。
+    """
+    applied: dict[str, Any] = {}
+    result = [dict(row) for row in rows if isinstance(row, Mapping)]
+
+    cap = hard_constraints.get("candidate_cap")
+    try:
+        cap_value = int(cap) if cap is not None else None
+    except (TypeError, ValueError):
+        cap_value = None
+    if cap_value is not None and cap_value >= 0 and len(result) > cap_value:
+        dropped_names = [str(row.get("name") or "") for row in result[cap_value:]][:8]
+        applied["candidate_cap"] = {
+            "limit": cap_value,
+            "dropped_count": len(result) - cap_value,
+            "dropped": dropped_names,
+        }
+        result = result[:cap_value]
+
+    max_far = hard_constraints.get("max_far_scenic")
+    try:
+        far_value = int(max_far) if max_far is not None else None
+    except (TypeError, ValueError):
+        far_value = None
+    if far_value is not None and far_value >= 0:
+        def _is_far(row: Mapping[str, Any]) -> bool:
+            if bool(row.get("out_of_town")):
+                return True
+            try:
+                return float(row.get("distance_km")) >= 40.0
+            except (TypeError, ValueError):
+                return False
+
+        far_rows = [row for row in result if _is_far(row)]
+        if len(far_rows) > far_value:
+            def _distance(row: Mapping[str, Any]) -> float:
+                try:
+                    return float(row.get("distance_km"))
+                except (TypeError, ValueError):
+                    return 0.0
+
+            keep_far = {id(row) for row in sorted(far_rows, key=_distance)[:far_value]}
+            dropped = [str(row.get("name") or "") for row in far_rows if id(row) not in keep_far]
+            result = [row for row in result if not _is_far(row) or id(row) in keep_far]
+            applied["max_far_scenic"] = {"limit": far_value, "dropped": dropped[:8], "dropped_count": len(dropped)}
+    return result, applied
+
+
 def pool_handler(agent_id: str, domain: str, *, provider: str, field: str) -> AgentHandler:
     """Create a deterministic adapter for a supplier-backed candidate pool."""
 
     async def handle(request: AgentInput) -> Mapping[str, Any]:
         candidates = request.context.get("candidates")
         rows = [item for item in candidates if isinstance(item, Mapping)] if isinstance(candidates, Sequence) and not isinstance(candidates, (str, bytes)) else []
+        rows, applied = _apply_contract_limits(rows, request.hard_constraints or {})
         if not rows:
             return {
                 "agent_id": agent_id,
@@ -46,7 +103,7 @@ def pool_handler(agent_id: str, domain: str, *, provider: str, field: str) -> Ag
                 "failure": {"code": "candidate_pool_empty", "message": "供应商没有返回可用候选", "retryable": True, "fallback": "official_channel_links"},
                 "explanation": "候选池为空，未编造推荐。",
             }
-        return {
+        proposal: dict[str, Any] = {
             "agent_id": agent_id,
             "domain": domain,
             "status": "ok",
@@ -57,6 +114,16 @@ def pool_handler(agent_id: str, domain: str, *, provider: str, field: str) -> Ag
             "confidence": 0.75 if rows else 0.0,
             "explanation": f"已从 {provider} 候选池读取 {len(rows)} 条记录。",
         }
+        if applied:
+            # 按裁决重提时要说清楚"我按要求去掉了什么"，否则用户只看到候选变少
+            proposal["applied_constraints"] = applied
+            dropped_total = sum(
+                int(item.get("dropped_count") or len(item.get("dropped") or []))
+                for item in applied.values()
+                if isinstance(item, Mapping)
+            )
+            proposal["explanation"] = f"已按协商裁决重提：从 {provider} 候选里去掉 {dropped_total} 条超出上限的记录。"
+        return proposal
 
     return handle
 
