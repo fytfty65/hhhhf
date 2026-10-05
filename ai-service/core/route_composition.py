@@ -32,7 +32,9 @@ PREFERENCE_SHARES: Dict[str, Dict[str, float]] = {
     "scenic+food": {"scenic": 0.5, "cultural": 0.2, "food": 0.3},
     "cultural+food": {"scenic": 0.2, "cultural": 0.5, "food": 0.3},
     "scenic+cultural": {"scenic": 0.4, "cultural": 0.4, "food": 0.2},
-    "no_cultural": {"scenic": 0.6, "cultural": 0.0, "food": 0.4},
+    # 用户明确"只想看自然"（排除人文）：景区为主、穿插美食，住宿单独算 ——
+    # 这时规划形态是"在更大范围里把几个景区串成最优路径"，不该再有人文占比。
+    "no_cultural": {"scenic": 0.7, "cultural": 0.0, "food": 0.3},
 }
 
 # 自然景观（景区）判定用的词，分强弱两档 —— 这是被真实数据逼出来的：
@@ -167,6 +169,7 @@ def composition_targets(
         "hotel": int(hotel),
         "daytime": int(daytime),
         "source": source,
+        "exclude_cultural": bool(exclude_cultural),
         "shares": {key: round(float(value), 3) for key, value in shares.items()},
     }
 
@@ -182,20 +185,26 @@ def summarize_targets(targets: Mapping[str, Any]) -> str:
     return base + "（按你这轮明确说的偏好加权）"
 
 
+COMPOSITION_LABELS = {"scenic": "自然景区", "cultural": "人文", "food": "特色美食", "hotel": "住宿"}
+
+
 def composition_audit(
     actual: Mapping[str, int],
     targets: Mapping[str, Any],
     *,
     tolerance: int = 1,
+    forbidden: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """实际配比 vs 目标配比：对不对得上，对不上差在哪。
 
-    容差刻意给 1 个节点（模型排布有合理弹性），但"整类缺失"必须报出来 ——
-    例如目标自然景区 4 个、实际 0 个，这不是弹性，是没做到。
+    容差刻意给 1 个节点（模型排布有合理弹性），但两种情况必须报出来：
+      - 目标 > 0 而实际 = 0（整类缺失，不是弹性）；
+      - `forbidden` 里的类别**一个都不该有**（用户明确说了不要人文，就不许再出现博物馆）——
+        目标为 0 的类别默认会被跳过，所以要靠这个参数把"用户明说不要"钉住。
     """
     deviations = []
     notes = []
-    for intent, label in (("scenic", "自然景区"), ("cultural", "人文"), ("food", "特色美食"), ("hotel", "住宿")):
+    for intent, label in ((key, COMPOSITION_LABELS[key]) for key in ("scenic", "cultural", "food", "hotel")):
         want = int(targets.get(intent, 0) or 0)
         got = int(actual.get(intent, 0) or 0)
         if want <= 0:
@@ -208,6 +217,15 @@ def composition_audit(
             deviations.append({"intent": intent, "target": want, "actual": got, "severity": severity})
             notes.append(f"{label} {got} 个，目标 {want} 个（{'偏多' if severity == 'over' else '偏少'}）")
 
+    for intent in forbidden:
+        if intent not in COMPOSITION_LABELS:
+            continue
+        got = int(actual.get(intent, 0) or 0)
+        if got > 0:
+            label = COMPOSITION_LABELS[intent]
+            deviations.append({"intent": intent, "target": 0, "actual": got, "severity": "forbidden"})
+            notes.append(f"你说了不要{label}，但方案里还有 {got} 个{label}节点")
+
     return {
         "ok": not deviations,
         "targets": dict(targets),
@@ -215,6 +233,7 @@ def composition_audit(
         "deviations": deviations,
         "notes": notes,
         "tolerance": tolerance,
+        "forbidden": [str(item) for item in forbidden],
     }
 
 

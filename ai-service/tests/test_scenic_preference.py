@@ -154,5 +154,70 @@ class TestPlayWorthyFilterScope(unittest.TestCase):
         self.assertNotIn("某博物馆-西北门地上停车场", names)
 
 
+class DistanceToleranceTests(unittest.TestCase):
+    """距离容忍度是"规划形态"的开关（用户 2026-10-04 口径）。
+
+    用户说"不考虑距离、只想看自然"时，方案应该是**跨景区最优路径**（在更大范围里串景区），
+    而不是继续在市区打转；说"不想跑远"则相反。所以这两个信号必须准。
+    """
+
+    def _signals(self, text):
+        from api.agent import extract_preference_signals
+
+        return extract_preference_signals(text)
+
+    def test_distance_does_not_matter(self):
+        for text in (
+            "去库尔勒玩3天，不考虑距离，只想看自然景观",
+            "多远都行，只要风景好",
+            "可以跑远一点，不介意距离",
+            "距离不是问题，想看雪山草原",
+        ):
+            signals = self._signals(text)
+            self.assertEqual(signals["distance_tolerance"], "high", text)
+            self.assertTrue(any("跑远" in item for item in signals["requirements"]), signals["requirements"])
+
+    def test_prefers_to_stay_close(self):
+        for text in ("不想跑远，就在附近玩玩", "别太远，带孩子不方便"):
+            self.assertEqual(self._signals(text)["distance_tolerance"], "low", text)
+
+    def test_default_is_normal(self):
+        self.assertEqual(self._signals("去库尔勒玩2天，帮我安排一下")["distance_tolerance"], "normal")
+
+
+class NatureOnlyIntentTests(unittest.TestCase):
+    """用户原话："如果用户说不考虑距离，只希望游玩自然景观…就可以忽略人文景观比如博物馆"。"""
+
+    def _signals(self, text):
+        from api.agent import extract_preference_signals
+
+        return extract_preference_signals(text)
+
+    def test_only_nature_excludes_cultural(self):
+        for text in (
+            "去库尔勒玩3天，不考虑距离，只想看自然景观",
+            "专门来看自然风光的，不要博物馆",
+            "就想看雪山和草原，人文少安排",
+        ):
+            signals = self._signals(text)
+            self.assertTrue(signals["wants_scenic"], text)
+            self.assertTrue(signals["exclude_cultural"], text)
+            self.assertFalse(signals["wants_cultural"], text)
+            self.assertNotIn("文化历史", signals["requirements"], signals["requirements"])
+
+    def test_nature_plus_culture_is_not_an_exclusion(self):
+        """说"自然和人文都要"时不能把人文踢掉（否则是过度解读）。"""
+        signals = self._signals("去库尔勒玩3天，自然景观和人文历史都想看看")
+        self.assertTrue(signals["wants_scenic"])
+        self.assertTrue(signals["wants_cultural"])
+        self.assertFalse(signals["exclude_cultural"])
+
+    def test_plain_nature_request_keeps_cultural_available(self):
+        """只说"想看自然"没说"只要自然" → 不排除人文（默认口径是各半）。"""
+        signals = self._signals("去库尔勒玩2天，想看看自然风景")
+        self.assertTrue(signals["wants_scenic"])
+        self.assertFalse(signals["exclude_cultural"])
+
+
 if __name__ == "__main__":
     unittest.main()

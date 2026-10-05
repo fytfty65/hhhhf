@@ -66,6 +66,22 @@ class RadiusTests(unittest.TestCase):
         self.assertEqual(scenic_radius_km(4), 150)
         self.assertEqual(scenic_radius_km(7), 250)
 
+    def test_user_says_distance_does_not_matter(self):
+        """用户原话："不考虑距离、只想看自然" → 规划形态变成跨景区最优路径，半径必须放开。"""
+        self.assertEqual(scenic_radius_km(2, "high"), 250)
+        self.assertEqual(scenic_radius_km(3, "high"), 400)
+        self.assertEqual(scenic_radius_km(6, "high"), 600)
+        self.assertGreater(scenic_radius_km(2, "high"), scenic_radius_km(2, "normal"))
+
+    def test_user_wants_to_stay_close(self):
+        self.assertEqual(scenic_radius_km(2, "low"), 45)
+        self.assertEqual(scenic_radius_km(4, "low"), 60)
+        self.assertLess(scenic_radius_km(3, "low"), scenic_radius_km(3, "normal"))
+
+    def test_unknown_tolerance_falls_back_to_normal(self):
+        self.assertEqual(scenic_radius_km(2, "whatever"), scenic_radius_km(2, "normal"))
+        self.assertEqual(scenic_radius_km(2, ""), scenic_radius_km(2, "normal"))
+
     def test_real_distances_are_sane(self):
         """用真实坐标校验：博斯腾湖约 47km、罗布人村寨约 75km、罗布湖 108km。"""
         bosten = [86.7600, 41.9800]  # 博斯腾湖大河口附近

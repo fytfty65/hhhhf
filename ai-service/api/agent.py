@@ -45,6 +45,7 @@ from core.poi_pool import (
     filter_by_radius,
     needs_widening,
     parent_region,
+    park_cap,
     pool_supply_report,
     required_food_candidates,
     required_scenic_candidates,
@@ -363,11 +364,40 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
         return False
 
     cultural_words = ["博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆", "历史", "古迹", "文化", "人文", "人文景观"]
-    excludes_cultural = bool(re.search(r"(?:不想|不要|不去|别|少|减少|去掉|换掉|排除|不需要)[^。；，,!?！?]{0,10}(?:博物馆|博物院|展馆|展览馆|纪念馆|美术馆|文化|人文)", t))
+    # 排除人文的三种说法（用户口径 2026-10-04：说"只想看自然"时人文就该让位）：
+    #   ① 明确否定："不要博物馆/少安排人文"；
+    #   ② 只谈自然："只想看自然景观""专门来爬山的"——且整句里根本没提人文/文化；
+    #   ③ 老口径：否定词 + 文化类词。
+    excludes_cultural = bool(
+        re.search(r"(?:不想|不要|不去|别|少|减少|去掉|换掉|排除|不需要)[^。；，,!?！?]{0,10}(?:博物馆|博物院|展馆|展览馆|纪念馆|美术馆|文化|人文)", t)
+    ) or bool(
+        re.search(r"(?:不想|不要|不去|少安排|不用安排|别安排|别去|不看)[^。；，,!?！?]{0,6}(?:人文|博物馆|文化|古迹)", t)
+    ) or bool(
+        # 语序反过来："人文少安排""博物馆就不用去了"。这里必须列具体词，
+        # 不能写成"文化+不"，否则"人文不少"会被误判成排除。
+        re.search(r"(?:人文|文化|博物馆|古迹|历史)[^。；，,!?！?]{0,3}(?:少安排|少一点|少去|少逛|不用|不要|不去|免了|砍掉|去掉|别安排|别去)", t)
+    )
+    mentions_culture = any(word in t for word in ["人文", "文化", "博物馆", "博物院", "古迹", "历史"])
+    nature_focus = bool(
+        re.search(r"(?:只想|只看|只要|专门|就想|就是为了|全程)[^。；，,!?！?]{0,6}(?:自然|风景|景区|户外|雪山|湖|草原|沙漠|峡谷|胡杨)", t)
+    )
+    if nature_focus and not mentions_culture:
+        excludes_cultural = True
+
+    # 距离容忍度：用户说"不考虑距离"时，规划形态应该变成"在更大范围里找景区最优路径"，
+    # 而不是继续在市区打转（实测：市区检索只有 ≤5km 的公园，真景区在 47-76km 外）。
+    if any(k in t for k in ["不考虑距离", "不介意距离", "不嫌远", "多远都行", "多远都可以", "可以跑远", "跑远一点", "距离不是问题", "不介意远", "愿意跑远", "远一点也没关系", "不在乎距离"]):
+        distance_tolerance = "high"
+    elif any(k in t for k in ["不想跑远", "别太远", "不要太远", "不想走远", "就近", "附近玩", "近距离"]):
+        distance_tolerance = "low"
+    else:
+        distance_tolerance = "normal"
+
     signals: Dict[str, Any] = {
         "wants_hotel": False, "wants_food": False, "wants_scenic": False,
         "wants_cultural": False, "wants_shopping": False, "luxury_hotel": False,
         "exclude_cultural": excludes_cultural,
+        "distance_tolerance": distance_tolerance,
         "requirements": [],
     }
     if any(k in t for k in ["酒店", "住宿", "民宿", "度假村", "客栈", "宾馆", "入住", "五星", "豪华"]):
@@ -397,6 +427,12 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
     if any(k in t for k in ["购物", "商场", "商圈", "商业街", "逛街"]):
         signals["wants_shopping"] = True
         signals["requirements"].append("购物商圈")
+    if distance_tolerance == "high":
+        signals["requirements"].append("不介意跑远（跨景区）")
+    elif distance_tolerance == "low":
+        signals["requirements"].append("尽量就近")
+    if excludes_cultural:
+        signals["requirements"] = [item for item in signals["requirements"] if item != "文化历史"]
     if not signals["requirements"]:
         signals["requirements"] = ["常规观光、特色美食与舒适住宿"]
     return signals
@@ -2329,7 +2365,7 @@ async def run_negotiate(msg: GatewayMessage):
 
             if _neighbor_region:
                 try:
-                    _radius = scenic_radius_km(trip_days)
+                    _radius = scenic_radius_km(trip_days, str(own_signals.get("distance_tolerance") or "normal"))
                     # 市中心坐标取 geocode 的 center（"lng,lat"）；拿不到就让距离筛选整体放行
                     _center_text = str(_geocode.get("center") or "")
                     _center_for_radius: List[float] = []
@@ -2678,6 +2714,26 @@ async def run_negotiate(msg: GatewayMessage):
                 print(f"🧩 [候选均衡] 按目标配比补齐被前沿挤掉的类别：{_topped_up}", flush=True)
             # 👑 不走回头路：spatial_daytime 已按 TSP 空间最近邻串接，分桶后【不再按适应度重排】，
             #    保留桶内空间序，仅靠轮询交错维持类别多样性，避免「东拉西扯」式回头路写进 Prompt。
+
+            # 👑 城市公园限量（用户口径：可以限量）。默认"每天最多 1 个"；
+            #    用户明确"只想看自然"时 **0 个** —— 按他的定义公园不算自然景观，不该拿公园凑数。
+            #    公园是顺路落脚点，不能占掉景区与吃饭的名额（真实事故：12 节点里 5 个是公园）。
+            _scenic_only = bool(own_signals.get("exclude_cultural")) and bool(own_signals.get("wants_scenic"))
+            _park_allowed = park_cap(trip_days, scenic_only=_scenic_only)
+            if len(_day_buckets.get("park") or []) > _park_allowed:
+                _park_dropped = len(_day_buckets["park"]) - _park_allowed
+                _day_buckets["park"] = (_day_buckets["park"] or [])[:_park_allowed]
+                pool_diagnostics["park_capped"] = {"allowed": _park_allowed, "dropped": _park_dropped}
+                print(
+                    f"🌳 [公园限量] 城市公园最多 {_park_allowed} 个（{'你只看了自然，公园不算自然景观' if _scenic_only else '每天最多一个'}），"
+                    f"本次候选里砍掉 {_park_dropped} 个",
+                    flush=True,
+                )
+            # 用户明确排除人文时，候选池里也不留人文（不靠模型自觉）
+            if own_signals.get("exclude_cultural") and _day_buckets.get("cultural"):
+                pool_diagnostics["cultural_excluded"] = len(_day_buckets["cultural"])
+                _day_buckets["cultural"] = []
+                print("🚫 [排除人文] 按你的要求，候选池里的人文史迹已全部移除", flush=True)
 
             _interleaved = []
             # 自然景区与人文先取、美食次之，城市公园排在其后（用户口径：自然景观要景区，
@@ -4479,7 +4535,12 @@ async def run_negotiate(msg: GatewayMessage):
                             _route_counts = count_route_composition(
                                 final_data.get("route") or [], classify_poi_category, scenic_tier
                             )
-                            _composition_audit = composition_audit(_route_counts, composition)
+                            _composition_audit = composition_audit(
+                                _route_counts,
+                                composition,
+                                # 用户明说不要人文时，"一个都不许有"要当成硬判据（目标 0 默认会被跳过）
+                                forbidden=("cultural",) if own_signals.get("exclude_cultural") else (),
+                            )
                             final_data["composition"] = {
                                 **composition,
                                 "actual": _route_counts,

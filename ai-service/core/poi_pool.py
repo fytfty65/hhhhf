@@ -86,18 +86,39 @@ def haversine_km(origin: Any, destination: Any) -> float:
     return 2 * radius * math.asin(math.sqrt(h))
 
 
-def scenic_radius_km(trip_days: int) -> int:
-    """周边景区能排进行程的最远距离（按行程长度给）：一天来回 vs 多日顺路。
+def scenic_radius_km(trip_days: int, distance_tolerance: str = "normal") -> int:
+    """周边景区能排进行程的最远距离。
 
-    实测：库尔勒的博斯腾湖风景区 47km、罗布人村寨 75km，2 天行程完全排得下；
-    而罗布湖 108km 对 2 天就太赶了。所以半径随天数放宽，而不是一刀切。
+    实测：库尔勒的博斯腾湖风景区 47km、罗布人村寨 75km，2 天行程排得下；
+    罗布湖 108km 对 2 天就太赶了。所以半径随天数放宽，而不是一刀切。
+
+    但**用户说了算**（2026-10-04 用户口径）：说"不考虑距离、只想看自然"时，
+    规划形态就该变成"在更大范围里找景区最优路径" —— 半径直接放到跨州级别，
+    这时候方案里本来就该是几个远景区串起来，而不是市区公园。
     """
     days = max(1, int(trip_days or 1))
+    tolerance = str(distance_tolerance or "normal").strip().lower()
+    if tolerance == "high":
+        return 600 if days >= 5 else (400 if days >= 3 else 250)
+    if tolerance == "low":
+        return 90 if days >= 5 else (60 if days >= 3 else 45)
     if days <= 2:
         return 90
     if days <= 4:
         return 150
     return 250
+
+
+def park_cap(trip_days: int, *, scenic_only: bool = False) -> int:
+    """城市公园最多排几个（用户口径：可以限量）。
+
+    - 默认："每天最多 1 个"——公园是顺路的落脚点，不该占掉景区与吃饭的名额；
+    - `scenic_only`（用户明确"只想看自然"）：**0 个**。按用户对自然景观的定义，
+      城市公园不算自然景观；既然他只要自然，就不该拿公园凑数。
+    """
+    if scenic_only:
+        return 0
+    return max(1, int(trip_days or 1))
 
 
 def parent_region(destination: str, geocode: Optional[Mapping[str, Any]]) -> str:

@@ -226,5 +226,48 @@ class StationNameTests(unittest.TestCase):
         self.assertTrue(is_play_worthy("库尔勒市湿地公园", "风景名胜;公园广场;公园"))
 
 
+class ParkCapTests(unittest.TestCase):
+    """城市公园限量（用户口径：可以限量；只想看自然时一个都不要）。"""
+
+    def test_default_cap_is_one_park_per_day(self):
+        from core.poi_pool import park_cap
+
+        self.assertEqual(park_cap(2), 2)
+        self.assertEqual(park_cap(4), 4)
+        self.assertEqual(park_cap(1), 1)
+
+    def test_scenic_only_trip_allows_no_city_park(self):
+        from core.poi_pool import park_cap
+
+        self.assertEqual(park_cap(3, scenic_only=True), 0)
+        self.assertEqual(park_cap(1, scenic_only=True), 0)
+
+
+class IntentDrivenCompositionTests(unittest.TestCase):
+    """意图驱动的规划形态：用户说"不考虑距离、只想看自然" → 无人生、公园 0、跨景区。"""
+
+    def test_only_nature_drops_cultural_entirely(self):
+        targets = composition_targets(trip_days=3, daily_nodes=5, wants_scenic=True, exclude_cultural=True)
+        self.assertEqual(targets["cultural"], 0)
+        self.assertTrue(targets["exclude_cultural"])
+        self.assertGreater(targets["scenic"], targets["food"], "景区为主、美食穿插")
+
+    def test_forbidden_category_is_reported_even_when_target_is_zero(self):
+        targets = composition_targets(trip_days=3, daily_nodes=5, wants_scenic=True, exclude_cultural=True)
+        audit = composition_audit(
+            {"scenic": 10, "cultural": 2, "food": 3, "hotel": 2, "landmark": 10, "city_park": 0},
+            targets,
+            forbidden=("cultural",),
+        )
+        self.assertFalse(audit["ok"])
+        self.assertTrue(any(item["severity"] == "forbidden" for item in audit["deviations"]))
+        self.assertTrue(any("不要人文" in note for note in audit["notes"]), audit["notes"])
+
+    def test_no_forbidden_flag_means_no_complaint(self):
+        targets = composition_targets(trip_days=3, daily_nodes=5, wants_scenic=True, exclude_cultural=True)
+        audit = composition_audit({"scenic": 10, "cultural": 2, "food": 3, "hotel": 2}, targets)
+        self.assertTrue(audit["ok"], audit["notes"])
+
+
 if __name__ == "__main__":
     unittest.main()
