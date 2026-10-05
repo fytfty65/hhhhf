@@ -1174,20 +1174,26 @@ class ExpertToolbox:
         return "本地高人气热门目的地，融汇了独特的地域人文与招牌风味体验。"
 
     async def get_real_time_web_price(self, city: str, target: str) -> str:
-        def sync_search():
-            try:
-                query = f"{city} {target} 今日 携程 飞猪 均价 价格"
-                with DDGS(timeout=2) as ddgs:
-                    return list(ddgs.text(query, max_results=2))
-            except Exception:
-                return []
+        """联网搜一条价格（DuckDuckGo）。失败如实回"未抓取到"，绝不编数字。
+
+        2026-10-04 修正：这里原来既没走 `WEB_SEARCH_PROXY`，也把超时掐到 2 秒 ——
+        于是"配了代理"和"没配"完全一样，而且几乎必然超时。现在：
+          - 搜索走 `core/web_price_tool.search_texts()`（统一处理代理与超时配置）；
+          - 超时从 `WEB_PRICE_TIMEOUT_SECONDS` 读（默认 6s，不再写死 2s）。
+        """
+        from core.web_price_tool import price_timeout_seconds, search_texts
+
+        query = f"{city} {target} 门票 价格 人均 每晚"
         try:
-            results = await asyncio.wait_for(asyncio.to_thread(sync_search), timeout=2.0)
-            if not results:
-                return "未抓取到外网实时价格"
-            return " | ".join([str(r.get('body', '')) for r in results if isinstance(r, dict)])
+            results = await asyncio.wait_for(
+                search_texts(query, max_results=3),
+                timeout=price_timeout_seconds() + 2,
+            )
         except Exception:
             return "未抓取到可信供应商价格"
+        if not results:
+            return "未抓取到外网实时价格"
+        return " | ".join(str(item.get("body") or "") for item in results if isinstance(item, dict))
 
     async def get_coordinates(self, address: str) -> str:
         async with httpx.AsyncClient(timeout=3.0) as http_client:
@@ -4731,15 +4737,41 @@ async def run_negotiate(msg: GatewayMessage):
                                         _provider_report = {"reachable": False, "error": str(_probe_exc)[:160]}
 
                                     async def _lookup(_item: Dict[str, Any]) -> Dict[str, Any]:
+                                        """查一个节点的价格：**带出处**（URL + 原文片段），拿不到就如实 None。"""
+                                        from core.web_price_tool import (
+                                            build_observation,
+                                            extract_price_candidates,
+                                            search_texts,
+                                        )
+
+                                        _name = str(_item.get("name") or "")
                                         try:
-                                            _text = await _fetcher(target_city, str(_item.get("name") or ""))
+                                            _rows = await search_texts(
+                                                f"{target_city} {_name} 门票 价格 人均 每晚", max_results=3
+                                            )
                                         except Exception:
-                                            _text = ""
-                                        return {
-                                            "name": _item.get("name"),
-                                            "value": parse_price_from_text(_text),
-                                            "source": "web",
-                                        }
+                                            _rows = []
+                                        _best = None
+                                        _best_row: Dict[str, Any] = {}
+                                        for _row in _rows:
+                                            _text = f"{_row.get('title') or ''} {_row.get('body') or ''}"
+                                            _cands = extract_price_candidates(_text)
+                                            if _cands:
+                                                _best = _cands[0]
+                                                _best_row = _row
+                                                break
+                                        if _best is None:
+                                            return build_observation(
+                                                name=_name, value=None, source="web", provider="search"
+                                            )
+                                        return build_observation(
+                                            name=_name,
+                                            value=float(_best["value"]),
+                                            source="web",
+                                            source_url=str(_best_row.get("href") or ""),
+                                            excerpt=str(_best.get("excerpt") or ""),
+                                            provider="search",
+                                        )
 
                                     _observations = await asyncio.wait_for(
                                         asyncio.gather(*[_lookup(item) for item in _targets]),

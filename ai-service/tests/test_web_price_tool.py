@@ -277,5 +277,141 @@ class FetchPageTests(unittest.TestCase):
         self.assertIn("403", result["error"])
 
 
+class ProxyWiringTests(unittest.TestCase):
+    """真实缺陷（2026-10-04）：`WEB_SEARCH_PROXY` 最初只给了 httpx，搜索根本没走代理 ——
+    界面上写着"可配置代理让搜索走代理"，配了也照样连不通。文档承诺必须与代码一致。"""
+
+    def test_proxy_is_passed_to_the_search_engine_and_env_restored(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        captured: dict = {}
+
+        class _Ddgs:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+                captured["http_proxy"] = os.environ.get("HTTPS_PROXY")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def text(self, *_args, **_kwargs):
+                return [{"title": "ok"}]
+
+        with mock.patch.dict(os.environ, {
+            "WEB_SEARCH_PROXY": "http://127.0.0.1:7890",
+            "WEB_PRICE_PROVIDERS": "search",
+        }, clear=True):
+            with mock.patch("duckduckgo_search.DDGS", _Ddgs):
+                count = asyncio.run(web_price_tool.search_result_count("库尔勒 门票"))
+
+        self.assertEqual(count, 1)
+        self.assertEqual(captured["kwargs"].get("proxy"), "http://127.0.0.1:7890")
+        self.assertEqual(captured["http_proxy"], "http://127.0.0.1:7890", "调用期间环境变量也要覆盖")
+        # 现场必须恢复，绝不能把代理留在进程环境里（那会污染高德等其它请求）
+        self.assertIsNone(os.environ.get("HTTPS_PROXY"))
+        self.assertIsNone(os.environ.get("HTTP_PROXY"))
+
+    def test_no_proxy_configured_means_no_env_pollution(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        class _Ddgs:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def text(self, *_args, **_kwargs):
+                return []
+
+        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "search"}, clear=True):
+            with mock.patch("duckduckgo_search.DDGS", _Ddgs):
+                count = asyncio.run(web_price_tool.search_result_count("x"))
+        self.assertEqual(count, 0)
+        self.assertIsNone(os.environ.get("HTTPS_PROXY"))
+
+    def test_unreachable_proxy_gets_an_actionable_hint(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        with mock.patch.dict(os.environ, {
+            "WEB_SEARCH_PROXY": "http://127.0.0.1:7890",
+            "WEB_PRICE_PROVIDERS": "search",
+        }, clear=True):
+            with mock.patch(
+                "core.web_price_tool.search_result_count",
+                side_effect=RuntimeError("ConnectError: error sending request"),
+            ):
+                report = asyncio.run(web_price_tool.probe_providers())
+        entry = report["providers"]["search"]
+        self.assertFalse(entry["ok"])
+        self.assertIn("已配置代理", entry["hint"])
+        self.assertIn("确认代理在运行", entry["hint"])
+
+
+class SourceLinkTests(unittest.TestCase):
+    """出处链接：估算价必须能"点开核对"（用户原话："不能直接打开页面看看吗"）。"""
+
+    def _plan(self):
+        return {"route": [{"day": 1, "name": "博斯腾湖", "type": "风景名胜", "is_hotel": False}]}
+
+    def test_observation_url_lands_on_the_node_and_in_the_pending_list(self):
+        from core.price_sources import merge_observations, pending_price_report
+
+        observation = {
+            "name": "博斯腾湖",
+            "value": 45.0,
+            "source": "web",
+            "source_url": "https://www.xinjiang.gov.cn/ticket/45",
+            "excerpt": "门票45元",
+            "retrieved_at": 1_700_000_000.0,
+        }
+        merged = merge_observations(self._plan(), [observation], now=1_700_000_001.0)
+        node = merged["plan"]["route"][0]
+        self.assertEqual(node["price_source_url"], "https://www.xinjiang.gov.cn/ticket/45")
+        self.assertEqual(node["price_excerpt"], "门票45元")
+        self.assertTrue(node["estimated"], "web 来的价格仍是估算")
+        self.assertEqual(merged["updated"][0]["source_url"], "https://www.xinjiang.gov.cn/ticket/45")
+
+        report = pending_price_report(merged["plan"])
+        entry = report["pending"][0]
+        self.assertEqual(entry["url"], "https://www.xinjiang.gov.cn/ticket/45", "待确认清单要给出处链接")
+        self.assertIn("联网估算价", entry["reason"])
+        self.assertTrue(entry["estimated"])
+
+    def test_without_url_it_falls_back_to_a_search_entry(self):
+        from core.price_sources import merge_observations, pending_price_report
+
+        merged = merge_observations(
+            self._plan(),
+            [{"name": "博斯腾湖", "value": 45.0, "source": "web", "retrieved_at": 1_700_000_000.0}],
+            now=1_700_000_001.0,
+        )
+        report = pending_price_report(merged["plan"])
+        self.assertIn("amap.com/search", report["pending"][0]["url"])
+        self.assertIn("没有可核实报价", report["pending"][0]["reason"])
+
+    def test_verified_price_disappears_from_the_pending_list(self):
+        from core.price_sources import merge_observations, pending_price_report
+
+        merged = merge_observations(
+            self._plan(),
+            [{"name": "博斯腾湖", "value": 45.0, "source": "amap", "retrieved_at": 1_700_000_000.0}],
+            now=1_700_000_001.0,
+        )
+        self.assertEqual(pending_price_report(merged["plan"])["pending"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -148,11 +148,23 @@ def pending_price_report(plan: Any, limit: int = 6) -> Dict[str, Any]:
             if is_lodging
             else "没有可核实报价，需要你确认"
         )
-        url = str(node.get("amap_url") or "").strip()
+        # 已经有**联网估算价**的节点：不是"没有报价"，而是"估算价、来源可核对"——
+        # 这时把出处链接直接给用户（他点开就能看到原始页面/搜索结果）。
+        estimated_url = str(node.get("price_source_url") or "").strip()
+        if value is not None and estimated_url:
+            reason = "这是联网估算价（不是官方报价），可点开来源核对"
+        url = estimated_url or str(node.get("amap_url") or "").strip()
         if not url:
             query = urllib.parse.quote(name)
             url = f"https://www.amap.com/search?query={query}"
-        pending.append({"name": name, "kind": kind or "other", "reason": reason, "url": url})
+        pending.append({
+            "name": name,
+            "kind": kind or "other",
+            "reason": reason,
+            "url": url,
+            "estimated": bool(node.get("estimated")),
+            "value": value,
+        })
         if len(pending) >= max(1, int(limit)):
             break
     lodging = sum(1 for item in pending if item["kind"] == "hotel")
@@ -234,8 +246,22 @@ def merge_observations(
         new_node["data_sources"] = sources
         # 只有"可核实来源"才取消 estimated 标记
         new_node["estimated"] = not is_verified_source(source)
+        # 出处（URL + 抓取时间 + 原文片段）：估算价的关键配套 —— 用户能自己点开核对，
+        # 而不是只看到一个数字（用户原话："不能直接打开官方页面看看吗"）。
+        url = str(observation.get("source_url") or "").strip()
+        if url:
+            new_node["price_source_url"] = url
+            new_node["price_retrieved_at"] = float(observation.get("retrieved_at") or now)
+        excerpt = str(observation.get("excerpt") or "").strip()
+        if excerpt:
+            new_node["price_excerpt"] = excerpt[:160]
         nodes[index] = new_node
-        updated.append({"name": name, "value": float(value), "source": source or "unavailable"})
+        updated.append({
+            "name": name,
+            "value": float(value),
+            "source": source or "unavailable",
+            "source_url": url,
+        })
 
     new_plan: Any = dict(plan) if isinstance(plan, Mapping) else {"route": nodes}
     new_plan["route"] = nodes

@@ -194,22 +194,18 @@ async def probe_providers(*, query: str = "库尔勒 门票 价格") -> Dict[str
     providers = enabled_providers()
     if "search" in providers:
         try:
-            from duckduckgo_search import DDGS
-
-            def _run() -> int:
-                with DDGS(timeout=min(8.0, price_timeout_seconds())) as ddgs:
-                    return len(list(ddgs.text(query, max_results=3)))
-
-            import asyncio
-
-            count = await asyncio.wait_for(asyncio.to_thread(_run), timeout=price_timeout_seconds() + 2)
+            count = await search_result_count(query, max_results=3)
             results["search"] = {"ok": count > 0, "results": count, "proxy": bool(search_proxy())}
         except Exception as exc:
+            proxy = search_proxy()
+            hint = "国际线路不通时，设置 WEB_SEARCH_PROXY（只作用于本模块，不动全局代理）"
+            if proxy and "ConnectError" in f"{type(exc).__name__}{exc}":
+                hint = f"已配置代理 {proxy} 但连不上：先确认代理在运行（端口/进程）"
             results["search"] = {
                 "ok": False,
                 "error": f"{type(exc).__name__}: {str(exc)[:140]}",
-                "proxy": bool(search_proxy()),
-                "hint": "国际线路不通时，设置 WEB_SEARCH_PROXY（只作用于本模块，不动全局代理）",
+                "proxy": bool(proxy),
+                "hint": hint,
             }
     if "official_page" in providers:
         # 注意：这一项只是**声明能力**（有允许清单、可按 URL 抓取），不是"可达性"。
@@ -227,6 +223,52 @@ async def probe_providers(*, query: str = "库尔勒 门票 价格") -> Dict[str
         "reachable": any(item.get("ok") for item in probed) if probed else False,
         "probed": ["search"] if probed else [],
     }
+
+
+async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, Any]]:
+    """搜一次并返回原始结果（带代理与超时配置）—— 供推演里的取价与诊断共用。
+
+    与 `search_result_count` 同一套代理处理：显式 `proxy=` + 调用期间覆盖
+    HTTP(S)_PROXY，结束后立刻恢复（绝不把代理留在进程环境里）。
+    """
+    import asyncio
+
+    def _run() -> List[Dict[str, Any]]:
+        from duckduckgo_search import DDGS
+
+        proxy = search_proxy()
+        saved = {key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
+        try:
+            if proxy:
+                os.environ["HTTP_PROXY"] = proxy
+                os.environ["HTTPS_PROXY"] = proxy
+            kwargs: Dict[str, Any] = {"timeout": min(8.0, price_timeout_seconds())}
+            if proxy:
+                kwargs["proxy"] = proxy
+            with DDGS(**kwargs) as ddgs:
+                rows = list(ddgs.text(query, max_results=max_results))
+            return [row for row in rows if isinstance(row, dict)]
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    return await asyncio.wait_for(asyncio.to_thread(_run), timeout=price_timeout_seconds() + 2)
+
+
+async def search_result_count(query: str, *, max_results: int = 3) -> int:
+    """真正去搜一次（供诊断使用），**把 WEB_SEARCH_PROXY 传进搜索引擎**。
+
+    实测教训（2026-10-04）：这个模块最初只把代理给了 httpx（抓页面那条路径），
+    而 DuckDuckGo 搜索根本没走代理 —— 于是界面上写着"可配置 WEB_SEARCH_PROXY 让搜索走代理"，
+    配了也照样连不通。文档承诺与代码行为必须一致，所以这里显式传 `proxy=`，
+    并额外在调用期间设置 HTTP(S)_PROXY 环境变量（DDGS 内部用 requests/urllib3，
+    两层都覆盖），调用结束立刻恢复现场。
+    """
+    rows = await search_texts(query, max_results=max_results)
+    return len(rows)
 
 
 def build_observation(
