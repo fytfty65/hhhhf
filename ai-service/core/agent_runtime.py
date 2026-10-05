@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
 from .agent_contracts import AgentInput, AgentProposal, capability_registry, validate_agent_proposal
 from .joint_optimization import rank_lodging_options  # 联合优化（P2）：住宿 ↔ 通勤/费用/体力/碳排/预算
@@ -81,6 +81,51 @@ def _apply_contract_limits(rows: list[dict[str, Any]], hard_constraints: Mapping
             dropped = [str(row.get("name") or "") for row in far_rows if id(row) not in keep_far]
             result = [row for row in result if not _is_far(row) or id(row) in keep_far]
             applied["max_far_scenic"] = {"limit": far_value, "dropped": dropped[:8], "dropped_count": len(dropped)}
+
+    # 每晚房价上限（预算 vs 房价 的裁决）：只砍**已知超价**的，房价未知的一律保留 ——
+    # "不知道多少钱"不等于"太贵"，砍掉就是拿臆测当事实。
+    max_price = hard_constraints.get("max_price_per_night")
+    try:
+        price_cap = float(max_price) if max_price is not None else None
+    except (TypeError, ValueError):
+        price_cap = None
+    if price_cap is not None and price_cap > 0:
+        def _nightly(row: Mapping[str, Any]) -> Optional[float]:
+            for key in ("nightly_price", "price_per_night", "price", "cost_estimate", "cost"):
+                value = row.get(key)
+                if value is None or isinstance(value, bool):
+                    continue
+                if isinstance(value, (int, float)):
+                    return float(value)
+                digits = ""
+                for char in str(value):
+                    if char.isdigit() or char == ".":
+                        digits += char
+                    elif digits:
+                        break
+                try:
+                    return float(digits) if digits else None
+                except ValueError:
+                    continue
+            return None
+
+        dropped_prices = [
+            (str(row.get("name") or ""), _nightly(row))
+            for row in result
+            if (_nightly(row) is not None and float(_nightly(row)) > price_cap)
+        ]
+        unknown = sum(1 for row in result if _nightly(row) is None)
+        if dropped_prices:
+            result = [
+                row for row in result
+                if _nightly(row) is None or float(_nightly(row)) <= price_cap
+            ]
+            applied["max_price_per_night"] = {
+                "limit": price_cap,
+                "dropped": [name for name, _ in dropped_prices][:8],
+                "dropped_count": len(dropped_prices),
+                "kept_price_unknown": unknown,
+            }
     return result, applied
 
 
@@ -560,6 +605,8 @@ def lodging_handler(
     async def handle(request: AgentInput) -> Mapping[str, Any]:
         candidates = request.context.get("candidates")
         rows = [dict(item) for item in candidates if isinstance(item, Mapping)] if isinstance(candidates, Sequence) and not isinstance(candidates, (str, bytes)) else []
+        # 协商裁决也作用在住宿侧（例如"每晚不超过 ¥X"）：只砍已知超价的，房价未知的保留
+        rows, applied = _apply_contract_limits(rows, request.hard_constraints or {})
         if not rows:
             return {
                 "agent_id": "lodging-agent",
@@ -573,7 +620,7 @@ def lodging_handler(
                 "explanation": "候选池为空，未编造推荐。",
             }
         if not route:
-            return {
+            proposal = {
                 "agent_id": "lodging-agent",
                 "domain": "lodging",
                 "status": "ok",
@@ -584,6 +631,13 @@ def lodging_handler(
                 "confidence": 0.6,
                 "explanation": f"已读取 {len(rows)} 个住宿候选；**没有路线，未做通勤联合评估**（仅按候选池给出）。",
             }
+            if applied:
+                proposal["applied_constraints"] = applied
+                proposal["explanation"] = (
+                    f"已按协商裁决重提：住宿候选从 {len(applied.get('max_price_per_night', {}).get('dropped') or []) + len(rows)} "
+                    f"条里去掉超价记录，剩 {len(rows)} 条；没有路线，未做通勤联合评估。"
+                )
+            return proposal
 
         try:
             ranking = rank_lodging_options(rows, route, nights=nights, budget_total=budget_total)
@@ -621,7 +675,7 @@ def lodging_handler(
             enriched.append(merged)
 
         tradeoffs = "；".join(ranking["tradeoffs"])
-        return {
+        proposal = {
             "agent_id": "lodging-agent",
             "domain": "lodging",
             "status": "ok",
@@ -638,6 +692,9 @@ def lodging_handler(
                 f"（成本只统计已知分项；{ranking['note']}）"
             ),
         }
+        if applied:
+            proposal["applied_constraints"] = applied
+        return proposal
 
     return handle
 

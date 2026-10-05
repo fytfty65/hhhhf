@@ -2270,6 +2270,7 @@ async def run_negotiate(msg: GatewayMessage):
             intent=intent_str,
             signals=own_signals,
             composition=composition,
+            budget_total=float(total_calc_budget) if total_calc_budget else None,
         )
         facts_version_string = str(request_facts.get("facts_version") or "")
         print(f"🧾 [统一事实] 快照 {facts_version_string}（约束 {len(request_facts.get('constraints') or {})} 项）", flush=True)
@@ -2564,6 +2565,8 @@ async def run_negotiate(msg: GatewayMessage):
                     distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
                     classify=classify_poi_category,
                     trip_days=trip_days,
+                    budget_total=float(total_calc_budget) if total_calc_budget else None,
+                    nights=max(1, trip_days - 1),
                 )
 
                 # 👑 协商回环（一轮，有界）：把裁决变成相关智能体的**新输入契约**，让它们重提。
@@ -2625,6 +2628,8 @@ async def run_negotiate(msg: GatewayMessage):
                                 distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
                                 classify=classify_poi_category,
                                 trip_days=trip_days,
+                                budget_total=float(total_calc_budget) if total_calc_budget else None,
+                                nights=max(1, trip_days - 1),
                             )
                             _revision_record = evaluate_revisions(
                                 _conflict_facts.get("conflicts"),

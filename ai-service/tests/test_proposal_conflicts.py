@@ -412,5 +412,87 @@ class NegotiationLoopTests(unittest.TestCase):
         self.assertTrue(any("仍有分歧" in note for note in record["notes"]))
 
 
+class LodgingBudgetTests(unittest.TestCase):
+    """预算 vs 房价：住得下也要花得起 —— 这条要能真协商（压晚价上限）。"""
+
+    def _lodging(self, prices):
+        return {
+            "agent_id": "lodging-agent", "domain": "lodging", "status": "ok",
+            "candidates": [{"name": f"酒店{i}", "cost": price} for i, price in enumerate(prices)],
+        }
+
+    def test_expensive_lodging_against_budget_is_a_conflict(self):
+        proposals = [self._lodging([180, 420, 680])]
+        conflicts = detect_conflicts(proposals, budget_total=1200, nights=2)
+        entry = next((item for item in conflicts if item["code"] == "lodging_price_vs_budget"), None)
+        self.assertIsNotNone(entry, conflicts)
+        self.assertIn("最贵要 ¥1360", entry["detail"])
+        self.assertIn("最便宜的 酒店0 是 ¥180/晚", entry["detail"])
+
+    def test_affordable_lodging_is_not_a_conflict(self):
+        conflicts = detect_conflicts([self._lodging([180, 220])], budget_total=4000, nights=2)
+        self.assertEqual([item["code"] for item in conflicts], [])
+
+    def test_unknown_price_is_not_treated_as_cheap(self):
+        """房价未知不等于便宜 —— 没有已知价格时不许凭空判"没冲突"。"""
+        proposals = [{"agent_id": "lodging-agent", "domain": "lodging", "status": "ok",
+                      "candidates": [{"name": "某酒店"}]}]
+        self.assertEqual(detect_conflicts(proposals, budget_total=800, nights=2), [])
+
+    def test_directive_caps_nightly_price_at_half_budget(self):
+        from core.proposal_conflicts import build_revision_directives
+
+        directives = build_revision_directives(
+            [{"code": "lodging_price_vs_budget", "evidence": {"budget_total": 1200, "nights": 2}}],
+        )
+        self.assertIn("lodging-agent", directives)
+        self.assertEqual(directives["lodging-agent"]["hard_constraints"]["max_price_per_night"], 300)
+        self.assertIn("每晚不超过 ¥300", directives["lodging-agent"]["message"])
+
+    def test_arbitration_names_the_enforcing_layer(self):
+        decisions = arbitrate_conflicts([{"code": "lodging_price_vs_budget"}])
+        self.assertIn("_apply_contract_limits", decisions[0]["mechanism"])
+        self.assertIn("预算", decisions[0]["why"])
+
+    def test_lodging_agent_really_drops_overpriced_options(self):
+        import asyncio
+
+        from core.agent_contracts import AgentInput
+        from core.agent_runtime import lodging_handler
+
+        handler = lodging_handler(nights=2, budget_total=1200)
+        request = AgentInput(
+            request_id="r-lodge", agent_id="lodging-agent", domain="lodging",
+            context={"candidates": [
+                {"name": "便宜酒店", "cost": "180"},
+                {"name": "贵酒店", "cost": "680"},
+                {"name": "价格未知酒店"},
+            ]},
+            hard_constraints={"max_price_per_night": 300}, soft_preferences={}, allowed_tools=[],
+        )
+        proposal = asyncio.run(handler(request))
+        names = [item["name"] for item in proposal["candidates"]]
+        self.assertIn("便宜酒店", names)
+        self.assertNotIn("贵酒店", names, "超价住宿必须被去掉")
+        self.assertIn("价格未知酒店", names, "房价未知的要保留（不知道≠太贵）")
+        self.assertEqual(proposal["applied_constraints"]["max_price_per_night"]["dropped_count"], 1)
+        self.assertEqual(proposal["applied_constraints"]["max_price_per_night"]["kept_price_unknown"], 1)
+
+    def test_no_directive_means_no_trimming(self):
+        import asyncio
+
+        from core.agent_contracts import AgentInput
+        from core.agent_runtime import lodging_handler
+
+        handler = lodging_handler(nights=2, budget_total=1200)
+        request = AgentInput(
+            request_id="r-lodge2", agent_id="lodging-agent", domain="lodging",
+            context={"candidates": [{"name": "贵酒店", "cost": "680"}]},
+            hard_constraints={}, soft_preferences={}, allowed_tools=[],
+        )
+        proposal = asyncio.run(handler(request))
+        self.assertEqual([item["name"] for item in proposal["candidates"]], ["贵酒店"])
+
+
 if __name__ == "__main__":
     unittest.main()

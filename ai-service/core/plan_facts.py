@@ -84,6 +84,7 @@ def build_plan_facts(
     reference_profile: Optional[Mapping[str, Any]] = None,
     route: Optional[Sequence[Mapping[str, Any]]] = None,
     degradations: Any = None,
+    budget_total: Optional[float] = None,
     generated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """把一次规划的事实收成一份记录（纯函数）。"""
@@ -100,6 +101,12 @@ def build_plan_facts(
         "city": _fact(str(city or ""), "user_intent"),
         "trip_days": _fact(int(trip_days) if _number(trip_days) is not None else None, "user_intent"),
         "intent_chars": _fact(len(str(intent or "")), "user_intent"),
+        # 预算是从用户原话里解析出来的（用于"住得下也要花得起"这类协商）
+        "budget_total": (
+            _fact(_number(budget_total), "user_intent")
+            if _number(budget_total) is not None
+            else _unknown("用户没给预算，或没能从原话里解析出金额")
+        ),
         "requirements": _fact(list(signals.get("requirements") or []), "user_intent"),
     }
 
@@ -218,6 +225,7 @@ def build_request_facts(
     intent: str,
     signals: Mapping[str, Any],
     composition: Optional[Mapping[str, Any]] = None,
+    budget_total: Optional[float] = None,
     generated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """**提案阶段**用的基础事实快照：请求 + 约束（+ 若有则目标配比）。
@@ -240,6 +248,7 @@ def build_request_facts(
         reference_profile=None,
         route=None,
         degradations=None,
+        budget_total=budget_total,
         generated_at=generated_at,
     )
     facts["stage"] = "request"

@@ -67,6 +67,41 @@ def _carbon_options(proposal: Mapping[str, Any]) -> List[Mapping[str, Any]]:
     return rows
 
 
+def _nightly_price(row: Mapping[str, Any]) -> Optional[float]:
+    """住宿一晚价格：高德给的是 `cost`/`cost_estimate`，我们自己的候选里也可能是 `price`。
+
+    取不到就返回 None —— 不允许把"不知道房价"当成 0（那会让便宜酒店凭空胜出）。
+    """
+    for key in ("nightly_price", "price_per_night", "price", "cost_estimate", "cost"):
+        value = row.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value)
+        digits = ""
+        for char in text:
+            if char.isdigit() or char == ".":
+                digits += char
+            elif digits:
+                break
+        try:
+            return float(digits) if digits else None
+        except ValueError:
+            continue
+    return None
+
+
+def _lodging_prices(proposal: Mapping[str, Any]) -> List[tuple[str, float]]:
+    pairs: List[tuple[str, float]] = []
+    for row in _candidates_of(proposal):
+        price = _nightly_price(row)
+        if price is None:
+            continue
+        pairs.append((str(row.get("name") or ""), price))
+    return pairs
+
+
 def summarize_stances(proposals: Any) -> Dict[str, Any]:
     """每个提案的立场 + 谁没参与（没有数据或无需处置）。"""
     stances: List[Dict[str, Any]] = []
@@ -152,6 +187,8 @@ def detect_conflicts(
     distance_tolerance: str = "normal",
     classify=None,
     trip_days: Optional[int] = None,
+    budget_total: Optional[float] = None,
+    nights: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """只报能由提案信号直接推出的分歧；推不出就返回空列表（不编戏）。
 
@@ -214,7 +251,37 @@ def detect_conflicts(
                 "evidence": {"min_carbon_kg": round(min(values), 1), "max_carbon_kg": round(max(values), 1)},
             })
 
-    # ③ 有人还提了用户明说不要的类别：这是**硬冲突**，必须由过滤器处理
+    # ③ 预算 vs 房价：住宿总额占预算比重过高 → 住得下与花得起冲突（可协商：压晚价上限）
+    lodging = by_agent.get("lodging-agent")
+    if lodging and budget_total and nights:
+        try:
+            budget = float(budget_total)
+            night_count = max(1, int(nights))
+        except (TypeError, ValueError):
+            budget, night_count = 0.0, 0
+        prices = _lodging_prices(lodging)
+        if budget > 0 and night_count > 0 and prices:
+            cheapest_name, cheapest = min(prices, key=lambda item: item[1])
+            heaviest_name, heaviest = max(prices, key=lambda item: item[1])
+            share = (heaviest * night_count) / budget
+            if share > 0.5:
+                conflicts.append({
+                    "code": "lodging_price_vs_budget",
+                    "between": ["lodging-agent", "budget-agent"],
+                    "severity": "negotiable",
+                    "detail": (f"住 {night_count} 晚最贵要 ¥{heaviest * night_count:.0f}"
+                               f"（{heaviest_name or '未命名'}，占预算 {share * 100:.0f}%），"
+                               f"最便宜的 {cheapest_name or '未命名'} 是 ¥{cheapest:.0f}/晚"),
+                    "evidence": {
+                        "budget_total": budget,
+                        "nights": night_count,
+                        "cheapest_nightly": cheapest,
+                        "heaviest_nightly": heaviest,
+                        "share": round(share, 3),
+                    },
+                })
+
+    # ④ 有人还提了用户明说不要的类别：这是**硬冲突**，必须由过滤器处理
     if forbidden_categories and callable(classify):
         offenders: List[Dict[str, Any]] = []
         for proposal in rows:
@@ -272,7 +339,14 @@ def arbitrate_conflicts(
                 "code": code,
                 "decision": "跨景区行程保留用车，同时在方案里标明碳排差异",
                 "mechanism": "core/carbon_service（碳排标注）+ 交通审计",
-                "why": "看自然景区通常必须用车，碳排让位于你的出行诉求，但如实标注" ,
+                "why": "看自然景区通常必须用车，碳排让位于你的出行诉求，但如实标注",
+            })
+        elif code == "lodging_price_vs_budget":
+            decisions.append({
+                "code": code,
+                "decision": "按预算给每晚房价设上限，超出的住宿候选换掉",
+                "mechanism": "core/agent_runtime._apply_contract_limits(max_price_per_night) + 住宿联合评估",
+                "why": "住得下也要花得起：先按你说的总预算把住宿压在合理区间",
             })
         elif code == "forbidden_category_in_proposals":
             for category in forbidden_categories:
@@ -326,6 +400,19 @@ def build_revision_directives(
                     "hard_constraints": {},
                     "message": "请重提：不要包含用户明确排除的类别",
                 }
+        elif code == "lodging_price_vs_budget":
+            evidence = _as_mapping(entry.get("evidence"))
+            try:
+                budget = float(evidence.get("budget_total") or 0.0)
+                night_count = max(1, int(evidence.get("nights") or 1))
+            except (TypeError, ValueError):
+                budget, night_count = 0.0, 1
+            cap = int(budget * 0.5 / night_count) if budget > 0 else 0
+            directives["lodging-agent"] = {
+                "reason": "住宿占预算比重过高",
+                "hard_constraints": {"max_price_per_night": cap},
+                "message": f"请按「每晚不超过 ¥{cap}」重提（住 {night_count} 晚、预算 ¥{budget:.0f} 的一半留给住宿）",
+            }
         elif code == "low_carbon_vs_driving":
             directives.setdefault("transport-agent", {
                 "reason": "低碳与自驾存在差异",
@@ -376,6 +463,8 @@ def build_proposal_conflicts(
     distance_tolerance: str = "normal",
     classify=None,
     trip_days: Optional[int] = None,
+    budget_total: Optional[float] = None,
+    nights: Optional[int] = None,
 ) -> Dict[str, Any]:
     """把三件事合成一条事实（立场 + 分歧 + 裁决），随方案下发并发事件。"""
     summary = summarize_stances(proposals)
@@ -385,6 +474,8 @@ def build_proposal_conflicts(
         distance_tolerance=distance_tolerance,
         classify=classify,
         trip_days=trip_days,
+        budget_total=budget_total,
+        nights=nights,
     )
     arbitration = arbitrate_conflicts(
         conflicts,
