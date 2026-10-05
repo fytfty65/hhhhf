@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # —— 默认配比（白天节点份额）——
 DEFAULT_SCENIC_SHARE = 0.4
@@ -269,3 +269,119 @@ def count_route_composition(route: Sequence[Mapping[str, Any]], classify, scenic
 
         counts[category] = counts.get(category, 0) + 1
     return counts
+
+
+# 禁令类别的替换优先顺序：把"不要人文"换成自然景区最合理，其次美食、逛街。
+DEFAULT_REPLACEMENT_ORDER = ("scenic", "food", "shopping")
+
+
+def repair_forbidden_categories(
+    route: Sequence[Mapping[str, Any]],
+    *,
+    forbidden: Sequence[str],
+    classify,
+    pool: Sequence[Mapping[str, Any]] = (),
+    replacement_order: Sequence[str] = DEFAULT_REPLACEMENT_ORDER,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """把用户**明确排除**的类别从路线里换掉或移出（闭环"硬约束过滤"阶段）。
+
+    为什么需要：只做"目标是 0 + 事后报警"不够 —— 模型仍可能自己塞一个博物馆进来，
+    而我们只是如实告诉你，没有去修。既然用户说了不要，就该真的不出现。
+
+    行为（保守、可解释）：
+      - 命中禁令的节点优先从候选池里**同类替换**（按 `replacement_order` 找第一个非禁令类别，
+        且不与路线已有节点重名）；替换会带上 `replaced_from` 便于追溯；
+      - 候选池里没有可替换的 → **移出**该节点；
+      - 绝不触碰非禁令节点，也不改天数与顺序（保持原位替换）。
+
+    返回 `(新路线, 动作清单)`；动作里写明 换/移 了什么、为什么，供事件流与界面展示。
+    """
+    forbidden_set = {str(item) for item in (forbidden or []) if str(item)}
+    if not forbidden_set:
+        return [dict(node) for node in route or [] if isinstance(node, Mapping)], []
+
+    existing_names = {
+        str(node.get("name") or node.get("location") or "")
+        for node in route or []
+        if isinstance(node, Mapping)
+    }
+
+    def node_category(node: Mapping[str, Any]) -> str:
+        name = str(node.get("name") or node.get("location") or "")
+        poi_type = str(node.get("type") or "")
+        is_hotel = bool(node.get("is_hotel")) or any(word in name for word in ("酒店", "民宿", "宾馆", "客栈", "旅馆"))
+        if is_hotel:
+            return "hotel"
+        try:
+            return str(classify(name, poi_type, is_hotel) or "other")
+        except Exception:
+            return "other"
+
+    # 候选池按类别索引（跳过禁令类别与已出现的名字）
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for item in pool or []:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in existing_names:
+            continue
+        category = node_category(item)
+        if category in forbidden_set or category == "other":
+            continue
+        buckets.setdefault(category, []).append(dict(item))
+
+    kept: List[Dict[str, Any]] = []
+    actions: List[Dict[str, Any]] = []
+    for node in route or []:
+        if not isinstance(node, Mapping):
+            continue
+        category = node_category(node)
+        if category not in forbidden_set:
+            kept.append(dict(node))
+            continue
+
+        replacement: Optional[Dict[str, Any]] = None
+        for candidate_category in replacement_order:
+            if candidate_category in forbidden_set:
+                continue
+            bucket = buckets.get(candidate_category) or []
+            while bucket:
+                candidate = bucket.pop(0)
+                name = str(candidate.get("name") or "")
+                if not name or name in existing_names:
+                    continue
+                replacement = candidate
+                existing_names.add(name)
+                break
+            if replacement is not None:
+                break
+
+        original_name = str(node.get("name") or node.get("location") or "")
+        if replacement is not None:
+            merged = dict(node)
+            merged["name"] = replacement.get("name")
+            merged["location"] = replacement.get("name")
+            merged["type"] = replacement.get("type")
+            if replacement.get("lnglat"):
+                merged["lnglat"] = replacement.get("lnglat")
+            if replacement.get("price") is not None:
+                merged["cost_estimate"] = replacement.get("cost_estimate")
+            merged["replaced_from"] = original_name
+            kept.append(merged)
+            actions.append({
+                "code": "forbidden_category_replaced",
+                "day": node.get("day"),
+                "category": category,
+                "from": original_name,
+                "to": str(replacement.get("name") or ""),
+                "reason": f"你说了不要{COMPOSITION_LABELS.get(category, category)}，已换成同类可去的点",
+            })
+        else:
+            actions.append({
+                "code": "forbidden_category_dropped",
+                "day": node.get("day"),
+                "category": category,
+                "from": original_name,
+                "reason": f"你说了不要{COMPOSITION_LABELS.get(category, category)}，且候选池里没有可替换的点，已移出",
+            })
+    return kept, actions

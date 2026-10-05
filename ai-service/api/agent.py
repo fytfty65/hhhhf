@@ -59,6 +59,7 @@ from core.route_composition import (
     composition_audit,
     composition_targets,
     count_route_composition,
+    repair_forbidden_categories,
     scenic_tier,
     summarize_targets,
 )
@@ -4532,6 +4533,49 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["fallback"] = _snapshot["fallback"]
                         except Exception as _quality_exc:  # 质量评估失败绝不能影响出方案
                             final_data["quality"] = {"error": str(_quality_exc)[:200]}
+                        # 👑 硬约束过滤（禁令）：用户明确说了"不要博物馆/人文"，就不能只是报警 ——
+                        #    模型自己塞进来的也真的换掉或移出（从候选池同类替换），并在事件流留痕。
+                        #    这一步放在配比对账之前，好让对账看到修复后的真实路线。
+                        if own_signals.get("exclude_cultural"):
+                            try:
+                                _replacement_pool: List[Dict[str, Any]] = []
+                                for _item in list(unique_attractions or []) + list(unique_foods or []):
+                                    if isinstance(_item, dict):
+                                        _replacement_pool.append(_item)
+                                _route_before_exclusion = list(final_data.get("route") or [])
+                                _exclusion_kept, _exclusion_actions = repair_forbidden_categories(
+                                    _route_before_exclusion,
+                                    forbidden=("cultural",),
+                                    classify=classify_poi_category,
+                                    pool=_replacement_pool,
+                                )
+                                if _exclusion_actions:
+                                    final_data["route"] = _exclusion_kept
+                                    final_data["exclusion_repair"] = {
+                                        "forbidden": ["cultural"],
+                                        "actions": _exclusion_actions,
+                                    }
+                                    await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
+                                        "room_id": room_id, "city": target_city,
+                                        "action_count": len(_exclusion_actions),
+                                        "action_codes": sorted({str(item.get("code") or "") for item in _exclusion_actions}),
+                                        "examples": [
+                                            f"{item.get('from')} → {item.get('to') or '（移出）'}"
+                                            for item in _exclusion_actions[:5]
+                                        ],
+                                        "correlation_id": plan_correlation_id,
+                                    }, room_id, correlation_id=plan_correlation_id, producer="validator")
+                                    print(
+                                        f"🚫 [硬约束过滤] 排除人文：修复 {len(_exclusion_actions)} 处 → "
+                                        + "；".join(
+                                            f"{item.get('from')} → {item.get('to') or '（移出）'}"
+                                            for item in _exclusion_actions[:4]
+                                        ),
+                                        flush=True,
+                                    )
+                            except Exception as _exclusion_exc:  # 修复失败绝不影响出方案
+                                final_data["exclusion_repair"] = {"error": str(_exclusion_exc)[:200]}
+
                         # 👑 配比对账：实际排出来的构成 vs 用户口径算出的目标（默认自然=人文各半
                         # + 穿插美食住宿；明确偏好则加权）。对不上就如实记账，进"遗留问题"。
                         try:

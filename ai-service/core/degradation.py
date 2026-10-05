@@ -243,6 +243,26 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.8) 明确排除项的实际处置（2026-10-04）：用户说"不要博物馆"，方案里真出现过又被换掉/移出的，
+    #      也要写清楚 —— 让用户知道系统按他的禁令动过什么，而不是悄悄改了。
+    exclusion = _as_mapping(data.get("exclusion_repair"))
+    if exclusion.get("error"):
+        items.append(_entry("route_composition", STATUS_MISSING, f"按禁令修正失败：{str(exclusion.get('error'))[:100]}"))
+    else:
+        exclusion_actions = [item for item in (exclusion.get("actions") or []) if isinstance(item, Mapping)]
+        if exclusion_actions:
+            replaced = [item for item in exclusion_actions if str(item.get("code")) == "forbidden_category_replaced"]
+            dropped = [item for item in exclusion_actions if str(item.get("code")) == "forbidden_category_dropped"]
+            parts = []
+            if replaced:
+                parts.append(
+                    "已替换 " + str(len(replaced)) + " 处（"
+                    + "、".join(f"{item.get('from')}→{item.get('to')}" for item in replaced[:2]) + "）"
+                )
+            if dropped:
+                parts.append("已移出 " + str(len(dropped)) + " 处（" + "、".join(str(item.get("from")) for item in dropped[:2]) + "）")
+            items.append(_entry("route_composition", STATUS_DEGRADED, "你说了不要的类别：" + "；".join(parts)))
+
     # 3.6) 配比对账（用户口径，2026-10-04）：这一趟排出来的自然/人文/美食/住宿数量，
     #      与"默认自然=人文各半 + 穿插美食住宿"或"用户明确偏好加权"的目标不一致时如实说。
     composition = _as_mapping(data.get("composition"))
