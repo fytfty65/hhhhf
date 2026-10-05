@@ -49,6 +49,11 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "行程配比",
         "impact": "这一趟的自然/人文/美食/住宿数量与你说的偏好有偏差，按实际排出来的算",
     },
+    # 每日密度不足：不是"少排了"，而是"一天跑不了那么多远的地方"（距离是硬约束）
+    "daily_balance": {
+        "label": "每日节点密度",
+        "impact": "有几天节点比目标少，因为同一天跑不了那么多远的地方；优先保证不赶路",
+    },
     "travel_feasibility": {
         "label": "日内里程",
         "impact": "同一天里的移动里程或远景区数量偏多，实际跑起来会赶",
@@ -387,6 +392,22 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     lodgings = [node for node in _route_of(data) if _looks_like_lodging(node)]
     if lodgings and not any(_has_price(node) for node in lodgings):
         items.append(_entry("hotel_price", STATUS_MISSING, f"{len(lodgings)} 个住宿节点都没拿到报价"))
+
+    # 4.5) 每日密度不足（2026-10-05）：出稿前的硬约束收口会移出"一天跑不了"的远景点，
+    #      于是某些天的节点数少于目标。这是**距离优先于密度**的必然结果，必须如实说出来 ——
+    #      否则用户只会觉得"这天怎么这么空"，而系统的沉默会让它看起来像少排了。
+    balance = _as_mapping(data.get("daily_balance"))
+    if balance.get("recomputed_after_closeout") and balance.get("satisfied") is False:
+        deficient = [str(day) for day in (balance.get("deficient_days") or [])]
+        if deficient:
+            items.append(
+                _entry(
+                    "daily_balance",
+                    STATUS_DEGRADED,
+                    "收口后第 " + "、".join(deficient) + " 天节点偏少：一天跑不了那么多远的地方，"
+                    "优先保证不赶路；想更满一点可以说「愿意多留一天」或「放宽每天节点数」",
+                )
+            )
 
     # 5) 跨城出行方式
     transport = _as_mapping(data.get("transport_audit"))

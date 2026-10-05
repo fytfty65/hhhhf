@@ -2155,6 +2155,8 @@ class SemanticItineraryCache:
         self.sim_threshold = float(os.getenv("CACHE_SIM_THRESHOLD", "0.92"))
         self.embed_model = os.getenv("LLM_EMBED_MODEL", "text-embedding-v3").strip()
         self.ttl = int(os.getenv("CACHE_TTL", "86400"))  # 默认 24h
+        # 缓存命中率排查开关（默认关）：打开后会打印参与哈希的键原文
+        self.debug = str(os.getenv("SEMANTIC_CACHE_DEBUG") or "").strip() in {"1", "true", "on", "yes"}
         self._mem: Dict[str, Dict[str, Any]] = {}
         self._vec_index: Dict[str, Dict[str, Any]] = {}  # key -> {city, days, vector}
 
@@ -2164,6 +2166,10 @@ class SemanticItineraryCache:
         # v5：类别/原始诉求进入精确缓存键，避免同城同天数的文化路线
         # 污染自然、美食、购物或普通均衡路线。
         raw = f"v5|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        if self.debug:
+            # 缓存命中率低时，第一件要知道的事就是"键为什么不一样"：
+            # 把参与哈希的原文打出来（只在本进程日志里），两次同样的请求一比就知道。
+            print(f"🔑 [语义缓存] key={hashlib.md5(raw.encode('utf-8')).hexdigest()[:10]} raw={raw[:200]}", flush=True)
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     async def _embed(self, text: str) -> Optional[List[float]]:
@@ -2543,51 +2549,40 @@ async def run_negotiate(msg: GatewayMessage):
             try:
                 from core.itinerary_balance import is_daily_balance_acceptable
 
-                cache_ok = is_daily_balance_acceptable(cached_route or [], trip_days, target_daily_count)
+                # ⚠️ 必须用**和出稿门禁同一个**刻度：出稿用的是
+                #    `target_daily_count if role == "深度探索" else min(target_daily_count, 5)`；
+                #    缓存这边原来拿 `target_daily_count` 去卡，比出稿门禁还严 ——
+                #    于是系统自己刚产出的方案都被判"每日密度不达标"，缓存等于关掉。
+                _cache_min_daytime = target_daily_count if role == "深度探索" else min(target_daily_count, 5)
+                cache_balance_ok = bool(is_daily_balance_acceptable(cached_route or [], trip_days, _cache_min_daytime))
             except Exception:
-                cache_ok = False
-            # 旧缓存只做了“每天有节点”校验，无法阻止整套路线被单一文化场馆占满。
-            # 普通城市游默认需要景区 + 餐饮 + 人文/地标 + 住宿；只有用户明确要求
-            # 只看博物馆/历史场馆时，才允许单一文化主题缓存继续复用。
-            if cache_ok and isinstance(cached_route, list):
-                cached_categories = {
-                    classify_poi_category(
-                        str(item.get("name") or item.get("location") or ""),
-                        str(item.get("type") or ""),
-                        bool(item.get("is_hotel")),
-                    )
-                    for item in cached_route
-                    if isinstance(item, dict) and not item.get("is_hotel")
-                }
-                explicit_culture_only = bool(pref_signals.get("wants_cultural")) and not any(
-                    pref_signals.get(key) for key in ("wants_food", "wants_scenic", "wants_hotel", "wants_shopping")
-                )
-                if not explicit_culture_only:
-                    cache_ok = {"scenic", "food"}.issubset(cached_categories) and "cultural" in cached_categories
-                    if cache_ok:
-                        cached_by_day: Dict[int, set[str]] = {}
-                        for item in cached_route:
-                            if not isinstance(item, dict) or item.get("is_hotel"):
-                                continue
-                            try:
-                                cached_day = int(item.get("day") or 1)
-                            except (TypeError, ValueError):
-                                cached_day = 1
-                            cached_by_day.setdefault(cached_day, set()).add(
-                                classify_poi_category(
-                                    str(item.get("name") or item.get("location") or ""),
-                                    str(item.get("type") or ""),
-                                    bool(item.get("is_hotel")),
-                                )
-                            )
-                        cache_ok = all(
-                            {"scenic", "food"}.issubset(cached_by_day.get(day, set()))
-                            for day in range(1, trip_days + 1)
-                        )
+                cache_balance_ok = False
+            # 👑 复用判据用**生成时同一套门禁结论**（2026-10-05 实测教训）：
+            #    原来这里另写了一条更严的"每天都必须有景区+餐饮"，结果系统自己产出的方案
+            #    经常不满足（收口会移出多余节点），缓存命中后又被拒 —— 日志上明明"精确命中"，
+            #    整条推演还是跑满 70s，等于把缓存关掉了。判据见 core/cache_policy。
+            from core.cache_policy import cached_plan_decision
+
+            _cache_decision = cached_plan_decision(
+                payload=cached_hit,
+                route=cached_route,
+                days=trip_days,
+                daily_count=target_daily_count,
+                signals=pref_signals,
+                classify=classify_poi_category,
+                balance_ok=cache_balance_ok,
+            )
+            cache_ok = bool(_cache_decision.get("reusable"))
             if cache_ok:
-                print(f"✅ [语义缓存] {target_city}/{trip_days}天命中，秒回", flush=True)
+                print(
+                    f"✅ [语义缓存] {target_city}/{trip_days}天命中，秒回（{_cache_decision.get('reason')}）",
+                    flush=True,
+                )
                 return StreamingResponse(cached_stream(cached_hit), media_type="application/x-ndjson")
-            print(f"♻️ [语义缓存] {target_city}/{trip_days}天命中但密度或类别多样性不达标，跳过旧方案", flush=True)
+            print(
+                f"♻️ [语义缓存] {target_city}/{trip_days}天命中但不复用：{_cache_decision.get('reason')}",
+                flush=True,
+            )
         # Seed templates are intentionally limited to short cold-start trips.
         # Long/deep itineraries must use the supplier-backed candidate pool so
         # every requested day receives a balanced set of unique nodes.
@@ -6203,6 +6198,66 @@ async def run_negotiate(msg: GatewayMessage):
                             pass
                     except Exception as _final_balance_exc:
                         final_data["daily_balance"] = {"gate": "final_pre_emit", "error": str(_final_balance_exc)[:200]}
+
+                    # 👑 出稿前把「每日密度」按**最终路线**重算一次（2026-10-05 实测发现）：
+                    #    上面那道门禁跑在硬约束收口**之前**，而收口会移出节点（例如"一天跑不了
+                    #    两个远景区"），于是下发的 payload 里 `daily_balance` 描述的是**收口前**的
+                    #    路线 —— 自己产出的方案，拿自己去核对时说"不达标"（语义缓存就是这么被
+                    #    判死的）。这里重算，让"方案里写着的结论"和"方案的路线"一致。
+                    try:
+                        from core.itinerary_balance import daily_balance_audit as _daily_balance_audit
+
+                        _final_target_for_audit = target_daily_count if role == "深度探索" else min(target_daily_count, 5)
+                        _final_balance_audit = _daily_balance_audit(
+                            final_data.get("route") or [], trip_days, _final_target_for_audit
+                        )
+                        final_data["daily_balance"] = {
+                            **(final_data.get("daily_balance") or {}),
+                            **_final_balance_audit,
+                            "gate": "final_pre_emit",
+                            "recomputed_after_closeout": True,
+                        }
+                        if not _final_balance_audit.get("satisfied"):
+                            print(
+                                "⚠️ [每日密度] 收口之后有几天不足目标节点数："
+                                + str(_final_balance_audit.get("deficient_days")),
+                                flush=True,
+                            )
+                    except Exception as _balance_recheck_exc:  # 重算失败不影响出方案
+                        print(f"⚠️ [每日密度] 收口后重算失败: {_balance_recheck_exc}", flush=True)
+
+                    # 👑 披露与事实快照必须按**最终路线**重算（2026-10-05 实测抓到）
+                    #    上面那两处登记（degradations / facts）跑在"最终均衡门禁 + 出稿前硬约束收口"
+                    #    **之前**，而路线在之后还会被改动（移出跑不了的远景点、补/减住宿）。
+                    #    实测后果：喀什的 payload 里 `daily_balance.satisfied=False`（收口后确实有几天偏少），
+                    #    但"遗留问题"里一条都没有 —— **该说的没说**。
+                    #    这两步都是"从 final_data 推导出结论"，重算一次是幂等的，所以直接按最终路线再算一遍。
+                    try:
+                        from core.degradation import collect_degradations as _collect_degradations_final
+
+                        final_data["degradations"] = _collect_degradations_final(final_data)
+                    except Exception as _degrade_recheck_exc:
+                        print(f"⚠️ [遗留问题] 收口后重算失败: {_degrade_recheck_exc}", flush=True)
+                    try:
+                        from core.plan_facts import build_plan_facts as _build_plan_facts_final
+
+                        final_data["facts"] = _build_plan_facts_final(
+                            correlation_id=plan_correlation_id,
+                            city=target_city,
+                            trip_days=trip_days,
+                            intent=intent_str,
+                            signals=own_signals,
+                            composition=composition,
+                            supply=candidate_supply,
+                            feasibility=final_data.get("travel_feasibility"),
+                            profile_applied=final_data.get("profile_applied"),
+                            reference_profile=final_data.get("reference_profile"),
+                            route=final_data.get("route"),
+                            degradations=final_data.get("degradations"),
+                            budget_total=float(total_calc_budget) if total_calc_budget else None,
+                        )
+                    except Exception as _facts_recheck_exc:
+                        print(f"⚠️ [统一事实] 收口后重算失败: {_facts_recheck_exc}", flush=True)
 
                     # 把本次规划的关联键交给前端/网关：以后用户采纳、确认重规划、标记到访
                     # 都能带着同一个 correlation_id 回到事件流里（否则审计只能看到孤立的片段）

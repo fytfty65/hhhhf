@@ -47,11 +47,20 @@ async function post(pathname, token, body) {
 }
 
 async function register(username) {
-  let response = await fetch(`${BASE}/api/auth/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password: PASSWORD, nickname: username.slice(-4) }),
-  });
+  // 注册会被网关限流（实测：连续跑矩阵时 /api/auth/register 回 429，
+  // 于是后面几个场景直接"注册失败"、整轮探针白跑）。这里对 429 退避重试。
+  let response = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    response = await fetch(`${BASE}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password: PASSWORD, nickname: username.slice(-4) }),
+    });
+    if (response.status !== 429) break;
+    const waitMs = 1500 * (attempt + 1);
+    console.log(`  （注册被限流 429，等 ${waitMs}ms 重试）`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
   if (response.status !== 200) {
     response = await fetch(`${BASE}/api/auth/login`, {
       method: 'POST',
