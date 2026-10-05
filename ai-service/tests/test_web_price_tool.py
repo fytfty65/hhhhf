@@ -858,7 +858,7 @@ class PriceStepBudgetTests(unittest.TestCase):
         """
         text = self._source()
         self.assertIn("_per_point_cap = max(", text)
-        self.assertIn("for _item in _targets:", text)
+        self.assertIn("for _index, _item in enumerate(_targets):", text)
         self.assertIn("_observations.append(await _lookup_bounded(_item))", text)
         self.assertNotIn("asyncio.gather(\n                                        *[_lookup_bounded(item) for item in _targets]", text)
 
@@ -1143,6 +1143,53 @@ class PriceContextRankingTests(unittest.TestCase):
             "provider": "baidu",
         }]
         self.assertEqual(pick_price_from_rows(rows)["value"], 0.0)
+
+
+class PriceStepEarlyStopTests(unittest.TestCase):
+    """取价这一步的"所有源都死了就别硬撑"与"每个源的原因都要说出来"。"""
+
+    def _source(self):
+        import io
+        import pathlib
+
+        path = pathlib.Path(__file__).resolve().parents[1] / "api" / "agent.py"
+        with io.open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_price_step_stops_early_when_every_source_is_dead(self):
+        """所有源都不可用时逐点重试是白花时间：实测 27.4s、补到 0 条。
+
+        前两个点都没换来价格就停下，剩下的节点留给「需要你确认」，并如实说明原因。
+        """
+        text = self._source()
+        self.assertIn("_early_stop_reason", text)
+        self.assertIn("所有取价源连续失败，已提前停止", text)
+        self.assertIn('"early_stop_reason": _early_stop_reason', text)
+
+    def test_provider_summary_is_reported_per_source(self):
+        """只说"来源可达=False"看不出是"被反爬挡住"还是"根本没查"。"""
+        text = self._source()
+        self.assertIn("_provider_summary", text)
+        self.assertIn('"provider_summary": _provider_summary', text)
+
+
+class PriceFailureDisclosureTests(unittest.TestCase):
+    def test_unreachable_price_source_names_each_provider(self):
+        from core.degradation import collect_degradations
+
+        payload = {
+            "price_audit": {
+                "provider_reachable": False,
+                "provider_status": {"error": "baidu 返回安全验证页（需要会话/被限流）"},
+                "provider_summary": "baidu：baidu 返回安全验证页；sogou：0 条结果；search：0 条结果",
+            }
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if item.get("source") == "price_web"), None)
+        self.assertIsNotNone(entry, items)
+        self.assertIn("各源情况", str(entry.get("reason")))
+        self.assertIn("baidu", str(entry.get("reason")))
+        self.assertIn("WEB_SEARCH_PROXY", str(entry.get("reason")))
 
 
 if __name__ == "__main__":

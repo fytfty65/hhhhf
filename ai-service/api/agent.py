@@ -5320,7 +5320,19 @@ async def run_negotiate(msg: GatewayMessage):
                                             ) | {"error": f"{type(_bounded_exc).__name__}: {str(_bounded_exc)[:120]}"}
 
                                     _observations = []
-                                    for _item in _targets:
+                                    _early_stop_reason = ""
+                                    for _index, _item in enumerate(_targets):
+                                        # 👑 早停（2026-10-05 实测）：所有源都不可用时，
+                                        #    逐点重试只是白白花掉 20 多秒（实测 27.4s、补到 0 条）。
+                                        #    前两个点都没换来任何价格、且最近一次尝试没有任何源成功过，
+                                        #    就停下来，把剩下的节点留给「需要你确认」并如实说明。
+                                        if _index >= 2 and not any(
+                                            isinstance(item, Mapping) and item.get("value") is not None
+                                            for item in _observations
+                                        ):
+                                            _early_stop_reason = "所有取价源连续失败，已提前停止（剩下的节点留给「需要你确认」）"
+                                            print(f"⏹️ [联网取价] {_early_stop_reason}", flush=True)
+                                            break
                                         _observations.append(await _lookup_bounded(_item))
                                     _merged = merge_observations(final_data, list(_observations))
                                     if _merged["updated"]:
@@ -5384,6 +5396,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         "provider_attempts": list(_attempts or [])[:4],
                                         "provider_states": _provider_state,
                                         "provider_summary": _provider_summary,
+                                        "early_stop_reason": _early_stop_reason,
                                         "provider_status": {"error": _attempt_error} if _attempt_error else {},
                                         "looked_up": len(_targets),
                                         "filled_from_web": len(_filled),
