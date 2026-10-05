@@ -181,10 +181,18 @@ async function runScenario(scenario) {
     },
     composition: {
       targets: `${composition.scenic}/${composition.cultural}/${composition.food}/${composition.hotel}`,
+      feasible: composition.feasible_targets
+        ? `${composition.feasible_targets.scenic}/${composition.feasible_targets.cultural}/${composition.feasible_targets.food}/${composition.feasible_targets.hotel}`
+        : '—',
       actual: `${actual.landmark ?? '?'} 景区 + ${actual.city_park ?? '?'} 公园 / ${actual.cultural ?? '?'} 人文 / ${actual.food ?? '?'} 美食 / ${actual.hotel ?? '?'} 住宿`,
       source: composition.source,
       ok: audit.ok,
       notes: audit.notes || [],
+      supplyLimited: Object.entries(composition.supply_limited || {}).map(([key, item]) => {
+        const label = { scenic: '自然景区', cultural: '人文', food: '特色美食', hotel: '住宿' };
+        return `${label[key] || key}候选 ${item.available} 个 < 目标 ${item.target} 个`;
+      }),
+      recomputed: Boolean(composition.recomputed_after_closeout),
     },
     repairs: {
       park: (payload.park_trim?.actions || []).map((item) => `${item.from}→${item.to || '移出'}`),
@@ -193,6 +201,7 @@ async function runScenario(scenario) {
       lodging: (payload.lodging_repair?.actions || []).map((item) => `第${item.day}晚→${item.to}`),
       lodgingMissing: payload.lodging_repair?.missing_days || [],
       lodgingError: payload.lodging_repair?.error || '',
+      lodgingTrimmed: (payload.lodging_trim?.actions || []).map((item) => `${item.from}(第${item.day}天)`),
       closeout: payload.hard_constraint_closeout?.actions || [],
       closeoutError: payload.hard_constraint_closeout?.error || '',
     },
@@ -235,7 +244,7 @@ function toMarkdown(rows) {
       `- 候选供给：${fmt(row.supply.status)}（景点 ${fmt(row.supply.attractions)} / 餐饮 ${fmt(row.supply.foods)} / 自然 ${fmt(row.supply.scenic)}）；` +
         `补检索 ${row.supply.widened.length ? row.supply.widened.join('、') : '无'}；` +
         `周边县市景区 ${fmt(row.supply.outOfTown)} 个（最远 ${fmt(row.supply.farthest)}km）`,
-      `- 配比目标 ${row.composition.targets}（${fmt(row.composition.source)}）→ 实际 ${row.composition.actual}｜对账 ${row.composition.ok ? '一致' : '有偏差'}`,
+      `- 配比目标 ${row.composition.targets}（${fmt(row.composition.source)}；可做到 ${fmt(row.composition.feasible)}）→ 实际 ${row.composition.actual}｜对账 ${row.composition.ok ? '一致' : '有偏差'}${row.composition.recomputed ? '（收口后重算）' : ''}`,
       row.composition.notes.length ? `- 配比偏差：${row.composition.notes.join('；')}` : '',
       `- 硬约束修复：公园 ${row.repairs.park.length} 处｜日内 ${row.repairs.travel.length} 处｜排除项 ${row.repairs.exclusion.length} 处｜住宿兜底 ${row.repairs.lodging.length} 晚`,
       row.repairs.park.length ? `  - 公园：${row.repairs.park.join('、')}` : '',
@@ -243,6 +252,8 @@ function toMarkdown(rows) {
       row.repairs.lodging.length ? `  - 住宿兜底：${row.repairs.lodging.join('、')}` : '',
       row.repairs.lodgingMissing.length ? `  - 住宿仍缺：第 ${row.repairs.lodgingMissing.join('、')} 晚（候选池里没有可用住宿）` : '',
       row.repairs.lodgingError ? `  - 住宿兜底失败：${row.repairs.lodgingError}` : '',
+      row.repairs.lodgingTrimmed.length ? `  - 住宿超夜数移出：${row.repairs.lodgingTrimmed.join('、')}` : '',
+      row.composition.supplyLimited.length ? `  - 供给缺口（不是没安排）：${row.composition.supplyLimited.join('；')}` : '',
       row.repairs.closeout.length ? `  - 出稿前收口：${row.repairs.closeout.join('；')}` : '',
       row.repairs.closeoutError ? `  - ⚠️ 收口失败：${row.repairs.closeoutError}` : '',
       `- 协商：参与 ${row.negotiation.agents} 个｜分歧 ${row.negotiation.conflicts.length ? row.negotiation.conflicts.join('、') : '无'}｜` +

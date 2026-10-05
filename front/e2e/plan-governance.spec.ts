@@ -116,7 +116,8 @@ const GOVERNANCE_PAYLOAD = {
     looked_up: 5,
     filled_from_web: 2,
     not_looked_up: 1,
-    budget_seconds: 25,
+    timed_out: 2,
+    budget_seconds: 45,
     pending: [
       { name: '钟楼酒店', kind: 'hotel', reason: '高德不提供房价，需要你确认', url: 'https://uri.amap.com/marker?position=108.94,34.26&name=x' },
       { name: '城墙南门门票', kind: 'cultural', reason: '这是联网估算价（不是官方报价），可点开来源核对', url: 'https://www.xinjiang.gov.cn/ticket/45', estimated: true, value: 45 },
@@ -314,8 +315,7 @@ const GOVERNANCE_PAYLOAD = {
   },
   // 协商纪要：谁参与、站在什么立场、争了什么、裁决凭什么、谁没参与
   negotiation: {
-    facts_version: 'facts-v1-e2etest1',
-    agents: [
+    facts_version: 'facts-v1-e2etest1',    agents: [
       { agent_id: 'route-planner', domain: 'itinerary', prefers: '远景区', candidates: 12, status: 'ok' },
       { agent_id: 'health-agent', domain: 'health', prefers: '保守强度', candidates: 1, status: 'ok' },
       { agent_id: 'dining-agent', domain: 'dining', prefers: '本地餐饮', candidates: 9, status: 'ok' },
@@ -354,6 +354,44 @@ const GOVERNANCE_PAYLOAD = {
       notes: ['协商一轮后分歧全部解决'],
       convergence: { code: 'converged', reason: '分歧已全部解决，协商结束' },
     },
+  },
+  // 统一事实记录（闭环第①段）：每条事实都带 source（谁说的）与 verified（能不能当真）。
+  // 这里**故意**混进一条 source=unknown 的（预算）：界面上必须显示"未取到"，
+  // 绝不能显示成 0 —— "不知道"和"是 0"是两件事。
+  facts: {
+    schema_version: 1,
+    facts_version: 'facts-v1-e2etest1',
+    request: {
+      city: { value: '库尔勒', source: 'user_intent', verified: true },
+      trip_days: { value: 2, source: 'user_intent', verified: true },
+      budget_total: { value: null, source: 'unknown', verified: false, note: '用户没给预算' },
+      requirements: { value: ['自然风景', '购物商圈'], source: 'user_intent', verified: true },
+    },
+    constraints: {
+      exclude_cultural: { value: false, source: 'user_intent', verified: true },
+      park_cap: { value: 2, source: 'policy', verified: true, note: '城市公园每天上限' },
+    },
+    suppliers: {
+      amap_attractions: { value: 16, source: 'amap', verified: true },
+      supply_status: { value: 'ok', source: 'derived', verified: true },
+      widened: { value: ['美食'], source: 'policy', verified: true },
+    },
+    decisions: {
+      composition_targets: {
+        value: { scenic: 4, cultural: 4, food: 2, hotel: 1, source: 'default_balanced' },
+        source: 'policy',
+        verified: true,
+      },
+      profile_applied: { value: null, source: 'unknown', verified: false },
+    },
+    outcome: {
+      nodes: { value: 12, source: 'derived', verified: true },
+      by_category: { value: { scenic_landmark: 4, city_park: 2, cultural: 1, food: 3, hotel: 1 }, source: 'derived', verified: true },
+    },
+    gaps: [
+      { area: 'candidate_pool', status: 'degraded', reason: '人文候选只有 3 个（按你的偏好目标 4 个），这是候选供给的限制' },
+      { area: 'price_web', status: 'degraded', reason: '未取到 40% 的价格' },
+    ],
   },
 };
 
@@ -433,6 +471,7 @@ async function installMocks(page: Page) {
                     candidate_supply: payload.governance.candidate_supply,
                     composition: payload.governance.composition,
                     negotiation: payload.governance.negotiation,
+                    facts: payload.governance.facts,
                   }),
               }),
             });
@@ -730,11 +769,31 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     const provenance = page.getByTestId('diagnostics-price-provenance');
     await expect(provenance).toContainText('联网查了 5 个缺价节点，补到 2 条');
     await expect(provenance).toContainText('还有 1 个没查');
+    // "预算用完没轮到" ≠ "网上搜不到"：这两件事后续动作不一样，必须分开说
+    await expect(provenance).toContainText('2 个是取价预算用完没轮到（不是搜不到）');
+    await expect(provenance).toContainText('预算 45s');
     await expect(page.getByTestId('diagnostics-pending-links')).toContainText('这是联网估算价（不是官方报价），可点开来源核对');
     // 出处链接必须指向**那条价格的真实来源**（按 href 精确定位；列表第一条是酒店的另一个链接）
     await expect(
       page.getByTestId('diagnostics-pending-links').locator('a[href="https://www.xinjiang.gov.cn/ticket/45"]'),
     ).toHaveCount(1);
+
+    // 统一事实记录（闭环第①段）：请求/约束/供应商/决策/结果/缺口，每条带来源与核实状态
+    const factsPanel = page.getByTestId('plan-facts-panel');
+    await expect(factsPanel).toBeVisible();
+    await expect(page.getByTestId('facts-panel-version')).toContainText('facts-v1-e2etest1');
+    await expect(page.getByTestId('facts-request')).toContainText('库尔勒');
+    await expect(page.getByTestId('facts-request')).toContainText('[你说的]');
+    // 「不知道」不能显示成 0：没解析出预算就写"未取到"
+    await expect(page.getByTestId('facts-row-budget_total')).toContainText('未取到');
+    await expect(page.getByTestId('facts-constraints')).toContainText('城市公园上限：2');
+    await expect(page.getByTestId('facts-constraints')).toContainText('[系统策略]');
+    await expect(page.getByTestId('facts-suppliers')).toContainText('真实景点候选：16');
+    await expect(page.getByTestId('facts-suppliers')).toContainText('[高德实时数据]');
+    await expect(page.getByTestId('facts-decisions')).toContainText('学习画像是否生效：未取到');
+    await expect(page.getByTestId('facts-outcome')).toContainText('节点数：12');
+    await expect(page.getByTestId('facts-gaps')).toContainText('人文候选只有 3 个');
+    await expect(page.getByTestId('facts-gaps')).toContainText('缺口清单（2 条）');
 
     // 回到证据层，后面的断言仍按原路径走
     await page.getByTestId('workspace-layer-evidence').click();

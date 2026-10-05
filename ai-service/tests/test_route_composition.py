@@ -574,6 +574,191 @@ class LodgingDisclosureTests(unittest.TestCase):
         items = collect_degradations({"lodging_repair": {"actions": [], "missing_days": []}}).get("items", [])
         self.assertFalse([item for item in items if "住宿" in str(item.get("reason"))])
 
+    def test_lodging_over_cap_is_disclosed_with_the_night_count(self):
+        from core.degradation import collect_degradations
+
+        payload = {
+            "lodging_trim": {
+                "nights": 2,
+                "actions": [{"code": "lodging_over_cap_dropped", "from": "喀什古城昆仑塔逸扉度假酒店", "day": 3}],
+            }
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if "住宿比夜数多" in str(item.get("reason"))), None)
+        self.assertIsNotNone(entry, items)
+        self.assertIn("这趟 2 晚", str(entry.get("reason")))
+        self.assertIn("喀什古城昆仑塔逸扉度假酒店", str(entry.get("reason")))
+
+    def test_supply_limited_target_is_disclosed_as_a_supply_gap(self):
+        from core.degradation import collect_degradations
+
+        payload = {
+            "composition": {
+                "supply_limited": {"cultural": {"target": 4, "available": 3}},
+                "supply_counts": {"cultural": 3},
+            }
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if "候选供给的限制" in str(item.get("reason"))), None)
+        self.assertIsNotNone(entry, items)
+        self.assertIn("人文候选只有 3 个", str(entry.get("reason")))
+        self.assertIn("目标 4 个", str(entry.get("reason")))
+
+
+class LodgingTrimTests(unittest.TestCase):
+    """住宿不能多于夜数（2026-10-05 横向对照实测：喀什 3 天 4 个住宿、乌鲁木齐 2 天 3 个）。"""
+
+    def _route(self):
+        return [
+            {"day": 1, "name": "英吉沙国家湿地公园", "lnglat": [76.17, 38.93]},
+            {"day": 1, "name": "川渝洲精品酒店", "lnglat": [75.99, 39.47], "cost_estimate": "¥288"},
+            {"day": 2, "name": "喀什博物馆", "lnglat": [75.98, 39.46]},
+            {"day": 2, "name": "君鼎精品酒店", "lnglat": [75.98, 39.47]},
+            {"day": 3, "name": "百年喀什馆", "lnglat": [75.99, 39.45]},
+            {"day": 3, "name": "喀什古城昆仑塔逸扉度假酒店", "lnglat": [75.99, 39.46]},
+        ]
+
+    def test_extra_lodging_beyond_the_nights_is_dropped(self):
+        from core.route_composition import trim_lodging_over_cap
+
+        kept, dropped = trim_lodging_over_cap(self._route(), nights=2)
+        self.assertEqual(len(dropped), 1)
+        self.assertEqual(dropped[0]["name"], "喀什古城昆仑塔逸扉度假酒店", "最后一天不需要留宿")
+        self.assertIn("住宿比夜数多", str(dropped[0]["removed_reason"]))
+        names = [node["name"] for node in kept]
+        self.assertNotIn("喀什古城昆仑塔逸扉度假酒店", names)
+        self.assertIn("川渝洲精品酒店", names)
+        self.assertIn("君鼎精品酒店", names)
+
+    def test_exactly_one_lodging_per_night_is_left_alone(self):
+        from core.route_composition import trim_lodging_over_cap
+
+        route = [
+            {"day": 1, "name": "甲酒店", "lnglat": [81.0, 43.0]},
+            {"day": 2, "name": "乙酒店", "lnglat": [81.1, 43.1]},
+        ]
+        kept, dropped = trim_lodging_over_cap(route, nights=2)
+        self.assertEqual(dropped, [])
+        self.assertEqual(len(kept), 2)
+
+    def test_two_lodging_on_the_same_day_keeps_the_priced_one(self):
+        from core.route_composition import trim_lodging_over_cap
+
+        route = [
+            {"day": 1, "name": "天山天池", "lnglat": [88.1, 43.9]},
+            {"day": 1, "name": "无价酒店", "lnglat": [88.0, 43.8]},
+            {"day": 1, "name": "有价酒店", "lnglat": [88.05, 43.85], "cost_estimate": "¥380"},
+        ]
+        kept, dropped = trim_lodging_over_cap(route, nights=1)
+        self.assertEqual([item["name"] for item in dropped], ["无价酒店"])
+        self.assertIn("有价酒店", [node["name"] for node in kept])
+
+    def test_zero_nights_drops_nothing(self):
+        from core.route_composition import trim_lodging_over_cap
+
+        kept, dropped = trim_lodging_over_cap(self._route(), nights=0)
+        self.assertEqual((len(kept), dropped), (6, []))
+
+    def test_classify_identifies_a_hotel_without_the_word_hotel(self):
+        from core.route_composition import trim_lodging_over_cap
+
+        route = [
+            {"day": 1, "name": "康城建国国际", "type": "住宿服务;宾馆酒店;宾馆酒店"},
+            {"day": 2, "name": "东归宾馆"},
+        ]
+        kept, dropped = trim_lodging_over_cap(
+            route, nights=1, classify=lambda name, type_text, food=False: "hotel" if "住宿" in str(type_text) else "other"
+        )
+        self.assertEqual(len(dropped), 1)
+        self.assertEqual(len(kept), 1)
+
+
+class SupplyClampTests(unittest.TestCase):
+    """配比目标要按候选供给压一次（2026-10-05 实测：库尔勒目标 4 人文而候选只有 3 个）。"""
+
+    def test_numeric_targets_ignores_the_source_note(self):
+        """真实事故：`int(v) for v in composition.values()` 撞上 `source='default_balanced'`
+        直接抛 ValueError，整个推演在出稿前崩掉。"""
+        from core.route_composition import numeric_targets
+
+        targets = numeric_targets(
+            {"scenic": 4, "cultural": 4, "food": 2, "hotel": 1, "source": "default_balanced"}
+        )
+        self.assertEqual(targets, {"scenic": 4, "cultural": 4, "food": 2, "hotel": 1})
+        self.assertNotIn("source", targets)
+
+    def test_numeric_targets_tolerates_garbage_values(self):
+        from core.route_composition import numeric_targets
+
+        self.assertEqual(
+            numeric_targets({"scenic": "4", "cultural": None, "food": "abc"}),
+            {"scenic": 4, "cultural": 0, "hotel": 0},
+            "数字字符串能用；解析不出来的键**跳过**（不是当成 0 —— 目标 0 意味着"
+            "「这个类别一个都别排」，把解析失败变成 0 会把整类踢掉）",
+        )
+        self.assertNotIn("food", numeric_targets({"food": "abc"}))
+        self.assertEqual(numeric_targets(None), {"scenic": 0, "cultural": 0, "food": 0, "hotel": 0})
+
+    def test_targets_beyond_supply_are_clamped_and_reported(self):
+        from core.route_composition import clamp_targets_by_supply
+
+        targets = {"scenic": 4, "cultural": 4, "food": 2, "hotel": 1}
+        supply = {"scenic": 5, "cultural": 3, "food": 2, "hotel": 6}
+        clamped, limited = clamp_targets_by_supply(targets, supply)
+        self.assertEqual(clamped["cultural"], 3)
+        self.assertEqual(clamped["scenic"], 4, "供给够就不动")
+        self.assertEqual(clamped["hotel"], 1, "供给多也不抬目标")
+        self.assertEqual(limited, {"cultural": {"target": 4, "available": 3}})
+
+    def test_real_composition_targets_shape_does_not_crash(self):
+        """回归：直接用 `composition_targets()` 的**真实返回结构**（含 source/shares/布尔）。
+
+        实测事故（2026-10-05）：这里曾写 `{k: int(v) for k, v in targets.items()}`，
+        撞上 `source='explicit_preference'` 抛 ValueError，4 个场景的"配比对账"整段作废。
+        """
+        from core.route_composition import clamp_targets_by_supply, composition_targets
+
+        composition = composition_targets(
+            trip_days=2,
+            daily_nodes=4,
+            wants_scenic=True,
+            wants_cultural=False,
+            wants_food=False,
+            exclude_cultural=False,
+            wants_hotel=False,
+        )
+        clamped, limited = clamp_targets_by_supply(composition, {"scenic": 3, "cultural": 1, "food": 9, "hotel": 0})
+        self.assertEqual(clamped["scenic"], 3)
+        self.assertEqual(clamped["cultural"], 1)
+        self.assertNotIn("source", clamped)
+        self.assertNotIn("shares", clamped)
+        self.assertNotIn("exclude_cultural", clamped, "布尔值不许变成目标 0")
+        self.assertEqual(limited["scenic"], {"target": 4, "available": 3})
+        self.assertIn("food", clamped)
+
+    def test_zero_target_categories_are_ignored(self):
+        from core.route_composition import clamp_targets_by_supply
+
+        clamped, limited = clamp_targets_by_supply({"scenic": 9, "cultural": 0}, {"scenic": 4, "cultural": 0})
+        self.assertEqual(clamped, {"scenic": 4, "cultural": 0})
+        self.assertEqual(limited, {"scenic": {"target": 9, "available": 4}})
+
+    def test_missing_supply_key_means_zero_not_unknown(self):
+        from core.route_composition import clamp_targets_by_supply
+
+        clamped, limited = clamp_targets_by_supply({"cultural": 3}, {})
+        self.assertEqual(clamped["cultural"], 0)
+        self.assertEqual(limited["cultural"]["available"], 0)
+
+    def test_summary_says_it_is_a_supply_gap_not_a_plan_defect(self):
+        from core.route_composition import summarize_supply_limits
+
+        notes = summarize_supply_limits({"cultural": {"target": 9, "available": 7}})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("人文候选只有 7 个", notes[0])
+        self.assertIn("目标 9 个", notes[0])
+        self.assertIn("供给缺口", notes[0])
+
 
 class ParkTrimDisclosureTests(unittest.TestCase):
     def test_trim_is_disclosed_with_names(self):

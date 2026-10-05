@@ -790,11 +790,41 @@ class PriceStepBudgetTests(unittest.TestCase):
         with io.open(path, encoding="utf-8") as handle:
             return handle.read()
 
+    def test_budget_and_per_node_estimate_match_measured_cost(self):
+        """预算与"能查几个"必须按**实测单点耗时**给（探针实测 ≈6.5s/节点）。
+
+        上一版预算 25s + 每点按 4.2s 估算 → 号称能查 5 个，实际 4 个没轮到、补到 0 条。
+        """
+        from core.web_price_tool import (
+            affordable_target_count,
+            price_budget_seconds,
+            price_timeout_seconds,
+            search_min_interval_seconds,
+        )
+
+        with isolated_env():
+            budget = price_budget_seconds()
+            per_node = search_min_interval_seconds() + price_timeout_seconds()
+            self.assertGreaterEqual(budget, 40.0, "实测单点 6.5s，25s 的预算不够 5 个点")
+            self.assertGreaterEqual(per_node, 6.0, "单点估算不许比实测乐观")
+            count = affordable_target_count(12, budget_seconds=budget)
+            self.assertGreaterEqual(count, 4)
+            self.assertLessEqual(count, 12)
+            # 目标数 × 单点成本不能超出预算太多（否则必然有节点"没轮到"）
+            self.assertLessEqual(count * per_node, budget + per_node)
+
     def test_each_lookup_carries_its_own_deadline(self):
         text = self._source()
         self.assertIn("_lookup_bounded", text, "取价必须逐点限时，而不是整体一刀切")
         self.assertIn("_deadline = _time.monotonic()", text)
-        self.assertIn("asyncio.wait_for(_lookup(_item), timeout=_remaining)", text)
+        self.assertIn("asyncio.wait_for(\n                                                _lookup(_item), timeout=min(_remaining, _fair_share)", text)
+
+    def test_each_lookup_gets_a_fair_share_of_the_budget(self):
+        """只按"剩余预算"给每个点限时，第一个慢点就能吃光全部预算 —— 后面几个点全部
+        "没轮到"，实测表现就是"查了 5 个、补到 0 条"（2026-10-05 矩阵 3/4 个场景）。"""
+        text = self._source()
+        self.assertIn("_fair_share = max(", text)
+        self.assertIn("float(_price_budget) / max(1, len(_targets))", text)
 
     def test_the_whole_price_step_is_not_wrapped_in_a_global_timeout(self):
         text = self._source()

@@ -38,6 +38,7 @@ import MafengwoStylePanel from './components/MafengwoStylePanel';
 const PlanGovernancePanel = dynamic(() => import('./components/PlanGovernancePanel'), { ssr: false });
 import type { PlanGovernance } from './components/PlanGovernancePanel';
 import NegotiationDiagnostics from './components/NegotiationDiagnostics';
+import PlanFactsPanel from './components/PlanFactsPanel';
 
 // 系统图标与登录门户（自 ContextualLobby 拆分出来的展示型组件）
 import OmniLogo from './components/OmniLogo';
@@ -1186,7 +1187,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
-          fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition || fd.negotiation,
+          fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition || fd.negotiation || fd.facts,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1214,6 +1215,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         composition: fd.composition ?? prev?.composition,
         // 本次协商纪要：谁参与、站在什么立场、争了什么、裁决凭什么
         negotiation: fd.negotiation ?? prev?.negotiation,
+        // 统一事实记录：请求/约束/供应商/决策/结果/缺口，每条带来源与核实状态
+        facts: fd.facts ?? prev?.facts,
       }));
     };
 
@@ -2243,6 +2246,9 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                       negotiation={planGovernance?.negotiation as any}
                       priceAudit={planGovernance?.priceAudit as any}
                     />
+                    {/* 统一事实记录（闭环第①段）：请求/约束/供应商/决策/结果/缺口，
+                        每条都带来源与核实状态 —— "大家看的是同一份事实吗"要看这里。 */}
+                    <PlanFactsPanel facts={planGovernance?.facts as any} />
                     <div className="mt-4 border-t border-slate-200 pt-3">
                       <button type="button" data-testid="toggle-advanced-diagnostics" aria-expanded={showAdvancedDiagnostics} onClick={() => setShowAdvancedDiagnostics((open) => !open)} className="flex w-full items-center justify-between gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-slate-100">
                         <span className="flex items-center gap-1.5 text-[11px] font-black text-slate-700">{showAdvancedDiagnostics ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}高级诊断</span>

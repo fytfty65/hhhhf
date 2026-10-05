@@ -43,6 +43,7 @@ type PriceAudit = {
   filled_from_web?: number;
   not_looked_up?: number;
   budget_seconds?: number;
+  timed_out?: number;
   skipped_reason?: string;
   error?: string;
   pending?: { name?: string; kind?: string; reason?: string; url?: string; estimated?: boolean; value?: number | null }[];
@@ -183,6 +184,7 @@ export default function NegotiationDiagnostics({
               ? `没有补价：${priceAudit.skipped_reason}`
               : `联网查了 ${priceAudit?.looked_up ?? 0} 个缺价节点，补到 ${priceAudit?.filled_from_web ?? 0} 条` +
                 (priceAudit?.not_looked_up ? `；因时间预算还有 ${priceAudit.not_looked_up} 个没查` : '') +
+                (priceAudit?.timed_out ? `；其中 ${priceAudit.timed_out} 个是取价预算用完没轮到（不是搜不到）` : '') +
                 (priceAudit?.budget_seconds ? `（预算 ${priceAudit.budget_seconds}s）` : '')}
           </p>
           {priceAudit?.provider_reachable === false && (

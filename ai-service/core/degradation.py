@@ -239,6 +239,26 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.55) 配比目标受候选供给限制（2026-10-05 实测）：库尔勒目标 4 人文而候选只有 3 个人文点、
+    #       喀什目标 9 而候选 7 个。这时"人文偏少"不是方案没安排好，而是**这座城市就这么点候选** ——
+    #       必须按供给缺口说出来，否则用户会以为是我们没给排。
+    composition = _as_mapping(data.get("composition"))
+    supply_limits = _as_mapping(composition.get("supply_limited"))
+    supply_counts = _as_mapping(composition.get("supply_counts"))
+    _label_of = {"scenic": "自然景区", "cultural": "人文", "food": "特色美食", "hotel": "住宿"}
+    for key, limit in supply_limits.items():
+        info = _as_mapping(limit)
+        target = int(info.get("target") or 0)
+        available = int(info.get("available") or supply_counts.get(key) or 0)
+        items.append(
+            _entry(
+                "candidate_pool",
+                STATUS_DEGRADED,
+                f"{_label_of.get(str(key), str(key))}候选只有 {available} 个（按你的偏好目标 {target} 个），"
+                "这是候选供给的限制，不是没安排；换城市或放宽偏好可以补上",
+            )
+        )
+
     # 3.7) 日内物理现实性（硬约束过滤层，2026-10-04）：一天跑不完的行程要如实说，
     #      包括"已自动移出多余远景区"这种情况（移出了什么也要写清楚）。
     travel = _as_mapping(data.get("travel_feasibility"))
@@ -273,6 +293,21 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                 "candidate_pool",
                 STATUS_MISSING,
                 "第 " + "、".join(str(day) for day in missing_nights) + " 晚没有可用住宿候选，需要你自己定",
+            )
+        )
+
+    # 3.88) 住宿比夜数多（2026-10-05 横向对照实测：喀什 3 天排了 4 个住宿、乌鲁木齐 2 天 3 个）：
+    #       多出来的已移出，但要说明"这趟只需要住几晚"，否则用户看到的数字对不上。
+    lodging_trim = _as_mapping(data.get("lodging_trim"))
+    lodging_dropped = [item for item in (lodging_trim.get("actions") or []) if isinstance(item, Mapping)]
+    if lodging_dropped:
+        nights = int(lodging_trim.get("nights") or 0)
+        names = "、".join(str(item.get("from")) for item in lodging_dropped[:3])
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                f"住宿比夜数多（这趟 {nights} 晚），已移出 {len(lodging_dropped)} 个：{names}",
             )
         )
 

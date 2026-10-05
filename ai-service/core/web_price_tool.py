@@ -410,25 +410,34 @@ async def fetch_sogou(query: str, *, max_results: int = 5) -> List[Dict[str, Any
 
 
 def price_budget_seconds() -> float:
-    """一次规划里"联网取价"这条链路的**总时间预算**（默认 25s）。
+    """一次规划里"联网取价"这条链路的**总时间预算**（默认 45s）。
 
-    为什么要按预算反推能查几个：实测（2026-10-04）搜狗单次约 2.5s，加上 1.2s 节流，
-    每个节点约 3.7s —— 12 个节点要 44s，被调用方 12s 的 wait_for 掐断，
-    整个补价功能就废了（而且表现成 TimeoutError）。现在改成：
-    按预算算"这次能查几个"，查不完的**如实留给「需要你确认」**，而不是硬超时。
+    这个数字是用**实测单点耗时**反推的，不是拍的：
+      - 2026-10-04 实测搜狗单次约 2.5s（+1.2s 节流）；
+      - 2026-10-05 用 `tools/probe_web_price.py` 连查 3 个库尔勒节点耗时 **19.7s**
+        （≈6.5s/节点：搜索 + 命中白名单页面还要再抓一次正文），
+        而当时预算 25s 只够 5 个节点 × 6.5s = 32.5s 里的前 3~4 个 ——
+        矩阵里 4 个场景全部出现"查了 5 个、超预算 4 个、补到 0 条"。
+      - 所以预算按"最多 6 个节点 × 7.2s"给到 45s，并且**逐点公平分预算**
+        （一个慢点不许吃光全部预算）。仍然可配置：`WEB_PRICE_BUDGET_SECONDS`。
     """
     raw = str(os.getenv("WEB_PRICE_BUDGET_SECONDS") or "").strip()
     try:
         value = float(raw)
     except ValueError:
-        return 25.0
-    return value if value > 0 else 25.0
+        return 45.0
+    return value if value > 0 else 45.0
 
 
 def affordable_target_count(max_nodes: int, *, budget_seconds: Optional[float] = None) -> int:
-    """在时间预算内**大概**能查几个节点（单节点 ≈ 节流间隔 + 单次搜索耗时）。"""
+    """在时间预算内**大概**能查几个节点。
+
+    单节点成本按"节流间隔 + 一次搜索/抓页的上限（`price_timeout_seconds`）"算 ——
+    上一版写死 `+3.0s`，比实测的 6.5s 乐观太多，于是"能查 5 个"的目标里有 4 个
+    根本没轮到（2026-10-05 矩阵实测）。
+    """
     budget = float(budget_seconds if budget_seconds is not None else price_budget_seconds())
-    per_node = max(1.0, search_min_interval_seconds() + 3.0)
+    per_node = max(1.0, search_min_interval_seconds() + float(price_timeout_seconds()))
     return max(1, min(int(max_nodes or 1), int(budget // per_node) or 1))
 
 

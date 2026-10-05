@@ -59,15 +59,19 @@ from core.poi_pool import (
 # 行程配比口径（用户明确的口味）：默认自然=人文各半并穿插美食/住宿；自然景观只算景区
 # （城市公园另算一档）；用户明确说了就加权。纯函数在 core/route_composition，便于单测。
 from core.route_composition import (
+    clamp_targets_by_supply,
     composition_audit,
     composition_hint as composition_hint_text,
     composition_targets,
     count_route_composition,
     ensure_lodging_per_night,
+    numeric_targets,
     repair_forbidden_categories,
     scenic_tier,
+    summarize_supply_limits,
     summarize_targets,
     trim_category_over_cap,
+    trim_lodging_over_cap,
 )
 
 
@@ -3080,7 +3084,24 @@ async def run_negotiate(msg: GatewayMessage):
                 if not _advanced:
                     break
 
-            top_candidates = _interleaved + sorted_hotels
+            # 👑 住宿候选**限量**：目标只是"每晚一家"（外加一点备选），但候选池原来把**全部**
+            #    酒店都塞进 top（实测 `hotel: 6~8` 而目标是 1~2 个）—— 于是模型以为"这趟要住好几家"，
+            #    路线里排出 4 个住宿。给出 `晚数 + 1` 家备选就够了，不挤占景区/人文/美食的名额。
+            _lodging_slots = max(2, max(1, trip_days - 1) + 1)
+            _room_candidates = list(sorted_hotels[:_lodging_slots])
+            if len(sorted_hotels) > len(_room_candidates):
+                pool_diagnostics["lodging_capped"] = {
+                    "kept": len(_room_candidates),
+                    "dropped": len(sorted_hotels) - len(_room_candidates),
+                    "nights": max(1, trip_days - 1),
+                }
+                print(
+                    f"🛏️ [住宿候选限量] 目标 {max(1, trip_days - 1)} 晚，只给模型 {len(_room_candidates)} 家备选"
+                    f"（其余 {len(sorted_hotels) - len(_room_candidates)} 家不进候选，避免排出一堆住宿）",
+                    flush=True,
+                )
+
+            top_candidates = _interleaved + _room_candidates
             final_candidates = top_candidates
 
             # 写入 Redis 黑板
@@ -4800,6 +4821,7 @@ async def run_negotiate(msg: GatewayMessage):
                                     affordable_target_count,
                                     price_budget_seconds,
                                     price_max_nodes,
+                                    price_timeout_seconds,
                                 )
 
                                 _price_budget = price_budget_seconds()
@@ -4832,9 +4854,16 @@ async def run_negotiate(msg: GatewayMessage):
                                     #    价格全部丢掉**，price_audit 只剩一个 error —— 界面上表现成
                                     #    "取价这一步压根没跑"（查了几个/补到几条/来源可达全是 —）。
                                     #    现在每个点自己带 deadline，超时只影响那一个点，其余结果照收。
+                                    #    而且每个点拿的是**公平份额**（总预算/点数，下限=单点超时）：
+                                    #    否则第一个慢点就能吃光全部预算，后面几个点全部"没轮到"
+                                    #    （实测就是这么出现"查了 5 个、补到 0 条"的）。
                                     import time as _time
 
                                     _deadline = _time.monotonic() + float(_price_budget)
+                                    _fair_share = max(
+                                        float(price_timeout_seconds()),
+                                        float(_price_budget) / max(1, len(_targets)),
+                                    )
 
                                     async def _lookup_bounded(_item: Dict[str, Any]) -> Dict[str, Any]:
                                         from core.web_price_tool import build_observation
@@ -4846,7 +4875,9 @@ async def run_negotiate(msg: GatewayMessage):
                                                 name=_name, value=None, source="web", provider="search"
                                             ) | {"timeout": True, "error": "整体预算已用完，这个点没轮到"}
                                         try:
-                                            return await asyncio.wait_for(_lookup(_item), timeout=_remaining)
+                                            return await asyncio.wait_for(
+                                                _lookup(_item), timeout=min(_remaining, _fair_share)
+                                            )
                                         except asyncio.TimeoutError:
                                             return build_observation(
                                                 name=_name, value=None, source="web", provider="search"
@@ -5088,15 +5119,64 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _lodging_exc:  # 兜底失败绝不影响出方案
                             final_data["lodging_repair"] = {"error": str(_lodging_exc)[:200]}
 
+                        # 👑 住宿不能多于夜数（2026-10-05 横向对照实测）：喀什 3 天排了 4 个住宿、
+                        #    乌鲁木齐 2 天排了 3 个（应 1 晚）。成因是候选池把**全部**酒店塞进 top
+                        #    （hotel 6~8 个，而目标 1~2 个），最终均衡又会"哪天没酒店就补一个"。
+                        #    多出来的直接移出（住宿不做同类替换 —— 多一个住宿没有"换成别的"的道理）。
+                        try:
+                            _lodging_capped, _lodging_dropped = trim_lodging_over_cap(
+                                final_data.get("route") or [],
+                                nights=max(1, trip_days - 1),
+                                classify=classify_poi_category,
+                            )
+                            if _lodging_dropped:
+                                final_data["route"] = _lodging_capped
+                                final_data["lodging_trim"] = {
+                                    "nights": max(1, trip_days - 1),
+                                    "actions": [
+                                        {
+                                            "code": "lodging_over_cap_dropped",
+                                            "from": str(item.get("name") or ""),
+                                            "day": item.get("day"),
+                                            "reason": item.get("removed_reason"),
+                                        }
+                                        for item in _lodging_dropped
+                                    ],
+                                }
+                                print(
+                                    f"🛏️ [住宿限量] 住宿比夜数多，移出 {len(_lodging_dropped)} 个："
+                                    + "、".join(str(item.get("name") or "") for item in _lodging_dropped[:4]),
+                                    flush=True,
+                                )
+                        except Exception as _lodging_trim_exc:  # 修复失败绝不影响出方案（对账仍会报超限）
+                            final_data["lodging_trim"] = {"error": str(_lodging_trim_exc)[:200]}
+
                         # 👑 配比对账：实际排出来的构成 vs 用户口径算出的目标（默认自然=人文各半
                         # + 穿插美食住宿；明确偏好则加权）。对不上就如实记账，进"遗留问题"。
+                        # ⚠️ 但要先把目标**按候选供给压一次**：库尔勒目标 4 人文而候选只有 3 个人文点，
+                        #    喀什目标 9 人文而候选 7 个 —— 这时报"人文偏少"是在怪方案没做到
+                        #    供给本身就不够的事。做不到的部分作为**供给缺口**单独披露。
+                        _feasible_targets: Dict[str, int] = numeric_targets(composition)
+                        _supply_limited: Dict[str, Dict[str, int]] = {}
+                        _supply_limit_notes: List[str] = []
+                        _supply_counts: Dict[str, int] = {}
                         try:
+                            _supply_counts = {}
+                            for _candidate in (top_candidates or []):
+                                if not isinstance(_candidate, Mapping):
+                                    continue
+                                _key = str(_day_cat(_candidate) or "other")
+                                _supply_counts[_key] = _supply_counts.get(_key, 0) + 1
+                            _feasible_targets, _supply_limited = clamp_targets_by_supply(
+                                composition, _supply_counts
+                            )
+                            _supply_limit_notes = summarize_supply_limits(_supply_limited)
                             _route_counts = count_route_composition(
                                 final_data.get("route") or [], classify_poi_category, scenic_tier
                             )
                             _composition_audit = composition_audit(
                                 _route_counts,
-                                composition,
+                                {**composition, **_feasible_targets},
                                 # 用户明说不要人文时，"一个都不许有"要当成硬判据（目标 0 默认会被跳过）
                                 forbidden=("cultural",) if own_signals.get("exclude_cultural") else (),
                             )
@@ -5111,9 +5191,16 @@ async def run_negotiate(msg: GatewayMessage):
                                 _composition_audit["deviations"] = list(_composition_audit.get("deviations") or []) + [
                                     {"intent": "city_park", "target": int(_park_allowed or 0), "actual": _urban_park, "severity": "over"}
                                 ]
+                            if _supply_limit_notes:
+                                # 供给缺口是"为什么达不到口径目标"，必须和对账结论写在一起
+                                _composition_audit["notes"] = list(_composition_audit.get("notes") or []) + _supply_limit_notes
+                                _composition_audit["supply_limited"] = _supply_limited
                             composition["park_cap"] = int(_park_allowed or 0)
                             final_data["composition"] = {
                                 **composition,
+                                "feasible_targets": _feasible_targets,
+                                "supply_limited": _supply_limited,
+                                "supply_counts": _supply_counts,
                                 "actual": _route_counts,
                                 "audit": _composition_audit,
                             }
@@ -5121,11 +5208,16 @@ async def run_negotiate(msg: GatewayMessage):
                                 f"⚖️ [配比对账] 实际 自然景区={_route_counts.get('landmark')}/城市公园={_route_counts.get('city_park')}"
                                 f"/人文={_route_counts.get('cultural')}/美食={_route_counts.get('food')}/住宿={_route_counts.get('hotel')}"
                                 f" | 目标 {composition.get('scenic')}/{composition.get('cultural')}/{composition.get('food')}/{composition.get('hotel')}"
+                                f"（可做到 {_feasible_targets.get('scenic')}/{_feasible_targets.get('cultural')}/{_feasible_targets.get('food')}/{_feasible_targets.get('hotel')}）"
                                 f" | {'一致' if _composition_audit['ok'] else _composition_audit['notes']}",
                                 flush=True,
                             )
                         except Exception as _comp_exc:  # 对账失败绝不影响出方案
-                            final_data["composition"] = {"error": str(_comp_exc)[:200]}
+                            # ⚠️ 但**必须打出来**：实测（2026-10-05）这里静默吞掉一个 ValueError，
+                            #    表现成"配比对账这一步压根没跑"（对数全空），排查只能靠猜。
+                            final_data["composition"] = {"error": f"{type(_comp_exc).__name__}: {str(_comp_exc)[:200]}"}
+                            print(f"⚠️ [配比对账] 失败（不影响出方案）: {type(_comp_exc).__name__}: {_comp_exc}", flush=True)
+                            traceback.print_exc()
 
                         # 👑 硬约束过滤：日内物理现实性（用户"不考虑距离"≠"一天能跑 500km"）。
                         #    实测事故：3 天方案里同时排了博斯腾湖（47km）与巴音布鲁克（270km）。
@@ -5487,6 +5579,32 @@ async def run_negotiate(msg: GatewayMessage):
                                 if _co_lodge_actions:
                                     _closeout_summary.append(f"住宿又补 {len(_co_lodge_actions)} 晚")
 
+                            # 3.5) 住宿限量：`rebalance_daily_route` 会"哪天没酒店就补一个"，
+                            #      连不需要留宿的最后一天也补 —— 出稿前必须再压回夜数以内。
+                            _co_lodge_capped, _co_lodge_dropped = trim_lodging_over_cap(
+                                final_data.get("route") or [],
+                                nights=max(1, trip_days - 1),
+                                classify=classify_poi_category,
+                            )
+                            if _co_lodge_dropped:
+                                final_data["route"] = _co_lodge_capped
+                                _existing_lodge_trim = final_data.get("lodging_trim") or {}
+                                final_data["lodging_trim"] = {
+                                    "nights": max(1, trip_days - 1),
+                                    "actions": list(_existing_lodge_trim.get("actions") or [])
+                                    + [
+                                        {
+                                            "code": "lodging_over_cap_dropped",
+                                            "from": str(item.get("name") or ""),
+                                            "day": item.get("day"),
+                                            "reason": item.get("removed_reason"),
+                                            "stage": "final_closeout",
+                                        }
+                                        for item in _co_lodge_dropped
+                                    ],
+                                }
+                                _closeout_summary.append(f"住宿超夜数又移出 {len(_co_lodge_dropped)} 个")
+
                             # 4) 日内物理现实性（最容易被打回的一条：补节点正是"又塞远景区"的来源）
                             _co_before = evaluate_travel_feasibility(
                                 final_data.get("route") or [],
@@ -5531,7 +5649,7 @@ async def run_negotiate(msg: GatewayMessage):
                                 )
                                 _co_audit = composition_audit(
                                     _co_counts,
-                                    composition,
+                                    {**composition, **_feasible_targets},
                                     forbidden=("cultural",) if own_signals.get("exclude_cultural") else (),
                                 )
                                 _co_urban_park = int(_co_counts.get("city_park") or 0)
@@ -5540,9 +5658,15 @@ async def run_negotiate(msg: GatewayMessage):
                                         f"城市公园排了 {_co_urban_park} 个，超过上限 {_co_park_cap} 个（想把公园换成景区/吃饭可以直接说）"
                                     ]
                                     _co_audit["ok"] = False
+                                if _supply_limit_notes:
+                                    _co_audit["notes"] = list(_co_audit.get("notes") or []) + _supply_limit_notes
+                                    _co_audit["supply_limited"] = _supply_limited
                                 composition["park_cap"] = int(_co_park_cap or 0)
                                 final_data["composition"] = {
                                     **composition,
+                                    "feasible_targets": _feasible_targets,
+                                    "supply_limited": _supply_limited,
+                                    "supply_counts": _supply_counts,
                                     "actual": _co_counts,
                                     "audit": _co_audit,
                                     "recomputed_after_closeout": True,
@@ -5733,7 +5857,12 @@ async def run_negotiate(msg: GatewayMessage):
                         yield json.dumps({"actual_path": final_stitched_path}, ensure_ascii=False) + "\n"
                         print(f"🛣️ [精准链路推送] 成功下发 {len(final_stitched_path)} 个对齐的高德路网坐标！")
             except Exception as e:
-                print(f"🔥 [真实路网拼装失败]: {e}")
+                # ⚠️ 这个 except 覆盖的范围**远不止**"路网拼装"（从最终门禁到下发都在里面），
+                #    所以标题容易把人带偏 —— 实测（2026-10-05）配比对账里一个 ValueError
+                #    被报成"真实路网拼装失败"，只给一行 `{e}` 完全无法定位。
+                #    这里保留原标题（前端/日志检索依赖它），但把**真实位置**打出来。
+                print(f"🔥 [真实路网拼装失败]: {type(e).__name__}: {e}", flush=True)
+                traceback.print_exc()
 
         except BadRequestError as e:
             # 阿里云百炼等大模型平台侧错误（如账号欠费 Arrearage / 无权限）：不打印整段 Traceback

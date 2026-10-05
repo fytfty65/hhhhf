@@ -262,6 +262,171 @@ def composition_audit(
     }
 
 
+LODGING_NAME_WORDS = ("酒店", "民宿", "宾馆", "客栈", "旅馆", "度假村", "旅社", "青旅")
+
+
+def is_lodging_node(node: Mapping[str, Any], classify=None) -> bool:
+    """这个节点是不是住宿（名称/标记/类别三条路，缺一不可地覆盖真实数据）。
+
+    实测：酒店名可能完全不含"酒店"二字（「康城建国国际」的类别是"住宿服务;宾馆酒店"），
+    所以名称之外还要看 `is_hotel` 标记与分类器。
+    """
+    name = str(node.get("name") or node.get("location") or "")
+    if bool(node.get("is_hotel")):
+        return True
+    if any(word in name for word in LODGING_NAME_WORDS):
+        return True
+    if classify is None:
+        return False
+    try:
+        return str(classify(name, str(node.get("type") or ""), False) or "") == "hotel"
+    except Exception:
+        return False
+
+
+def numeric_targets(
+    targets: Mapping[str, Any],
+    *,
+    keys: Sequence[str] = ("scenic", "cultural", "food", "hotel"),
+) -> Dict[str, int]:
+    """只取目标里的**数字键**，忽略 `source` 这类说明字段。
+
+    真实事故（2026-10-05）：agent 里直接写
+    `{k: int(v or 0) for k, v in composition.items()}`，而 `composition` 里有
+    `source="default_balanced"` → `int('default_balanced')` 抛 ValueError，
+    整个推演在出稿前崩掉（而且被外层 `except` 报成"真实路网拼装失败"，误导排查）。
+    配比映射是"几个数字 + 一个说明"的结构，取数必须显式点名键。
+    """
+    out: Dict[str, int] = {}
+    for key in keys:
+        try:
+            out[str(key)] = int((targets or {}).get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def clamp_targets_by_supply(
+    targets: Mapping[str, int],
+    supply: Mapping[str, int],
+    *,
+    keys: Sequence[str] = ("scenic", "cultural", "food", "hotel"),
+) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]]]:
+    """把"用户口径算出的目标"按**候选供给**压到做得到的范围内。
+
+    为什么需要（2026-10-05 横向对照实测）：库尔勒默认口径目标 4 人文，而候选池里
+    一共只有 3 个人文点（`类别={'scenic': 5, 'cultural': 3, ...}`）；喀什目标 9 人文、
+    候选 7 个。这时对账报"人文偏少"其实是在**怪方案没做到供给本身就不够的事** ——
+    用户看到的是"这趟人文安排得不好"，真实原因是"这个城市的候选里人文就这么点"。
+
+    所以分两层说清楚：
+      - 做得到的部分（clamped）对账，达不到才算方案问题；
+      - 做不到的部分（limited）作为**供给缺口**单独披露。
+
+    返回 `(clamped_targets, limited)`；`limited[类别] = {"target": 原目标, "available": 候选数}`。
+    """
+    # ⚠️ 只搬**数字**键。`composition` 里还有 `source`（"default_balanced" 这种字符串）、
+    #    `shares`（字典）、`exclude_cultural`（布尔）—— 无脑 `int(value)` 会直接
+    #    `ValueError: invalid literal for int(): 'default_balanced'`，把整段配比对账带走
+    #    （2026-10-05 实测：4 个场景全崩，界面上只看到"配比对账失败"）。布尔也要跳过，
+    #    否则 `int(False)=0` 会凭空造出一个目标 0 的类别。
+    clamped: Dict[str, int] = {}
+    for key, value in (targets or {}).items():
+        if isinstance(value, bool) or isinstance(value, (dict, list, tuple, set)):
+            continue
+        try:
+            clamped[str(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    limited: Dict[str, Dict[str, int]] = {}
+    for key in keys:
+        if key not in clamped:
+            continue
+        target = int(clamped.get(key) or 0)
+        if target <= 0:
+            continue
+        available = int((supply or {}).get(key) or 0)
+        if target > available:
+            clamped[key] = available
+            limited[str(key)] = {"target": target, "available": available}
+    return clamped, limited
+
+
+def summarize_supply_limits(limited: Mapping[str, Mapping[str, int]], label_of=None) -> List[str]:
+    """把供给缺口说成人话（用于"遗留问题"与配比说明）。"""
+    labels = {"scenic": "自然景区", "cultural": "人文", "food": "特色美食", "hotel": "住宿"}
+    notes: List[str] = []
+    for key, item in (limited or {}).items():
+        name = (label_of or labels.get)(str(key)) if label_of else labels.get(str(key), str(key))
+        notes.append(
+            f"{name}候选只有 {int(item.get('available') or 0)} 个（目标 {int(item.get('target') or 0)} 个），"
+            "这是这座城市的候选供给缺口，不是没安排"
+        )
+    return notes
+
+
+def trim_lodging_over_cap(
+    route: Sequence[Mapping[str, Any]],
+    *,
+    nights: int,
+    classify=None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """住宿节点**不能多于夜数**：多出来的移出该路线。
+
+    实测（2026-10-05 横向对照）：喀什 3 天排了 4 个住宿（应 2 晚）、乌鲁木齐 2 天排了 3 个（应 1 晚）。
+    原因是两个机制叠加 —— 候选池把**全部**酒店都塞进 top（`hotel: 6/8`，而目标是 1~2 个），
+    最终均衡又会"哪天没有酒店就补一个"（最后一天本来就不需要住）。
+    结果用户看到"这一趟住 3 个酒店"，既不合口径也解释不通。
+
+    规则：按天排序，保留**最前面的 `nights` 晚**的住宿；同一天有多个时优先留有价格的。
+    返回 `(新路线, 移出的住宿)`，动作码 `lodging_over_cap_dropped`（住宿不做同类替换，
+    直接移出 —— 多一个住宿本来就没有"换成别的"的道理）。
+    """
+    route_list = [dict(node) for node in route or [] if isinstance(node, Mapping)]
+    total_nights = max(0, int(nights or 0))
+    if total_nights <= 0:
+        return route_list, []
+
+    lodging = [node for node in route_list if is_lodging_node(node, classify)]
+    if len(lodging) <= total_nights:
+        return route_list, []
+
+    def _has_price(node: Mapping[str, Any]) -> int:
+        value = node.get("cost_estimate") or node.get("price")
+        return 1 if value not in (None, "", "未知") else 0
+
+    def _day_of(node: Mapping[str, Any]) -> int:
+        try:
+            return int(node.get("day") or 1)
+        except (TypeError, ValueError):
+            return 1
+
+    # 需要住宿的是"前 nights 天"（最后一天通常是回程日，不留宿）
+    keep_ids = set()
+    for day in sorted({_day_of(node) for node in lodging})[:total_nights]:
+        same_day = [node for node in lodging if _day_of(node) == day]
+        same_day.sort(key=lambda node: (-_has_price(node), str(node.get("name") or "")))
+        keep_ids.add(id(same_day[0]))
+    # 天数不足 nights 时（例如所有住宿都挤在同一天），按"有价优先"把剩下的名额补满
+    if len(keep_ids) < total_nights:
+        for node in sorted(lodging, key=lambda item: (-_has_price(item), _day_of(item))):
+            if len(keep_ids) >= total_nights:
+                break
+            keep_ids.add(id(node))
+
+    kept: List[Dict[str, Any]] = []
+    removed: List[Dict[str, Any]] = []
+    for node in route_list:
+        if is_lodging_node(node, classify) and id(node) not in keep_ids:
+            removed.append({
+                **node,
+                "removed_reason": f"住宿比夜数多（{len(lodging)} 个 > {total_nights} 晚）",
+            })
+            continue
+        kept.append(node)
+    return kept, removed
+
+
 def ensure_lodging_per_night(
     route: Sequence[Mapping[str, Any]],
     *,
@@ -288,17 +453,7 @@ def ensure_lodging_per_night(
         return route_list, [], []
 
     def is_hotel(node: Mapping[str, Any]) -> bool:
-        name = str(node.get("name") or node.get("location") or "")
-        if bool(node.get("is_hotel")):
-            return True
-        if any(word in name for word in ("酒店", "民宿", "宾馆", "客栈", "旅馆", "度假村")):
-            return True
-        if classify is None:
-            return False
-        try:
-            return str(classify(name, str(node.get("type") or ""), False) or "") == "hotel"
-        except Exception:
-            return False
+        return is_lodging_node(node, classify)
 
     def coord_of(node: Mapping[str, Any]) -> List[float]:
         value = node.get("lnglat") or node.get("location")

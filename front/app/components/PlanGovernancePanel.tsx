@@ -226,6 +226,26 @@ export type PlanGovernance = {
       other?: number;
     };
     audit?: { ok?: boolean; notes?: string[]; deviations?: { intent?: string; target?: number; actual?: number; severity?: string }[] };
+    /** 按候选供给压过的"做得到的目标"（达不到原目标时，原因写在 supply_limited 里） */
+    feasible_targets?: Record<string, number>;
+    supply_limited?: Record<string, { target?: number; available?: number }>;
+    supply_counts?: Record<string, number>;
+    recomputed_after_closeout?: boolean;
+  };
+  /**
+   * 统一事实记录（闭环第①段）：请求/约束/供应商/决策/结果/缺口，
+   * 每条事实都带 `source`（谁说的）与 `verified`（能不能当真）。
+   * 专业诊断层用它回答"大家看的是不是同一份事实"。
+   */
+  facts?: {
+    schema_version?: number;
+    facts_version?: string;
+    request?: Record<string, { value?: unknown; source?: string; verified?: boolean; note?: string }>;
+    constraints?: Record<string, { value?: unknown; source?: string; verified?: boolean; note?: string }>;
+    suppliers?: Record<string, { value?: unknown; source?: string; verified?: boolean; note?: string }>;
+    decisions?: Record<string, { value?: unknown; source?: string; verified?: boolean; note?: string }>;
+    outcome?: Record<string, { value?: unknown; source?: string; verified?: boolean; note?: string }>;
+    gaps?: { area?: string; status?: string; reason?: string }[];
   };
   /** 自动复核（critic + 确定性修补）的结果：改了什么、还剩几处门禁问题、缺哪些数据 */
   review?: {
@@ -454,6 +474,19 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
           <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
             自然景观只算景区（湖/雪山/草原/湿地这类）；城市公园另算 {composition?.actual?.city_park ?? 0} 个，不顶自然的名额。
           </p>
+          {/* 目标受候选供给限制时说清楚：达不到原目标不是"没安排"，是这座城市候选里就这么多 */}
+          {Object.keys(composition?.supply_limited || {}).length > 0 && (
+            <p className="mt-1 text-[11.5px] leading-relaxed text-amber-800" data-testid="composition-supply-limit">
+              候选供给限制：
+              {Object.entries(composition?.supply_limited || {})
+                .map(([key, item]) => {
+                  const label: Record<string, string> = { scenic: '自然景区', cultural: '人文', food: '特色美食', hotel: '住宿' };
+                  return `${label[key] || key}候选只有 ${item?.available ?? 0} 个（原目标 ${item?.target ?? 0} 个）`;
+                })
+                .join('；')}
+              ，这不是没安排。
+            </p>
+          )}
           {composition?.audit?.ok === false && (composition?.audit?.notes?.length ?? 0) > 0 && (
             <ul className="mt-1.5 space-y-1" data-testid="composition-notes">
               {(composition?.audit?.notes || []).map((note) => (
