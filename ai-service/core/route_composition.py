@@ -401,9 +401,15 @@ def trim_lodging_over_cap(
         except (TypeError, ValueError):
             return 1
 
-    # 需要住宿的是"前 nights 天"（最后一天通常是回程日，不留宿）
+    # 需要住宿的是"前 nights 天"（最后一天通常是回程日，不留宿）：
+    # **先**在 1..nights 里选，只有那里没有住宿时才退而取最靠前的几天 ——
+    # 否则"所有住宿都排在最后一天"会让前几晚空着（实测伊宁 3 天只剩 1 个住宿）。
+    all_days = sorted({_day_of(node) for node in lodging})
+    day_order = [day for day in all_days if day <= total_nights] + [
+        day for day in all_days if day > total_nights
+    ]
     keep_ids = set()
-    for day in sorted({_day_of(node) for node in lodging})[:total_nights]:
+    for day in day_order[:total_nights]:
         same_day = [node for node in lodging if _day_of(node) == day]
         same_day.sort(key=lambda node: (-_has_price(node), str(node.get("name") or "")))
         keep_ids.add(id(same_day[0]))
@@ -425,6 +431,36 @@ def trim_lodging_over_cap(
             continue
         kept.append(node)
     return kept, removed
+
+
+def settle_lodging(
+    route: Sequence[Mapping[str, Any]],
+    *,
+    nights: int,
+    pool: Sequence[Mapping[str, Any]] = (),
+    classify=None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+    """把住宿一次收口到"**每晚一家、不多不少**"，返回 `(路线, 补上的, 移出的, 仍缺的晚)`。
+
+    为什么要把两步封在一起（2026-10-05 实测教训）：这两步的顺序**会决定结果**，
+    分开写在几千行的推演函数里时，谁先谁后根本没人记得住，结果就是伊宁 3 天
+    最后只剩 1 个住宿（目标 2 晚）。正确顺序是**先补后减**：
+      1. `ensure_lodging_per_night`：先把缺的晚补上（从候选池挑离当天最近的）；
+      2. `trim_lodging_over_cap`：再按夜数限量 —— 它偏好保留"该住的第 1..nights 天"，
+         所以第 1 步补进来的那几晚不会被当成多余的删掉，而排在最后一天的酒店会被清掉。
+    反过来的顺序（先减后补）会留下一个排在不需要留宿那天的酒店，因为它在前一步
+    就已经占满了夜数名额。
+    """
+    filled, added, missing = ensure_lodging_per_night(
+        route, nights=nights, pool=pool, classify=classify
+    )
+    trimmed, dropped = trim_lodging_over_cap(filled, nights=nights, classify=classify)
+    return trimmed, added, dropped, missing
+
+
+def count_lodging(route: Sequence[Mapping[str, Any]], classify=None) -> int:
+    """路线里住宿节点的个数（与 `is_lodging_node` 同一口径，供对账/断言用）。"""
+    return len([node for node in route or [] if isinstance(node, Mapping) and is_lodging_node(node, classify)])
 
 
 def ensure_lodging_per_night(
@@ -486,11 +522,14 @@ def ensure_lodging_per_night(
         and str(item.get("name")) not in used_names
     ]
 
-    days = sorted({int(node.get("day") or 1) for node in route_list}) or [1]
+    # ⚠️ 要看的是**第 1..nights 天**，不是"路线里出现的前 nights 个日子"。
+    #    实测事故（2026-10-05 伊宁）：路线恰好没有第 2 天的节点时，
+    #    `sorted({day})[:nights]` 会去检查第 1、3 天，第 2 晚**永远补不上**。
+    days = list(range(1, total_nights + 1))
     actions: List[Dict[str, Any]] = []
     missing_days: List[int] = []
 
-    for day in days[:total_nights]:
+    for day in days:
         day_nodes = [node for node in route_list if int(node.get("day") or 1) == day]
         if not day_nodes or any(is_hotel(node) for node in day_nodes):
             continue

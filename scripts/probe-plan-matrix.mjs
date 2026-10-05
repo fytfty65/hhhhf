@@ -126,6 +126,13 @@ function nodeNames(payload) {
   return names;
 }
 
+/** 带天数的路线（查"住宿到底落在哪一晚"这类问题用；纯名字看不出日期分布）。 */
+function nodeDays(payload) {
+  return (payload?.route || payload?.routes || [])
+    .filter((node) => node && typeof node.name === 'string')
+    .map((node) => `D${node.day ?? '?'}:${node.name}`);
+}
+
 function fmt(value, fallback = '—') {
   return value === undefined || value === null || value === '' ? fallback : value;
 }
@@ -170,6 +177,7 @@ async function runScenario(scenario) {
     eventCount: events.length,
     nodes: names.length,
     names,
+    routeByDay: nodeDays(payload),
     supply: {
       status: supply.status,
       attractions: supply.attractions,
@@ -265,6 +273,7 @@ function toMarkdown(rows) {
         (row.price.error ? `｜整段失败：${row.price.error}` : '') +
         (row.price.attemptError ? `｜取价源失败：${row.price.attemptError}` : ''),
       `- 路线：${row.names.join('、')}`,
+      `- 按天：${row.routeByDay.join('｜')}`,
       '',
     );
   }

@@ -45,9 +45,11 @@ from core.poi_pool import (
     collapse_sub_spots,
     dedupe_sub_spots,
     filter_by_radius,
+    haversine_km,
     needs_widening,
     parent_region,
     park_cap,
+    parse_amap_location,
     pool_supply_report,
     required_food_candidates,
     required_lodging_candidates,
@@ -68,6 +70,7 @@ from core.route_composition import (
     numeric_targets,
     repair_forbidden_categories,
     scenic_tier,
+    settle_lodging,
     summarize_supply_limits,
     summarize_targets,
     trim_category_over_cap,
@@ -81,6 +84,27 @@ def _fairness_limit_from_env() -> float:
         return max(0.0, float(os.getenv("PLANNING_FAIRNESS_MAX_STD", "0.15")))
     except (TypeError, ValueError):
         return 0.15
+
+
+# —— 出稿后路网拼装的并发控制与缓存（2026-10-05 实测：这一段要 48.4s，且算在用户等待里）——
+# 为什么要信号量：15 对相邻节点 × 3 种出行方式 = 45 个请求一次打出去，高德会 QPS 限流，
+# 表现成"大家一起排队等到超时"；有界并发反而更快也更省配额。
+_TRAVEL_OPTIONS_SEMAPHORE = asyncio.Semaphore(8)
+_TRAVEL_OPTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _straight_line_km(origin: str, destination: str) -> Optional[float]:
+    """两条 "lng,lat" 字符串的直线距离（拿不到就 None，调用方按"都要问"处理）。
+
+    ⚠️ 必须**先解析成 [lng, lat]** 再算：`haversine_km` 是按下标取的，
+    直接喂 "81.3,43.9" 这种字符串会把第 0/1 个**字符**当成经纬度（不报错，静默算错）。
+    """
+    origin_point = parse_amap_location(origin)
+    destination_point = parse_amap_location(destination)
+    if not origin_point or not destination_point:
+        return None
+    distance = float(haversine_km(origin_point, destination_point))
+    return None if distance != distance else distance
 
 
 def _simulate_final_plan(
@@ -1487,78 +1511,103 @@ class ExpertToolbox:
     async def get_travel_options(self, origin_lnglat: str, dest_lnglat: str, city: str = "") -> Dict[str, Any]:
         if not self.amap_key or not origin_lnglat or not dest_lnglat:
             return {}
-        async with httpx.AsyncClient(timeout=3.5) as http_client:
-            tasks = [
-                # 策略 10（高德默认）：躲避拥堵 + 路程较短 + 尽量缩短时间，返回多条路线取 paths[0]，
-                # 避免 strategy=0（速度优先）在往返时因高速/环线绕出明显更远的“理论最快”路线
-                http_client.get(f"{self.amap_url}/direction/driving", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "strategy": 10}),
-                http_client.get(f"{self.amap_url}/direction/walking", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat})
-            ]
-            if city:
-                tasks.append(http_client.get(f"{self.amap_url}/direction/transit/integrated", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "city": city, "cityd": city}))
+        # 👑 出稿后的路网拼装实测要 48.4s（喀什 3 天 15 个节点 → 15 对），而这段时间
+        #    **算在用户等多久里**（服务端请求要等它跑完才结束）。三条优化，都是为了这段：
+        #    1. 复用同一个连接池：原先每次调用都新建 AsyncClient（15 对 = 15 次 TCP/TLS 握手）；
+        #    2. 有界并发（信号量）：一次性发 45 个请求会被高德 QPS 限流，
+        #       表现成"大家排队等到超时"，比少发一点更慢；
+        #    3. 只问有意义的出行方式：3km 以上不必问步行（走了也不现实），
+        #       40km 以上不必问市内公交；双城/跨城腿本来也不该走公交。
+        #    另外按坐标对做进程内缓存：同一对在跨城腿比较与出稿拼装里都可能被问到。
+        _pair_key = f"{origin_lnglat}|{dest_lnglat}|{city}"
+        _cached = _TRAVEL_OPTIONS_CACHE.get(_pair_key)
+        if _cached is not None:
+            return dict(_cached)
 
-            names = ["driving", "walking", "transit"] if city else ["driving", "walking"]
+        _straight_km = _straight_line_km(origin_lnglat, dest_lnglat)
+        async with _TRAVEL_OPTIONS_SEMAPHORE:
+            async with httpx.AsyncClient(timeout=3.5) as http_client:
+                tasks = [
+                    # 策略 10（高德默认）：躲避拥堵 + 路程较短 + 尽量缩短时间，返回多条路线取 paths[0]，
+                    # 避免 strategy=0（速度优先）在往返时因高速/环线绕出明显更远的“理论最快”路线
+                    http_client.get(f"{self.amap_url}/direction/driving", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "strategy": 10}),
+                ]
+                names = ["driving"]
+                if _straight_km is None or _straight_km <= 3.0:
+                    tasks.append(http_client.get(f"{self.amap_url}/direction/walking", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat}))
+                    names.append("walking")
+                if city and (_straight_km is None or _straight_km <= 40.0):
+                    tasks.append(http_client.get(f"{self.amap_url}/direction/transit/integrated", params={"key": self.amap_key, "origin": origin_lnglat, "destination": dest_lnglat, "city": city, "cityd": city}))
+                    names.append("transit")
+                return await self._collect_travel_options(http_client, tasks, names, _pair_key)
 
-            try:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                travel_info = {}
-                for name, resp in zip(names, results):
-                    if isinstance(resp, Exception) or not resp:
-                        continue
-                    try:
-                        data = resp.json()
+    async def _collect_travel_options(self, http_client, tasks, names, cache_key: str) -> Dict[str, Any]:
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            travel_info: Dict[str, Any] = {}
+            for name, resp in zip(names, results):
+                if isinstance(resp, Exception) or not resp:
+                    continue
+                try:
+                    data = resp.json()
 
-                        if name == "transit" and data.get("status") == "1" and data.get("route", {}).get("transits"):
-                            transit = data["route"]["transits"][0]
-                            dist_km = round(int(transit.get("distance", 0)) / 1000, 1)
-                            dur_min = round(int(transit.get("duration", 0)) / 60)
+                    if name == "transit" and data.get("status") == "1" and data.get("route", {}).get("transits"):
+                        transit = data["route"]["transits"][0]
+                        dist_km = round(int(transit.get("distance", 0)) / 1000, 1)
+                        dur_min = round(int(transit.get("duration", 0)) / 60)
 
-                            transit_steps = []
-                            for seg in transit.get("segments", []):
-                                bus = seg.get("bus", {})
-                                for line in bus.get("buslines", []):
-                                    line_name = line.get("name", "").split("(")[0]
-                                    transit_steps.append(f"乘坐【{line_name}】至【{line.get('arrival_stop', {}).get('name', '')}】")
-                                rail = seg.get("railway", {})
-                                if rail and rail.get("name"):
-                                    transit_steps.append(f"乘坐【{rail.get('name')}】")
+                        transit_steps = []
+                        for seg in transit.get("segments", []):
+                            bus = seg.get("bus", {})
+                            for line in bus.get("buslines", []):
+                                line_name = line.get("name", "").split("(")[0]
+                                transit_steps.append(f"乘坐【{line_name}】至【{line.get('arrival_stop', {}).get('name', '')}】")
+                            rail = seg.get("railway", {})
+                            if rail and rail.get("name"):
+                                transit_steps.append(f"乘坐【{rail.get('name')}】")
 
-                            travel_info["transit"] = {
-                                "label": "公交/地铁", 
-                                "distance_km": dist_km, 
-                                "duration_min": dur_min,
-                                "steps": transit_steps if transit_steps else [f"搭乘城市公共交通线路约 {dur_min} 分钟"]
-                            }
+                        travel_info["transit"] = {
+                            "label": "公交/地铁", 
+                            "distance_km": dist_km, 
+                            "duration_min": dur_min,
+                            "steps": transit_steps if transit_steps else [f"搭乘城市公共交通线路约 {dur_min} 分钟"]
+                        }
 
-                        elif data.get("status") == "1" and data.get("route", {}).get("paths"):
-                            path = data["route"]["paths"][0]
-                            dist_km = round(int(path["distance"]) / 1000, 1)
-                            dur_min = round(int(path["duration"]) / 60)
-                            label_map = {"walking": "步行", "driving": "驾车"}
+                    elif data.get("status") == "1" and data.get("route", {}).get("paths"):
+                        path = data["route"]["paths"][0]
+                        dist_km = round(int(path["distance"]) / 1000, 1)
+                        dur_min = round(int(path["duration"]) / 60)
+                        label_map = {"walking": "步行", "driving": "驾车"}
 
-                            actual_coords = self._extract_polyline_coords(path)
-                            steps = path.get("steps", [])
+                        actual_coords = self._extract_polyline_coords(path)
+                        steps = path.get("steps", [])
 
-                            clean_steps = []
-                            for s in steps:
-                                inst = s.get("instruction", "")
-                                clean_inst = re.sub(r'<[^>]+>', '', str(inst)).strip()
-                                if clean_inst:
-                                    clean_steps.append(clean_inst)
+                        clean_steps = []
+                        for s in steps:
+                            inst = s.get("instruction", "")
+                            clean_inst = re.sub(r'<[^>]+>', '', str(inst)).strip()
+                            if clean_inst:
+                                clean_steps.append(clean_inst)
 
-                            travel_info[name] = {
-                                "label": label_map.get(name, name), 
-                                "distance_km": dist_km, 
-                                "duration_min": dur_min,
-                                "actual_path": actual_coords,
-                                "steps": clean_steps,
-                                "navi_summary": " -> ".join(clean_steps[:3]) if clean_steps else f"沿主要道路出行约{dur_min}分钟"
-                            }
-                    except Exception:
-                        continue
-                return travel_info
-            except Exception:
-                return {}
+                        travel_info[name] = {
+                            "label": label_map.get(name, name), 
+                            "distance_km": dist_km, 
+                            "duration_min": dur_min,
+                            "actual_path": actual_coords,
+                            "steps": clean_steps,
+                            "navi_summary": " -> ".join(clean_steps[:3]) if clean_steps else f"沿主要道路出行约{dur_min}分钟"
+                        }
+                except Exception:
+                    continue
+            # 只缓存**有结果**的对：空结果不缓存，避免把一次限流的失败固化 6 小时
+            if travel_info:
+                if len(_TRAVEL_OPTIONS_CACHE) >= 512:
+                    _TRAVEL_OPTIONS_CACHE.clear()
+                _TRAVEL_OPTIONS_CACHE[cache_key] = dict(travel_info)
+            return travel_info
+        except Exception:
+            return {}
+
 
     async def get_amap_weather(self, city: str) -> Dict[str, Any]:
         """对接高德天气 API（weatherInfo），返回实时天气+未来3天预报；失败返回空兜底由上层回退。"""
@@ -3149,6 +3198,7 @@ async def run_negotiate(msg: GatewayMessage):
                 )
             except Exception:
                 web_knowledge_list = ["本地高人气打卡目的地，融入独特文化特色与地道风味体验。"] * len(search_candidates)
+            _stage("候选池与增强")
 
             poi_pool_data = []
             prompt_pool_data = []
@@ -3512,6 +3562,7 @@ async def run_negotiate(msg: GatewayMessage):
                 return []
 
             # 👑 主推演：带重试 + 阶段进度日志，防止 LLM 网络抖动/长时间无响应造成前端卡死
+            _stage("提示词组装")
             llm_call_succeeded = False
             last_llm_err: Optional[Exception] = None
             for attempt in range(LLM_MAX_RETRIES + 1):
@@ -3565,6 +3616,7 @@ async def run_negotiate(msg: GatewayMessage):
                     yield json.dumps({"token": f"\n[连接自愈]: LLM 调用异常（{err_name}），正在重连...\n"}, ensure_ascii=False) + "\n"
                     continue
 
+            _stage("主推演输出")
             if not llm_call_succeeded:
                 # 所有重试都失败：显式错误 + 候选池兜底路线，保证前端 100% 收到 final_route
                 err_msg = str(last_llm_err) if last_llm_err else "未知错误"
@@ -4821,9 +4873,9 @@ async def run_negotiate(msg: GatewayMessage):
                             except Exception as _coverage_exc:  # 诉求核对失败绝不影响出方案
                                 final_data["constraints"] = {"error": str(_coverage_exc)[:200]}
 
+                            _stage("复核与多方案")
                             # 👑 价格补全（有界）：只查**缺价**节点、并发执行、整体超时保护；
                             # 来源标为 web → 结构上仍是"估算"，必须标明，不会冒充已验证价格。
-                            _stage("候选池与模型写方案")
                             try:
                                 from core.price_sources import (
                                     merge_observations,
@@ -4928,6 +4980,17 @@ async def run_negotiate(msg: GatewayMessage):
                                             if not _attempt.get("ok") and _attempt.get("error"):
                                                 _attempt_error = str(_attempt["error"])[:160]
                                                 break
+                                    # 熔断状态也随方案下发：用户/我们自己都要能回答"这一轮为什么先跳过某个源"
+                                    from core.web_price_tool import provider_states as _provider_states
+
+                                    _provider_state = _provider_states()
+                                    for _name, _state in _provider_state.items():
+                                        if not _state.get("available") and not _attempt_error:
+                                            _attempt_error = (
+                                                f"{_name} 连续失败 {_state.get('consecutive_failures')} 次，"
+                                                f"冷却中（还剩 {_state.get('cooldown_remaining_s')}s）"
+                                            )
+                                            break
                                     _filled = [
                                         item for item in (_observations or [])
                                         if isinstance(item, Mapping) and item.get("value") is not None
@@ -4948,6 +5011,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         # 取价源的可达性与失败原因（用户能看到"为什么没价"）
                                         "provider_reachable": _reachable,
                                         "provider_attempts": list(_attempts or [])[:4],
+                                        "provider_states": _provider_state,
                                         "provider_status": {"error": _attempt_error} if _attempt_error else {},
                                         "looked_up": len(_targets),
                                         "filled_from_web": len(_filled),
@@ -5106,53 +5170,59 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _park_exc:  # 修复失败绝不影响出方案（对账仍会报超限）
                             final_data["park_trim"] = {"error": str(_park_exc)[:200]}
 
-                        # 👑 住宿兜底：**每晚都必须有住宿**（横向对照实测：伊宁 3 天方案一个住宿
-                        #    节点都没有，等于"住哪儿没着落"）。缺的那晚从候选里挑离当天行程最近的补上；
-                        #    池里没有可用的就如实报缺，绝不编一个酒店。
+                        # 👑 住宿收口：**每晚一家、不多不少**（两个方向都实测过事故）
+                        #    - 少了：伊宁 3 天方案一晚住宿都没有（"住哪儿没着落"）；
+                        #    - 多了：喀什 3 天 4 个、乌鲁木齐 2 天 3 个（候选池把全部酒店塞进 top，
+                        #      最终均衡又"哪天没酒店就补一个"，连不回程的最后一天也补）。
+                        #    顺序是**先补后减**，封在 core/route_composition.settle_lodging 里
+                        #    （先减后补会留下一个排在不需要留宿那天的酒店，实测踩过）。
                         try:
-                            _lodging_route, _lodging_actions, _missing_nights = ensure_lodging_per_night(
+                            _settled_route, _lodging_added, _lodging_dropped, _missing_nights = settle_lodging(
                                 final_data.get("route") or [],
                                 nights=max(1, trip_days - 1),
                                 pool=list(cleaned_hotels or []),
                                 classify=classify_poi_category,
                             )
-                            if _lodging_actions or _missing_nights:
-                                if _lodging_actions:
-                                    final_data["route"] = _lodging_route
-                                    await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
-                                        "room_id": room_id, "city": target_city,
-                                        "action_count": len(_lodging_actions),
-                                        "action_codes": ["lodging_added"],
-                                        "examples": [
-                                            f"第 {item.get('day')} 晚补上 {item.get('to')}"
-                                            for item in _lodging_actions[:4]
-                                        ],
-                                        "correlation_id": plan_correlation_id,
-                                    }, room_id, correlation_id=plan_correlation_id, producer="validator")
-                                final_data["lodging_repair"] = {
-                                    "actions": _lodging_actions,
-                                    "missing_days": _missing_nights,
-                                }
+                            if _lodging_added or _lodging_dropped or _missing_nights:
+                                final_data["route"] = _settled_route
+                            if _lodging_added:
+                                await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
+                                    "room_id": room_id, "city": target_city,
+                                    "action_count": len(_lodging_added),
+                                    "action_codes": ["lodging_added"],
+                                    "examples": [
+                                        f"第 {item.get('day')} 晚补上 {item.get('to')}"
+                                        for item in _lodging_added[:4]
+                                    ],
+                                    "correlation_id": plan_correlation_id,
+                                }, room_id, correlation_id=plan_correlation_id, producer="validator")
                                 print(
-                                    f"🛏️ [住宿兜底] 补上 {len(_lodging_actions)} 晚"
+                                    f"🛏️ [住宿兜底] 补上 {len(_lodging_added)} 晚"
                                     + (f"；仍缺 {_missing_nights}（候选池里没有可用住宿）" if _missing_nights else ""),
                                     flush=True,
                                 )
-                        except Exception as _lodging_exc:  # 兜底失败绝不影响出方案
-                            final_data["lodging_repair"] = {"error": str(_lodging_exc)[:200]}
-
-                        # 👑 住宿不能多于夜数（2026-10-05 横向对照实测）：喀什 3 天排了 4 个住宿、
-                        #    乌鲁木齐 2 天排了 3 个（应 1 晚）。成因是候选池把**全部**酒店塞进 top
-                        #    （hotel 6~8 个，而目标 1~2 个），最终均衡又会"哪天没酒店就补一个"。
-                        #    多出来的直接移出（住宿不做同类替换 —— 多一个住宿没有"换成别的"的道理）。
-                        try:
-                            _lodging_capped, _lodging_dropped = trim_lodging_over_cap(
-                                final_data.get("route") or [],
-                                nights=max(1, trip_days - 1),
-                                classify=classify_poi_category,
-                            )
                             if _lodging_dropped:
-                                final_data["route"] = _lodging_capped
+                                await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
+                                    "room_id": room_id, "city": target_city,
+                                    "action_count": len(_lodging_dropped),
+                                    "action_codes": ["lodging_over_cap_dropped"],
+                                    "examples": [
+                                        f"{item.get('name')}（第 {item.get('day')} 天）"
+                                        for item in _lodging_dropped[:4]
+                                    ],
+                                    "correlation_id": plan_correlation_id,
+                                }, room_id, correlation_id=plan_correlation_id, producer="validator")
+                                print(
+                                    f"🛏️ [住宿限量] 住宿比夜数多，移出 {len(_lodging_dropped)} 个："
+                                    + "、".join(str(item.get("name") or "") for item in _lodging_dropped[:4]),
+                                    flush=True,
+                                )
+                            if _lodging_added or _missing_nights:
+                                final_data["lodging_repair"] = {
+                                    "actions": _lodging_added,
+                                    "missing_days": _missing_nights,
+                                }
+                            if _lodging_dropped:
                                 final_data["lodging_trim"] = {
                                     "nights": max(1, trip_days - 1),
                                     "actions": [
@@ -5165,13 +5235,8 @@ async def run_negotiate(msg: GatewayMessage):
                                         for item in _lodging_dropped
                                     ],
                                 }
-                                print(
-                                    f"🛏️ [住宿限量] 住宿比夜数多，移出 {len(_lodging_dropped)} 个："
-                                    + "、".join(str(item.get("name") or "") for item in _lodging_dropped[:4]),
-                                    flush=True,
-                                )
-                        except Exception as _lodging_trim_exc:  # 修复失败绝不影响出方案（对账仍会报超限）
-                            final_data["lodging_trim"] = {"error": str(_lodging_trim_exc)[:200]}
+                        except Exception as _lodging_exc:  # 收口失败绝不影响出方案
+                            final_data["lodging_repair"] = {"error": str(_lodging_exc)[:200]}
 
                         # 👑 配比对账：实际排出来的构成 vs 用户口径算出的目标（默认自然=人文各半
                         # + 穿插美食住宿；明确偏好则加权）。对不上就如实记账，进"遗留问题"。
@@ -5582,52 +5647,12 @@ async def run_negotiate(msg: GatewayMessage):
                                 }
                                 _closeout_summary.append(f"公园超限又处理 {len(_co_park_actions)} 处")
 
-                            # 3) 每晚住宿（门禁补酒店是好事，但它也可能把补过的天又弄丢）
-                            _co_lodge_route, _co_lodge_actions, _co_missing = ensure_lodging_per_night(
-                                final_data.get("route") or [],
-                                nights=max(1, trip_days - 1),
-                                pool=list(cleaned_hotels or []),
-                                classify=classify_poi_category,
-                            )
-                            if _co_lodge_actions or _co_missing:
-                                if _co_lodge_actions:
-                                    final_data["route"] = _co_lodge_route
-                                _existing_lodge = final_data.get("lodging_repair") or {}
-                                final_data["lodging_repair"] = {
-                                    "actions": list(_existing_lodge.get("actions") or [])
-                                    + [{**item, "stage": "final_closeout"} for item in _co_lodge_actions],
-                                    "missing_days": sorted(set(list(_existing_lodge.get("missing_days") or []) + list(_co_missing))),
-                                }
-                                if _co_lodge_actions:
-                                    _closeout_summary.append(f"住宿又补 {len(_co_lodge_actions)} 晚")
-
-                            # 3.5) 住宿限量：`rebalance_daily_route` 会"哪天没酒店就补一个"，
-                            #      连不需要留宿的最后一天也补 —— 出稿前必须再压回夜数以内。
-                            _co_lodge_capped, _co_lodge_dropped = trim_lodging_over_cap(
-                                final_data.get("route") or [],
-                                nights=max(1, trip_days - 1),
-                                classify=classify_poi_category,
-                            )
-                            if _co_lodge_dropped:
-                                final_data["route"] = _co_lodge_capped
-                                _existing_lodge_trim = final_data.get("lodging_trim") or {}
-                                final_data["lodging_trim"] = {
-                                    "nights": max(1, trip_days - 1),
-                                    "actions": list(_existing_lodge_trim.get("actions") or [])
-                                    + [
-                                        {
-                                            "code": "lodging_over_cap_dropped",
-                                            "from": str(item.get("name") or ""),
-                                            "day": item.get("day"),
-                                            "reason": item.get("removed_reason"),
-                                            "stage": "final_closeout",
-                                        }
-                                        for item in _co_lodge_dropped
-                                    ],
-                                }
-                                _closeout_summary.append(f"住宿超夜数又移出 {len(_co_lodge_dropped)} 个")
-
-                            # 4) 日内物理现实性（最容易被打回的一条：补节点正是"又塞远景区"的来源）
+                            # 3) 日内物理现实性（最容易被打回的一条：补节点正是"又塞远景区"的来源）
+                            #    ⚠️ 必须排在**住宿收口之前**：它会移出"一天跑不了的远景区"，
+                            #    而被移出的那个节点有可能本身就是住宿（实测伊宁：被移出的
+                            #    「南河清泉…度假美宿」在没被移走时会被当成"这一晚已有住宿"，
+                            #    于是住宿收口什么都不补；等它被移走，第一晚就空了）。
+                            #    收口里任何"会删节点"的步骤都要排在住宿收口之前，住宿收口必须是最后一道。
                             _co_before = evaluate_travel_feasibility(
                                 final_data.get("route") or [],
                                 city_center=_closeout_center,
@@ -5663,6 +5688,42 @@ async def run_negotiate(msg: GatewayMessage):
                                     distance_tolerance=_closeout_tolerance,
                                     days=trip_days,
                                 )
+
+                            # 4) 住宿收口（**收口的最后一道**：先补后减，封在 settle_lodging 里）
+                            _co_settled, _co_lodge_added, _co_lodge_dropped, _co_missing = settle_lodging(
+                                final_data.get("route") or [],
+                                nights=max(1, trip_days - 1),
+                                pool=list(cleaned_hotels or []),
+                                classify=classify_poi_category,
+                            )
+                            if _co_lodge_added or _co_lodge_dropped or _co_missing:
+                                final_data["route"] = _co_settled
+                            if _co_lodge_dropped:
+                                _existing_lodge_trim = final_data.get("lodging_trim") or {}
+                                final_data["lodging_trim"] = {
+                                    "nights": max(1, trip_days - 1),
+                                    "actions": list(_existing_lodge_trim.get("actions") or [])
+                                    + [
+                                        {
+                                            "code": "lodging_over_cap_dropped",
+                                            "from": str(item.get("name") or ""),
+                                            "day": item.get("day"),
+                                            "reason": item.get("removed_reason"),
+                                            "stage": "final_closeout",
+                                        }
+                                        for item in _co_lodge_dropped
+                                    ],
+                                }
+                                _closeout_summary.append(f"住宿超夜数又移出 {len(_co_lodge_dropped)} 个")
+                            if _co_lodge_added or _co_missing:
+                                _existing_lodge = final_data.get("lodging_repair") or {}
+                                final_data["lodging_repair"] = {
+                                    "actions": list(_existing_lodge.get("actions") or [])
+                                    + [{**item, "stage": "final_closeout"} for item in _co_lodge_added],
+                                    "missing_days": sorted(set(list(_existing_lodge.get("missing_days") or []) + list(_co_missing))),
+                                }
+                                if _co_lodge_added:
+                                    _closeout_summary.append(f"住宿又补 {len(_co_lodge_added)} 晚")
 
                             # 5) 对账必须按**收口后的真实路线**重算（否则界面上的数字对不上实际路线）
                             if _closeout_summary:

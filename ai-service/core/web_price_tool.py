@@ -507,6 +507,13 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
     带**同一进程内的节流与结果缓存**：
       - 两次搜索至少间隔 `WEB_PRICE_MIN_INTERVAL_SECONDS`（默认 1.2s）—— 防限流；
       - 相同 query 在 `WEB_SEARCH_CACHE_TTL_SECONDS`（默认 6h）内直接复用 —— 少打扰对方站点；
+      - **提供方熔断**：一个源连续失败 2 次就先冷却 `WEB_PRICE_PROVIDER_COOLDOWN_SECONDS`
+        （默认 180s），后面的取价点直接跳过它。
+        为什么必须要（2026-10-05 实测）：搜狗当时已经查不动了，而每个取价点都还按顺序
+        先去问它、等它失败，才轮到能用的源 —— 单点预算被这个"死源"吃光，
+        表现成"查了 6 个、补到 0 条、超预算 5 个"。
+      - 兜底原则：**所有源都在冷却时仍然试第一个**（宁可慢，也不能因为熔断把功能关掉），
+        并在尝试记录里标明这是"冷却被强制放行"。
     每个提供方的成败都记进 `last_search_attempts`，供诊断与"为什么没取到"的披露。
     """
     global last_search_attempts, _last_search_at  # noqa: PLW0603 - 模块级诊断/节流状态
@@ -538,12 +545,24 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
         if gap > 0:
             await asyncio.sleep(gap)
         attempts: List[Dict[str, Any]] = []
-        for provider in enabled_providers():
+        searchable = [name for name in enabled_providers() if name != "official_page"]
+        available = [name for name in searchable if provider_is_available(name)]
+        if searchable and not available:
+            # 全都冷却中：强制放行第一个（并如实记下来），否则一次网络抖动会把功能关死
+            available = [searchable[0]]
+            attempts.append({
+                "provider": searchable[0],
+                "ok": False,
+                "cooldown_overridden": True,
+                "error": "所有取价源都在冷却中，仍强制试一次（避免因为熔断直接放弃）",
+            })
+        for provider in available:
             if provider == "sogou":
                 try:
                     rows = await fetch_sogou(query, max_results=max_results)
                     record_request()  # 计入日配额（无论成败都算一次真实请求）
                     attempts.append({"provider": "sogou", "ok": bool(rows), "results": len(rows)})
+                    _note_provider_result("sogou", bool(rows))
                     if rows:
                         _last_search_at = _time.monotonic()
                         _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
@@ -551,11 +570,13 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
                         return rows
                 except Exception as exc:
                     attempts.append({"provider": "sogou", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+                    _note_provider_result("sogou", False)
             elif provider == "search":
                 try:
                     rows = await search_duckduckgo(query, max_results=max_results)
                     record_request()
                     attempts.append({"provider": "search", "ok": bool(rows), "results": len(rows)})
+                    _note_provider_result("search", bool(rows))
                     if rows:
                         _last_search_at = _time.monotonic()
                         _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
@@ -563,10 +584,73 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
                         return rows
                 except Exception as exc:
                     attempts.append({"provider": "search", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+                    _note_provider_result("search", False)
             # official_page 不是通用搜索，跳过
         _last_search_at = _time.monotonic()
         last_search_attempts = attempts
         return []
+
+
+# —— 提供方熔断状态（进程内）——
+_PROVIDER_FAILURES: Dict[str, int] = {}
+_PROVIDER_COOLDOWN_UNTIL: Dict[str, float] = {}
+# 连续失败几次就冷却：2 次足够区分"偶发失败"和"这个源现在不行了"
+PROVIDER_FAILURE_THRESHOLD = 2
+
+
+def provider_cooldown_seconds() -> float:
+    raw = str(os.getenv("WEB_PRICE_PROVIDER_COOLDOWN_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 180.0
+    return value if value >= 0 else 180.0
+
+
+def provider_is_available(provider: str, *, now: Optional[float] = None) -> bool:
+    """这个源现在能不能用（不在冷却期内）。"""
+    import time as _time
+
+    moment = float(now if now is not None else _time.monotonic())
+    return moment >= float(_PROVIDER_COOLDOWN_UNTIL.get(str(provider)) or 0.0)
+
+
+def _note_provider_result(provider: str, ok: bool, *, now: Optional[float] = None) -> None:
+    """记一次成败：成功清零；连续失败到阈值就进入冷却（默认 180s）。"""
+    import time as _time
+
+    moment = float(now if now is not None else _time.monotonic())
+    name = str(provider)
+    if ok:
+        _PROVIDER_FAILURES[name] = 0
+        _PROVIDER_COOLDOWN_UNTIL.pop(name, None)
+        return
+    failures = int(_PROVIDER_FAILURES.get(name) or 0) + 1
+    _PROVIDER_FAILURES[name] = failures
+    if failures >= PROVIDER_FAILURE_THRESHOLD:
+        _PROVIDER_COOLDOWN_UNTIL[name] = moment + provider_cooldown_seconds()
+
+
+def provider_states(*, now: Optional[float] = None) -> Dict[str, Dict[str, Any]]:
+    """给诊断用：每个源连续失败几次、还要冷却多久。"""
+    import time as _time
+
+    moment = float(now if now is not None else _time.monotonic())
+    states: Dict[str, Dict[str, Any]] = {}
+    for name in enabled_providers():
+        until = float(_PROVIDER_COOLDOWN_UNTIL.get(name) or 0.0)
+        states[name] = {
+            "consecutive_failures": int(_PROVIDER_FAILURES.get(name) or 0),
+            "cooldown_remaining_s": round(max(0.0, until - moment), 1),
+            "available": moment >= until,
+        }
+    return states
+
+
+def reset_provider_state() -> None:
+    """清空熔断状态（测试与"换一换"重试时用）。"""
+    _PROVIDER_FAILURES.clear()
+    _PROVIDER_COOLDOWN_UNTIL.clear()
 
 
 last_search_attempts: List[Dict[str, Any]] = []

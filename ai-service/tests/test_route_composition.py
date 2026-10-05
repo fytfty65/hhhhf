@@ -672,6 +672,56 @@ class LodgingTrimTests(unittest.TestCase):
         self.assertEqual(len(dropped), 1)
         self.assertEqual(len(kept), 1)
 
+    def test_hotels_stuck_on_the_last_day_prefer_the_needed_nights(self):
+        """实测（2026-10-05 伊宁）：住宿都排在最后一天时，要先保"该住的几晚"。
+
+        只按天数排序取前 nights 个、且不做天数偏好，会留下最后一天的酒店让前几晚空着。
+        """
+        from core.route_composition import trim_lodging_over_cap
+
+        route = [
+            {"day": 1, "name": "伊宁县文化艺术中心", "lnglat": [81.5, 43.9]},
+            {"day": 1, "name": "第一晚酒店", "lnglat": [81.5, 43.9]},
+            {"day": 3, "name": "植德客栈", "lnglat": [81.5, 43.9]},
+            {"day": 3, "name": "泽涛·花锦民宿", "lnglat": [81.6, 43.9], "cost_estimate": "¥260"},
+        ]
+        kept, dropped = trim_lodging_over_cap(route, nights=2)
+        self.assertEqual(len(dropped), 1, "3 个住宿 > 2 晚，只该移出 1 个")
+        kept_names = [node["name"] for node in kept]
+        self.assertIn("第一晚酒店", kept_names, "第 1 晚是真正要住的一晚，不能动")
+        self.assertIn("泽涛·花锦民宿", kept_names, "同一天多个时保留有价格的")
+        self.assertNotIn("植德客栈", kept_names)
+
+    def test_ensure_then_trim_lands_on_one_per_needed_night(self):
+        """两根绳子一起拉才收敛：**先补每晚、再按夜数限量**（且限量偏好该住的几晚）。"""
+        from core.route_composition import ensure_lodging_per_night, trim_lodging_over_cap
+
+        route = [
+            {"day": 1, "name": "伊宁县文化艺术中心", "lnglat": [81.50, 43.90]},
+            {"day": 2, "name": "天鹅泉湿地公园", "lnglat": [81.65, 43.70]},
+            {"day": 3, "name": "植德客栈", "lnglat": [81.51, 43.91]},
+            {"day": 3, "name": "泽涛·花锦民宿", "lnglat": [81.52, 43.92]},
+        ]
+        pool = [
+            {"name": "伊宁马龙民宿", "lnglat": [81.53, 43.93]},
+            {"name": "伊宁温州国际大酒店", "lnglat": [81.54, 43.94]},
+        ]
+        filled, actions, missing = ensure_lodging_per_night(route, nights=2, pool=pool)
+        self.assertEqual(missing, [])
+        self.assertEqual(len(actions), 2, "第 1、2 晚都要补")
+        trimmed, dropped = trim_lodging_over_cap(filled, nights=2)
+        self.assertEqual(len(dropped), 2, "最后一晚那两家都不该留")
+        added_days = sorted(
+            int(node.get("day") or 1)
+            for node in trimmed
+            if node.get("added_reason") == "missing_lodging_for_night"
+        )
+        self.assertEqual(added_days, [1, 2], "补的两晚必须活到最后")
+        self.assertEqual(
+            len([node for node in trimmed if node.get("added_reason") == "missing_lodging_for_night"]),
+            2,
+        )
+
 
 class SupplyClampTests(unittest.TestCase):
     """配比目标要按候选供给压一次（2026-10-05 实测：库尔勒目标 4 人文而候选只有 3 个）。"""

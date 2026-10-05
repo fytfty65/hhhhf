@@ -864,5 +864,138 @@ class PriceStepBudgetTests(unittest.TestCase):
         self.assertEqual(sum(1 for item in observations if item.get("timeout")), 1)
 
 
+class ProviderCooldownTests(unittest.TestCase):
+    """提供方熔断（2026-10-05 实测：搜狗已经查不动了，每个取价点还先去问它、等它失败）。
+
+    现象是"查了 6 个、补到 0 条、超预算 5 个"：单点预算被**死源**吃光，
+    能用的源根本没轮到。规则：连续失败 2 次 → 冷却 180s → 后面的点直接跳过它。
+    """
+
+    def setUp(self):
+        from core import web_price_tool
+
+        web_price_tool.reset_provider_state()
+        web_price_tool._search_cache.clear()
+        web_price_tool._last_search_at = 0.0
+
+    def tearDown(self):
+        from core import web_price_tool
+
+        web_price_tool.reset_provider_state()
+
+    def test_two_failures_put_a_provider_into_cooldown(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        calls = {"n": 0}
+
+        async def broken(*_args, **_kwargs):
+            calls["n"] += 1
+            raise RuntimeError("HTTP 503")
+
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou", WEB_PRICE_MIN_INTERVAL_SECONDS="0"):
+            with mock.patch("core.web_price_tool.fetch_sogou", broken):
+                asyncio.run(web_price_tool.search_texts("库尔勒 门票 A"))
+                asyncio.run(web_price_tool.search_texts("库尔勒 门票 B"))
+                self.assertEqual(calls["n"], 2)
+                # 第三次：已在冷却期 → 不再打扰死源（但仍然会强制放行一次，见下面那条用例）
+                asyncio.run(web_price_tool.search_texts("库尔勒 门票 C"))
+        state = web_price_tool.provider_states()["sogou"]
+        self.assertGreaterEqual(state["consecutive_failures"], 2)
+
+    def test_a_dead_first_provider_no_longer_blocks_the_working_one(self):
+        """这是那条实测事故的核心断言：死源冷却后，第二个源必须真的被问到。"""
+        import asyncio
+
+        from core import web_price_tool
+
+        asked = []
+
+        async def broken(*_args, **_kwargs):
+            asked.append("sogou")
+            raise RuntimeError("HTTP 503")
+
+        async def working(*_args, **_kwargs):
+            asked.append("search")
+            return [{"title": "门票45元", "url": "https://x", "provider": "search"}]
+
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou,search", WEB_PRICE_MIN_INTERVAL_SECONDS="0"):
+            with mock.patch("core.web_price_tool.fetch_sogou", broken):
+                with mock.patch("core.web_price_tool.search_duckduckgo", working):
+                    asyncio.run(web_price_tool.search_texts("库尔勒 门票 A"))
+                    asked.clear()
+                    asyncio.run(web_price_tool.search_texts("库尔勒 门票 B"))
+                    asked.clear()
+                    rows = asyncio.run(web_price_tool.search_texts("库尔勒 门票 C"))
+        self.assertEqual(len(rows), 1, "第二个源的结果必须真的拿到")
+        self.assertEqual(asked, ["search"], f"死源进冷却后不该再逐个点去问它，实际问了 {asked}")
+
+    def test_success_resets_the_failure_counter(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def broken(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        async def working(*_args, **_kwargs):
+            return [{"title": "门票45元", "url": "https://x"}]
+
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou", WEB_PRICE_MIN_INTERVAL_SECONDS="0"):
+            with mock.patch("core.web_price_tool.fetch_sogou", broken):
+                asyncio.run(web_price_tool.search_texts("库尔勒 A"))
+            with mock.patch("core.web_price_tool.fetch_sogou", working):
+                asyncio.run(web_price_tool.search_texts("库尔勒 B"))
+        self.assertEqual(web_price_tool.provider_states()["sogou"]["consecutive_failures"], 0)
+        self.assertTrue(web_price_tool.provider_states()["sogou"]["available"])
+
+    def test_cooldown_expires(self):
+        from core import web_price_tool
+
+        with isolated_env(WEB_PRICE_PROVIDER_COOLDOWN_SECONDS="60"):
+            web_price_tool._note_provider_result("sogou", False, now=1000.0)
+            web_price_tool._note_provider_result("sogou", False, now=1000.0)
+            self.assertFalse(web_price_tool.provider_is_available("sogou", now=1030.0))
+            self.assertTrue(web_price_tool.provider_is_available("sogou", now=1061.0))
+
+    def test_all_providers_cooling_down_still_tries_one(self):
+        """兜底：全都冷却时也要强制试一次 —— 熔断不能把功能直接关掉。"""
+        import asyncio
+
+        from core import web_price_tool
+
+        asked = []
+
+        async def working(*_args, **_kwargs):
+            asked.append("sogou")
+            return [{"title": "门票45元", "url": "https://x"}]
+
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou", WEB_PRICE_MIN_INTERVAL_SECONDS="0"):
+            web_price_tool._note_provider_result("sogou", False)
+            web_price_tool._note_provider_result("sogou", False)
+            with mock.patch("core.web_price_tool.fetch_sogou", working):
+                rows = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(asked, ["sogou"])
+
+    def test_cooldown_is_explained_in_the_attempts(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def broken(*_args, **_kwargs):
+            raise RuntimeError("HTTP 503")
+
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou", WEB_PRICE_MIN_INTERVAL_SECONDS="0"):
+            web_price_tool._note_provider_result("sogou", False)
+            web_price_tool._note_provider_result("sogou", False)
+            with mock.patch("core.web_price_tool.fetch_sogou", broken):
+                asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
+        override = [item for item in web_price_tool.last_search_attempts if item.get("cooldown_overridden")]
+        self.assertTrue(override, web_price_tool.last_search_attempts)
+        self.assertIn("冷却", str(override[0].get("error")))
+
+
 if __name__ == "__main__":
     unittest.main()
