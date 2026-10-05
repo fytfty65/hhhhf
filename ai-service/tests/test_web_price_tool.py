@@ -10,6 +10,7 @@
 """
 
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -23,6 +24,47 @@ from core.web_price_tool import (
     price_timeout_seconds,
     search_proxy,
 )
+
+_USAGE_DIR = None
+
+
+def setUpModule():
+    """测试必须**自给自足**：不能让真实的日请求计数器把测试拖垮。
+
+    实测事故（2026-10-05）：跑了几轮真实推演后 `web_price_usage.json` 到 126/120，
+    这个文件里 4 个"搜索应该成功"的用例集体失败 —— 也就是测试依赖了**机器当天的用量状态**。
+    这里把用量文件指到临时目录、并把上限调大，测试不再受真实配额影响；
+    `DailyQuotaTests` 仍然用 `mock.patch.dict` 覆盖成它自己的小配额，两者互不干扰。
+    """
+    global _USAGE_DIR
+    _USAGE_DIR = tempfile.mkdtemp(prefix="web-price-test-")
+    os.environ["WEB_PRICE_USAGE_FILE"] = os.path.join(_USAGE_DIR, "usage.json")
+    os.environ["WEB_PRICE_DAILY_MAX_REQUESTS"] = "1000000"
+
+
+def tearDownModule():
+    os.environ.pop("WEB_PRICE_USAGE_FILE", None)
+    os.environ.pop("WEB_PRICE_DAILY_MAX_REQUESTS", None)
+    if _USAGE_DIR:
+        import shutil
+
+        shutil.rmtree(_USAGE_DIR, ignore_errors=True)
+
+
+def isolated_env(**overrides):
+    """一个**清空环境**但保留"用量文件指到临时目录"的 patch。
+
+    为什么需要它：本文件里好几个用例用 `mock.patch.dict(..., clear=True)` 来验证
+    "没有代理时不污染环境"，而 `clear=True` 会把 `WEB_PRICE_USAGE_FILE` 也清掉 ——
+    于是取价工具回落到**真实的** `web_price_usage.json`，机器当天用完 120 次配额后
+    这些用例就集体失败（实测 2026-10-05）。测试不该依赖机器当天的用量状态。
+    """
+    env = {
+        "WEB_PRICE_USAGE_FILE": os.path.join(_USAGE_DIR or tempfile.mkdtemp(), "usage.json"),
+        "WEB_PRICE_DAILY_MAX_REQUESTS": "1000000",
+    }
+    env.update(overrides)
+    return mock.patch.dict(os.environ, env, clear=True)
 
 
 class PriceParsingTests(unittest.TestCase):
@@ -103,7 +145,7 @@ class HostAllowlistTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_defaults_are_sane(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with isolated_env():
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
             # 默认顺序把**国内直连可达**的搜狗放前面（实测 DuckDuckGo/Bing 在本机不可达）
@@ -111,23 +153,23 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(search_proxy(), "")
 
     def test_env_overrides_are_honoured(self):
-        with mock.patch.dict(os.environ, {
-            "WEB_PRICE_TIMEOUT_SECONDS": "12.5",
-            "WEB_PRICE_MAX_NODES": "30",
-            "WEB_PRICE_PROVIDERS": "search",
-            "WEB_SEARCH_PROXY": "http://127.0.0.1:7890",
-        }, clear=True):
+        with isolated_env(
+            WEB_PRICE_TIMEOUT_SECONDS="12.5",
+            WEB_PRICE_MAX_NODES="30",
+            WEB_PRICE_PROVIDERS="search",
+            WEB_SEARCH_PROXY="http://127.0.0.1:7890",
+        ):
             self.assertEqual(price_timeout_seconds(), 12.5)
             self.assertEqual(price_max_nodes(), 30)
             self.assertEqual(enabled_providers(), ["search"])
             self.assertEqual(search_proxy(), "http://127.0.0.1:7890")
 
     def test_bad_values_fall_back_instead_of_crashing(self):
-        with mock.patch.dict(os.environ, {
-            "WEB_PRICE_TIMEOUT_SECONDS": "abc",
-            "WEB_PRICE_MAX_NODES": "-3",
-            "WEB_PRICE_PROVIDERS": " , ",
-        }, clear=True):
+        with isolated_env(
+            WEB_PRICE_TIMEOUT_SECONDS="abc",
+            WEB_PRICE_MAX_NODES="-3",
+            WEB_PRICE_PROVIDERS=" , ",
+        ):
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
             self.assertEqual(enabled_providers(), ["sogou"])
@@ -161,7 +203,7 @@ class ProviderProbeTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "search"}, clear=True):
+        with isolated_env(WEB_PRICE_PROVIDERS="search"):
             with mock.patch("duckduckgo_search.DDGS", side_effect=RuntimeError("blocked")):
                 report = asyncio.run(web_price_tool.probe_providers(query="测试"))
         entry = report["providers"]["search"]
@@ -176,7 +218,7 @@ class ProviderProbeTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "official_page"}, clear=True):
+        with isolated_env(WEB_PRICE_PROVIDERS="official_page"):
             report = asyncio.run(web_price_tool.probe_providers())
         entry = report["providers"]["official_page"]
         self.assertTrue(entry["configured"])
@@ -201,7 +243,7 @@ class ProviderProbeTests(unittest.TestCase):
             def text(self, *_args, **_kwargs):
                 return [{"title": "门票45元"}]
 
-        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "search,official_page"}, clear=True):
+        with isolated_env(WEB_PRICE_PROVIDERS="search,official_page"):
             with mock.patch("duckduckgo_search.DDGS", _Ddgs):
                 report = asyncio.run(web_price_tool.probe_providers())
         self.assertTrue(report["reachable"], report)
@@ -303,10 +345,7 @@ class ProxyWiringTests(unittest.TestCase):
             def text(self, *_args, **_kwargs):
                 return [{"title": "ok"}]
 
-        with mock.patch.dict(os.environ, {
-            "WEB_SEARCH_PROXY": "http://127.0.0.1:7890",
-            "WEB_PRICE_PROVIDERS": "search",
-        }, clear=True):
+        with isolated_env(WEB_SEARCH_PROXY="http://127.0.0.1:7890", WEB_PRICE_PROVIDERS="search"):
             with mock.patch("duckduckgo_search.DDGS", _Ddgs):
                 count = asyncio.run(web_price_tool.search_result_count("库尔勒 门票"))
 
@@ -335,7 +374,7 @@ class ProxyWiringTests(unittest.TestCase):
             def text(self, *_args, **_kwargs):
                 return []
 
-        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "search"}, clear=True):
+        with isolated_env(WEB_PRICE_PROVIDERS="search"):
             with mock.patch("duckduckgo_search.DDGS", _Ddgs):
                 count = asyncio.run(web_price_tool.search_result_count("x"))
         self.assertEqual(count, 0)
@@ -346,10 +385,10 @@ class ProxyWiringTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        with mock.patch.dict(os.environ, {
-            "WEB_SEARCH_PROXY": "http://127.0.0.1:7890",
-            "WEB_PRICE_PROVIDERS": "search",
-        }, clear=True):
+        with isolated_env(
+            WEB_SEARCH_PROXY="http://127.0.0.1:7890",
+            WEB_PRICE_PROVIDERS="search",
+        ):
             with mock.patch(
                 "core.web_price_tool.search_duckduckgo",
                 side_effect=RuntimeError("ConnectError: error sending request"),
@@ -365,7 +404,7 @@ class ProxyWiringTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou"}, clear=True):
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou"):
             with mock.patch("core.web_price_tool.fetch_sogou", side_effect=RuntimeError("HTTP 503")):
                 report = asyncio.run(web_price_tool.probe_providers())
         self.assertFalse(report["providers"]["sogou"]["ok"])
@@ -485,7 +524,7 @@ class ProviderOrderTests(unittest.TestCase):
         async def fake_ddg(query, max_results=3):
             raise AssertionError("搜狗有结果时不该再去问 DuckDuckGo")
 
-        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou,search"}, clear=True):
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou,search"):
             with mock.patch("core.web_price_tool.fetch_sogou", fake_sogou):
                 with mock.patch("core.web_price_tool.search_duckduckgo", fake_ddg):
                     rows = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
@@ -501,7 +540,7 @@ class ProviderOrderTests(unittest.TestCase):
         async def broken(*_args, **_kwargs):
             raise RuntimeError("boom")
 
-        with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou,search"}, clear=True):
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou,search"):
             with mock.patch("core.web_price_tool.fetch_sogou", broken):
                 with mock.patch("core.web_price_tool.search_duckduckgo", broken):
                     rows = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
@@ -553,13 +592,13 @@ class PacingAndCacheTests(unittest.TestCase):
     def test_min_interval_and_cache_ttl_are_configurable(self):
         from core.web_price_tool import search_cache_ttl_seconds, search_min_interval_seconds
 
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with isolated_env():
             self.assertEqual(search_min_interval_seconds(), 1.2)
             self.assertEqual(search_cache_ttl_seconds(), 6 * 3600.0)
-        with mock.patch.dict(os.environ, {
-            "WEB_PRICE_MIN_INTERVAL_SECONDS": "0.3",
-            "WEB_SEARCH_CACHE_TTL_SECONDS": "60",
-        }, clear=True):
+        with isolated_env(
+            WEB_PRICE_MIN_INTERVAL_SECONDS="0.3",
+            WEB_SEARCH_CACHE_TTL_SECONDS="60",
+        ):
             self.assertEqual(search_min_interval_seconds(), 0.3)
             self.assertEqual(search_cache_ttl_seconds(), 60.0)
 
@@ -576,10 +615,10 @@ class PacingAndCacheTests(unittest.TestCase):
 
         web_price_tool._search_cache.clear()
         web_price_tool._last_search_at = 0.0
-        with mock.patch.dict(os.environ, {
-            "WEB_PRICE_PROVIDERS": "sogou",
-            "WEB_PRICE_MIN_INTERVAL_SECONDS": "0",
-        }, clear=True):
+        with isolated_env(
+            WEB_PRICE_PROVIDERS="sogou",
+            WEB_PRICE_MIN_INTERVAL_SECONDS="0",
+        ):
             with mock.patch("core.web_price_tool.fetch_sogou", fake_sogou):
                 first = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
                 second = asyncio.run(web_price_tool.search_texts("库尔勒 门票"))
@@ -733,6 +772,66 @@ class PageFetchIntegrationTests(unittest.TestCase):
             observation = asyncio.run(web_price_tool.lookup_price("某酒店", "库尔勒"))
         self.assertIsNone(observation["value"])
         self.assertTrue(observation["estimated"])
+
+
+class PriceStepBudgetTests(unittest.TestCase):
+    """取价这一步不能"一超时就整段作废"（2026-10-05 矩阵实测：4 个场景里 3 个只剩一个 error）。
+
+    事故形态：整体 `wait_for(gather(...), 25s)` 一旦超时抛 TimeoutError，**已经查到的价格全丢**，
+    price_audit 只剩 `{"error": "TimeoutError:"}` —— 界面上表现成"取价压根没跑"
+    （查了几个/补到几条/来源可达全是空）。
+    """
+
+    def _source(self):
+        import io
+        import pathlib
+
+        path = pathlib.Path(__file__).resolve().parents[1] / "api" / "agent.py"
+        with io.open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_each_lookup_carries_its_own_deadline(self):
+        text = self._source()
+        self.assertIn("_lookup_bounded", text, "取价必须逐点限时，而不是整体一刀切")
+        self.assertIn("_deadline = _time.monotonic()", text)
+        self.assertIn("asyncio.wait_for(_lookup(_item), timeout=_remaining)", text)
+
+    def test_the_whole_price_step_is_not_wrapped_in_a_global_timeout(self):
+        text = self._source()
+        self.assertNotIn(
+            "asyncio.wait_for(\n                                        asyncio.gather(*[_lookup(item) for item in _targets])",
+            text,
+            "整体 wait_for 会把已查到结果一起丢掉",
+        )
+        self.assertIn('"timed_out": len(_timed_out)', text, "超预算的条数要如实记账")
+
+    def test_partial_results_survive_a_timeout(self):
+        """行为级验证：一个点超时，另一个点查到的价格**必须仍然被采纳**。"""
+        import asyncio
+
+        from core.price_sources import merge_observations
+
+        async def one_fast_one_slow():
+            async def _lookup_bounded(name, delay, value):
+                if delay == 0:
+                    return {"name": name, "value": value, "source": "web", "provider": "sogou", "estimated": True}
+                await asyncio.sleep(delay)
+                return {"name": name, "value": None, "source": "web", "provider": "search",
+                        "estimated": True, "timeout": True, "error": "单点取价超预算（来源慢或不可达）"}
+
+            return await asyncio.gather(
+                _lookup_bounded("博斯腾湖", 0, 45.0),
+                _lookup_bounded("某酒店", 5, None),
+            )
+
+        observations = asyncio.run(one_fast_one_slow())
+        plan = {"route": [{"day": 1, "name": "博斯腾湖", "price": None, "price_source": "unknown"},
+                          {"day": 1, "name": "某酒店", "price": None, "price_source": "unknown"}]}
+        merged = merge_observations(plan, observations)
+        self.assertEqual(len(merged["updated"]), 1, "超时的点不该拖累查到的点")
+        self.assertEqual(merged["updated"][0]["value"], 45.0)
+        self.assertEqual(merged["updated"][0]["name"], "博斯腾湖")
+        self.assertEqual(sum(1 for item in observations if item.get("timeout")), 1)
 
 
 if __name__ == "__main__":

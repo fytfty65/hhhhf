@@ -106,6 +106,37 @@ class TestLongTripAndPrice(unittest.TestCase):
         self.assertEqual(entry["status"], STATUS_DEGRADED)
         self.assertIn("估算", entry["reason"])
 
+    def test_nodes_skipped_by_the_price_budget_are_named_as_such(self):
+        """取价预算用完 ≠ 网上搜不到（2026-10-05 实测口径）。"""
+        payload = {"price_audit": {"total": 8, "verified_ratio": 0.1, "unknown_ratio": 0.5, "timed_out": 3}}
+        entry = degradation_for(payload, "price_web")
+        self.assertEqual(entry["status"], STATUS_DEGRADED)
+        self.assertIn("预算用完", entry["reason"])
+        self.assertIn("3 个", entry["reason"])
+
+    def test_no_budget_note_when_nothing_timed_out(self):
+        payload = {"price_audit": {"total": 8, "verified_ratio": 0.1, "unknown_ratio": 0.5}}
+        self.assertNotIn("预算", degradation_for(payload, "price_web")["reason"])
+
+    def test_final_closeout_is_disclosed_as_degraded(self):
+        """最终门禁把修好的约束又破坏掉 → 收口动作必须说出来（2026-10-05 实测）。"""
+        payload = {
+            "hard_constraint_closeout": {
+                "actions": ["日内又移出 4 个", "住宿又补 1 晚"],
+                "stage": "final_pre_emit",
+            }
+        }
+        entry = degradation_for(payload, "route_composition")
+        self.assertEqual(entry["status"], STATUS_DEGRADED)
+        self.assertIn("出稿前重新收口", entry["reason"])
+        self.assertIn("日内又移出 4 个", entry["reason"])
+
+    def test_closeout_failure_is_disclosed_as_missing(self):
+        payload = {"hard_constraint_closeout": {"error": "NameError: x"}}
+        entry = degradation_for(payload, "route_composition")
+        self.assertEqual(entry["status"], STATUS_MISSING)
+        self.assertIn("收口失败", entry["reason"])
+
     def test_lodging_without_any_price_is_reported(self):
         payload = {"route": [node("景点A"), lodging("酒店H"), lodging("民宿X")]}
         entry = degradation_for(payload, "hotel_price")

@@ -208,6 +208,186 @@ class WidenCandidatesTests(unittest.TestCase):
         food_block = text.split("FOOD_WIDENING_KEYWORDS")[-1][:400]
         self.assertIn("play_worthy", food_block, "餐饮补检索必须显式关掉玩点过滤")
 
+    def test_agent_passes_play_worthy_false_for_lodging_widening(self):
+        """源码级护栏：住宿补检索同样必须关掉玩点过滤（否则"补了却一条都没加回来"）。"""
+        import io
+        import pathlib
+
+        source = pathlib.Path(__file__).resolve().parents[1] / "api" / "agent.py"
+        with io.open(source, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("LODGING_WIDENING_KEYWORDS", text, "住宿补检索没接线")
+        lodging_block = text.split("LODGING_WIDENING_KEYWORDS")[-1][:600]
+        self.assertIn("play_worthy", lodging_block)
+        self.assertIn("cleaned_hotels = list(cleaned_hotels) + _added_hotels", lodging_block)
+
+
+class LodgingSupplyTests(unittest.TestCase):
+    """住宿候选下限（2026-10-05 横向对照实测：伊宁 3 天方案一晚住宿都没有）。
+
+    根因不是"伊宁没酒店"，而是生产关键词「品质酒店|高端度假酒店|高分精品住宿」在高德
+    对伊宁直接回 `count=0`，而同一时刻「酒店」回 count=86 / 30 条 POI。
+    """
+
+    def test_lodging_bar_is_two_choices_per_night(self):
+        from core.poi_pool import required_lodging_candidates
+
+        self.assertEqual(required_lodging_candidates(2), 4)
+        self.assertEqual(required_lodging_candidates(3), 6)
+        self.assertEqual(required_lodging_candidates(0), 2, "哪怕不算夜数，也要至少 2 家可比")
+        self.assertTrue(
+            needs_widening(0, required_lodging_candidates(2)),
+            "住宿候选为 0 是硬伤（伊宁真实事故），必须触发补检索",
+        )
+        self.assertTrue(needs_widening(1, required_lodging_candidates(1)), "只有 1 家没法挑")
+        self.assertFalse(needs_widening(6, required_lodging_candidates(3)))
+
+    def test_lodging_widening_keywords_cover_all_kinds_of_stays(self):
+        from core.poi_pool import LODGING_WIDENING_KEYWORDS
+
+        for keyword in ("酒店", "宾馆", "民宿", "客栈", "公寓"):
+            self.assertIn(keyword, LODGING_WIDENING_KEYWORDS)
+        # 实测口径：宽词检索"酒店"对伊宁回 30 条，而生产窄词回 0 条
+        self.assertNotIn("品质", LODGING_WIDENING_KEYWORDS, "兜底词不能再窄回去")
+
+
+class SubSpotCollapseTests(unittest.TestCase):
+    """同一景区的子景点合并（2026-10-05 伊宁实测：同一天排了 5 个"天山花海xx"）。
+
+    判据必须**同时**看名字前缀与位置：只按名字前缀合并会把真景区吃掉
+    （实测：伊犁州候选 43 条被误并 16 条，路线质量反而崩了）。
+    """
+
+    def test_tian_shan_hua_hai_sub_spots_collapse_to_one(self):
+        from core.poi_pool import collapse_sub_spots
+
+        # 坐标是同一个景区的几个子点（互相 1~3km）
+        items = [
+            {"name": "天山花海·花田柳林", "lnglat": [81.90, 43.75], "type": "风景名胜;风景名胜相关;旅游景点"},
+            {"name": "天山花海天山花园", "lnglat": [81.91, 43.76], "type": "风景名胜;风景名胜相关;旅游景点"},
+            {"name": "天山花海旅游景区木屋营地", "lnglat": [81.92, 43.74], "type": "风景名胜;风景名胜相关;旅游景点"},
+            {"name": "天山花海天泉餐厅", "lnglat": [81.90, 43.77], "type": "餐饮服务;餐饮相关场所;餐饮相关场所"},
+            {"name": "天山花海天山乐园", "lnglat": [81.93, 43.75], "type": "风景名胜;公园广场;公园"},
+        ]
+        kept, merged = collapse_sub_spots(items)
+        self.assertEqual(len(kept), 1, f"同一个景区只该留一个，实际 {[i['name'] for i in kept]}")
+        self.assertEqual(merged, 4)
+
+    def test_same_prefix_far_apart_stays_separate(self):
+        """前缀相同但相距很远 = 两个地方（这条是"误并 16 个"的教训）。"""
+        from core.poi_pool import collapse_sub_spots
+
+        items = [
+            {"name": "伊犁河旅游风景区", "lnglat": [81.30, 43.90]},
+            {"name": "伊犁河谷草原", "lnglat": [83.50, 43.20]},  # 同前缀，相距上百公里
+        ]
+        kept, merged = collapse_sub_spots(items)
+        self.assertEqual(merged, 0)
+        self.assertEqual(len(kept), 2)
+
+    def test_missing_coordinates_are_never_merged(self):
+        from core.poi_pool import collapse_sub_spots
+
+        kept, merged = collapse_sub_spots([{"name": "天山花海甲"}, {"name": "天山花海乙"}])
+        self.assertEqual(merged, 0, "没有坐标就无法判断是不是同一个地方，宁可不合并")
+        self.assertEqual(len(kept), 2)
+
+    def test_different_places_are_not_merged(self):
+        from core.poi_pool import collapse_sub_spots
+
+        items = [
+            {"name": "孔雀公园", "lnglat": [86.15, 41.75]},
+            {"name": "孔雀河景观带", "lnglat": [86.16, 41.76]},
+            {"name": "库尔勒市湿地公园", "lnglat": [86.20, 41.70]},
+            {"name": "博斯腾湖风景名胜区", "lnglat": [86.75, 41.98]},
+        ]
+        kept, merged = collapse_sub_spots(items)
+        self.assertEqual(merged, 0, f"不同地方不该被并掉，实际并掉 {merged}")
+        self.assertEqual(len(kept), 4)
+
+    def test_short_names_are_never_merged_away(self):
+        from core.poi_pool import collapse_sub_spots
+
+        kept, merged = collapse_sub_spots([{"name": "西湖"}, {"name": "东湖"}, {"name": "湖"}])
+        self.assertEqual(merged, 0)
+        self.assertEqual(len(kept), 3)
+
+    def test_the_shortest_name_is_the_one_kept(self):
+        from core.poi_pool import collapse_sub_spots
+
+        kept, _merged = collapse_sub_spots(
+            [
+                {"name": "博斯腾湖风景名胜区芦花港", "lnglat": [86.75, 41.98]},
+                {"name": "博斯腾湖风景名胜区", "lnglat": [86.76, 41.97]},
+            ]
+        )
+        self.assertEqual([item["name"] for item in kept], ["博斯腾湖风景名胜区"])
+
+    def test_the_main_scenic_area_beats_a_shorter_sub_spot(self):
+        """实测（2026-10-05 伊宁）：「天山花海天山乐园」比「天山花海旅游度假区」名字短，
+        只按长度选会把真正的景区顶掉，留下一个子点。"""
+        from core.poi_pool import collapse_sub_spots
+
+        kept, merged = collapse_sub_spots(
+            [
+                {"name": "天山花海天山乐园", "lnglat": [81.996847, 43.732182], "type": "风景名胜;风景名胜;风景名胜"},
+                {"name": "天山花海旅游度假区", "lnglat": [81.989914, 43.706884], "type": "风景名胜;风景名胜;风景名胜"},
+            ]
+        )
+        self.assertEqual(merged, 1)
+        self.assertEqual([item["name"] for item in kept], ["天山花海旅游度假区"])
+
+    def test_a_facility_or_hotel_is_never_the_representative(self):
+        """实测：只按名字长度选，「图开沙漠酒店」会当上「图开沙漠旅游度假区」这组的代表。"""
+        from core.poi_pool import collapse_sub_spots
+
+        kept, merged = collapse_sub_spots(
+            [
+                {"name": "图开沙漠酒店", "lnglat": [80.793468, 44.020034], "type": "住宿服务;宾馆酒店;宾馆酒店"},
+                {"name": "图开沙漠冰雪乐园", "lnglat": [80.809519, 44.020116], "type": "体育休闲服务;娱乐场所;游乐场"},
+            ]
+        )
+        self.assertEqual(merged, 1)
+        self.assertEqual([item["name"] for item in kept], ["图开沙漠冰雪乐园"])
+
+    def test_real_sub_spots_of_tian_shan_hua_hai_all_go_to_the_main_area(self):
+        """用探针抓到的**真实**高德数据（tools/probe_sub_spots.py）：24 条子点归到 1 个主景区。"""
+        from core.poi_pool import collapse_sub_spots
+
+        items = [
+            {"name": "天山花海旅游度假区", "lnglat": [81.989914, 43.706884]},
+            {"name": "天山花海天山乐园", "lnglat": [81.996847, 43.732182]},
+            {"name": "天山花海天山花园", "lnglat": [81.999285, 43.734208]},
+            {"name": "伊犁天山花海旅游景区停车场", "lnglat": [81.987972, 43.707341]},
+            {"name": "天山花海旅游景区房车营地", "lnglat": [82.006137, 43.740688]},
+            {"name": "天山花海·域见楠舍全景主题餐厅", "lnglat": [81.9963, 43.731788]},
+            {"name": "天山花海景区公共厕所", "lnglat": [81.989026, 43.706819]},
+            {"name": "天山花海旅游商品超市", "lnglat": [81.989776, 43.707131]},
+            {"name": "天山花海·花田柳林", "lnglat": [81.991419, 43.743657]},
+            {"name": "天鹅泉湿地公园", "lnglat": [81.649858, 43.699048]},
+            {"name": "天鹅泉湿地公园北停车场", "lnglat": [81.63173, 43.707739]},
+        ]
+        kept, merged = collapse_sub_spots(items)
+        names = [str(item["name"]) for item in kept]
+        self.assertIn("天山花海旅游度假区", names)
+        self.assertIn("天鹅泉湿地公园", names)
+        self.assertNotIn("天山花海天山乐园", names)
+        self.assertNotIn("天山花海景区公共厕所", names)
+        self.assertEqual(merged, 8)
+        self.assertEqual(len(kept), 3, names)
+
+    def test_punctuation_does_not_break_the_prefix(self):
+        from core.poi_pool import collapse_sub_spots
+
+        kept, merged = collapse_sub_spots(
+            [
+                {"name": "天山花海·花田柳林", "lnglat": [81.90, 43.75]},
+                {"name": "天山花海—天山花园", "lnglat": [81.91, 43.75]},
+            ]
+        )
+        self.assertEqual(merged, 1)
+        self.assertEqual(len(kept), 1)
+
 
 class CategoryFloorTests(unittest.TestCase):
     """类别下限兜底：真实缺口是"餐饮 50 个候选，top 里 0 个"。"""

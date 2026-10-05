@@ -428,6 +428,153 @@ class ParkTrimTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
 
 
+class LodgingEnsureTests(unittest.TestCase):
+    """每晚都要有住宿（2026-10-05 横向对照实测：伊宁 3 天方案一晚住宿都没有）。"""
+
+    def test_missing_night_gets_the_nearest_candidate(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        route = [
+            {"day": 1, "name": "赛里木湖", "lnglat": [81.18, 44.60]},
+            {"day": 1, "name": "伊宁希尔顿酒店", "lnglat": [81.34, 43.90]},
+            {"day": 2, "name": "喀赞其民俗旅游区", "lnglat": [81.33, 43.91]},
+            {"day": 2, "name": "伊犁河大桥", "lnglat": [81.35, 43.89]},
+        ]
+        pool = [
+            {"name": "伊宁温州国际大酒店", "lnglat": [81.32, 43.92]},
+            {"name": "乌鲁木齐环球酒店", "lnglat": [87.62, 43.83]},
+        ]
+        kept, actions, missing = ensure_lodging_per_night(route, nights=2, pool=pool)
+        self.assertEqual(missing, [])
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["code"], "lodging_added")
+        self.assertEqual(actions[0]["day"], 2)
+        self.assertEqual(actions[0]["to"], "伊宁温州国际大酒店", "要挑离当天行程最近的，而不是池子里第一个")
+        added = [node for node in kept if node.get("added_reason") == "missing_lodging_for_night"]
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0]["day"], 2)
+        self.assertTrue(added[0]["is_hotel"])
+
+    def test_days_that_already_have_lodging_are_left_alone(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        route = [
+            {"day": 1, "name": "博斯腾湖", "lnglat": [86.75, 41.98]},
+            {"day": 1, "name": "库尔勒康城建国酒店", "lnglat": [86.15, 41.73]},
+            {"day": 2, "name": "天鹅河景区", "lnglat": [86.14, 41.72]},
+            {"day": 2, "name": "库尔勒民宿小院", "lnglat": [86.16, 41.74]},
+        ]
+        kept, actions, missing = ensure_lodging_per_night(route, nights=2, pool=[{"name": "备用酒店"}])
+        self.assertEqual(actions, [])
+        self.assertEqual(missing, [])
+        self.assertEqual(len(kept), 4)
+
+    def test_empty_pool_reports_the_gap_instead_of_inventing_a_hotel(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        route = [{"day": 1, "name": "赛里木湖", "lnglat": [81.18, 44.60]}]
+        kept, actions, missing = ensure_lodging_per_night(route, nights=1, pool=[])
+        self.assertEqual(actions, [])
+        self.assertEqual(missing, [1], "候选池为空就必须如实报缺，绝不编一个酒店")
+        self.assertEqual(len(kept), 1)
+        self.assertFalse(any(node.get("is_hotel") for node in kept))
+
+    def test_the_same_hotel_is_never_reused_for_two_nights(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        route = [
+            {"day": 1, "name": "博斯腾湖", "lnglat": [86.75, 41.98]},
+            {"day": 2, "name": "天鹅河景区", "lnglat": [86.14, 41.72]},
+        ]
+        pool = [
+            {"name": "库尔勒康城建国酒店", "lnglat": [86.15, 41.73]},
+            {"name": "库尔勒东归宾馆", "lnglat": [86.16, 41.75]},
+        ]
+        kept, actions, missing = ensure_lodging_per_night(route, nights=2, pool=pool)
+        self.assertEqual(missing, [])
+        added = [str(node.get("name")) for node in kept if node.get("added_reason") == "missing_lodging_for_night"]
+        self.assertEqual(len(added), 2)
+        self.assertEqual(len(set(added)), 2, "两晚不能住同一家，池子里有第二个就必须用第二个")
+
+    def test_a_hotel_already_in_the_route_is_not_re_added_from_the_pool(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        route = [
+            {"day": 1, "name": "赛里木湖", "lnglat": [81.18, 44.60]},
+            {"day": 1, "name": "伊宁希尔顿酒店", "lnglat": [81.34, 43.90]},
+            {"day": 2, "name": "喀赞其民俗旅游区", "lnglat": [81.33, 43.91]},
+            {"day": 2, "name": "伊犁河大桥", "lnglat": [81.35, 43.89]},
+        ]
+        pool = [
+            {"name": "伊宁希尔顿酒店", "lnglat": [81.34, 43.90]},
+            {"name": "伊宁温州国际大酒店", "lnglat": [81.32, 43.92]},
+        ]
+        kept, actions, missing = ensure_lodging_per_night(route, nights=2, pool=pool)
+        self.assertEqual(missing, [])
+        self.assertEqual([action["to"] for action in actions], ["伊宁温州国际大酒店"])
+
+    def test_zero_nights_means_no_work(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        route = [{"day": 1, "name": "博斯腾湖", "lnglat": [86.75, 41.98]}]
+        kept, actions, missing = ensure_lodging_per_night(route, nights=0, pool=[{"name": "某酒店"}])
+        self.assertEqual((actions, missing), ([], []))
+        self.assertEqual(len(kept), 1)
+
+    def test_classify_is_used_when_the_name_gives_nothing_away(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        # 真实情况：酒店名可能完全不含"酒店"二字，只能靠高德类别认（住宿服务;宾馆酒店）
+        route = [
+            {"day": 1, "name": "博斯腾湖", "lnglat": [86.75, 41.98]},
+            {"day": 1, "name": "康城建国国际", "lnglat": [86.15, 41.73], "type": "住宿服务;宾馆酒店;宾馆酒店"},
+        ]
+        pool = [{"name": "库尔勒东归宾馆", "lnglat": [86.16, 41.75]}]
+
+        def classify(name, type_text, food_hint=False):
+            return "hotel" if "住宿" in str(type_text) else "scenic"
+
+        kept, actions, _missing = ensure_lodging_per_night(route, nights=1, pool=pool, classify=classify)
+        self.assertEqual(actions, [], "类别已经说明这天有住宿，就不该再加一个")
+        self.assertEqual(len(kept), 2)
+
+    def test_without_classify_an_unnamed_hotel_room_is_not_assumed(self):
+        from core.route_composition import ensure_lodging_per_night
+
+        route = [
+            {"day": 1, "name": "博斯腾湖", "lnglat": [86.75, 41.98]},
+            {"day": 1, "name": "康城建国国际", "lnglat": [86.15, 41.73], "type": "住宿服务;宾馆酒店;宾馆酒店"},
+        ]
+        pool = [{"name": "库尔勒东归宾馆", "lnglat": [86.16, 41.75]}]
+        _kept, actions, _missing = ensure_lodging_per_night(route, nights=1, pool=pool)
+        self.assertEqual(len(actions), 1, "没有类别信息时按「看不出是住宿」处理，宁可补一个也不留空")
+
+
+class LodgingDisclosureTests(unittest.TestCase):
+    def test_repaired_nights_and_remaining_gaps_are_disclosed(self):
+        from core.degradation import collect_degradations
+
+        payload = {
+            "lodging_repair": {
+                "actions": [{"code": "lodging_added", "day": 2, "to": "伊宁希尔顿酒店"}],
+                "missing_days": [3],
+            }
+        }
+        items = collect_degradations(payload).get("items", [])
+        repaired = next((item for item in items if "原本有晚上没安排住宿" in str(item.get("reason"))), None)
+        self.assertIsNotNone(repaired, items)
+        self.assertIn("第 2 晚→伊宁希尔顿酒店", str(repaired.get("reason")))
+        gap = next((item for item in items if "没有可用住宿候选" in str(item.get("reason"))), None)
+        self.assertIsNotNone(gap, items)
+        self.assertIn("第 3 晚", str(gap.get("reason")))
+
+    def test_nothing_repaired_and_nothing_missing_stays_quiet(self):
+        from core.degradation import collect_degradations
+
+        items = collect_degradations({"lodging_repair": {"actions": [], "missing_days": []}}).get("items", [])
+        self.assertFalse([item for item in items if "住宿" in str(item.get("reason"))])
+
+
 class ParkTrimDisclosureTests(unittest.TestCase):
     def test_trim_is_disclosed_with_names(self):
         from core.degradation import collect_degradations

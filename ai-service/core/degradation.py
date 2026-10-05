@@ -209,6 +209,11 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             detail = f"未取到 {round(unknown_ratio * 100)}% 的价格"
             if missing_names:
                 detail += "（" + "、".join(str(name) for name in missing_names) + "）"
+            timed_out = int(price_audit.get("timed_out") or 0)
+            if timed_out:
+                # 实测（2026-10-05）：取价预算用完时有节点根本没轮到，要说清是"没时间查"
+                # 而不是"网上搜不到" —— 两者的后续动作不一样。
+                detail += f"，其中 {timed_out} 个是取价预算用完没轮到（不是搜不到）"
             items.append(_entry("price_web", STATUS_DEGRADED, detail))
         elif total and verified_ratio < 0.999:
             items.append(_entry("price_web", STATUS_DEGRADED, "部分价格来自网络检索，按「估算」标明，不算已验证"))
@@ -254,8 +259,40 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.85) 住宿兜底（2026-10-04 实测发现：伊宁 3 天方案出现过"一晚都没住宿"）：
+    #       补上了要说明补在哪一晚；候选池真的没有的，如实说"需要你自己定"，绝不编一个酒店。
+    lodging_repair = _as_mapping(data.get("lodging_repair"))
+    lodging_actions = [item for item in (lodging_repair.get("actions") or []) if isinstance(item, Mapping)]
+    if lodging_actions:
+        parts = "、".join(f"第 {item.get('day')} 晚→{item.get('to')}" for item in lodging_actions[:3])
+        items.append(_entry("route_composition", STATUS_DEGRADED, f"原本有晚上没安排住宿，已补上：{parts}"))
+    missing_nights = list(lodging_repair.get("missing_days") or [])
+    if missing_nights:
+        items.append(
+            _entry(
+                "candidate_pool",
+                STATUS_MISSING,
+                "第 " + "、".join(str(day) for day in missing_nights) + " 晚没有可用住宿候选，需要你自己定",
+            )
+        )
+
     # 3.9) 城市公园限量落到实处（2026-10-04 用户口径：默认 1~2 个）：路线里超出的已被
     #      换成景区/美食或移出，动过什么要写清楚，别让用户以为方案自己"少了两个地方"。
+    # 3.95) 硬约束收口（2026-10-05 实测发现的闭环漏洞）：最终均衡/类别门禁会从候选池补节点，
+    #      可能把刚修好的约束又破坏掉；收口动作说明"最终门禁之后又修了一次"这件事真实发生过。
+    closeout = _as_mapping(data.get("hard_constraint_closeout"))
+    if closeout.get("error"):
+        items.append(_entry("route_composition", STATUS_MISSING, f"出稿前硬约束收口失败：{str(closeout.get('error'))[:100]}"))
+    closeout_actions = [str(item) for item in (closeout.get("actions") or []) if str(item).strip()]
+    if closeout_actions:
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                "最终均衡之后约束又被破坏过，已在出稿前重新收口：" + "；".join(closeout_actions[:3]),
+            )
+        )
+
     park_trim = _as_mapping(data.get("park_trim"))
     park_actions = [item for item in (park_trim.get("actions") or []) if isinstance(item, Mapping)]
     if park_actions:

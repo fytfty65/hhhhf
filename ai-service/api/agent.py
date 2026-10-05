@@ -36,11 +36,13 @@ from core.events import new_event  # 统一事件协议信封（correlation_id /
 # 而单测全绿（因为没有任何单测覆盖这条长生成器路径）。放在顶层，缺名字在导入时就暴露。
 from core.poi_pool import (
     FOOD_WIDENING_KEYWORDS,
+    LODGING_WIDENING_KEYWORDS,
     NEIGHBOR_SCENIC_KEYWORDS,
     SCENIC_WIDENING_KEYWORDS,
     amap_error_is_retryable,
     amap_error_note,
     attraction_query_limits,
+    collapse_sub_spots,
     dedupe_sub_spots,
     filter_by_radius,
     needs_widening,
@@ -48,6 +50,7 @@ from core.poi_pool import (
     park_cap,
     pool_supply_report,
     required_food_candidates,
+    required_lodging_candidates,
     required_scenic_candidates,
     scenic_radius_km,
     top_up_category_buckets,
@@ -60,6 +63,7 @@ from core.route_composition import (
     composition_hint as composition_hint_text,
     composition_targets,
     count_route_composition,
+    ensure_lodging_per_night,
     repair_forbidden_categories,
     scenic_tier,
     summarize_targets,
@@ -2470,6 +2474,18 @@ async def run_negotiate(msg: GatewayMessage):
                     pool_diagnostics["neighbor_error"] = str(_neighbor_exc)[:120]
                     print(f"⚠️ [周边景区] 补检索失败（不影响主流程）: {_neighbor_exc}", flush=True)
 
+            # 👑 同景区子景点合并（2026-10-05 伊宁实测）：高德会一次返回同一个景区的 5 个子点
+            #    （「天山花海·花田柳林」「天山花海天山花园」「天山花海旅游景区木屋营地」…），
+            #    名字互相不包含，所以更早的 dedupe_sub_spots 抓不住 —— 结果同一天排了 5 个
+            #    "天山花海xx"，看起来像 5 个景点。这里按名字前缀归并，只留最短的那条。
+            merged, _sub_merged = collapse_sub_spots(merged)
+            if _sub_merged:
+                pool_diagnostics["sub_spots_merged"] = _sub_merged
+                print(
+                    f"🧩 [子景点合并] 同一个景区的子景点合并掉 {_sub_merged} 个（保留最短的主名），候选 {len(merged)} 个",
+                    flush=True,
+                )
+
             return merged
 
         attractions_task = _fetch_attraction_mix()
@@ -2535,6 +2551,38 @@ async def run_negotiate(msg: GatewayMessage):
                 if any(bad in h_name for bad in ["餐", "菜", "火锅", "酒楼", "宴", "小吃", "面", "茶", "油漆", "体验店", "手机"]):
                     continue
                 cleaned_hotels.append(h)
+
+        # 👑 住宿候选兜底（2026-10-05 横向对照实测的真实事故，伊宁 3 天）：生产用的住宿关键词
+        #    「品质酒店|高端度假酒店|高分精品住宿」在高德对伊宁**直接回 count=0**，而同一时刻
+        #    「酒店」二字回 86 条 / 30 个 POI。于是住宿候选池为空 → lodging-agent 未参与协商 →
+        #    最终方案**一晚住宿都没有**（用户拿到的是"住哪儿没着落"的行程）。
+        #    这跟 2026-10-04 餐饮踩的是同一个坑：窄关键词把整类候选清空，所以补一次更宽的检索。
+        #    品质/档次排序交给后面的多目标裁决，不该在检索阶段就把整类清空。
+        if needs_widening(len(cleaned_hotels), required_lodging_candidates(max(1, trip_days - 1))):
+            _hotel_names = [str(item.get("name") or "") for item in cleaned_hotels if isinstance(item, dict)]
+            _hotel_widen = await widen_candidates(
+                toolbox.get_dynamic_pois,
+                city=target_city,
+                keywords=LODGING_WIDENING_KEYWORDS,
+                types="100000",
+                limit=30,
+                existing_names=_hotel_names,
+                # 与餐饮同理：住宿类别永远不属于"玩点类别"，必须显式关掉 strict_type，
+                # 否则补检索"看起来跑了却一条都没加回来"（餐饮踩过这个坑）。
+                fetch_kwargs={"play_worthy": False},
+            )
+            _added_hotels = _hotel_widen["added"]
+            if _added_hotels:
+                cleaned_hotels = list(cleaned_hotels) + _added_hotels
+                pool_diagnostics["widened"] = list(pool_diagnostics.get("widened") or []) + ["住宿"]
+                pool_diagnostics.setdefault("widened_added", {})["住宿"] = len(_added_hotels)
+                print(
+                    f"🔎 [候选补检索] 住宿候选只有 {len(_hotel_names)} 个 → 更宽检索补回 {len(_added_hotels)} 个",
+                    flush=True,
+                )
+            if _hotel_widen.get("error"):
+                pool_diagnostics["widening_error"] = _hotel_widen["error"]
+                print(f"⚠️ [候选补检索] 住宿补充检索失败（不影响主流程）: {_hotel_widen['error']}", flush=True)
 
         # Specialist runtime: these domain tasks run independently and return
         # validated proposals before the coordinator performs final route
@@ -4778,9 +4826,38 @@ async def run_negotiate(msg: GatewayMessage):
                                                 name=_name, value=None, source="web", provider="search"
                                             ) | {"error": f"{type(_lookup_exc).__name__}: {str(_lookup_exc)[:120]}"}
 
-                                    _observations = await asyncio.wait_for(
-                                        asyncio.gather(*[_lookup(item) for item in _targets]),
-                                        timeout=_price_budget,
+                                    # 👑 **每个节点各自扣减剩余预算**，不再用整体 wait_for 一刀切。
+                                    #    实测事故（2026-10-05 矩阵 4 个场景里 3 个）：整体
+                                    #    `wait_for(gather(...), 25s)` 一超时就抛 TimeoutError，**已经查到的
+                                    #    价格全部丢掉**，price_audit 只剩一个 error —— 界面上表现成
+                                    #    "取价这一步压根没跑"（查了几个/补到几条/来源可达全是 —）。
+                                    #    现在每个点自己带 deadline，超时只影响那一个点，其余结果照收。
+                                    import time as _time
+
+                                    _deadline = _time.monotonic() + float(_price_budget)
+
+                                    async def _lookup_bounded(_item: Dict[str, Any]) -> Dict[str, Any]:
+                                        from core.web_price_tool import build_observation
+
+                                        _remaining = _deadline - _time.monotonic()
+                                        _name = str(_item.get("name") or "")
+                                        if _remaining <= 0.5:
+                                            return build_observation(
+                                                name=_name, value=None, source="web", provider="search"
+                                            ) | {"timeout": True, "error": "整体预算已用完，这个点没轮到"}
+                                        try:
+                                            return await asyncio.wait_for(_lookup(_item), timeout=_remaining)
+                                        except asyncio.TimeoutError:
+                                            return build_observation(
+                                                name=_name, value=None, source="web", provider="search"
+                                            ) | {"timeout": True, "error": "单点取价超预算（来源慢或不可达）"}
+                                        except Exception as _bounded_exc:
+                                            return build_observation(
+                                                name=_name, value=None, source="web", provider="search"
+                                            ) | {"error": f"{type(_bounded_exc).__name__}: {str(_bounded_exc)[:120]}"}
+
+                                    _observations = await asyncio.gather(
+                                        *[_lookup_bounded(item) for item in _targets]
                                     )
                                     _merged = merge_observations(final_data, list(_observations))
                                     if _merged["updated"]:
@@ -4803,6 +4880,12 @@ async def run_negotiate(msg: GatewayMessage):
                                         item for item in (_observations or [])
                                         if isinstance(item, Mapping) and item.get("value") is not None
                                     ]
+                                    _timed_out = [
+                                        item for item in (_observations or [])
+                                        if isinstance(item, Mapping) and item.get("timeout")
+                                    ]
+                                    if not _attempt_error and _timed_out:
+                                        _attempt_error = str(_timed_out[0].get("error") or "单点取价超预算")[:160]
                                     final_data["price_audit"] = {
                                         **_merged["coverage"],
                                         "updated": len(_merged["updated"]),
@@ -4816,6 +4899,8 @@ async def run_negotiate(msg: GatewayMessage):
                                         "provider_status": {"error": _attempt_error} if _attempt_error else {},
                                         "looked_up": len(_targets),
                                         "filled_from_web": len(_filled),
+                                        # 超预算没查完的**如实计数**（不再是整段失败、一片空白）
+                                        "timed_out": len(_timed_out),
                                         # 预算只够查这么多：剩下的如实留给「需要你确认」，
                                         # 不让用户以为"系统把该查的都查了"
                                         "budget_seconds": _price_budget,
@@ -4823,7 +4908,9 @@ async def run_negotiate(msg: GatewayMessage):
                                     }
                                     print(
                                         f"🌐 [联网取价] 查了 {len(_targets)}/{_pending_total} 个缺价节点，补到 {len(_filled)} 条"
-                                        f"（预算 {_price_budget:.0f}s，来源可达={_reachable}）"
+                                        f"（预算 {_price_budget:.0f}s，来源可达={_reachable}"
+                                        + (f"，超预算 {len(_timed_out)} 个" if _timed_out else "")
+                                        + "）"
                                         + (f"；失败原因：{_attempt_error}" if _attempt_error else ""),
                                         flush=True,
                                     )
@@ -4965,6 +5052,41 @@ async def run_negotiate(msg: GatewayMessage):
                                 )
                         except Exception as _park_exc:  # 修复失败绝不影响出方案（对账仍会报超限）
                             final_data["park_trim"] = {"error": str(_park_exc)[:200]}
+
+                        # 👑 住宿兜底：**每晚都必须有住宿**（横向对照实测：伊宁 3 天方案一个住宿
+                        #    节点都没有，等于"住哪儿没着落"）。缺的那晚从候选里挑离当天行程最近的补上；
+                        #    池里没有可用的就如实报缺，绝不编一个酒店。
+                        try:
+                            _lodging_route, _lodging_actions, _missing_nights = ensure_lodging_per_night(
+                                final_data.get("route") or [],
+                                nights=max(1, trip_days - 1),
+                                pool=list(cleaned_hotels or []),
+                                classify=classify_poi_category,
+                            )
+                            if _lodging_actions or _missing_nights:
+                                if _lodging_actions:
+                                    final_data["route"] = _lodging_route
+                                    await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
+                                        "room_id": room_id, "city": target_city,
+                                        "action_count": len(_lodging_actions),
+                                        "action_codes": ["lodging_added"],
+                                        "examples": [
+                                            f"第 {item.get('day')} 晚补上 {item.get('to')}"
+                                            for item in _lodging_actions[:4]
+                                        ],
+                                        "correlation_id": plan_correlation_id,
+                                    }, room_id, correlation_id=plan_correlation_id, producer="validator")
+                                final_data["lodging_repair"] = {
+                                    "actions": _lodging_actions,
+                                    "missing_days": _missing_nights,
+                                }
+                                print(
+                                    f"🛏️ [住宿兜底] 补上 {len(_lodging_actions)} 晚"
+                                    + (f"；仍缺 {_missing_nights}（候选池里没有可用住宿）" if _missing_nights else ""),
+                                    flush=True,
+                                )
+                        except Exception as _lodging_exc:  # 兜底失败绝不影响出方案
+                            final_data["lodging_repair"] = {"error": str(_lodging_exc)[:200]}
 
                         # 👑 配比对账：实际排出来的构成 vs 用户口径算出的目标（默认自然=人文各半
                         # + 穿插美食住宿；明确偏好则加权）。对不上就如实记账，进"遗留问题"。
@@ -5279,6 +5401,166 @@ async def run_negotiate(msg: GatewayMessage):
                                 **final_data["daily_balance"],
                                 "category_balance": _mixed["audit"],
                             }
+
+                        # 👑 硬约束收口（2026-10-05 横向对照实测发现的闭环漏洞）：
+                        #    上面那些修复（排除项 / 公园限量 / 住宿兜底 / 日内现实性）全都跑在
+                        #    **最终均衡 + 类别门禁之前**，而 `rebalance_daily_route` /
+                        #    `enforce_category_mix` 会**从同一个候选池里按天补节点**（还会补酒店）。
+                        #    实测伊宁 3 天：日内修复把「天山花海」的 4 个子景点移出了，
+                        #    最终路线里它们**原样回来了**（同一天 5 个同景区子点），
+                        #    而我们还在报告里写着"已移出" —— 报的和做的不一致，比不报更糟。
+                        #    所以硬约束必须是**出稿前最后一道**，并且对账要按收口后的真实路线重算。
+                        try:
+                            _closeout_pool: List[Dict[str, Any]] = []
+                            for _item in list(unique_attractions or []) + list(unique_foods or []) + list(cleaned_hotels or []):
+                                if isinstance(_item, Mapping):
+                                    _closeout_pool.append(dict(_item))
+                            _closeout_center: List[float] = []
+                            _closeout_center_text = str(geo_info.get("center") or coord or "")
+                            if "," in _closeout_center_text:
+                                try:
+                                    _cl_text, _, _cla_text = _closeout_center_text.partition(",")
+                                    _closeout_center = [float(_cl_text), float(_cla_text)]
+                                except ValueError:
+                                    _closeout_center = []
+                            _closeout_tolerance = str(own_signals.get("distance_tolerance") or "normal")
+                            _closeout_summary: List[str] = []
+
+                            # 1) 用户禁令：门禁补分类时可能又把人文塞回来
+                            if own_signals.get("exclude_cultural"):
+                                _co_kept, _co_actions = repair_forbidden_categories(
+                                    final_data.get("route") or [],
+                                    forbidden=("cultural",),
+                                    classify=classify_poi_category,
+                                    pool=_closeout_pool,
+                                )
+                                if _co_actions:
+                                    final_data["route"] = _co_kept
+                                    _existing_exclusion = final_data.get("exclusion_repair") or {}
+                                    final_data["exclusion_repair"] = {
+                                        "forbidden": ["cultural"],
+                                        "actions": list(_existing_exclusion.get("actions") or [])
+                                        + [{**item, "stage": "final_closeout"} for item in _co_actions],
+                                    }
+                                    _closeout_summary.append(f"排除项又清掉 {len(_co_actions)} 处")
+
+                            # 2) 城市公园限量
+                            _co_park_cap = park_cap(
+                                trip_days,
+                                scenic_only=bool(own_signals.get("exclude_cultural")) and bool(own_signals.get("wants_scenic")),
+                                wants_park=bool(own_signals.get("wants_park")),
+                            )
+                            _co_park_kept, _co_park_actions = trim_category_over_cap(
+                                final_data.get("route") or [],
+                                cap=int(_co_park_cap or 0),
+                                classify=classify_poi_category,
+                                scenic_tier_of=scenic_tier,
+                                category="city_park",
+                                pool=_closeout_pool,
+                            )
+                            if _co_park_actions:
+                                final_data["route"] = _co_park_kept
+                                _existing_park = final_data.get("park_trim") or {}
+                                final_data["park_trim"] = {
+                                    "cap": int(_co_park_cap or 0),
+                                    "actions": list(_existing_park.get("actions") or [])
+                                    + [{**item, "stage": "final_closeout"} for item in _co_park_actions],
+                                }
+                                _closeout_summary.append(f"公园超限又处理 {len(_co_park_actions)} 处")
+
+                            # 3) 每晚住宿（门禁补酒店是好事，但它也可能把补过的天又弄丢）
+                            _co_lodge_route, _co_lodge_actions, _co_missing = ensure_lodging_per_night(
+                                final_data.get("route") or [],
+                                nights=max(1, trip_days - 1),
+                                pool=list(cleaned_hotels or []),
+                                classify=classify_poi_category,
+                            )
+                            if _co_lodge_actions or _co_missing:
+                                if _co_lodge_actions:
+                                    final_data["route"] = _co_lodge_route
+                                _existing_lodge = final_data.get("lodging_repair") or {}
+                                final_data["lodging_repair"] = {
+                                    "actions": list(_existing_lodge.get("actions") or [])
+                                    + [{**item, "stage": "final_closeout"} for item in _co_lodge_actions],
+                                    "missing_days": sorted(set(list(_existing_lodge.get("missing_days") or []) + list(_co_missing))),
+                                }
+                                if _co_lodge_actions:
+                                    _closeout_summary.append(f"住宿又补 {len(_co_lodge_actions)} 晚")
+
+                            # 4) 日内物理现实性（最容易被打回的一条：补节点正是"又塞远景区"的来源）
+                            _co_before = evaluate_travel_feasibility(
+                                final_data.get("route") or [],
+                                city_center=_closeout_center,
+                                distance_tolerance=_closeout_tolerance,
+                                days=trip_days,
+                            )
+                            if not _co_before.get("ok"):
+                                _co_kept_route, _co_moved = repair_day_overload(
+                                    final_data.get("route") or [],
+                                    city_center=_closeout_center,
+                                    distance_tolerance=_closeout_tolerance,
+                                )
+                                if _co_moved:
+                                    final_data["route"] = _co_kept_route
+                                    _existing_travel = final_data.get("travel_repair") or {}
+                                    final_data["travel_repair"] = {
+                                        "moved_out": list(_existing_travel.get("moved_out") or [])
+                                        + [
+                                            {
+                                                "name": str(item.get("name") or ""),
+                                                "day": item.get("day"),
+                                                "reason": item.get("removed_reason"),
+                                                "stage": "final_closeout",
+                                            }
+                                            for item in _co_moved
+                                        ],
+                                        "reason": "一天跑不了两个远景区",
+                                    }
+                                    _closeout_summary.append(f"日内又移出 {len(_co_moved)} 个")
+                                final_data["travel_feasibility"] = evaluate_travel_feasibility(
+                                    final_data.get("route") or [],
+                                    city_center=_closeout_center,
+                                    distance_tolerance=_closeout_tolerance,
+                                    days=trip_days,
+                                )
+
+                            # 5) 对账必须按**收口后的真实路线**重算（否则界面上的数字对不上实际路线）
+                            if _closeout_summary:
+                                _co_counts = count_route_composition(
+                                    final_data.get("route") or [], classify_poi_category, scenic_tier
+                                )
+                                _co_audit = composition_audit(
+                                    _co_counts,
+                                    composition,
+                                    forbidden=("cultural",) if own_signals.get("exclude_cultural") else (),
+                                )
+                                _co_urban_park = int(_co_counts.get("city_park") or 0)
+                                if _co_urban_park > int(_co_park_cap or 0):
+                                    _co_audit["notes"] = list(_co_audit.get("notes") or []) + [
+                                        f"城市公园排了 {_co_urban_park} 个，超过上限 {_co_park_cap} 个（想把公园换成景区/吃饭可以直接说）"
+                                    ]
+                                    _co_audit["ok"] = False
+                                composition["park_cap"] = int(_co_park_cap or 0)
+                                final_data["composition"] = {
+                                    **composition,
+                                    "actual": _co_counts,
+                                    "audit": _co_audit,
+                                    "recomputed_after_closeout": True,
+                                }
+                                final_data["hard_constraint_closeout"] = {
+                                    "actions": _closeout_summary,
+                                    "stage": "final_pre_emit",
+                                }
+                                print(
+                                    "🔒 [硬约束收口] 最终门禁之后重新收口：" + "；".join(_closeout_summary)
+                                    + f"｜收口后 自然景区={_co_counts.get('landmark')}/城市公园={_co_counts.get('city_park')}"
+                                    f"/人文={_co_counts.get('cultural')}/美食={_co_counts.get('food')}/住宿={_co_counts.get('hotel')}"
+                                    + ("" if _co_audit["ok"] else "｜仍有偏差：" + "；".join(_co_audit.get("notes") or [])),
+                                    flush=True,
+                                )
+                        except Exception as _closeout_exc:  # 收口失败绝不影响出方案（但要留痕）
+                            final_data["hard_constraint_closeout"] = {"error": str(_closeout_exc)[:200]}
+                            print(f"⚠️ [硬约束收口] 失败（不影响出方案）: {_closeout_exc}", flush=True)
                         _final_fairness = fairness_report(final_data["route"], fairness_members or room_members)
                         _fairness_meta = final_data.get("fairness") or {}
                         _threshold = float(_fairness_meta.get("threshold", 0.15) or 0.15)

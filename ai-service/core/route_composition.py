@@ -262,6 +262,116 @@ def composition_audit(
     }
 
 
+def ensure_lodging_per_night(
+    route: Sequence[Mapping[str, Any]],
+    *,
+    nights: int,
+    pool: Sequence[Mapping[str, Any]] = (),
+    classify=None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+    """每晚都必须有住宿：缺的那一晚从候选里**挑离当天行程最近的**补上。
+
+    为什么要有它（2026-10-05 横向对照实测）：伊宁 3 天方案里**一个住宿节点都没有**
+    （住宿候选池为空 → lodging-agent 未参与 → 模型也没排住宿），用户拿到的是
+    "住哪儿没着落"的行程。这是硬伤，不是风格问题。
+
+    规则：
+      - 逐天检查是否有住宿节点（按名称/类别判定）；
+      - 缺的那天从候选池挑**未使用过**且**离当天行程质心最近**的住宿；
+      - 候选池里没有可用住宿 → 记进 `missing_days`（**如实报缺，不编一个酒店**）。
+    """
+    import math
+
+    route_list = [dict(node) for node in route or [] if isinstance(node, Mapping)]
+    total_nights = max(0, int(nights or 0))
+    if total_nights <= 0:
+        return route_list, [], []
+
+    def is_hotel(node: Mapping[str, Any]) -> bool:
+        name = str(node.get("name") or node.get("location") or "")
+        if bool(node.get("is_hotel")):
+            return True
+        if any(word in name for word in ("酒店", "民宿", "宾馆", "客栈", "旅馆", "度假村")):
+            return True
+        if classify is None:
+            return False
+        try:
+            return str(classify(name, str(node.get("type") or ""), False) or "") == "hotel"
+        except Exception:
+            return False
+
+    def coord_of(node: Mapping[str, Any]) -> List[float]:
+        value = node.get("lnglat") or node.get("location")
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return [float(value[0]), float(value[1])]
+            except (TypeError, ValueError):
+                return []
+        if isinstance(value, str) and "," in value:
+            left, _, right = value.partition(",")
+            try:
+                return [float(left), float(right)]
+            except ValueError:
+                return []
+        return []
+
+    def haversine(a: Sequence[float], b: Sequence[float]) -> float:
+        if not a or not b or len(a) < 2 or len(b) < 2:
+            return float("inf")
+        lon1, lat1, lon2, lat2 = float(a[0]), float(a[1]), float(b[0]), float(b[1])
+        d_lat = math.radians(lat2 - lat1)
+        d_lon = math.radians(lon2 - lon1)
+        h = math.sin(d_lat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(d_lon / 2) ** 2
+        return 2 * 6371.0 * math.asin(math.sqrt(h))
+
+    used_names = {str(node.get("name") or node.get("location") or "") for node in route_list}
+    available = [
+        dict(item) for item in (pool or [])
+        if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+        and str(item.get("name")) not in used_names
+    ]
+
+    days = sorted({int(node.get("day") or 1) for node in route_list}) or [1]
+    actions: List[Dict[str, Any]] = []
+    missing_days: List[int] = []
+
+    for day in days[:total_nights]:
+        day_nodes = [node for node in route_list if int(node.get("day") or 1) == day]
+        if not day_nodes or any(is_hotel(node) for node in day_nodes):
+            continue
+        points = [coord_of(node) for node in day_nodes]
+        points = [point for point in points if point]
+        centroid = (
+            [sum(point[0] for point in points) / len(points), sum(point[1] for point in points) / len(points)]
+            if points
+            else []
+        )
+        if not available:
+            missing_days.append(day)
+            continue
+        best_index, best_distance = 0, float("inf")
+        for index, candidate in enumerate(available):
+            distance = haversine(centroid, coord_of(candidate))
+            if distance < best_distance:
+                best_index, best_distance = index, distance
+        chosen = available.pop(best_index)
+        used_names.add(str(chosen.get("name") or ""))
+        inserted = dict(chosen)
+        inserted["day"] = day
+        inserted["is_hotel"] = True
+        inserted.setdefault("type", "住宿服务;宾馆酒店;宾馆酒店")
+        inserted["added_reason"] = "missing_lodging_for_night"
+        route_list.append(inserted)
+        actions.append({
+            "code": "lodging_added",
+            "day": day,
+            "to": str(chosen.get("name") or ""),
+            "distance_km": None if best_distance == float("inf") else round(best_distance, 1),
+            "reason": "这一晚原本没有住宿，已按离当天行程最近补上",
+        })
+    return route_list, actions, missing_days
+
+
 def trim_category_over_cap(
     route: Sequence[Mapping[str, Any]],
     *,

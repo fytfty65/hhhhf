@@ -65,6 +65,23 @@ def amap_error_note(info: str, status: Any = "") -> str:
 # 而不是让方案看起来"就是这么点地方"。
 SCENIC_WIDENING_KEYWORDS = "景点|景区|公园|游玩|山|湖|河|草原|沙漠|峡谷|湿地|林|寺|古城"
 FOOD_WIDENING_KEYWORDS = "美食|餐厅|小吃|本地菜"
+# 住宿兜底关键词（2026-10-05 实测）：生产关键词「品质酒店|高端度假酒店|高分精品住宿」
+# 在伊宁直接回 count=0（而「酒店」回 86/30 条）。宽词只要能覆盖"住哪儿"的各类供给即可，
+# 品质排序交给后面的多目标裁决，不该在检索阶段就把整类清空。
+LODGING_WIDENING_KEYWORDS = "酒店|宾馆|民宿|客栈|公寓|青年旅舍"
+# 同一个景区的子点合并时，"配套设施/商业点"不能当代表（2026-10-05 实测：只按名字最短选，
+# 会把「图开沙漠酒店」当成「图开沙漠旅游度假区」这组的代表、「草原明珠店」当成「草原明珠」的代表）。
+SECONDARY_SPOT_MARKERS = (
+    "酒店", "宾馆", "民宿", "客栈", "旅社", "餐厅", "饭馆", "超市", "商店", "购物",
+    "停车场", "游客中心", "售票", "客服", "厕所", "卫生间", "区间车", "充电站",
+    "小区", "服务区", "收费站", "出入口", "大门", "营地", "农庄", "采摘园", "店",
+)
+# 反过来，"主景区"名字里通常带这些词 —— 合并时优先留它（实测：不优先，
+# 「天山花海天山乐园」这种子点会因为名字更短而顶掉真正的「天山花海旅游度假区」）。
+MAIN_SPOT_MARKERS = (
+    "景区", "风景区", "风景名胜区", "旅游度假区", "度假区", "自然保护区",
+    "森林公园", "地质公园", "国家公园", "湿地公园", "公园", "庄园", "古城", "古镇",
+)
 # 周边县市**景区专用**关键词：只用"公园"这类词搜出来的是市区公园，
 # 真景区要靠"风景名胜区/自然保护区/沙漠/峡谷/胡杨林/地质公园"这些词才搜得到。
 NEIGHBOR_SCENIC_KEYWORDS = "风景名胜区|自然保护区|沙漠|草原|峡谷|胡杨林|地质公园|国家森林公园|湖|湿地"
@@ -200,6 +217,73 @@ def dedupe_sub_spots(items: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str,
 
 
 
+def collapse_sub_spots(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    prefix_len: int = 4,
+    max_km: float = 5.0,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """同一个景区的多个"子景点"合并成一个（名字前缀相同 **且** 位置几乎重合）。
+
+    为什么要有它（2026-10-05 伊宁实测）：高德对伊宁一次返回了 **30 多条**「天山花海xx」
+    （天山花海·花田柳林 / 天山花海旅游景区木屋营地 / 天山花海天泉餐厅 / 天山花海景区公共厕所…），
+    它们**名字互相不包含**，所以 `dedupe_sub_spots`（只在"名字互相包含"时合并）抓不住；
+    结果同一天里排了 5 个"天山花海xx"，看起来像 5 个不同景点，实际用户只会去一个地方，
+    而且真景区被这些子点挤出了候选池。
+
+    判据必须**同时**满足两条，否则会误并（实测教训：只按前 4 个字合并，
+    伊犁州候选 40 条被并掉 8 条真景区）：
+      1. 去掉标点后前 `prefix_len` 个字相同；
+      2. 两点直线距离 ≤ `max_km`（同一景区的子点必然挨着）。
+    任一条不满足、或坐标缺失 → **不合并**（宁可多给一个，也不误并两个真景点）。
+
+    代表选谁：**先排除"配套设施/商业点"**（停车场/游客中心/售票/餐厅/酒店/超市…），
+    再取名字最短的。实测教训：只按"名字最短"选，会把「图开沙漠酒店」当成
+    「图开沙漠旅游度假区」这一组的代表、把「草原明珠店」当成「草原明珠」的代表 ——
+    留下的反而是商业点，真景区被并掉。
+    """
+    def _clean(name: str) -> str:
+        return "".join(ch for ch in str(name or "") if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+    def _rank(item: Mapping[str, Any]) -> Tuple[int, int, int]:
+        name = str(item.get("name") or "")
+        secondary = 1 if any(marker in name for marker in SECONDARY_SPOT_MARKERS) else 0
+        main = 0 if any(marker in name for marker in MAIN_SPOT_MARKERS) else 1
+        return (secondary, main, len(_clean(name)))
+
+    ordered = sorted(
+        (dict(item) for item in items if isinstance(item, Mapping) and str(item.get("name") or "").strip()),
+        key=_rank,
+    )
+    kept: List[Dict[str, Any]] = []
+    groups: Dict[str, List[Mapping[str, Any]]] = {}
+    for item in ordered:
+        cleaned = _clean(str(item.get("name") or ""))
+        key = cleaned[:prefix_len] if len(cleaned) >= prefix_len else ""
+        if key and key in groups:
+            coord = item.get("lnglat") if item.get("lnglat") is not None else item.get("location")
+            merged = False
+            for representative in groups[key]:
+                rep_coord = (
+                    representative.get("lnglat")
+                    if representative.get("lnglat") is not None
+                    else representative.get("location")
+                )
+                distance = haversine_km(rep_coord, coord)
+                # nan（缺坐标）或超出半径 → 不是同一个地方，不合并
+                if distance == distance and distance <= float(max_km):
+                    merged = True
+                    break
+            if merged:
+                continue
+            groups[key].append(item)
+        elif key:
+            groups[key] = [item]
+        kept.append(item)
+    total = len([item for item in items if isinstance(item, Mapping)])
+    return kept, max(0, total - len(kept))
+
+
 def required_daytime_slots(trip_days: int, daily_nodes: int) -> int:
     """排满行程需要的白天节点数（每天 daily_nodes 个）。"""
     days = max(1, int(trip_days or 1))
@@ -221,6 +305,19 @@ def required_food_candidates(trip_days: int) -> int:
     餐饮不是配菜：一天两顿是硬需求，所以阈值按"一天两顿"给。
     """
     return max(4, int(trip_days or 1) * 2)
+
+
+def required_lodging_candidates(nights: int) -> int:
+    """住宿候选的下限：每晚至少要有 2 家可比（一家选中、一家备选）。
+
+    真实事故（2026-10-05 横向对照实测，伊宁 3 天）：
+      生产用的住宿关键词是「品质酒店|高端度假酒店|高分精品住宿」，高德对**伊宁**直接回
+      `count=0`（同一时刻「酒店」二字回 count=86 / 30 条 POI，其中就有"伊宁宾馆(五星级)"）。
+      于是住宿候选池为空 → lodging-agent 未参与协商 → 最终方案**一晚住宿都没有**。
+      这和 2026-10-04 餐饮踩的是同一个坑：**窄关键词把整类候选清空**，而住宿没有任何兜底检索。
+    住宿是硬需求（"住哪儿"没着落等于方案不能用），所以按"每晚 2 家"设下限。
+    """
+    return max(2, int(nights or 0) * 2)
 
 
 def category_floor(intent: str, trip_days: int) -> int:
