@@ -316,6 +316,19 @@ def classify_poi_category(name: str, poi_type: str = "", is_hotel: bool = False)
         return "hotel"
     n = str(name or "").lower()
     t = str(poi_type or "").lower()
+    # 👑 餐饮 / 住宿 / 购物：**类别说了算**，名字里的"楼/馆/城"等字样不改变类别。
+    # 实测事故（2026-10-04 真实推演）：餐厅「西域楼兰焰一店」因为名字带"楼"被判成人文 →
+    # ① 在"排除人文"时被当成博物馆候选剔除；② 配比对账里被算成人文节点；
+    # ③ 提案分歧里报出一条根本不存在的"有人还提了你不要的类别"。
+    # 而"名字里的文化词优先于泛自然词"这条既有修正（针对天山博物院/湖畔展馆）必须保留 ——
+    # 它们的类别是科教文化/风景名胜，不落在这三个前缀里，所以互不影响。
+    _type_text = t
+    if _type_text.startswith("10") or any(k in _type_text for k in ["住宿", "酒店", "宾馆", "民宿"]):
+        return "hotel"
+    if _type_text.startswith("05") or any(k in _type_text for k in ["餐饮", "美食", "餐厅", "小吃"]):
+        return "food"
+    if _type_text.startswith("06") or any(k in _type_text for k in ["购物", "商场", "商业街", "商圈"]):
+        return "shopping"
     # 名称中的明确文化场馆词优先于“山/湖/公园”等泛自然词，
     # 避免“天山博物院”“湖畔展馆”被误分到 scenic，导致类别门禁误判。
     if any(k in n for k in _CULTURAL_KW) or any(k in t for k in ["博物馆", "博物院", "展馆", "展览馆", "科教", "文化"]):
@@ -2515,6 +2528,15 @@ async def run_negotiate(msg: GatewayMessage):
                 dining=unique_foods,
                 risk=[safety_intel] if isinstance(safety_intel, dict) else [],
                 budget=[],
+                # 实测缺口（2026-10-04）：这几个参数此前没传，于是健康智能体拿不到每日节点数、
+                # 住宿智能体拿不到夜数与预算 —— 它们在"提案分歧"里永远显示"未参与"，
+                # 也就是**根本没参与博弈**。现在把手上真实的上下文传进去。
+                profile=personalized_profile,
+                weather=weather_data if isinstance(weather_data, dict) else {},
+                daily_nodes=target_daily_count,
+                nights=max(1, trip_days - 1),
+                budget_total=float(total_calc_budget) if total_calc_budget else None,
+                route=[],
                 facts=request_facts,
             )
             specialist_runtime_result = await _runtime.execute(_runtime_requests)
@@ -2526,6 +2548,56 @@ async def run_negotiate(msg: GatewayMessage):
             specialist_runtime_result["facts_alignment"] = _facts_alignment
             if not _facts_alignment.get("aligned"):
                 print(f"⚠️ [统一事实] 有提案不是基于同一版事实：{_facts_alignment.get('mismatched')}", flush=True)
+
+            # 👑 提案分歧显式化（闭环第②–④段之间）：谁站在什么立场 / 谁和谁冲突 / 裁决凭什么。
+            #    没有这一条，"多智能体协同"在审计上跟"并行各算一遍"没有区别。
+            try:
+                from core.proposal_conflicts import build_proposal_conflicts
+
+                _conflict_facts = build_proposal_conflicts(
+                    specialist_runtime_result.get("proposals"),
+                    forbidden_categories=("cultural",) if own_signals.get("exclude_cultural") else (),
+                    distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
+                    classify=classify_poi_category,
+                )
+                specialist_runtime_result["proposal_conflicts"] = _conflict_facts
+                _codes = [str(item.get("code")) for item in _conflict_facts.get("conflicts") or []]
+                await event_bus.emit(OMNI_EVENTS_STREAM, "proposal.conflicts", {
+                    "room_id": room_id,
+                    "city": target_city,
+                    "facts_version": facts_version_string,
+                    "conflicts": _codes,
+                    "conflict_count": len(_codes),
+                    # 冲突细节（谁提了什么、差在哪）也进事件：否则审计只能看到"有冲突"，看不见冲突内容
+                    "details": [
+                        {
+                            "code": str(item.get("code")),
+                            "between": list(item.get("between") or []),
+                            "detail": str(item.get("detail") or "")[:200],
+                            "severity": str(item.get("severity") or ""),
+                        }
+                        for item in (_conflict_facts.get("conflicts") or [])[:5]
+                    ],
+                    "arbitration": [
+                        {"code": str(item.get("code")), "mechanism": str(item.get("mechanism"))}
+                        for item in (_conflict_facts.get("arbitration") or [])[:5]
+                    ],
+                    "inactive_agents": [str(item.get("agent_id")) for item in _conflict_facts.get("inactive") or []],
+                    "correlation_id": plan_correlation_id,
+                }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
+                print(
+                    f"⚔️ [提案分歧] {len(_codes)} 条：{_codes or '无显式分歧'}"
+                    + (
+                        "；未参与：" + str([str(item.get("agent_id")) for item in _conflict_facts.get("inactive") or []])
+                        if _conflict_facts.get("inactive")
+                        else ""
+                    ),
+                    flush=True,
+                )
+                for _conflict in (_conflict_facts.get("conflicts") or [])[:3]:
+                    print(f"   · {_conflict.get('code')}：{_conflict.get('detail')}", flush=True)
+            except Exception as _conflict_exc:  # 分歧记录失败绝不影响出方案
+                specialist_runtime_result["proposal_conflicts"] = {"error": str(_conflict_exc)[:200]}
             _gated = apply_candidate_gates(
                 {"attractions": unique_attractions, "dining": unique_foods, "lodging": cleaned_hotels},
                 specialist_runtime_result,
@@ -2581,6 +2653,23 @@ async def run_negotiate(msg: GatewayMessage):
                 "status": "degraded",
                 "error": str(_runtime_error)[:240],
             }
+
+        # 👑 候选池层面就剔除"用户明说不要"的类别：不让专业智能体拿到用户已经否掉的东西
+        #    （此前只在候选桶/提示词层面清空，`unique_attractions` 里仍然留着人文 →
+        #     提案里还带着博物馆，得靠后面的分歧检测 + 排除修复兜住）。
+        #    分歧检测与排除修复都保留：它们现在是安全网，不是主路径。
+        if own_signals.get("exclude_cultural") and unique_attractions:
+            _before_exclusion = len(unique_attractions)
+            unique_attractions = [
+                item for item in unique_attractions
+                if classify_poi_category(
+                    str(item.get("name") or ""), str(item.get("type") or ""), bool(item.get("is_hotel"))
+                ) != "cultural"
+            ]
+            _dropped_cultural = _before_exclusion - len(unique_attractions)
+            if _dropped_cultural:
+                pool_diagnostics["excluded_cultural_from_pool"] = _dropped_cultural
+                print(f"🚫 [排除人文] 候选池层面剔除 {_dropped_cultural} 个人文候选（不让智能体再拿它提案）", flush=True)
 
         # 景点与餐饮都属于可执行的白天节点。此前只统计景点会在长行程中
         # 过早降低 actual_daily_count，导致后续日期只剩住宿。
@@ -4738,6 +4827,18 @@ async def run_negotiate(msg: GatewayMessage):
                             # 事实记录里也带上提案阶段那一版快照的版本号：整轮规划可对齐
                             _facts["facts_version"] = facts_version_string
                             _facts["proposal_alignment"] = specialist_runtime_result.get("facts_alignment")
+                            # 提案分歧与裁决也进事实记录（"当时分歧在哪、凭什么这么定"）
+                            _conflict_record = specialist_runtime_result.get("proposal_conflicts") or {}
+                            _facts["proposal_conflicts"] = {
+                                "codes": [str(item.get("code")) for item in _conflict_record.get("conflicts") or []],
+                                "arbitration": [
+                                    {"code": str(item.get("code")), "mechanism": str(item.get("mechanism"))}
+                                    for item in _conflict_record.get("arbitration") or []
+                                ],
+                                "inactive_agents": [
+                                    str(item.get("agent_id")) for item in _conflict_record.get("inactive") or []
+                                ],
+                            }
                             await event_bus.emit(OMNI_EVENTS_STREAM, "plan.facts.ready", {
                                 "room_id": room_id,
                                 "user_id": user_id,
