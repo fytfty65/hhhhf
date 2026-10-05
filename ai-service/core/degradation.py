@@ -49,6 +49,10 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "行程配比",
         "impact": "这一趟的自然/人文/美食/住宿数量与你说的偏好有偏差，按实际排出来的算",
     },
+    "travel_feasibility": {
+        "label": "日内里程",
+        "impact": "同一天里的移动里程或远景区数量偏多，实际跑起来会赶",
+    },
     "transport_options": {
         "label": "跨城出行方式",
         "impact": "只能比时长，班次与票价按「未核实」标注",
@@ -216,6 +220,26 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                 "candidate_pool",
                 STATUS_MISSING if supply_status == "missing" else STATUS_DEGRADED,
                 supply_notes[0] if supply_notes else "本次真实候选偏少，部分地点靠模型知识补",
+            )
+        )
+
+    # 3.7) 日内物理现实性（硬约束过滤层，2026-10-04）：一天跑不完的行程要如实说，
+    #      包括"已自动移出多余远景区"这种情况（移出了什么也要写清楚）。
+    travel = _as_mapping(data.get("travel_feasibility"))
+    travel_notes = [str(item) for item in (travel.get("notes") or []) if str(item).strip()]
+    if travel.get("error"):
+        items.append(_entry("travel_feasibility", STATUS_MISSING, str(travel.get("error"))[:120]))
+    elif travel_notes:
+        items.append(_entry("travel_feasibility", STATUS_DEGRADED, "；".join(travel_notes[:2])))
+    repaired = _as_mapping(data.get("travel_repair"))
+    moved_out = list(repaired.get("moved_out") or [])
+    if moved_out:
+        names = "、".join(str(_as_mapping(item).get("name") or "") for item in moved_out[:3])
+        items.append(
+            _entry(
+                "travel_feasibility",
+                STATUS_DEGRADED,
+                f"一天跑不了两个远景区，已移出 {len(moved_out)} 个（{names}）；想保留可以说明愿意多留一天",
             )
         )
 

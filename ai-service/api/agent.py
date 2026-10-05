@@ -2219,6 +2219,10 @@ async def run_negotiate(msg: GatewayMessage):
         # 分领域检索后再合并，保证自然景区、文化、人文商业和特色餐饮都有真实候选。
         # 候选供给诊断：记录每一类真实候选有多少、有没有补检索（随方案如实下发）
         pool_diagnostics: Dict[str, Any] = {}
+        # geocode 结构化结果（province/city/district/level/center）：内层补检索往外层共用一个**可变字典**，
+        # 而不是内层重新绑定一个局部名 —— 实测坑：内层 `_geocode = ...` 只改内层局部变量，
+        # 外层硬约束过滤读它直接 NameError，还被兜底 except 吞掉（日志里什么都看不到）。
+        geo_info: Dict[str, Any] = {}
         # 提前初始化：保底路线的 except 分支也要能引用它（否则异常早于下面的赋值时会 NameError）
         candidate_supply: Dict[str, Any] = {}
         # 行程配比目标（用户口径）：默认自然=人文各半并穿插美食/住宿；明确说了偏好就加权。
@@ -2356,10 +2360,9 @@ async def run_negotiate(msg: GatewayMessage):
             # 检索，按行程长度限制距离（2 天 90km / 3-4 天 150km / 5 天以上 250km），
             # 并去掉同一景区的子景点（博斯腾湖的芦花港/阿洪口/码头只留主景区）。
             _neighbor_region = ""
-            _geocode: Dict[str, Any] = {}
             try:
-                _geocode = await toolbox.get_geocode(target_city)
-                _neighbor_region = parent_region(target_city, _geocode)
+                geo_info.update(await toolbox.get_geocode(target_city) or {})
+                _neighbor_region = parent_region(target_city, geo_info)
             except Exception as _geo_exc:
                 pool_diagnostics["neighbor_region_error"] = str(_geo_exc)[:120]
 
@@ -2367,7 +2370,7 @@ async def run_negotiate(msg: GatewayMessage):
                 try:
                     _radius = scenic_radius_km(trip_days, str(own_signals.get("distance_tolerance") or "normal"))
                     # 市中心坐标取 geocode 的 center（"lng,lat"）；拿不到就让距离筛选整体放行
-                    _center_text = str(_geocode.get("center") or "")
+                    _center_text = str(geo_info.get("center") or "")
                     _center_for_radius: List[float] = []
                     if "," in _center_text:
                         try:
@@ -4555,6 +4558,76 @@ async def run_negotiate(msg: GatewayMessage):
                             )
                         except Exception as _comp_exc:  # 对账失败绝不影响出方案
                             final_data["composition"] = {"error": str(_comp_exc)[:200]}
+
+                        # 👑 硬约束过滤：日内物理现实性（用户"不考虑距离"≠"一天能跑 500km"）。
+                        #    实测事故：3 天方案里同时排了博斯腾湖（47km）与巴音布鲁克（270km）。
+                        #    发现同一天塞了多个远景区就**移出多余的**（保留最近的，每天至少留一个），
+                        #    并把这件事写进事件流与「遗留问题」—— 这才是闭环里的"硬约束过滤"阶段。
+                        try:
+                            from core.travel_feasibility import (
+                                evaluate_travel_feasibility,
+                                repair_day_overload,
+                            )
+
+                            _center_for_check: List[float] = []
+                            _center_text_check = str(geo_info.get("center") or coord or "")
+                            if "," in _center_text_check:
+                                try:
+                                    _lng_check, _, _lat_check = _center_text_check.partition(",")
+                                    _center_for_check = [float(_lng_check), float(_lat_check)]
+                                except ValueError:
+                                    _center_for_check = []
+                            _before = evaluate_travel_feasibility(
+                                final_data.get("route") or [],
+                                city_center=_center_for_check,
+                                distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
+                                days=trip_days,
+                            )
+                            if not _before.get("ok"):
+                                _kept_route, _moved_out = repair_day_overload(
+                                    final_data.get("route") or [],
+                                    city_center=_center_for_check,
+                                    distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
+                                )
+                                if _moved_out:
+                                    final_data["route"] = _kept_route
+                                    final_data["travel_repair"] = {
+                                        "moved_out": [
+                                            {"name": str(item.get("name") or ""), "day": item.get("day"), "reason": item.get("removed_reason")}
+                                            for item in _moved_out
+                                        ],
+                                        "reason": "一天跑不了两个远景区",
+                                    }
+                                    await event_bus.emit(OMNI_EVENTS_STREAM, "route.repaired", {
+                                        "room_id": room_id, "city": target_city,
+                                        "action_count": len(_moved_out),
+                                        "action_codes": ["too_many_far_scenic_in_one_day"],
+                                        "moved_out": [str(item.get("name") or "") for item in _moved_out][:5],
+                                        "correlation_id": plan_correlation_id,
+                                    }, room_id, correlation_id=plan_correlation_id, producer="validator")
+                                _after = evaluate_travel_feasibility(
+                                    final_data.get("route") or [],
+                                    city_center=_center_for_check,
+                                    distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
+                                    days=trip_days,
+                                )
+                                final_data["travel_feasibility"] = _after
+                                if not _after.get("ok"):
+                                    await event_bus.emit(OMNI_EVENTS_STREAM, "constraint.failed", {
+                                        "room_id": room_id, "city": target_city,
+                                        "violations": _after.get("violations", [])[:10],
+                                        "total": len(_after.get("violations", [])),
+                                        "correlation_id": plan_correlation_id,
+                                    }, room_id, correlation_id=plan_correlation_id, producer="validator")
+                                print(
+                                    f"🚧 [硬约束过滤] 日内现实性：{'修复 ' + str(len(_moved_out)) + ' 个节点' if _moved_out else '无法自动修复'}"
+                                    f" → {'一致' if _after.get('ok') else _after.get('notes')}",
+                                    flush=True,
+                                )
+                            else:
+                                final_data["travel_feasibility"] = _before
+                        except Exception as _travel_exc:  # 检查失败绝不影响出方案
+                            final_data["travel_feasibility"] = {"error": str(_travel_exc)[:200]}
 
                         # 👑 数据降级登记：哪个数据源没取到、用户损失了什么，统一在这里说一次
                         # （文案只在 core/degradation.DATA_SOURCES 里定义，前端照抄渲染）。
