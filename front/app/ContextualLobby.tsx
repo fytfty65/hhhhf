@@ -37,6 +37,7 @@ import MafengwoStylePanel from './components/MafengwoStylePanel';
 // 按需加载：只在决策阶段出现，没必要进首屏包（实测直接 import 会让首屏 JS +6.5KB）。
 const PlanGovernancePanel = dynamic(() => import('./components/PlanGovernancePanel'), { ssr: false });
 import type { PlanGovernance } from './components/PlanGovernancePanel';
+import NegotiationDiagnostics from './components/NegotiationDiagnostics';
 
 // 系统图标与登录门户（自 ContextualLobby 拆分出来的展示型组件）
 import OmniLogo from './components/OmniLogo';
@@ -2236,6 +2237,12 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                     <div className="mt-3 rounded-xl border border-[#e9d8c5] bg-[#fff8ef] px-3 py-2.5 text-[11px] leading-5 text-[#6f4527]">
                       <span className="font-black">你可以直接这样调整：</span> 换成更省钱、减少每天节点、优先某位成员，或打开路线节点查看来源与替代项。技术指标只放在下面的“高级诊断”里，不影响普通使用。
                     </div>
+                    {/* 协商纪要 + 取价出处：属于"系统怎么想的"这类诊断信息，
+                        所以放在专业诊断层（按需展开），而不是行程核对面板里。 */}
+                    <NegotiationDiagnostics
+                      negotiation={planGovernance?.negotiation as any}
+                      priceAudit={planGovernance?.priceAudit as any}
+                    />
                     <div className="mt-4 border-t border-slate-200 pt-3">
                       <button type="button" data-testid="toggle-advanced-diagnostics" aria-expanded={showAdvancedDiagnostics} onClick={() => setShowAdvancedDiagnostics((open) => !open)} className="flex w-full items-center justify-between gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-slate-100">
                         <span className="flex items-center gap-1.5 text-[11px] font-black text-slate-700">{showAdvancedDiagnostics ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}高级诊断</span>

@@ -110,9 +110,17 @@ const GOVERNANCE_PAYLOAD = {
     still_unknown: ['城墙南门门票', '永兴坊美食'],
     summary: '补上 1 个价格；1 个查了没查到（保持未核实）；价格覆盖：可核实 40% / 未取到 40%',
     pending_summary: '2 项需要你确认：1 个住宿节点高德不提供房价；1 个节点没有可核实报价。点右侧入口可直接去核价。',
+    // 联网取价的实际结果（专业诊断里要显示"查了几个、补到几条、来源通不通"）
+    provider_reachable: true,
+    provider_status: {},
+    looked_up: 5,
+    filled_from_web: 2,
+    not_looked_up: 1,
+    budget_seconds: 25,
     pending: [
       { name: '钟楼酒店', kind: 'hotel', reason: '高德不提供房价，需要你确认', url: 'https://uri.amap.com/marker?position=108.94,34.26&name=x' },
-      { name: '城墙南门门票', kind: 'cultural', reason: '没有可核实报价，需要你确认', url: 'https://www.amap.com/search?query=x' },
+      { name: '城墙南门门票', kind: 'cultural', reason: '这是联网估算价（不是官方报价），可点开来源核对', url: 'https://www.xinjiang.gov.cn/ticket/45', estimated: true, value: 45 },
+      { name: '永兴坊美食', kind: 'food', reason: '没有可核实报价，需要你确认', url: 'https://www.amap.com/search?query=x' },
     ],
   },
   // 跨城腿比较：票价没有可核实来源时只比时长，并明确标注未核实（core/transport_options）
@@ -704,6 +712,32 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByTestId('composition-compare')).toContainText('实际：自然景区 3 · 人文 2 · 特色美食 2 · 住宿 1');
     await expect(compositionBlock).toContainText('城市公园另算 2 个，不顶自然的名额');
     await expect(panel.getByTestId('composition-notes')).toContainText('人文 2 个，目标 4 个（偏少）');
+
+    // 专业诊断（按需展开）：协商过程 + 取价出处 —— "系统怎么想的"要能查
+    await page.getByTestId('workspace-layer-more').click();
+    await page.getByTestId('workspace-layer-professional').click();
+    const diagnostics = page.getByTestId('professional-diagnostics');
+    await expect(diagnostics).toBeVisible({ timeout: 10_000 });
+    const negotiationDiag = page.getByTestId('negotiation-diagnostics');
+    await expect(negotiationDiag).toBeVisible();
+    await expect(page.getByTestId('diagnostics-facts-version')).toContainText('facts-v1-e2etest1');
+    await expect(page.getByTestId('diagnostics-stances')).toContainText('route-planner：远景区');
+    await expect(page.getByTestId('diagnostics-conflicts')).toContainText('路线侧有 2 个远景区');
+    await expect(page.getByTestId('diagnostics-arbitration')).toContainText('repair_day_overload');
+    await expect(page.getByTestId('diagnostics-revision')).toContainText('分歧已全部解决，协商结束');
+    await expect(page.getByTestId('diagnostics-inactive')).toContainText('budget-agent');
+    // 价格出处：查了几个、补到几条、以及**可点开的来源链接**
+    const provenance = page.getByTestId('diagnostics-price-provenance');
+    await expect(provenance).toContainText('联网查了 5 个缺价节点，补到 2 条');
+    await expect(provenance).toContainText('还有 1 个没查');
+    await expect(page.getByTestId('diagnostics-pending-links')).toContainText('这是联网估算价（不是官方报价），可点开来源核对');
+    // 出处链接必须指向**那条价格的真实来源**（按 href 精确定位；列表第一条是酒店的另一个链接）
+    await expect(
+      page.getByTestId('diagnostics-pending-links').locator('a[href="https://www.xinjiang.gov.cn/ticket/45"]'),
+    ).toHaveCount(1);
+
+    // 回到证据层，后面的断言仍按原路径走
+    await page.getByTestId('workspace-layer-evidence').click();
 
     // 协商纪要：谁参与 + 立场、分歧、裁决（含执行层）、谁没参与 —— 多智能体协同要看得见
     const negotiationBlock = panel.getByTestId('negotiation-block');
