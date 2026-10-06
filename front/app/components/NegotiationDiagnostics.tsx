@@ -46,6 +46,10 @@ type PriceAudit = {
   timed_out?: number;
   skipped_reason?: string;
   error?: string;
+  /** "有数字但只有网摘出处"的升级台账：试了几个、升级成可核实的是哪几个 */
+  unsourced_upgrade_attempted?: number;
+  upgraded_to_verifiable?: string[];
+  unsourced_after?: string[];
   pending?: { name?: string; kind?: string; reason?: string; url?: string; estimated?: boolean; value?: number | null }[];
 };
 
@@ -190,6 +194,15 @@ export default function NegotiationDiagnostics({
           {priceAudit?.provider_reachable === false && (
             <p className="mt-1 text-[11.5px] leading-relaxed text-amber-800">
               取价源不可达：{priceAudit.provider_status?.error || '未知原因'}
+            </p>
+          )}
+          {/* "有数字没出处"的台账：这些价格点开只有网摘，系统有没有试着换成官方页面要能看见 */}
+          {(priceAudit?.unsourced_upgrade_attempted ?? 0) > 0 && (
+            <p className="mt-1 text-[11.5px] leading-relaxed text-slate-600" data-testid="diagnostics-price-upgrade">
+              另有 {priceAudit?.unsourced_upgrade_attempted} 个价格原先只有网摘出处，已再查一次官方页面：
+              {(priceAudit?.upgraded_to_verifiable?.length ?? 0) > 0
+                ? `升级为可核实 ${priceAudit?.upgraded_to_verifiable?.length} 个（${(priceAudit?.upgraded_to_verifiable || []).slice(0, 3).join('、')}）`
+                : '这次没命中白名单官方页面，仍按"估算"标注'}
             </p>
           )}
           {priceAudit?.error && (

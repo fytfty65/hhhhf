@@ -118,6 +118,11 @@ const GOVERNANCE_PAYLOAD = {
     not_looked_up: 1,
     timed_out: 2,
     budget_seconds: 45,
+    // "有数字但只有网摘出处"的升级台账（core/price_sources.unsourced_price_claims +
+    // agent.py 取价第二轮）：点开只有网摘的价格，系统有没有试着换成官方页面
+    unsourced_upgrade_attempted: 2,
+    upgraded_to_verifiable: ['博斯腾湖'],
+    unsourced_after: ['城墙南门门票'],
     pending: [
       { name: '钟楼酒店', kind: 'hotel', reason: '高德不提供房价，需要你确认', url: 'https://uri.amap.com/marker?position=108.94,34.26&name=x' },
       { name: '城墙南门门票', kind: 'cultural', reason: '这是联网估算价（不是官方报价），可点开来源核对', url: 'https://www.xinjiang.gov.cn/ticket/45', estimated: true, value: 45 },
@@ -196,6 +201,18 @@ const GOVERNANCE_PAYLOAD = {
       { id: 'dietary', category: 'accessibility', text: '饮食要求：不吃辣', status: 'unverified', polarity: 'require', source: 'user_explicit', detail: '没有菜品级数据，是否满足无法核实' },
       { id: 'quota', category: 'change', text: '增加：美食 +2', status: 'partially_applied', polarity: 'require', source: 'user_explicit', detail: '要 2 个，只加上 1 个' },
     ],
+  },
+  // 节点级负反馈的落地情况（core/feedback_signals + agent.py）：
+  // 用户点过「不喜欢」的地点/写的原因，这一次到底改了没有 —— 必须渲染出来
+  feedback_applied: {
+    exclude_names: ['胡杨书院'],
+    distance_tolerance: 'low',
+    budget_tendency: null,
+    notes: [
+      '你上次把「胡杨书院」标为不喜欢（原因：太远了，来回太折腾），本次不再排它',
+      '你在反馈里提到「太远了，来回太折腾」，本次按就近安排：当天不再安排明显超出距离预算的远点',
+    ],
+    counts: { negative_total: 1, excluded: 1, distance: 1, price: 0 },
   },
   // 数据降级登记（core/degradation.collect_degradations）：文案与"用户损失"都由后端注册表给出
   degradations: {
@@ -472,6 +489,7 @@ async function installMocks(page: Page) {
                     composition: payload.governance.composition,
                     negotiation: payload.governance.negotiation,
                     facts: payload.governance.facts,
+                    feedback_applied: payload.governance.feedback_applied,
                   }),
               }),
             });
@@ -772,6 +790,9 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // "预算用完没轮到" ≠ "网上搜不到"：这两件事后续动作不一样，必须分开说
     await expect(provenance).toContainText('2 个是取价预算用完没轮到（不是搜不到）');
     await expect(provenance).toContainText('预算 45s');
+    // "有数字没出处"的台账：这些价格点开只有网摘，系统有没有试着换成官方页面要能看见
+    await expect(provenance).toContainText('另有 2 个价格原先只有网摘出处，已再查一次官方页面');
+    await expect(provenance).toContainText('升级为可核实 1 个（博斯腾湖）');
     await expect(page.getByTestId('diagnostics-pending-links')).toContainText('这是联网估算价（不是官方报价），可点开来源核对');
     // 出处链接必须指向**那条价格的真实来源**（按 href 精确定位；列表第一条是酒店的另一个链接）
     await expect(
@@ -837,6 +858,16 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // 价格核对：比例 + 还需补价的节点（未核实必须写明，不得当成 0 元）
     await expect(panel.getByText('价格核对')).toBeVisible();
     await expect(panel.getByText('已核实 2 项 · 需要你确认 2 项')).toBeVisible();
+
+    // 按你的反馈调整：用户点过「不喜欢」之后，系统到底改了什么必须看得见
+    // （后端算出来了、界面一个字没有 = 用户以为点了没用）
+    const feedbackBlock = panel.getByTestId('feedback-applied-block');
+    await expect(feedbackBlock).toBeVisible();
+    await expect(feedbackBlock).toContainText('按你的反馈调整');
+    await expect(feedbackBlock).toContainText('移出 1 个');
+    await expect(feedbackBlock).toContainText('你上次把「胡杨书院」标为不喜欢（原因：太远了，来回太折腾）');
+    await expect(feedbackBlock).toContainText('这次不再安排：胡杨书院');
+    await expect(feedbackBlock).toContainText('按"就近"收缩当天的距离半径');
     // "需要你确认"要逐条说清原因，并给可点开的核价入口（酒店房价尤其要写明高德不提供）
     await expect(page.getByTestId('price-pending')).toBeVisible();
     await expect(panel.getByText('高德不提供房价，需要你确认')).toBeVisible();

@@ -152,6 +152,19 @@ export type PlanGovernance = {
     missing_ids?: string[];
     error?: string;
   };
+  /**
+   * 节点级负反馈的落地情况：你点过"不喜欢"的地点/写下的原因，这一次到底改了没有。
+   *
+   * 为什么必须渲染：后端把"已按你的反馈移出「胡杨书院」、并改为就近安排"算出来了，
+   * 但界面上一个字都没有 —— 用户会以为点「不喜欢」没用（**没渲染出来的"已按反馈修正"等于没做**）。
+   */
+  feedbackApplied?: {
+    exclude_names?: string[];
+    distance_tolerance?: string;
+    budget_tendency?: string | null;
+    notes?: string[];
+    counts?: { negative_total?: number; excluded?: number; distance?: number; price?: number };
+  };
   /** 数据降级登记：哪个数据源没取到、用户损失了什么（文案由后端注册表给出） */
   degradations?: {
     items?: { source?: string; label?: string; impact?: string; status?: string; reason?: string }[];
@@ -381,7 +394,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation, feedbackApplied } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -408,6 +421,11 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
         (review.initial_hard_failures ?? 0) > (review.remaining_hard ?? 0)),
   );
   const hasConstraintBlock = Boolean(constraints && ((constraints.items?.length ?? 0) > 0 || constraints.error));
+  // 反馈落地：后端给了"排除了谁/改成了什么口径"才显示（缺字段不渲染空壳）
+  const hasFeedbackBlock = Boolean(
+    feedbackApplied &&
+      ((feedbackApplied.exclude_names?.length ?? 0) > 0 || (feedbackApplied.notes?.length ?? 0) > 0),
+  );
   const hasDegradationBlock = Boolean(
     degradations && ((degradations.items?.length ?? 0) > 0 || degradations.error),
   );
@@ -437,7 +455,8 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
     !hasBudgetBlock && !hasFallbackBlock && !hasHorizonBlock && !hasFailureBlock &&
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
     !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock &&
-    !hasReferenceProfileBlock && !hasCandidateSupplyBlock && !hasCompositionBlock && !hasNegotiationBlock
+    !hasReferenceProfileBlock && !hasCandidateSupplyBlock && !hasCompositionBlock && !hasNegotiationBlock &&
+    !hasFeedbackBlock
   ) {
     return null;
   }
@@ -495,6 +514,35 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+      {hasFeedbackBlock && (
+        <div
+          className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0"
+          data-testid="feedback-applied-block"
+        >
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<SlidersHorizontal className="h-3 w-3" />}>按你的反馈调整</SectionLabel>
+            {(feedbackApplied?.counts?.excluded ?? 0) > 0 && (
+              <span className="font-mono text-[12.5px] font-bold tabular-nums text-emerald-700">
+                移出 {feedbackApplied?.counts?.excluded} 个
+              </span>
+            )}
+          </div>
+          <ul className="mt-1.5 space-y-1">
+            {(feedbackApplied?.notes || []).slice(0, 3).map((note, index) => (
+              <li key={`feedback-note-${index}`} className="text-[12.5px] leading-relaxed text-slate-600">
+                <span className="text-slate-400">·</span>
+                <span className="ml-1">{note}</span>
+              </li>
+            ))}
+          </ul>
+          {(feedbackApplied?.exclude_names?.length ?? 0) > 0 && (
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">
+              这次不再安排：{(feedbackApplied?.exclude_names || []).join('、')}
+              {feedbackApplied?.distance_tolerance === 'low' ? '（并按"就近"收缩当天的距离半径）' : ''}
+            </p>
           )}
         </div>
       )}

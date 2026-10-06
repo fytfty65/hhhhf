@@ -1187,7 +1187,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         fd.quality || fd.budget_report || fd.fallback || fd.horizon ||
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
-          fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition || fd.negotiation || fd.facts,
+          fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition || fd.negotiation || fd.facts ||
+          fd.feedback_applied,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1217,6 +1218,9 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         negotiation: fd.negotiation ?? prev?.negotiation,
         // 统一事实记录：请求/约束/供应商/决策/结果/缺口，每条带来源与核实状态
         facts: fd.facts ?? prev?.facts,
+        // 节点级负反馈的落地情况：你点过"不喜欢"的地点/原因，这次到底改了没有
+        // （后端算出来了但界面不渲染 = 用户以为点了没用）
+        feedbackApplied: fd.feedback_applied ?? prev?.feedbackApplied,
       }));
     };
 
