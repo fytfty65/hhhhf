@@ -165,6 +165,20 @@ export type PlanGovernance = {
     notes?: string[];
     counts?: { negative_total?: number; excluded?: number; distance?: number; price?: number };
   };
+  /**
+   * 住宿候选的**供应商实价**清单：高德不给房价，所以"住哪"以前没有价格依据。
+   * 这份清单是用户的选择权（"同样的预算还有哪些有实价的可选"），必须能看见。
+   */
+  lodgingSupply?: {
+    status?: string;
+    error?: string;
+    count?: number;
+    with_price?: number;
+    added?: number;
+    nightly_cap?: number | null;
+    min_star?: number | null;
+    hotels?: { name?: string; price?: number | null; star?: number | null; address?: string; booking_url?: string; message?: string }[];
+  };
   /** 数据降级登记：哪个数据源没取到、用户损失了什么（文案由后端注册表给出） */
   degradations?: {
     items?: { source?: string; label?: string; impact?: string; status?: string; reason?: string }[];
@@ -394,7 +408,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation, feedbackApplied } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation, feedbackApplied, lodgingSupply } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -426,6 +440,10 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
     feedbackApplied &&
       ((feedbackApplied.exclude_names?.length ?? 0) > 0 || (feedbackApplied.notes?.length ?? 0) > 0),
   );
+  // 住宿实价候选：有清单才显示（没查到就不显示空壳，但错误要显示出来）
+  const hasLodgingSupplyBlock = Boolean(
+    lodgingSupply && ((lodgingSupply.hotels?.length ?? 0) > 0 || lodgingSupply.error),
+  );
   const hasDegradationBlock = Boolean(
     degradations && ((degradations.items?.length ?? 0) > 0 || degradations.error),
   );
@@ -456,7 +474,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
     !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock &&
     !hasReferenceProfileBlock && !hasCandidateSupplyBlock && !hasCompositionBlock && !hasNegotiationBlock &&
-    !hasFeedbackBlock
+    !hasFeedbackBlock && !hasLodgingSupplyBlock
   ) {
     return null;
   }
@@ -514,6 +532,58 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+      {hasLodgingSupplyBlock && (
+        <div
+          className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0"
+          data-testid="lodging-supply-block"
+        >
+          <div className="flex items-center justify-between">
+            <SectionLabel icon={<BedDouble className="h-3 w-3" />}>有实价的住宿可选</SectionLabel>
+            {typeof lodgingSupply?.with_price === 'number' && (
+              <span className="font-mono text-[12.5px] font-bold tabular-nums text-slate-600">
+                {lodgingSupply.with_price} 家有报价
+              </span>
+            )}
+          </div>
+          {lodgingSupply?.error ? (
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-500">
+              这次没拿到住宿实价候选（{lodgingSupply.error}）——`方案里的住宿仍按"需要你确认"处理。
+            </p>
+          ) : (
+            <>
+              <ul className="mt-1.5 space-y-1" data-testid="lodging-supply-list">
+                {(lodgingSupply?.hotels || []).slice(0, 4).map((hotel, index) => (
+                  <li key={`${hotel.name}-${index}`} className="text-[12.5px] leading-relaxed text-slate-600">
+                    <span className="font-bold text-slate-700">{hotel.name}</span>
+                    {hotel.price != null ? `：¥${hotel.price}/晚` : '：暂无报价'}
+                    {hotel.star != null ? `（${hotel.star} 星）` : ''}
+                    {hotel.address ? ` · ${hotel.address}` : ''}
+                    {hotel.booking_url ? (
+                      <>
+                        {' '}
+                        <a
+                          href={hotel.booking_url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="text-orange-700 underline decoration-dotted"
+                        >
+                          打开核对/预订
+                        </a>
+                      </>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-[11.5px] leading-relaxed text-slate-500">
+                以上是供应商返回的<span className="font-bold text-slate-600">可核实报价</span>（不是估算）
+                {lodgingSupply?.nightly_cap ? `，查询时按每晚上限 ¥${lodgingSupply.nightly_cap}` : ''}
+                {lodgingSupply?.min_star ? `、${lodgingSupply.min_star} 星以上` : ''}
+                ；选哪家由你定，方案里排的那家只是当前推荐。
+              </p>
+            </>
           )}
         </div>
       )}

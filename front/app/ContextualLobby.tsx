@@ -1188,7 +1188,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
           fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition || fd.negotiation || fd.facts ||
-          fd.feedback_applied,
+          fd.feedback_applied || fd.lodging_supply,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1221,6 +1221,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         // 节点级负反馈的落地情况：你点过"不喜欢"的地点/原因，这次到底改了没有
         // （后端算出来了但界面不渲染 = 用户以为点了没用）
         feedbackApplied: fd.feedback_applied ?? prev?.feedbackApplied,
+        // 住宿候选的供应商实价清单：同样的预算还有哪些有实价的可选（用户的选择权）
+        lodgingSupply: fd.lodging_supply ?? prev?.lodgingSupply,
       }));
     };
 

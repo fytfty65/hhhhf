@@ -227,6 +227,20 @@ const GOVERNANCE_PAYLOAD = {
     ],
     counts: { negative_total: 1, excluded: 1, distance: 1, price: 0 },
   },
+  // 住宿候选的供应商实价清单（core/rollinggo_mcp.search_hotels + agent.py）：
+  // 同样的预算还有哪些**有实价**的可选 —— 这是"住哪"的选择权，必须渲染
+  lodging_supply: {
+    status: 'ok',
+    count: 6,
+    with_price: 6,
+    added: 5,
+    nightly_cap: 1080,
+    min_star: 4,
+    hotels: [
+      { name: '库尔勒福润德·万达锦华酒店', price: 285, star: 5, address: '圣果路2号福润德大厦C座', booking_url: 'https://rollinggo.cn/pages/hotel/detail/index?id=1' },
+      { name: '维也纳国际酒店(库尔勒天鹅河店)', price: 694, star: 4, address: '民心路5号', booking_url: 'https://rollinggo.cn/pages/hotel/detail/index?id=2' },
+    ],
+  },
   // 数据降级登记（core/degradation.collect_degradations）：文案与"用户损失"都由后端注册表给出
   degradations: {
     total: 2,
@@ -503,6 +517,7 @@ async function installMocks(page: Page) {
                     negotiation: payload.governance.negotiation,
                     facts: payload.governance.facts,
                     feedback_applied: payload.governance.feedback_applied,
+                    lodging_supply: payload.governance.lodging_supply,
                   }),
               }),
             });
@@ -886,6 +901,19 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(feedbackBlock).toContainText('你上次把「胡杨书院」标为不喜欢（原因：太远了，来回太折腾）');
     await expect(feedbackBlock).toContainText('这次不再安排：胡杨书院');
     await expect(feedbackBlock).toContainText('按"就近"收缩当天的距离半径');
+
+    // 住宿实价候选：同样的预算还有哪些**有实价**的可选（"住哪"的选择权）
+    const lodgingSupply = panel.getByTestId('lodging-supply-block');
+    await expect(lodgingSupply).toBeVisible();
+    await expect(lodgingSupply).toContainText('有实价的住宿可选');
+    await expect(lodgingSupply).toContainText('6 家有报价');
+    await expect(panel.getByTestId('lodging-supply-list')).toContainText('库尔勒福润德·万达锦华酒店：¥285/晚（5 星）');
+    await expect(panel.getByTestId('lodging-supply-list')).toContainText('维也纳国际酒店(库尔勒天鹅河店)：¥694/晚（4 星）');
+    await expect(lodgingSupply).toContainText('供应商返回的可核实报价（不是估算）');
+    await expect(lodgingSupply).toContainText('每晚上限 ¥1080');
+    await expect(
+      panel.getByTestId('lodging-supply-list').locator('a[href="https://rollinggo.cn/pages/hotel/detail/index?id=1"]'),
+    ).toHaveCount(1);
     // "需要你确认"要逐条说清原因，并给可点开的核价入口（酒店房价尤其要写明高德不提供）
     await expect(page.getByTestId('price-pending')).toBeVisible();
     await expect(panel.getByText('高德不提供房价，需要你确认')).toBeVisible();
