@@ -882,6 +882,71 @@ class PreferOfficialUpgradeTests(unittest.TestCase):
         self.assertTrue(observation["estimated"])
 
 
+class FetchStableTests(unittest.TestCase):
+    """偶发抓取失败要重试一次（2026-10-05 实测：真实方案里白名单 gov.cn 页面抓失败过）。"""
+
+    def test_transient_failure_is_retried_and_then_succeeds(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        calls = []
+
+        async def flaky_fetch(url, **_kwargs):
+            calls.append(url)
+            if len(calls) == 1:
+                return {"ok": False, "url": url, "error": "ReadTimeout: 读取超时"}
+            return {"ok": True, "url": url, "text": "景区门票 45 元", "retrieved_at": 1.0}
+
+        with mock.patch("core.web_price_tool.fetch_page_text", flaky_fetch):
+            result = asyncio.run(web_price_tool.fetch_page_text_stable("https://www.xjyn.gov.cn/a.shtml"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 2, "偶发失败应重试一次")
+
+    def test_persistent_failure_stops_at_the_attempt_limit(self):
+        """持续失败不做无界重试：预算有限，失败原因多半是持续性的。"""
+        import asyncio
+
+        from core import web_price_tool
+
+        calls = []
+
+        async def dead_fetch(url, **_kwargs):
+            calls.append(url)
+            return {"ok": False, "url": url, "error": "HTTP 403"}
+
+        with mock.patch("core.web_price_tool.fetch_page_text", dead_fetch):
+            result = asyncio.run(web_price_tool.fetch_page_text_stable("https://www.xjyn.gov.cn/a.shtml"))
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(calls), 2, "默认最多两次")
+
+    def test_lookup_uses_the_retrying_fetch(self):
+        """"偶发失败 → 退回网摘估算"这件事要真的被挡住：取价里必须用重试版抓取。"""
+        import asyncio
+
+        from core import web_price_tool
+
+        calls = []
+
+        async def fake_search(query, max_results=3):
+            return [
+                {"title": "文化馆免费开放", "snippet": "免费开放", "url": "https://www.xjyn.gov.cn/a.shtml", "provider": "baidu"},
+            ]
+
+        async def flaky_fetch(url, **_kwargs):
+            calls.append(url)
+            if len(calls) == 1:
+                return {"ok": False, "url": url, "error": "ReadTimeout: 读取超时"}
+            return {"ok": True, "url": url, "text": "伊宁县文化馆免费开放服务公示", "retrieved_at": 1.0}
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            with mock.patch("core.web_price_tool.fetch_page_text", flaky_fetch):
+                observation = asyncio.run(web_price_tool.lookup_price("伊宁县文化艺术中心", "伊宁"))
+        self.assertEqual(observation["source"], "web_page", observation)
+        self.assertFalse(observation["estimated"], "官方页面正文来的价格按可核实计")
+        self.assertEqual(len(calls), 2)
+
+
 class PriceStepBudgetTests(unittest.TestCase):
     """取价这一步不能"一超时就整段作废"（2026-10-05 矩阵实测：4 个场景里 3 个只剩一个 error）。
 

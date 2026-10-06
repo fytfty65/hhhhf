@@ -294,6 +294,24 @@ async def fetch_page_text(url: str, *, timeout: Optional[float] = None) -> Dict[
     return {"ok": True, "url": str(url), "text": text, "retrieved_at": time.time()}
 
 
+async def fetch_page_text_stable(url: str, *, attempts: int = 2, timeout: Optional[float] = None) -> Dict[str, Any]:
+    """抓官方页面正文：失败**重试一次**（默认最多 2 次）。
+
+    为什么值得重试（2026-10-05 实测）：伊宁方案里「伊宁县文化艺术中心」拿到了
+    `¥0（web）`，而它的来源 URL 是 `xjyn.gov.cn`（白名单里的政府页）——说明当时**直抓失败了**，
+    只能退回搜索结果摘要，来源因此从"可核实"掉成"估算"。事后单独再抓同一个 URL：
+    `ok=True`、正文里就写着"文化馆免费开放" —— 那次失败是**偶发**的（超时/连接抖动）。
+    一个点的代价是一次请求，换回来的是一次"估算 → 可核实"的翻转，值。
+    上限写死为 `attempts`：不做无界重试（预算有限，且失败原因多半是持续性的）。
+    """
+    last: Dict[str, Any] = {"ok": False, "url": str(url), "error": "未尝试"}
+    for _ in range(max(1, int(attempts))):
+        last = await fetch_page_text(url, timeout=timeout)
+        if last.get("ok"):
+            return last
+    return last
+
+
 async def probe_providers(*, query: str = "库尔勒 门票 价格") -> Dict[str, Any]:
     """诊断每个取价提供方能不能用。**第一个能用的就停**，且每个源都有独立超时预算。
 
@@ -990,7 +1008,7 @@ async def lookup_price(
     page_urls = allowed_urls[:3] if prefer_official else allowed_urls[:1]
 
     for page_url in page_urls:
-        page = await fetch_page_text(page_url)
+        page = await fetch_page_text_stable(page_url)
         if not page.get("ok"):
             continue
         candidates = extract_price_candidates(str(page.get("text") or ""))
