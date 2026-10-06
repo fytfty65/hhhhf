@@ -1055,9 +1055,10 @@ class PriceStepBudgetTests(unittest.TestCase):
         """
         text = self._source()
         self.assertIn("_per_point_cap = max(", text)
-        self.assertIn("for _index, _item in enumerate(_targets):", text)
+        # 酒店走 RollingGo（供应商只读 MCP）之后，联网取价只跑剩下的节点
+        self.assertIn("for _index, _item in enumerate(_web_targets):", text)
         self.assertIn("_observations.append(await _lookup_bounded(_item))", text)
-        self.assertNotIn("asyncio.gather(\n                                        *[_lookup_bounded(item) for item in _targets]", text)
+        self.assertNotIn("asyncio.gather(\n                                        *[_lookup_bounded(item) for item in _web_targets]", text)
 
     def test_the_whole_price_step_is_not_wrapped_in_a_global_timeout(self):
         text = self._source()

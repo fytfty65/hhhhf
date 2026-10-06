@@ -25,11 +25,21 @@ from .plan_quality import PREFERENCE_TAXONOMY, node_name, nodes_of
 TIER_LEVELS = {"free": 0, "economy": 1, "comfort": 2, "quality": 3, "luxury": 4}
 
 
+# 供应商类别里的**住宿**标记：高德把住宿统一标成「住宿服务」，比名字里的关键词可靠得多。
+LODGING_TYPE_MARKERS = ("住宿", "酒店", "宾馆", "旅馆", "民宿", "客栈", "青旅", "公寓")
+
+
 def intent_of(value: Any) -> str:
-    """节点或纯文本 → 意图标签（显式意图优先，其次按 PREFERENCE_TAXONOMY 关键词）。
+    """节点或纯文本 → 意图标签（显式意图优先，其次**供应商类别**，最后才按名字关键词）。
 
     显式优先很重要：候选池条目与我们插入的节点都带 `intent`/`tags`，
     若只按中文关键词猜，"蒲城会馆"这类名字会被判成 other，响应度与配额核对都会算错。
+
+    ⚠️ 类别优先于名字（2026-10-05 真实推演抓到的错判）：
+    喀什的「**古城**昆仑塔逸扉度假酒店」名字里有"古城"，关键词扫描先撞上 `cultural`，
+    于是这家住宿被判成人文 —— 后果是住宿实时房价那一步**跳过了它**（只在查 hotel 意图的节点），
+    最终方案里它一直是"暂无供应商数据"。而它的 `type` 明明是 `住宿服务`。
+    所以：先看供应商给的类别，再退回名字关键词（名字本身有歧义，类别没有）。
     """
     if isinstance(value, Mapping):
         explicit = str(value.get("intent") or "").strip()
@@ -41,7 +51,10 @@ def intent_of(value: Any) -> str:
                 label = str(tag).strip()
                 if label in PREFERENCE_TAXONOMY:
                     return label
-        text = f"{node_name(value)} {value.get('type') or ''} {value.get('desc') or ''}"
+        poi_type = str(value.get("type") or "")
+        if value.get("is_hotel") is True or any(marker in poi_type for marker in LODGING_TYPE_MARKERS):
+            return "hotel"
+        text = f"{node_name(value)} {poi_type} {value.get('desc') or ''}"
         if isinstance(tags, list):
             text += " " + " ".join(str(tag) for tag in tags)
     else:

@@ -5417,9 +5417,21 @@ async def run_negotiate(msg: GatewayMessage):
                                     include_estimated=True,
                                     include_unsourced=True,
                                 )
+                                # 住宿**不在这里**查：硬约束收口（settle_lodging）之后还会补/换酒店，
+                                # 早查的房价会随着换店丢掉（2026-10-05 实测：取价查的是"库尔勒园林宾馆
+                                # ¥165"，收口后最终节点是"瑞德假日酒店"，价格白查）。住宿价格统一放到
+                                # 收口之后用供应商只读 MCP 查（见下方 `price_lodging_nodes`）。
+                                _web_targets = [item for item in _targets if str(item.get("intent") or "") != "hotel"]
                                 _pending_total = len(pending_price_report(final_data)["pending"])
                                 _fetcher = getattr(toolbox, "get_real_time_web_price", None)
-                                if _targets and _fetcher:
+
+                                # 住宿价格**不在这里**查：硬约束收口（settle_lodging）之后还会补/换酒店，
+                                # 早查的房价会随着换店一起丢掉（2026-10-05 实测：取价阶段查到的是
+                                # 「库尔勒园林宾馆 ¥165」，收口后最终节点换成「瑞德假日酒店」，
+                                # 最终方案里住宿仍是"暂无供应商数据"）。住宿统一放到收口之后用
+                                # 供应商只读 MCP 查 —— 见下方 `price_lodging_nodes`。
+
+                                if _web_targets and _fetcher:
                                     async def _lookup(
                                         _item: Dict[str, Any], *, prefer_official: bool = False
                                     ) -> Dict[str, Any]:
@@ -5490,7 +5502,9 @@ async def run_negotiate(msg: GatewayMessage):
 
                                     _observations = []
                                     _early_stop_reason = ""
-                                    for _index, _item in enumerate(_targets):
+                                    # 酒店已经由 RollingGo（可核实来源）查过，这里只跑**剩下的**缺价节点：
+                                    # 否则"所有源连续失败"的早停会被酒店查询的结果干扰，白等一轮。
+                                    for _index, _item in enumerate(_web_targets):
                                         # 👑 早停（2026-10-05 实测）：所有源都不可用时，
                                         #    逐点重试只是白白花掉 20 多秒（实测 27.4s、补到 0 条）。
                                         #    前两个点都没换来任何价格、且最近一次尝试没有任何源成功过，
@@ -5662,7 +5676,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         "not_looked_up": max(0, _pending_total - len(_targets)),
                                     }
                                     print(
-                                        f"🌐 [联网取价] 查了 {len(_targets)}/{_pending_total} 个缺价节点，补到 {len(_filled)} 条"
+                                        f"🌐 [联网取价] 查了 {len(_web_targets)} 个缺价节点，补到 {len(_filled)} 条"
                                         f"（预算 {_price_budget:.0f}s，来源可达={_reachable}"
                                         + (f"，超预算 {len(_timed_out)} 个" if _timed_out else "")
                                         + "）"
@@ -6422,6 +6436,75 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["route"] = order_route_by_day(final_data.get("route") or [])
                         except Exception as _order_exc:  # 排序失败不影响出方案
                             print(f"⚠️ [路线排序] 按天排序失败（不影响出方案）: {_order_exc}", flush=True)
+
+                        # 👑 酒店实时房价（供应商只读 MCP）—— **必须放在住宿定型之后**：
+                        #    硬约束收口的最后一道是 `settle_lodging`（会补/换酒店），
+                        #    取价阶段查到的房价会随着换店一起丢掉（2026-10-05 实测：
+                        #    取价查的是「库尔勒园林宾馆 ¥165」，收口后最终节点换了别家）。
+                        #    实测真实方案里的酒店名 4/5 能在供应商查到实价（¥131/¥316/¥635…），
+                        #    这正是"高德不提供房价"这个最大缺口唯一的真来源。
+                        #    只读白名单写死在 `core/rollinggo_mcp.READ_ONLY_TOOLS`，绝不下单/取消。
+                        try:
+                            from core.rollinggo_mcp import price_lodging_nodes
+
+                            _lodging_price = await price_lodging_nodes(
+                                final_data,
+                                city=target_city,
+                                nights=max(1, trip_days - 1),
+                                start_date=str(user_prefs.get("start_date") or ""),
+                                limit=3,
+                            )
+                            if isinstance(_lodging_price.get("plan"), dict) and isinstance(
+                                _lodging_price["plan"].get("route"), list
+                            ):
+                                final_data["route"] = _lodging_price["plan"]["route"]
+                            _lodging_report = _lodging_price.get("report") or {}
+                            final_data["price_audit"] = {
+                                **(final_data.get("price_audit") or {}),
+                                "rollinggo": _lodging_report,
+                            }
+                            if _lodging_report.get("enabled"):
+                                print(
+                                    f"🏨 [酒店实时价] 供应商只读 MCP 查 {_lodging_report.get('queried', 0)} 家，"
+                                    f"匹配到 {_lodging_report.get('matched', 0)} 家，"
+                                    f"其中给出数字 {_lodging_report.get('with_price', 0)} 家"
+                                    + (
+                                        "（"
+                                        + "、".join(
+                                            f"{key} ¥{value:g}"
+                                            for key, value in (_lodging_report.get("prices") or {}).items()
+                                        )
+                                        + "）"
+                                        if _lodging_report.get("prices")
+                                        else ""
+                                    )
+                                    + (
+                                        "；查到这家但没有数字：" + "、".join(_lodging_report.get("without_price") or [])
+                                        if _lodging_report.get("without_price")
+                                        else ""
+                                    )
+                                    + (
+                                        "；供应商没有这一家：" + "、".join(_lodging_report.get("not_found") or [])
+                                        if _lodging_report.get("not_found")
+                                        else ""
+                                    )
+                                    + f"；报价口径：{_lodging_report.get('check_in')}",
+                                    flush=True,
+                                )
+                            else:
+                                print(
+                                    f"🏨 [酒店实时价] 未启用：{_lodging_report.get('reason')}",
+                                    flush=True,
+                                )
+                        except Exception as _lodging_price_exc:  # 供应商失败绝不影响出方案
+                            final_data["price_audit"] = {
+                                **(final_data.get("price_audit") or {}),
+                                "rollinggo": {"enabled": False, "error": f"{type(_lodging_price_exc).__name__}: {str(_lodging_price_exc)[:140]}"},
+                            }
+                            print(
+                                f"⚠️ [酒店实时价] 查询失败（不影响出方案）: {_lodging_price_exc}",
+                                flush=True,
+                            )
                         _final_fairness = fairness_report(final_data["route"], fairness_members or room_members)
                         _fairness_meta = final_data.get("fairness") or {}
                         _threshold = float(_fairness_meta.get("threshold", 0.15) or 0.15)

@@ -31,11 +31,16 @@ from .plan_quality import cost_of, node_name, nodes_of
 # `web_page` = **白名单里的官方/政府页面正文**（2026-10-05 用户口径：
 #   "把 gov/景区官网页面（白名单里的）视作可核实来源"）。
 #   它不等于"任意网页"：`web` 仍然是搜索结果摘要、一律估算。
+# `rollinggo` = **供应商只读 MCP 的实时房价**（2026-10-05 实测：`searchHotels` 返回
+#   "1晚总价：131CNY" + 可点开的 bookingUrl）。它与 provider/vendor 同级（真供应商接口），
+#   必须在这里登记 —— 漏登记会让它 rank=0：既覆盖不了已有的网摘价，
+#   合并回去还会被标成"估算"（测试抓到过：`rollinggo` 曾在 plan_quality 里而不是这里）。
 SOURCE_RANK: Dict[str, int] = {
     "provider": 4,
     "vendor": 4,
     "official": 4,
     "web_page": 4,
+    "rollinggo": 4,
     "amap": 3,
     "web": 2,
     "estimate": 1,
@@ -43,8 +48,8 @@ SOURCE_RANK: Dict[str, int] = {
     "": 0,
     "unavailable": 0,
 }
-# 可核实来源：供应商/官方接口 + **白名单官方页面正文**
-VERIFIED_SOURCES = {"provider", "vendor", "official", "amap", "web_page"}
+# 可核实来源：供应商/官方接口 + **白名单官方页面正文** + 供应商只读 MCP
+VERIFIED_SOURCES = {"provider", "vendor", "official", "amap", "web_page", "rollinggo"}
 
 
 def source_rank(source: Any) -> int:
