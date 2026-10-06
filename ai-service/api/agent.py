@@ -747,9 +747,20 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
 
     # 距离容忍度：用户说"不考虑距离"时，规划形态应该变成"在更大范围里找景区最优路径"，
     # 而不是继续在市区打转（实测：市区检索只有 ≤5km 的公园，真景区在 47-76km 外）。
-    if any(k in t for k in ["不考虑距离", "不介意距离", "不嫌远", "多远都行", "多远都可以", "可以跑远", "跑远一点", "距离不是问题", "不介意远", "愿意跑远", "远一点也没关系", "不在乎距离"]):
+    #
+    # ⚠️ 顺序要紧：**先判"不介意距离"**，再判"嫌远" —— 否则"不介意太远"会被后一条抓成 low。
+    # 用户口径（2026-10-05）：方案里出现"单日 447km"这种是可以接受的（只要标明），
+    # 但**用户一说不想跑远，就必须按他的意思把远点移出去**（distance_tolerance=low
+    # → daily_far_limit=0 → travel 修复会移出远点）。所以"嫌远"的说法要尽量收全。
+    if any(k in t for k in ["不考虑距离", "不介意距离", "不嫌远", "多远都行", "多远都可以", "可以跑远", "跑远一点", "距离不是问题", "不介意远", "愿意跑远", "远一点也没关系", "不在乎距离", "不介意太远", "远点也行", "远一点也行", "可以远一点", "不介意跑远", "不介意跑太远", "跑远也行", "不介意走远", "远也愿意"]):
         distance_tolerance = "high"
-    elif any(k in t for k in ["不想跑远", "别太远", "不要太远", "不想走远", "就近", "附近玩", "近距离"]):
+    elif any(k in t for k in [
+        "不想跑远", "别太远", "不要太远", "不想走远", "就近", "附近玩", "近距离",
+        # 用户投诉/二次增量里真实会说的说法（2026-10-05 补）
+        "太远", "太远了", "太折腾", "路上太折腾", "别折腾", "不想跑那么远", "不想跑这么远",
+        "不想去那么远", "不想去这么远", "别安排那么远", "别排那么远", "换近", "近一点", "近一点的",
+        "不要那么远", "不要这么远", "远的地方不去", "少跑点", "别跑太远",
+    ]):
         distance_tolerance = "low"
     else:
         distance_tolerance = "normal"
@@ -2233,7 +2244,12 @@ class SemanticItineraryCache:
         # v4 invalidates plans cached before the final daily-balance gate.
         # v5：类别/原始诉求进入精确缓存键，避免同城同天数的文化路线
         # 污染自然、美食、购物或普通均衡路线。
-        raw = f"v5|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v6：模型名进入精确缓存键。理由（2026-10-05 实测）：同一句诉求在 qwen-plus
+        # 与 qwen-turbo 下跑出来的路线**完全一致**、但耗时差一倍；如果模型不进键，
+        # 换了模型之后用户拿到的还是旧模型缓存的那份方案 —— "切换模型"这件事在
+        # 真实验收里就不可观测了（冷跑会被缓存秒回掩盖）。换模型即失效，代价只是
+        # 重算一次，换来的是"所见即本次模型产出"。
+        raw = f"v6|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
         if self.debug:
             # 缓存命中率低时，第一件要知道的事就是"键为什么不一样"：
             # 把参与哈希的原文打出来（只在本进程日志里），两次同样的请求一比就知道。
@@ -2547,6 +2563,32 @@ async def run_negotiate(msg: GatewayMessage):
     if not isinstance(evolution_memory, list):
         evolution_memory = []
 
+    # 👎 节点级负反馈（用户点"不喜欢"时写的原因）→ **真的会被执行**的信号。
+    # 用户口径（2026-10-05）：「如果用户点击不喜欢，或者二次增量不想去这么远的地方，
+    # 就按照用户的意图来」。此前这条链路只写了 FeedbackLog + 把**地点名的细标签**记进
+    # 画像（嫌"太远"被读成"不喜欢山岳"），排除名单也只由**这一轮打的字**解析 ——
+    # 用户不再打字，等于没说过。这里补上：点名的地点进排除名单（走 apply_exclusions
+    # 剔除+同类替换），原因说"太远"就把距离口径压成 low（远点会被日内修复移出）。
+    try:
+        from core.feedback_signals import merge_feedback_into_signals, summarize_feedback
+
+        feedback_signals = summarize_feedback(evolution_memory, city=target_city)
+        feedback_exclude_names: List[str] = list(feedback_signals.get("exclude_names") or [])
+        if feedback_signals.get("notes"):
+            print(
+                f"👎 [反馈信号] {feedback_signals.get('counts')}｜"
+                + "；".join(str(note) for note in feedback_signals["notes"]),
+                flush=True,
+            )
+        # 用户**这一轮亲口说的话优先**：他说了"不介意跑远"就不被历史反馈翻回去；
+        # 他这轮没表态（normal）才让反馈把口径压成"就近"。
+        own_signals = merge_feedback_into_signals(own_signals, feedback_signals)
+        pref_signals = merge_feedback_into_signals(pref_signals, feedback_signals)
+    except Exception as _feedback_exc:  # 反馈解析失败绝不影响出方案
+        feedback_signals = {"notes": [], "exclude_names": [], "counts": {}}
+        feedback_exclude_names = []
+        print(f"⚠️ [反馈信号] 解析失败（不影响出方案）: {_feedback_exc}", flush=True)
+
     is_refinement = len(history_sequence) > 0 and len(current_existing_route) > 0
     llm_temperature = 0.55 if is_refinement else 0.2
 
@@ -2599,6 +2641,16 @@ async def run_negotiate(msg: GatewayMessage):
         str(user_role),
         " ".join([str(m.get("intent", "")) for m in room_members if isinstance(m, dict)]),
         "prefs:" + ",".join(sorted(pref_signals.get("requirements", []))),
+        # 负反馈也进缓存键：否则用户刚标了"不喜欢帕米尔旅游景区"，
+        # 下一次请求会被**含这个点的旧缓存**秒回，看起来像反馈没生效。
+        "feedback:" + json.dumps(
+            {
+                "exclude": sorted(feedback_exclude_names),
+                "tolerance": str((own_signals or {}).get("distance_tolerance") or "normal"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
     ])
 
     async def cached_stream(cached_payload: dict):
@@ -2640,6 +2692,7 @@ async def run_negotiate(msg: GatewayMessage):
                 signals=pref_signals,
                 classify=classify_poi_category,
                 balance_ok=cache_balance_ok,
+                exclude_names=feedback_exclude_names,
             )
             cache_ok = bool(_cache_decision.get("reusable"))
             if cache_ok:
@@ -5128,6 +5181,9 @@ async def run_negotiate(msg: GatewayMessage):
                             _quality_context = {
                                 "days": trip_days,
                                 "budget": total_calc_budget,
+                                # 距离口径进质量上下文：完整性核对按用户口径判断"日内距离是否达标"
+                                # （说"不介意跑远"的人被按 normal 预算判"跑太远"是误判）。
+                                "distance_tolerance": str((own_signals or {}).get("distance_tolerance") or "normal"),
                                 # 原话带上：质量层要判断"这趟是不是以自然风景为主"这类诉求
                                 "request_text": intent_str,
                                 "preferences": {
@@ -5173,6 +5229,11 @@ async def run_negotiate(msg: GatewayMessage):
                                     _quality_context, final_data, signals=_quality_signals, pool_available=True
                                 )
                                 _exclude_terms = [str(item) for item in ((_refinement_delta or {}).get("exclude") or [])]
+                                # 👎 用户点过"不喜欢"的地点同样是排除项（不只是这一轮打的字）：
+                                # 没有这一步，反馈只进画像不进方案 —— 用户点了不喜欢，点还在。
+                                for _feedback_name in feedback_exclude_names:
+                                    if _feedback_name not in _exclude_terms:
+                                        _exclude_terms.append(_feedback_name)
                                 # 只在"确实需要新候选"时取池子：结构缺口（缺玩点/餐/住宿/必去项）
                                 # 或这次是排他/配额类增量。纯时间顺序问题用确定性修补就够了，
                                 # 没必要为它多打几次数据源。
@@ -5258,6 +5319,9 @@ async def run_negotiate(msg: GatewayMessage):
                                 request_text=intent_str,
                                 increment=_refinement_delta,
                                 pool=_pool or None,
+                                # 点过"不喜欢"的地点走这里：剔除 + 从候选池补同类，并在
+                                # `constraints` 里如实报"已按你的反馈移除/换成谁"。
+                                exclude_terms=feedback_exclude_names,
                             )
                             _snapshot = _governance["snapshot"]
                             # 增量真的改了方案：用调整后的路线替换（前端以 final_route 为准）
@@ -5268,6 +5332,16 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["quality"] = _snapshot["quality"]
                             final_data["budget_report"] = _snapshot["budget"]
                             final_data["horizon"] = _snapshot["horizon"]
+                            # 👎 反馈落地情况随方案下发：用户点的"不喜欢"到底改了没有，
+                            # 必须能看见（没渲染出来的"已按你的反馈修正"等于没做）。
+                            if feedback_exclude_names or (feedback_signals.get("notes") or []):
+                                final_data["feedback_applied"] = {
+                                    "exclude_names": list(feedback_exclude_names),
+                                    "distance_tolerance": str((own_signals or {}).get("distance_tolerance") or "normal"),
+                                    "budget_tendency": feedback_signals.get("budget_tendency"),
+                                    "notes": list(feedback_signals.get("notes") or []),
+                                    "counts": dict(feedback_signals.get("counts") or {}),
+                                }
                             if _governance.get("pool_sizes"):
                                 final_data["candidate_pool"] = _governance["pool_sizes"]
                             # 真实候选够不够、有没有补检索、供应商有没有报错：随方案下发（界面据此

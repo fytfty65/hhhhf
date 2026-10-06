@@ -181,8 +181,45 @@ class DistanceToleranceTests(unittest.TestCase):
         for text in ("不想跑远，就在附近玩玩", "别太远，带孩子不方便"):
             self.assertEqual(self._signals(text)["distance_tolerance"], "low", text)
 
+    def test_complaints_about_distance_count_as_close(self):
+        """用户口径（2026-10-05）：远点可以接受，但**用户一说嫌远就得按他的意思移出去**。
+
+        节点投票里点"不喜欢"写的原因是"太远了"这种大白话，必须真的把距离容忍度压成 low，
+        否则二次增量里"不想去这么远"会被当成没说 → 447km 的点还留在方案里。
+        """
+        from core.travel_feasibility import daily_far_limit
+
+        for text in (
+            "太远了",
+            "今天这个点太远了吧",
+            "不想跑那么远",
+            "不想去这么远的地方",
+            "路上太折腾了，换近一点的",
+            "别安排那么远的点",
+            "少跑点，就想在近一点的地方玩",
+            "不要这么远",
+            "远的地方不去",
+        ):
+            signals = self._signals(text)
+            self.assertEqual(signals["distance_tolerance"], "low", text)
+            # low 的真实后果：当天允许的"远点"配额为 0，travel 修复会把远点移出
+            self.assertEqual(daily_far_limit(signals["distance_tolerance"]), 0, text)
+
+    def test_negated_distance_complaint_is_not_close(self):
+        """顺序陷阱："不介意太远"含"太远"，先判 high 才不会被嫌远规则吃掉。"""
+        for text in (
+            "不介意太远，尽管排",
+            "远点也行，我不怕折腾",
+            "可以远一点，多远都可以",
+            "去伊宁玩3天，想看自然风景，不介意跑远",
+            "不介意跑太远，景区多远都去",
+        ):
+            self.assertEqual(self._signals(text)["distance_tolerance"], "high", text)
+
     def test_default_is_normal(self):
         self.assertEqual(self._signals("去库尔勒玩2天，帮我安排一下")["distance_tolerance"], "normal")
+        for text in ("去喀什玩3天，安排一下景点", "帮我排一下明天的行程", "想看点风景"):
+            self.assertEqual(self._signals(text)["distance_tolerance"], "normal", text)
 
 
 class NatureOnlyIntentTests(unittest.TestCase):

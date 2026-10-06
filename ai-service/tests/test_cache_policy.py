@@ -241,6 +241,57 @@ class CachePolicyTests(unittest.TestCase):
         )
         self.assertFalse(decision["reusable"])
 
+    def test_disliked_place_blocks_reuse_even_when_gates_passed(self):
+        """用户点过"不喜欢"的地点不能从缓存里回来（2026-10-05 用户口径）。
+
+        否则：用户刚标了"不喜欢帕米尔旅游景区"，下一次请求被**含这个点的旧缓存**秒回 ——
+        界面上看起来像"反馈没生效"，而日志里却是"缓存命中、门禁都过"。
+        """
+        route = _route_without_food_on_last_day()
+        route.append({"day": 2, "name": "帕米尔旅游景区", "type": "风景名胜"})
+        payload = {
+            "final_data": {
+                "route": route,
+                "daily_balance": {"satisfied": True, "category_balance": {"ok": True}},
+                "composition": {"audit": {"ok": True}},
+            }
+        }
+        decision = cached_plan_decision(
+            payload=payload,
+            route=route,
+            days=3,
+            daily_count=4,
+            signals={},
+            classify=_classify,
+            balance_ok=True,
+            exclude_names=["帕米尔旅游景区"],
+        )
+        self.assertFalse(decision["reusable"])
+        self.assertIn("不喜欢", decision["reason"])
+        self.assertEqual(decision["checks"]["excluded_present"], ["帕米尔旅游景区"])
+
+    def test_exclusion_terms_do_not_block_unrelated_plans(self):
+        route = _route_without_food_on_last_day()
+        payload = {
+            "final_data": {
+                "route": route,
+                "daily_balance": {"satisfied": True, "category_balance": {"ok": True}},
+                "composition": {"audit": {"ok": True}},
+            }
+        }
+        decision = cached_plan_decision(
+            payload=payload,
+            route=route,
+            days=3,
+            daily_count=4,
+            signals={},
+            classify=_classify,
+            balance_ok=True,
+            exclude_names=["帕米尔旅游景区"],
+        )
+        self.assertTrue(decision["reusable"], decision)
+        self.assertEqual(decision["checks"]["excluded_present"], [])
+
 
 class DailyDensityDisclosureTests(unittest.TestCase):
     """每日密度不足要如实披露（2026-10-05）：不是"少排了"，而是"一天跑不了那么多远的地方"。"""
@@ -268,6 +319,31 @@ class DailyDensityDisclosureTests(unittest.TestCase):
         payload = {"daily_balance": {"satisfied": False, "deficient_days": [2]}}
         items = collect_degradations(payload).get("items", [])
         self.assertFalse([item for item in items if item.get("source") == "daily_balance"])
+
+
+class CacheKeyModelTests(unittest.TestCase):
+    """换模型必须让旧缓存失效（2026-10-05）。
+
+    否则"把模型换成 qwen-turbo"这件事在真实验收里**不可观测**：同一句诉求冷跑会被
+    qwen-plus 产出的旧缓存秒回，看上去像"turbo 生效了、只是秒回"，实际用的还是旧方案。
+    代价只是重算一次，换来的是"所见即本次模型产出"。
+    """
+
+    def test_model_name_is_part_of_the_exact_key(self):
+        from api import agent
+
+        cache = agent.SemanticItineraryCache()
+        original = agent.MODEL_NAME
+        try:
+            agent.MODEL_NAME = "qwen-turbo"
+            first = cache._key("库尔勒", 2, "平衡画像")
+            again = cache._key("库尔勒", 2, "平衡画像")
+            agent.MODEL_NAME = "qwen-plus"
+            other = cache._key("库尔勒", 2, "平衡画像")
+        finally:
+            agent.MODEL_NAME = original
+        self.assertEqual(first, again, "同模型同画像必须稳定（否则缓存永远不命中）")
+        self.assertNotEqual(first, other, "换模型后键必须变（否则新模型拿不到自己的方案）")
 
 
 if __name__ == "__main__":

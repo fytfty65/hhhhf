@@ -26,6 +26,11 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _norm(value: Any) -> str:
+    """去掉空白并小写，用于比对"这个名字是不是同一个地方"（与 candidate_index 同口径的轻量版）。"""
+    return "".join(str(value or "").split()).lower()
+
+
 def cached_plan_decision(
     *,
     payload: Any,
@@ -35,12 +40,15 @@ def cached_plan_decision(
     signals: Optional[Mapping[str, Any]] = None,
     classify: Optional[Callable[[str, str, bool], str]] = None,
     balance_ok: Optional[bool] = None,
+    exclude_names: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """判断这份缓存方案能不能直接复用。
 
     返回 `{reusable, reason, checks, has_recorded_gates}`：
       - `has_recorded_gates=False` 表示这是老条目（没有生成时的门禁结论），走严格结构判据；
-      - `reason` 给人看，说明"为什么拒"或"凭什么敢用"。
+      - `reason` 给人看，说明"为什么拒"或"凭什么敢用"；
+      - `exclude_names`：用户点过"不喜欢"的地点。缓存里只要还有它就**不能复用** ——
+        否则用户刚说"别再去帕米尔"，下一次请求被含这个点的旧缓存秒回，看起来像反馈没生效。
     """
     signals = signals or {}
     final_data = _as_mapping(_as_mapping(payload).get("final_data"))
@@ -69,6 +77,30 @@ def cached_plan_decision(
 
     if not isinstance(route, list) or not route:
         return {"reusable": False, "reason": "缓存里没有路线", "checks": checks, "has_recorded_gates": has_recorded_gates}
+
+    # ⓪ 用户点过"不喜欢"的地点绝不能从缓存里回来（2026-10-05 用户口径）。
+    #    放在最前面：这是**用户明确表达过的意图**，不该被"这份方案当初门禁都过了"说服。
+    terms = [_norm(term) for term in (exclude_names or []) if _norm(term)]
+    if terms:
+        cached_names = [
+            str(item.get("name") or item.get("location") or "")
+            for item in route
+            if isinstance(item, Mapping)
+        ]
+        hits = [
+            name for name in cached_names
+            # 空名字必须排除：`"" in term` 恒为真，会把"没有名字的节点"判成命中
+            if len(_norm(name)) >= 2
+            and any(term in _norm(name) or _norm(name) in term for term in terms)
+        ]
+        checks["excluded_present"] = hits
+        if hits:
+            return {
+                "reusable": False,
+                "reason": "缓存里还有你标记不喜欢的地点：" + "、".join(hits),
+                "checks": checks,
+                "has_recorded_gates": has_recorded_gates,
+            }
 
     # ① 结构底线：每一天至少得有一个白天节点。
     #    ⚠️ 这里**不拿"每日节点数达标"当否决项**（2026-10-05 实测）：出稿前的硬约束收口
