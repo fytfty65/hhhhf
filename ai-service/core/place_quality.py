@@ -287,10 +287,23 @@ def score_completeness(
     transport = plan.get("transport_audit") if isinstance(plan, Mapping) else {}
     transport = transport if isinstance(transport, Mapping) else {}
     legs = transport.get("legs") or []
+
+    def _leg_is_disclosed(leg: Any) -> bool:
+        """这一段有没有"结论或如实说明"：候选方案 / 未核实票价清单 / 结构化未核实标记 /
+        advice 里明写"未核实"。实测（2026-10-05）踩过：说明只写在 advice 里，
+        判据却只看结构化字段 → 明明是"如实说明未核实"，却被算成 0/2 段。"""
+        if not isinstance(leg, Mapping):
+            return False
+        if leg.get("options") or leg.get("unverified_fares"):
+            return True
+        if str(leg.get("fare_status") or "").lower() == "unverified":
+            return True
+        return "未核实" in str(leg.get("advice") or "")
+
     if not legs:
         checks["cross_city_transport"] = {"ok": None, "detail": "没有跨城腿", "weight": 1.0}
     else:
-        with_options = len([leg for leg in legs if isinstance(leg, Mapping) and (leg.get("options") or leg.get("unverified_fares"))])
+        with_options = len([leg for leg in legs if _leg_is_disclosed(leg)])
         checks["cross_city_transport"] = {
             "ok": with_options >= 1,
             "detail": f"{with_options}/{len(legs)} 段跨城腿有交通方案或未核实票价说明",

@@ -461,6 +461,7 @@ async def build_transport_audit(
         }
         if not fetch:
             entry["advice"] = "未配置出行数据源，这一段建议按你的习惯选择（票价与班次未核实）"
+            entry["fare_status"] = "unverified"
             audits.append(entry)
             continue
         try:
@@ -470,11 +471,15 @@ async def build_transport_audit(
             options = normalize_travel_info(info or {})
             if not options:
                 entry["advice"] = "这一段没有取到可用的出行方式（数据源未返回），票价与班次未核实"
+                # 结构化标记：说明在 advice 里，但"有没有如实说明票价未核实"要能被机器判到
+                # （否则周全性核对会认为"这一段什么都没说"，实测踩过：0/2 段）。
+                entry["fare_status"] = "unverified"
             else:
                 result = advice(options, preferences, budget_left=budget_left)
                 entry["advice"] = result["recommendation"]
                 entry["alternatives"] = result["alternatives"]
                 entry["unverified_fares"] = result["unverified_fares"]
+                entry["fare_status"] = "unverified" if result["unverified_fares"] else "verified"
                 entry["options"] = [
                     {
                         "mode": item.get("mode_label"),
@@ -487,6 +492,7 @@ async def build_transport_audit(
                 ]
         except Exception as exc:  # 单条腿失败不影响其它腿，也不影响出方案
             entry["advice"] = f"这一段出行方式检索失败（{str(exc)[:60]}），票价与班次未核实"
+            entry["fare_status"] = "unverified"
         audits.append(entry)
     return {
         "legs": audits,

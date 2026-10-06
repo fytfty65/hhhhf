@@ -175,6 +175,24 @@ class CompletenessTests(unittest.TestCase):
         report = score_completeness({"days": 3}, plan)
         self.assertIn("cross_city_transport", report["failed_checks"])
 
+    def test_cross_city_leg_with_only_a_prose_disclosure_counts(self):
+        """说明只写在 `advice` 里也算"如实说明"（2026-10-05 实测：判据只看结构化字段，
+        明明是"如实说明未核实"，却被算成 0/2 段，周全性白扣分）。"""
+        plan = self._plan(
+            transport_audit={
+                "legs": [
+                    {"from": "库尔勒", "to": "乌鲁木齐", "advice": "这一段没有取到可用的出行方式（数据源未返回），票价与班次未核实"},
+                ]
+            }
+        )
+        report = score_completeness({"days": 3}, plan)
+        self.assertTrue(report["checks"]["cross_city_transport"]["ok"], report["checks"]["cross_city_transport"])
+
+    def test_cross_city_leg_with_a_structured_fare_status_counts(self):
+        plan = self._plan(transport_audit={"legs": [{"from": "甲", "to": "乙", "fare_status": "unverified"}]})
+        report = score_completeness({"days": 3}, plan)
+        self.assertTrue(report["checks"]["cross_city_transport"]["ok"], report["checks"]["cross_city_transport"])
+
     def test_no_cross_city_leg_is_unknown_not_failure(self):
         report = score_completeness({"days": 3}, self._plan())
         self.assertEqual(report["checks"]["cross_city_transport"]["ok"], None)
