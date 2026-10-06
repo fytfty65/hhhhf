@@ -96,13 +96,52 @@ def _day_rows(plan: Mapping[str, Any]) -> Dict[int, List[Mapping[str, Any]]]:
 
 
 def _context_of(plan: Mapping[str, Any]) -> Dict[str, Any]:
-    """从方案自身推出评分上下文（天数/距离容忍度）——方案里带着这些事实，不必再问一遍。"""
-    return {
-        "days": plan.get("trip_days") or plan.get("days") or 1,
-        "distance_tolerance": (plan.get("facts") or {}).get("constraints", {}).get("distance_tolerance", {}).get("value")
-        if isinstance(plan.get("facts"), Mapping)
-        else "normal",
-    }
+    """从方案自身推出评分上下文（天数/距离容忍度）——方案里带着这些事实，不必再问一遍。
+
+    ⚠️ 天数要读 `facts.request.trip_days`：真实方案的顶层没有 `trip_days`
+    （实测），只读顶层会让 3 天的方案按 1 天评，"日内距离/周全性"全判错。
+    """
+    facts = plan.get("facts") if isinstance(plan.get("facts"), Mapping) else {}
+    constraints = facts.get("constraints") if isinstance(facts.get("constraints"), Mapping) else {}
+    request = facts.get("request") if isinstance(facts.get("request"), Mapping) else {}
+    days = plan.get("trip_days") or plan.get("days")
+    if not days and isinstance(request.get("trip_days"), Mapping):
+        days = request["trip_days"].get("value")
+    tolerance = "normal"
+    if isinstance(constraints.get("distance_tolerance"), Mapping):
+        tolerance = str(constraints["distance_tolerance"].get("value") or "normal")
+    return {"days": days or 1, "distance_tolerance": tolerance}
+
+
+def _day_distance_notes(plan: Mapping[str, Any]) -> List[str]:
+    """按天算移动里程，并对照**方案自己记录的距离口径预算**标注是否超出。
+
+    为什么要放在抽查表里：用户口径是「447km 的一天可以接受，**但是需要标明**」。
+    标明必须出现在人真正会读的那一页上（方案里 degradations 有，但抽查表没有就等于没标）。
+    """
+    from core.travel_feasibility import daily_budget_km
+
+    context = _context_of(plan)
+    budget = daily_budget_km(str(context.get("distance_tolerance") or "normal"))
+    notes: List[str] = []
+    for day in sorted(_day_rows(plan)):
+        previous = None
+        total = 0.0
+        for node in _day_rows(plan)[day]:
+            coord = node_lnglat(node)
+            if previous is not None and coord:
+                km = haversine_km(previous, coord)
+                if km == km:
+                    total += km
+            if coord:
+                previous = coord
+        if total <= 0:
+            continue
+        if total > budget:
+            notes.append(f"第 {day} 天移动约 {total:.0f}km，超过当天预算 {budget:.0f}km（方案里已如实披露）")
+        else:
+            notes.append(f"第 {day} 天移动约 {total:.0f}km（预算 {budget:.0f}km）")
+    return notes
 
 
 def render_single(plan: Mapping[str, Any], label: str) -> List[str]:
@@ -117,6 +156,8 @@ def render_single(plan: Mapping[str, Any], label: str) -> List[str]:
         f"- 方案周全（可判定部分）{complete['value']:.2f}｜未过项："
         + ("、".join(complete["failed_checks"]) or "无"),
     ]
+    for note in _day_distance_notes(plan):
+        lines.append(f"- {note}")
     if place.get("suspect_names"):
         lines.append(
             "- ⚠️ 可疑名字：" + "；".join(f"{item['name']}（{item['why']}）" for item in place["suspect_names"])
@@ -194,6 +235,17 @@ def render_compare(left: Mapping[str, Any], right: Mapping[str, Any], left_label
         f"| 周全未过项 | {'、'.join(left_complete['failed_checks']) or '无'} | {'、'.join(right_complete['failed_checks']) or '无'} |",
         "",
     ])
+    # 距离要"标明"（用户口径：远的一天可以接受，但必须写出来）
+    left_notes = _day_distance_notes(left)
+    right_notes = _day_distance_notes(right)
+    if left_notes or right_notes:
+        lines.extend(["### 每天移动里程", "", f"| {left_label} | {right_label} |", "|---|---|"])
+        for index in range(max(len(left_notes), len(right_notes))):
+            lines.append(
+                f"| {left_notes[index] if index < len(left_notes) else ''} "
+                f"| {right_notes[index] if index < len(right_notes) else ''} |"
+            )
+        lines.append("")
     return lines
 
 

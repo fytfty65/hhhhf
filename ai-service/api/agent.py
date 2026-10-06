@@ -69,6 +69,7 @@ from core.route_composition import (
     count_route_composition,
     ensure_lodging_per_night,
     numeric_targets,
+    order_route_by_day,
     repair_forbidden_categories,
     scenic_tier,
     settle_lodging,
@@ -6298,6 +6299,14 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["hard_constraint_closeout"] = {"error": str(_closeout_exc)[:200]}
                             print(f"⚠️ [硬约束收口] 失败（不影响出方案）: {_closeout_exc}", flush=True)
                         _stage("硬约束修复与收口")
+                        # 行程数组的顺序就是行程顺序：住宿兜底/补点是"追加"节点的，
+                        # 补的第 1 晚会被放到数组末尾（实测伊宁：第 1 天的民宿排在第 3 天之后），
+                        # 前端按天分组看不出，但按数组顺序连线/导出的消费方会画出跨天回头线。
+                        # 放在收口之后、所有下游（公平性/校验/事实/前端）之前，一次排好。
+                        try:
+                            final_data["route"] = order_route_by_day(final_data.get("route") or [])
+                        except Exception as _order_exc:  # 排序失败不影响出方案
+                            print(f"⚠️ [路线排序] 按天排序失败（不影响出方案）: {_order_exc}", flush=True)
                         _final_fairness = fairness_report(final_data["route"], fairness_members or room_members)
                         _fairness_meta = final_data.get("fairness") or {}
                         _threshold = float(_fairness_meta.get("threshold", 0.15) or 0.15)

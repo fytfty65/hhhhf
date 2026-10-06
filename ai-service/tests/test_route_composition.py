@@ -20,6 +20,7 @@ from core.route_composition import (
     composition_audit,
     composition_targets,
     count_route_composition,
+    order_route_by_day,
     scenic_tier,
     summarize_targets,
 )
@@ -603,6 +604,52 @@ class LodgingDisclosureTests(unittest.TestCase):
         self.assertIsNotNone(entry, items)
         self.assertIn("人文候选只有 3 个", str(entry.get("reason")))
         self.assertIn("目标 4 个", str(entry.get("reason")))
+
+
+class RouteOrderTests(unittest.TestCase):
+    """路线数组的顺序就是行程顺序（2026-10-05 实测：伊宁第 1 晚的民宿排在第 3 天节点之后）。
+
+    住宿兜底/补点是**追加**节点的，前端按天分组看不出问题，但按数组顺序连线/导出的
+    消费方会画出"第 3 天末 → 第 1 天民宿"这种跨天回头线。
+    """
+
+    def test_lodging_appended_at_the_end_is_moved_back_to_its_day(self):
+        route = [
+            {"day": 1, "name": "草原遗迹"},
+            {"day": 2, "name": "天鹅泉湿地公园"},
+            {"day": 3, "name": "伊犁河旅游风景区"},
+            {"day": 1, "name": "信泰达民宿", "is_hotel": True},
+        ]
+        ordered = [node["name"] for node in order_route_by_day(route)]
+        self.assertEqual(ordered, ["草原遗迹", "信泰达民宿", "天鹅泉湿地公园", "伊犁河旅游风景区"])
+
+    def test_same_day_order_is_preserved(self):
+        """同一天里"上午/午饭/下午/酒店"的顺序是规划结果，只按天排、不按时间重排。"""
+        route = [
+            {"day": 1, "name": "景区A", "time": "15:00"},
+            {"day": 1, "name": "午餐B", "time": "12:30"},
+            {"day": 2, "name": "景区C", "time": "09:00"},
+            {"day": 1, "name": "酒店D", "time": "20:00"},
+        ]
+        self.assertEqual(
+            [node["name"] for node in order_route_by_day(route)],
+            ["景区A", "午餐B", "酒店D", "景区C"],
+        )
+
+    def test_missing_or_broken_day_falls_back_to_day_one(self):
+        route = [{"day": 2, "name": "乙"}, {"name": "无天数"}, {"day": "x", "name": "坏值"}, {"day": 1, "name": "甲"}]
+        ordered = order_route_by_day(route)
+        self.assertEqual([node["name"] for node in ordered], ["无天数", "坏值", "甲", "乙"])
+
+    def test_empty_and_junk_inputs_are_safe(self):
+        self.assertEqual(order_route_by_day(None), [])
+        self.assertEqual(order_route_by_day([]), [])
+        self.assertEqual([node["name"] for node in order_route_by_day(["x", None, {"day": 1, "name": "甲"}])], ["甲"])
+
+    def test_original_nodes_are_not_mutated(self):
+        route = [{"day": 2, "name": "乙"}, {"day": 1, "name": "甲"}]
+        order_route_by_day(route)[0]["name"] = "改过了"
+        self.assertEqual(route[0]["name"], "乙", "不能就地改调用方的节点")
 
 
 class LodgingTrimTests(unittest.TestCase):

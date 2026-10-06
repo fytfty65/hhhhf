@@ -433,6 +433,29 @@ def trim_lodging_over_cap(
     return kept, removed
 
 
+def order_route_by_day(route: Any) -> List[Dict[str, Any]]:
+    """把路线按天做**稳定**排序（同一天内部保持原顺序）。
+
+    为什么是方案自己的责任（2026-10-05 实测，伊宁 3 天方案）：
+    住宿兜底/补点是**追加**节点的（`ensure_lodging_per_night`、候选池补点），
+    于是第 1 晚补出来的「信泰达民宿」被放在路线数组的**末尾** —— 排在第 3 天的节点之后。
+    前端"按天分组"的视图看不出问题，但任何按**数组顺序**连线/导出的消费方都会画出
+    "第 3 天最后一个点 → 第 1 天的民宿"这种跨天回头线。
+
+    路线数组的顺序**就是行程顺序**，这是方案本身该保证的事，不该指望每个消费方各排一遍。
+    只按天排、不按时间排：同一天里"上午/午饭/下午/酒店"的顺序是规划结果，不能被重排。
+    """
+    items = [dict(node) for node in route or [] if isinstance(node, Mapping)]
+    return sorted(items, key=lambda node: _node_day(node))
+
+
+def _node_day(node: Mapping[str, Any]) -> int:
+    try:
+        return int(node.get("day") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def settle_lodging(
     route: Sequence[Mapping[str, Any]],
     *,

@@ -199,6 +199,41 @@ class TestDimensions(unittest.TestCase):
         report = score_pacing({"daily_active_minutes": 120}, plan, {"max_nodes_per_day": 6})
         self.assertTrue(any("超过 120 分钟上限" in p for p in report["penalties"]))
 
+    def test_missing_dinner_is_an_advisory_not_a_penalty(self):
+        """用户口径（2026-10-05）：「放宽上限吧，要是用户不喜欢晚上不安排晚餐，
+        在二次增量中说到就补充晚餐位置」。
+
+        没排晚餐**不是缺陷**，是等用户表态的可选偏好；扣分等于系统替用户认定
+        "你必须吃晚饭"。真正的动作是"用户提了就用增量补上"——所以只进 advisories。
+        """
+        plan = {"route": [
+            node("景区A", 1, "09:00"),
+            node("午餐B", 1, "12:00", node_type="餐饮"),
+            node("景区C", 1, "18:00"),
+        ]}
+        report = score_pacing({"days": 1}, plan, {"max_nodes_per_day": 6})
+        self.assertEqual(report["value"], 1.0, report)
+        self.assertEqual([p for p in report["penalties"] if "晚餐" in p], [])
+        self.assertTrue(any("晚餐" in text for text in report["advisories"]), report["advisories"])
+        self.assertTrue(any("加一顿晚饭" in text for text in report["advisories"]), report["advisories"])
+
+    def test_daily_active_budget_is_720_minutes_by_default(self):
+        """6 个节点 ≈720 分钟：放宽后的上限之内（旧上限 600 分钟会把正常的一天判超）。"""
+        plan = {"route": [
+            node(f"点{i}", 1, f"{9 + i:02d}:00", node_type="文化", cost="¥50")
+            for i in range(6)
+        ]}
+        report = score_pacing({"days": 1}, plan, {"max_nodes_per_day": 6})
+        self.assertEqual(report["value"], 1.0, report["penalties"])
+        # 上限是"超过才罚"（total > budget）：正好用满 720 分钟不罚
+        self.assertEqual(report["days"][0]["total_minutes"], 720.0)
+        self.assertFalse(any("上限" in p for p in report["penalties"]))
+
+    def test_pacing_uses_the_configured_active_budget_when_given(self):
+        plan = {"route": [node(f"点{i}", 1, f"{9 + i:02d}:00") for i in range(6)]}
+        tight = score_pacing({"days": 1, "daily_active_minutes": 200}, plan, {"max_nodes_per_day": 6})
+        self.assertTrue(any("200 分钟上限" in p for p in tight["penalties"]))
+
     def test_space_efficiency_rewards_compact_and_flags_missing_coords(self):
         compact = {"route": [node("a", 1, "09:00", (108.94, 34.26)), node("b", 1, "10:00", (108.95, 34.26))]}
         far = {"route": [node("a", 1, "09:00", (108.94, 34.26)), node("b", 1, "10:00", (110.09, 34.49))]}
