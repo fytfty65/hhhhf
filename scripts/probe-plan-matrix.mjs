@@ -185,6 +185,8 @@ async function runScenario(scenario) {
   const names = nodeNames(payload);
   return {
     ...scenario,
+    // 原始方案（落盘给人工抽查表用）：机器判不了"地点好不好"，必须有人读
+    finalData: payload,
     seconds,
     eventCount: events.length,
     nodes: names.length,
@@ -324,6 +326,19 @@ async function main() {
   const outPath = path.join('work', 'plan-quality-matrix.md');
   await mkdir('work', { recursive: true });
   await writeFile(outPath, markdown, 'utf8');
+
+  // 落盘原始方案 JSON：人工抽查表（ai-service/tools/plan_review_sheet.py）要用它，
+  // 而"地点好不好"机器判不了、必须有人读。文件名带模型名，方便 plus/turbo 并排。
+  const modelTag = process.env.MODEL_TAG || 'default';
+  const plansDir = path.join('work', 'plans');
+  await mkdir(plansDir, { recursive: true });
+  for (const row of rows) {
+    if (!row.finalData) continue;
+    const safeCity = String(row.city || 'city').replace(/[\\/:*?"<>|]/g, '_');
+    const file = path.join(plansDir, `${modelTag}-${safeCity}-${String(row.intent || '').length}.json`);
+    await writeFile(file, JSON.stringify(row.finalData, null, 2), 'utf8');
+  }
+  console.log(`方案 JSON 已写入 ${plansDir}（模型标签 ${modelTag}）`);
   console.log('');
   console.log(`报告已写入 ${outPath}`);
   console.log('='.repeat(72));

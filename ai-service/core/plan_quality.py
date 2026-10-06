@@ -40,6 +40,10 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     "truthfulness": 0.15,
     "anchoring": 0.15,
     "diversity": 0.10,
+    # 用户的第一优先级是"地点好不好"（2026-10-05 补的可判定部分），
+    # 它必须真的占权重 —— 只加维度不给权重等于没量。
+    "place_quality": 0.20,
+    "completeness": 0.15,
 }
 
 # 一天的"活跃时长"上限，超过即视为过赶（分钟）
@@ -799,6 +803,20 @@ def stability_score(plans: Sequence[Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 # 汇总
 # --------------------------------------------------------------------------
+def _flatten_candidates(candidates_by_intent: Optional[Mapping[str, Any]]) -> List[Any]:
+    """把"意图 → 候选列表"摊平成一串候选（供地点质量维度判断"这个节点是不是检索到的"）。"""
+    flat: List[Any] = []
+    if not isinstance(candidates_by_intent, Mapping):
+        return flat
+    for value in candidates_by_intent.values():
+        if isinstance(value, Mapping):
+            flat.extend(value.keys())
+            continue
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            flat.extend(value)
+    return flat
+
+
 def plan_quality_snapshot(
     context: Mapping[str, Any],
     plan: Any,
@@ -819,7 +837,9 @@ def plan_quality_snapshot(
     纯确定性、零网络；**不修改传入的 plan**。业务逻辑放在 core 里，`agent.py` 只做薄接线，
     这样接线本身不需要跑 LLM 就能单测。
     """
-    report = evaluate_plan(context, plan, expectations=expectations, signals=signals)
+    report = evaluate_plan(
+        context, plan, expectations=expectations, signals=signals, candidates=_flatten_candidates(candidates_by_intent)
+    )
     from .itinerary_skeleton import LONG_TRIP_DAYS, horizon_advisories, segment_days  # 延迟导入（见模块头说明）
 
     days = max(1, int(context.get("days") or context.get("trip_days") or 1))
@@ -840,6 +860,18 @@ def plan_quality_snapshot(
             "gate_failures": report["gate"]["failures"],
             "unverifiable_count": report["gate"]["unverifiable_count"],
             "dimensions": {key: value["value"] for key, value in report["dimensions"].items()},
+            # 「地点好不好」与「方案周全」的**明细**（给专业诊断/评测报告用）：
+            # 只有分数没法行动，必须能看见"哪些名字可疑 / 哪几条周全性没过"
+            "place_quality": {
+                key: value
+                for key, value in (report["dimensions"].get("place_quality") or {}).items()
+                if key != "value"
+            },
+            "completeness": {
+                key: value
+                for key, value in (report["dimensions"].get("completeness") or {}).items()
+                if key != "value"
+            },
         },
         "budget": report["budget"],
         "skeleton": report["skeleton"],
@@ -878,9 +910,16 @@ def evaluate_plan(
     expectations: Optional[Mapping[str, Any]] = None,
     signals: Optional[Mapping[str, Any]] = None,
     weights: Optional[Mapping[str, float]] = None,
+    candidates: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
-    """给一份规划打分：门禁 + 加权维度 + verdict。"""
+    """给一份规划打分：门禁 + 加权维度 + verdict。
+
+    `candidates` 是**本次真实候选池**（可选）：地点质量维度用它判断"这个节点是不是检索到的"。
+    不传也能跑，但那一项会如实标成"没有供应商证据"（而不是假装可信或假装不可信）。
+    """
     hard = check_hard_constraints(context, plan, expectations)
+    from .place_quality import score_completeness, score_place_quality
+
     dimensions = {
         "preference_coverage": score_preference_coverage(context, plan, signals),
         "pacing": score_pacing(context, plan, expectations),
@@ -888,6 +927,9 @@ def evaluate_plan(
         "truthfulness": score_truthfulness(plan),
         "anchoring": score_anchoring(context, plan),
         "diversity": score_diversity(plan),
+        # 用户第一优先级「地点好不好」的可判定部分 + 「方案周全」
+        "place_quality": score_place_quality(plan, candidates=candidates),
+        "completeness": score_completeness(context, plan, expectations),
     }
     active_weights = dict(DEFAULT_WEIGHTS)
     if weights:
