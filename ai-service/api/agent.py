@@ -3980,14 +3980,18 @@ async def run_negotiate(msg: GatewayMessage):
                     return ""
                 if lng == 0.0 and lat == 0.0:
                     return ""
-                if not self.amap_key:
+                # ⚠️ 这里原来写的是 `self.amap_key` —— `event_stream` 是嵌套生成器，**没有 self**，
+                #    于是"静态地图保底"这条路只要走到就 NameError（实测：整条下发链路被带走，
+                #    用户"未收到终稿"）。密钥在 `toolbox` 上（`ExpertToolbox` 实例），用 getattr 取。
+                _map_key = getattr(toolbox, "amap_key", None)
+                if not _map_key:
                     return ""
                 loc_str = f"{lng},{lat}"
                 return (
                     f"https://restapi.amap.com/v3/staticmap"
                     f"?location={loc_str}&zoom={zoom}&size={size}&scale=2"
                     f"&markers=mid,0xFF5722,A:{loc_str}"
-                    f"&key={self.amap_key}"
+                    f"&key={_map_key}"
                 )
 
             # —— 👑 候选池合成兜底：LLM 彻底失败时仍能给前端一份完整路线（防死锁）——
@@ -4423,12 +4427,15 @@ async def run_negotiate(msg: GatewayMessage):
                             # 👑 候选池耗尽：保留原节点（保留LLM原名称），但强制按坐标生成静态地图兜底
                             if not r.get("amap_url") and loc_name:
                                 r["amap_url"] = f"https://www.amap.com/search?query={urllib.parse.quote(f'{target_city} {loc_name}')}"
-                            # 强制静态地图兜底：有坐标用坐标，无坐标用城市中心
+                            # 强制静态地图兜底：**只用自己的坐标**。
+                            # ⚠️ 这里原来还有一条 `elif hasattr(self, 'center_lon') …` 拿"城市中心"
+                            #    当这个节点的示意图 —— 两处问题：① 这个嵌套函数里没有 `self`，
+                            #    走到就 NameError（实测把整条下发链路带走）；② 拿城市中心当某个
+                            #    节点的位置示意图本身就是在标错位置。没有坐标就交给
+                            #    `attach_photo_fallbacks` 用带"位置示意，非实景照片"标注的影像兜底。
                             if not r.get("map_image"):
                                 if isinstance(r.get("lnglat"), list) and len(r["lnglat"]) >= 2:
                                     r["map_image"] = _make_static_map(r["lnglat"])
-                                elif hasattr(self, 'center_lon') and hasattr(self, 'center_lat'):
-                                    r["map_image"] = _make_static_map([self.center_lon, self.center_lat])
                             if not r.get("photos"):
                                 r["photos"] = []
                     return route_nodes
@@ -4562,9 +4569,13 @@ async def run_negotiate(msg: GatewayMessage):
                                     _r["map_image"] = _gu
                                     _has_map = True
                                     _force_guaranteed += 1
-                            if not _has_map and hasattr(self, 'center_lon') and hasattr(self, 'center_lat'):
-                                _r["map_image"] = _make_static_map([self.center_lon, self.center_lat])
-                                _force_guaranteed += 1
+                            # ⚠️ 这里原来写的是 `hasattr(self, 'center_lon')` —— 这个**嵌套生成器里没有
+                            #    `self`**，一旦走到这一行就 `NameError`，把整条下发链路带走：
+                            #    实测（2026-10-05）伊宁某次 geocode 拿不到中心 → 用户"未收到终稿"，
+                            #    日志只有一句 `🔥 [真实路网拼装失败]: NameError: name 'self' is not defined`。
+                            #    而且"拿城市中心当这个节点的示意图"本身就是在标错位置：
+                            #    没有坐标就**不给图**，交给 `attach_photo_fallbacks` 用带
+                            #    "位置示意，非实景照片"标注的影像兜底（如实，不误导）。
                         if not _r.get("photos"):
                             _r["photos"] = []
                         if not isinstance(_r.get("data_sources"), dict):
@@ -5688,6 +5699,25 @@ async def run_negotiate(msg: GatewayMessage):
                                         )
 
                                     _report = pending_price_report(final_data)
+                                    # 待人工确认的官方域名：这一步只**汇报**（白名单加不加由人定）
+                                    _domain_candidates: Dict[str, Any] = {}
+                                    try:
+                                        from core.web_price_tool import load_domain_candidates
+
+                                        _candidates = load_domain_candidates()
+                                        if _candidates:
+                                            _hosts: List[str] = []
+                                            for _candidate in _candidates:
+                                                _host = str(_candidate.get("host") or "")
+                                                if _host and _host not in _hosts:
+                                                    _hosts.append(_host)
+                                            _domain_candidates = {
+                                                "count": len(_hosts),
+                                                "hosts": _hosts[:5],
+                                                "note": "这些域名在搜索结果里看起来是官网，但没进白名单：确认后写进 WEB_PRICE_HOST_SUFFIXES，这类价格才会从「网摘估算」变成「可核实」。",
+                                            }
+                                    except Exception:
+                                        _domain_candidates = {}
                                     # 取价源状态**从真实取价尝试里推导**（而不是再单独诊断一次）：
                                     # 单测/实测都表明"诊断比功能本身更容易超时"，
                                     # 早先那次 TimeoutError 就是这样把整个补价带走的。
@@ -5760,6 +5790,9 @@ async def run_negotiate(msg: GatewayMessage):
                                         "unsourced_after": [str(item.get("name") or "") for item in _unsourced_after],
                                         "unsourced_upgrade_attempted": len(_newly_unsourced),
                                         "upgraded_to_verifiable": _upgraded,
+                                        # 待人工确认的官方域名（白名单是人工确认的：系统只提议）——
+                                        # 用户看到"还有 N 个域名待确认，确认后这类价格就能变成可核实"
+                                        "domain_candidates": _domain_candidates,
                                         # 超预算没查完的**如实计数**（不再是整段失败、一片空白）
                                         "timed_out": len(_timed_out),
                                         # 预算只够查这么多：剩下的如实留给「需要你确认」，
