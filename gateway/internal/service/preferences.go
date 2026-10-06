@@ -14,6 +14,56 @@ type FeedbackSample struct {
 	Reason string
 }
 
+// —— 负反馈原因归类（2026-10-05 用户口径）——
+//
+// 用户原话：「如果用户点击不喜欢…就按照用户的意图来」。
+// 用户点「不喜欢」时写下的原因，往往说的不是"这个地方的类型不好"，而是**这次安排的毛病**：
+// 太远、太贵、太赶。此前聚合只看 `Target` 的名字能命中哪些细标签，于是：
+//
+//	嫌「帕米尔旅游景区」太远 → disliked_tags 里进「山岳」
+//	→ 排序器把**所有山岳类**候选扣 0.6 分（build_profile_fine_tag_boost）
+//
+// 用户要的是"别跑那么远"，不是"我不喜欢山"。所以当原因本身能解释这次负反馈时，
+// **不把它记成类别级不喜欢**；意图由原因文本承载（原样进 evolution_memory，
+// ai-service 侧 core/feedback_signals 会把它翻成距离口径 / 排除名单 / 省钱倾斜）。
+// 原因说不清时（"人太多""排队久"）仍按原口径记细标签 —— 那是真的对该类型不满意。
+var distanceReasonKeywords = []string{
+	"太远", "远太", "太折腾", "路上太折腾", "跑得太累", "跑太累", "坐车太久",
+	"不想跑", "不想走远", "别太远", "不要太远", "换近", "近一点", "太偏", "太绕",
+}
+
+var priceReasonKeywords = []string{"太贵", "贵了", "不值", "性价比", "被坑", "宰客", "坑人", "太花钱", "花钱多"}
+
+var paceReasonKeywords = []string{"太赶", "赶场", "太累", "太累人", "节奏太快", "没时间", "来不及", "太满", "排太满"}
+
+// arrangementComplaint 判断这次负反馈的锅在**安排**而不是**地点类型**。
+// 返回 "distance" / "price" / "pace"；原因说不清或为空时返回 ""（按原口径记类别偏好）。
+//
+// 顺序有讲究：**距离优先**。"太远了而且太贵"时距离才是真痛点（贵可以换便宜的同类，
+// 远只能换近的），与 ai-service 侧 core/feedback_signals.classify_feedback_reason 同一口径。
+func arrangementComplaint(reason string) string {
+	text := strings.TrimSpace(reason)
+	if text == "" {
+		return ""
+	}
+	for _, kw := range distanceReasonKeywords {
+		if strings.Contains(text, kw) {
+			return "distance"
+		}
+	}
+	for _, kw := range priceReasonKeywords {
+		if strings.Contains(text, kw) {
+			return "price"
+		}
+	}
+	for _, kw := range paceReasonKeywords {
+		if strings.Contains(text, kw) {
+			return "pace"
+		}
+	}
+	return ""
+}
+
 // Profile 用户旅行画像（个性化推荐引擎的产物）
 type Profile struct {
 	LikedTags      []string
@@ -94,8 +144,11 @@ func buildFineTagDims() map[string]string {
 // 而界面上完全看不出问题在哪。同类风险还有「上海XX」（"海"当成湖海水系）。
 //
 // 处理方式刻意保守：只列**确定不含歧义**的地名（塔里木/塔克拉玛干/塔什库尔干 都不是塔建筑；
-// 上海不是海景），不搞"关键字黑名单"式的大改，避免把真实地点误删。
-var keywordFalseFriends = []string{"塔里木", "塔克拉玛干", "塔什库尔干", "上海"}
+// 上海不是海景；慕士塔格是山名不是塔），不搞"关键字黑名单"式的大改，避免把真实地点误删。
+//
+// 2026-10-05 补「慕士塔格」：实测读回画像时，"慕士塔格峰"被 塔 命中 → disliked_tags 里
+// 冒出「宗教古迹」—— 那是座山，跟塔建筑无关。
+var keywordFalseFriends = []string{"塔里木", "塔克拉玛干", "塔什库尔干", "慕士塔格", "上海"}
 
 // dropFalseFriends 去掉这些地名后再做关键字匹配（"塔里木胡杨林"→"胡杨林"，仍能命中 natural 的林）。
 func dropFalseFriends(target string) string {
@@ -195,7 +248,9 @@ func BuildProfile(userID string, samples []FeedbackSample) Profile {
 			for _, t := range fine {
 				likedTags[t]++
 			}
-		} else {
+		} else if arrangementComplaint(s.Reason) == "" {
+			// 原因能解释这次负反馈（太远/太贵/太赶）时，不记类别级不喜欢：
+			// 那是"这次安排不合适"，不是"这一类地方我不喜欢"（详见 arrangementComplaint 注释）。
 			for _, t := range fine {
 				dislikedTags[t]++
 			}

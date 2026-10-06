@@ -183,6 +183,55 @@ func TestBuildProfileEmptyFallback(t *testing.T) {
 	}
 }
 
+func TestArrangementComplaintIsNotACategoryDislike(t *testing.T) {
+	// 用户口径（2026-10-05）：「如果用户点击不喜欢…就按照用户的意图来」。
+	// 真实事故形态：嫌「帕米尔旅游景区」太远 → disliked_tags 进「山岳」→ 所有山岳候选被 -0.6。
+	// 用户要的是"别跑那么远"，不是"我不喜欢山"。
+	p := BuildProfile("user-far", []FeedbackSample{
+		{Target: "慕士塔格峰", Score: -1, Reason: "太远了，来回太折腾"},
+	})
+	if hasTag(p.DislikedTags, "山岳") {
+		t.Fatalf("嫌远不该把整个山岳类记成不喜欢：disliked=%v", p.DislikedTags)
+	}
+	if hasTag(p.DislikedTags, "草原沙漠") {
+		t.Fatalf("嫌远不该污染其它自然细标签：disliked=%v", p.DislikedTags)
+	}
+
+	// 原因说不清时仍按原口径记类别（"人太多"是真的对这类体验不满意）
+	p2 := BuildProfile("user-crowd", []FeedbackSample{
+		{Target: "慕士塔格峰", Score: -1, Reason: "人太多了"},
+	})
+	if !hasTag(p2.DislikedTags, "山岳") {
+		t.Fatalf("原因与安排无关时应保留类别级不喜欢，got %v", p2.DislikedTags)
+	}
+
+	// 嫌贵：既不记类别不喜欢，也仍要走原有的省钱倾向推断（预算信号不能被这次改动丢掉）
+	p3 := BuildProfile("user-price", []FeedbackSample{
+		{Target: "某高档餐厅", Score: -1, Reason: "太贵了，不值"},
+	})
+	if hasTag(p3.DislikedTags, "地方菜") {
+		t.Fatalf("嫌贵不该把「地方菜」记成不喜欢：disliked=%v", p3.DislikedTags)
+	}
+	if p3.BudgetTendency != "low" {
+		t.Fatalf("嫌贵仍应推断为低预算倾向，got %q", p3.BudgetTendency)
+	}
+
+	// 关键词口径必须与 ai-service 侧 core/feedback_signals.classify_feedback_reason 一致
+	for reason, want := range map[string]string{
+		"太远了":      "distance",
+		"路上太折腾":    "distance",
+		"太远了，还那么贵": "distance", // 距离优先：贵可以换同类，远只能换近的
+		"太贵了":      "price",
+		"太赶了，来不及":  "pace",
+		"人太多了":     "",
+		"":          "",
+	} {
+		if got := arrangementComplaint(reason); got != want {
+			t.Fatalf("arrangementComplaint(%q) = %q，want %q", reason, got, want)
+		}
+	}
+}
+
 func TestProfileToPromptInjection(t *testing.T) {
 	p := BuildProfile("user-1", []FeedbackSample{{Target: "成都熊猫基地", Score: 1, Reason: "喜欢"}})
 	s := ProfileToPrompt(p)
