@@ -17,7 +17,7 @@ import uuid
 import numpy as np
 import networkx as nx
 from sklearn.cluster import DBSCAN
-from typing import List, Dict, Any, Optional, Tuple, Mapping
+from typing import List, Dict, Any, Optional, Tuple, Mapping, Sequence
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI, BadRequestError
@@ -312,6 +312,64 @@ def reset_fetch_timing() -> None:
     _AMAP_GATE_STATS["count"] = 0.0
     _AMAP_GATE_STATS["wait"] = 0.0
     _AMAP_GATE_STATS["held"] = 0.0
+
+
+# —— POI 检索的进程内缓存（2026-10-05）——
+# 为什么缓存"取候选"这一步（而不只是最终方案）：
+#   ① 同一座城市的候选池在几十分钟内是**同一份事实**（景点/餐饮/住宿不会按小时变），
+#      连查两次纯属浪费；
+#   ② 高德那把 key 的 QPS 是本项目最紧的资源（实测并发 2 就会限流、静默丢整条查询），
+#      少发一次请求就是给真正的取数留余量；
+#   ③ 用户"换一换"、多人同城、以及我们自己的 warm-up，都会重复同样的查询。
+# 口径：只缓存**已经过过滤的真实结果**（不缓存失败、不缓存空），默认 30 分钟；
+# 缓存命中会在日志里说明"这一轮的候选来自缓存"，不让它看起来像刚查的。
+_POI_QUERY_CACHE: Dict[str, tuple] = {}
+_POI_CACHE_STATS: Dict[str, int] = {"hits": 0, "misses": 0}
+
+
+def poi_cache_ttl_seconds() -> float:
+    raw = str(os.getenv("AMAP_POI_CACHE_TTL_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 1800.0
+    return value if value >= 0 else 1800.0
+
+
+def reset_pool_cache_stats() -> None:
+    _POI_CACHE_STATS["hits"] = 0
+    _POI_CACHE_STATS["misses"] = 0
+
+
+def pool_cache_summary() -> str:
+    return f"候选缓存 命中={_POI_CACHE_STATS.get('hits', 0)} 未命中={_POI_CACHE_STATS.get('misses', 0)}"
+
+
+def _poi_cache_key(city: str, keywords: str, types: str, limit: int, play_worthy: bool) -> str:
+    return f"{str(city).strip()}|{str(keywords).strip()}|{str(types).strip()}|{int(limit)}|{bool(play_worthy)}"
+
+
+def _poi_cache_get(key: str) -> Optional[List[Dict[str, Any]]]:
+    ttl = poi_cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    item = _POI_QUERY_CACHE.get(key)
+    if not item:
+        return None
+    stored_at, rows = item
+    if time.monotonic() - float(stored_at) > ttl:
+        _POI_QUERY_CACHE.pop(key, None)
+        return None
+    return [dict(row) for row in rows]
+
+
+def _poi_cache_set(key: str, rows: Sequence[Mapping[str, Any]]) -> None:
+    if poi_cache_ttl_seconds() <= 0 or not rows:
+        return
+    if len(_POI_QUERY_CACHE) >= 256:  # 简单的上限，避免长时间运行把内存吃光
+        _POI_QUERY_CACHE.clear()
+    _POI_QUERY_CACHE[key] = (time.monotonic(), [dict(row) for row in rows])
+
 
 
 def fetch_timing_summary() -> str:
@@ -1613,6 +1671,13 @@ class ExpertToolbox:
     async def get_dynamic_pois(self, city: str, keywords: str, types: str = "110000|141200|060400|060100", limit: int = 40, play_worthy: bool = True) -> List[Dict]:
         if not self.amap_key:
             return []
+        _cache_key = _poi_cache_key(city, keywords, types, limit, play_worthy)
+        _cached_rows = _poi_cache_get(_cache_key)
+        if _cached_rows is not None:
+            _POI_CACHE_STATS["hits"] = int(_POI_CACHE_STATS.get("hits") or 0) + 1
+            print(f"♻️ [候选缓存] {city} 的这次检索命中缓存（{len(_cached_rows)} 条，TTL {poi_cache_ttl_seconds():.0f}s）", flush=True)
+            return _cached_rows
+        _POI_CACHE_STATS["misses"] = int(_POI_CACHE_STATS.get("misses") or 0) + 1
         from core.poi_pool import parse_amap_location as _parse_amap_location
         from core.poi_pool import is_play_worthy, poi_record_from_amap, amap_error_is_retryable, amap_error_note
         async with _http_client(6.0) as http_client:
@@ -1771,6 +1836,9 @@ class ExpertToolbox:
                                     p["photos"] = id_to_photos[p["id"]]
                         except Exception as e:
                             print(f"🔥 [实景图增强异常]: {e}")
+                    # 只缓存**成功且非空**的结果：失败/空结果不缓存，
+                    # 否则一次限流会被固化半小时（"这里没有 POI"的假象）
+                    _poi_cache_set(_cache_key, pois)
                     return pois
             except Exception as e:
                 print(f"🔥 [POI抓取异常]: {e}")
@@ -2274,6 +2342,7 @@ async def run_negotiate(msg: GatewayMessage):
     import time as _stage_time
 
     reset_fetch_timing()
+    reset_pool_cache_stats()
     _stage_marks: Dict[str, float] = {"开始": _stage_time.monotonic()}
 
     def _stage(name: str) -> None:
@@ -2906,7 +2975,8 @@ async def run_negotiate(msg: GatewayMessage):
         _loop_probe.stop()
         _watchdog.stop()
         print(
-            f"⏱️ [取数细分] {fetch_timing_summary()}｜闸门：{amap_gate_summary()}｜事件循环：{_loop_probe.summary()}",
+            f"⏱️ [取数细分] {fetch_timing_summary()}｜闸门：{amap_gate_summary()}｜"
+            f"事件循环：{_loop_probe.summary()}｜{pool_cache_summary()}",
             flush=True,
         )
         # 事件循环卡顿分段快照：明确"是哪一段把循环堵住了"（否则只知道总卡顿）
