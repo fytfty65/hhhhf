@@ -140,6 +140,18 @@ def parse_price_message(message: Any) -> Optional[float]:
     return None
 
 
+def check_in_from_url(url: Any) -> str:
+    """从 bookingUrl 里取出**供应商实际用的入住日期**（`?checkInDate=YYYY-MM-DD`）。
+
+    为什么要它（2026-10-05 实测）：用户没给出发日期时，服务端会自己挑一个默认日期，
+    而原来的披露写的是"按明日报价" —— 实际返回的 URL 里写的是 `checkInDate=2026-10-20`。
+    报价口径写错等于**标错前提**，比不标更糟。有 URL 就按 URL 说，没有就老实说不知道。
+    """
+    text = str(url or "")
+    match = re.search(r"checkInDate=(\d{4}-\d{2}-\d{2})", text)
+    return match.group(1) if match else ""
+
+
 def normalize_hotel(row: Mapping[str, Any]) -> Dict[str, Any]:
     """供应商行 → 我们内部的酒店记录（字段名固定，缺就是缺）。"""
     price = row.get("price") if isinstance(row.get("price"), Mapping) else {}
@@ -174,6 +186,8 @@ def normalize_hotel(row: Mapping[str, Any]) -> Dict[str, Any]:
         "lnglat": lnglat,
         "hotel_id": row.get("hotelId"),
         "brand": str(row.get("brand") or "").strip(),
+        # 报价实际对应的入住日期（供应商 URL 里写着的那个）
+        "check_in_actual": check_in_from_url(row.get("bookingUrl")),
     }
 
 
@@ -359,6 +373,7 @@ async def hotel_price(
                 "lnglat": matched.get("lnglat"),
                 "has_price": matched.get("has_price"),
                 "check_in": check_in,
+                "check_in_actual": matched.get("check_in_actual") or "",
                 "nights": max(1, int(nights or 1)),
                 "adults": max(1, int(adults or 2)),
                 "source": "rollinggo",
@@ -428,11 +443,14 @@ async def price_lodging_nodes(
     targets = targets[: max(1, int(limit))]
 
     observations: List[Dict[str, Any]] = []
+    actual_dates: List[str] = []
     for name in targets:
         result = await hotel_price(
             name, city, check_in=str(start_date or "").strip(), nights=max(1, int(nights or 1)), adults=adults
         )
         report["queried"] += 1
+        if result.get("check_in_actual") and str(result["check_in_actual"]) not in actual_dates:
+            actual_dates.append(str(result["check_in_actual"]))
         if result.get("status") == "ok":
             report["matched"] += 1
             price = result.get("price")
@@ -456,6 +474,12 @@ async def price_lodging_nodes(
     # 「匹配到这家」≠「拿到了数字」：供应商可能返回这家但当天没有可售报价。
     # 分开报，用户才知道"是没这家"还是"有这家但没价"（unknown ≠ 0）。
     report["with_price"] = len(report["prices"])
+    # 报价口径：用户给了出发日期就用它；没给时**以供应商 URL 里的实际日期为准**
+    # （原来写"按明日报价"是错的 —— 实测供应商返回的是 2026-10-20）。
+    if actual_dates:
+        report["check_in_dates"] = sorted(actual_dates)
+        if not str(start_date or "").strip():
+            report["check_in"] = "未给出发日期，供应商实际按 " + "、".join(sorted(actual_dates)) + " 入住报价"
     return {"plan": merged_plan, "report": report, "observations": observations}
 
 

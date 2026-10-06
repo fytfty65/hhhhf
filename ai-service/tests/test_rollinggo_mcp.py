@@ -343,6 +343,46 @@ class LodgingPassTests(unittest.TestCase):
                 asyncio.run(rollinggo_mcp.price_lodging_nodes(plan, city="库尔勒"))
         self.assertEqual(asked, [])
 
+    def test_check_in_date_is_read_from_the_booking_url(self):
+        """报价口径要按**供应商 URL 里的实际日期**说（实测它返回的是 2026-10-20，不是"明天"）。"""
+        import asyncio
+
+        self.assertEqual(rollinggo_mcp.check_in_from_url(REAL_ROW["bookingUrl"]), "2026-10-11")
+        self.assertEqual(rollinggo_mcp.check_in_from_url("https://x/y"), "")
+        self.assertEqual(rollinggo_mcp.check_in_from_url(None), "")
+
+        async def fake_hotel_price(name, city, *, check_in="", nights=1, adults=2, timeout=None):
+            return {
+                "status": "ok",
+                "name": name,
+                "matched_name": name,
+                "price": 183.0,
+                "message": "查价成功。2晚总价：366CNY（约183CNY/晚）",
+                "booking_url": "https://rollinggo.cn/pages/hotel/detail/index?id=1&checkInDate=2026-10-20&checkOutDate=2026-10-22",
+                "check_in_actual": "2026-10-20",
+                "check_in": check_in,
+            }
+
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "hotel_price", fake_hotel_price):
+                result = asyncio.run(rollinggo_mcp.price_lodging_nodes(self._plan(), city="库尔勒"))
+        self.assertEqual(result["report"]["check_in_dates"], ["2026-10-20"])
+        self.assertIn("2026-10-20", result["report"]["check_in"])
+        self.assertNotIn("按明日", result["report"]["check_in"])
+
+    def test_user_supplied_date_is_not_overwritten(self):
+        import asyncio
+
+        async def fake_hotel_price(name, city, *, check_in="", nights=1, adults=2, timeout=None):
+            return {"status": "ok", "name": name, "matched_name": name, "price": 1.0, "check_in_actual": "2026-10-20"}
+
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "hotel_price", fake_hotel_price):
+                result = asyncio.run(
+                    rollinggo_mcp.price_lodging_nodes(self._plan(), city="库尔勒", start_date="2026-12-01")
+                )
+        self.assertEqual(result["report"]["check_in"], "2026-12-01", "用户给了日期就以用户的为准")
+
     def test_query_limit_is_respected(self):
         import asyncio
 
