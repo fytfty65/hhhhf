@@ -5389,6 +5389,7 @@ async def run_negotiate(msg: GatewayMessage):
                                     pending_price_targets,
                                     price_coverage,
                                     summarize_merge,
+                                    unsourced_price_claims,
                                 )
 
                                 # 补价节点数改为**可配置**（默认 12），并且先诊断"取价源通不通"：
@@ -5404,21 +5405,38 @@ async def run_negotiate(msg: GatewayMessage):
 
                                 _price_budget = price_budget_seconds()
                                 _price_node_cap = affordable_target_count(price_max_nodes(), budget_seconds=_price_budget)
-                                _targets = pending_price_targets(final_data, limit=_price_node_cap)
+                                # 👑 "有数字没出处"的节点优先查（2026-10-05 抽查表发现）：
+                                #    喀什 15 个节点里 5 个是 `¥206（source=web）`——数字来自搜索摘要，
+                                #    点开也不是官方报价。这类原来**永远不会被再查**（只挑 value is None），
+                                #    但它最值得再查一次：命中白名单官方页面就把来源从"估算"变成"可核实"。
+                                _unsourced_before = unsourced_price_claims(final_data, limit=_price_node_cap)
+                                _unsourced_names = {str(item.get("name") or "") for item in _unsourced_before}
+                                _targets = pending_price_targets(
+                                    final_data,
+                                    limit=_price_node_cap,
+                                    include_estimated=True,
+                                    include_unsourced=True,
+                                )
                                 _pending_total = len(pending_price_report(final_data)["pending"])
                                 _fetcher = getattr(toolbox, "get_real_time_web_price", None)
                                 if _targets and _fetcher:
-                                    async def _lookup(_item: Dict[str, Any]) -> Dict[str, Any]:
+                                    async def _lookup(
+                                        _item: Dict[str, Any], *, prefer_official: bool = False
+                                    ) -> Dict[str, Any]:
                                         """查一个节点的价格：搜索 + **能直抓官方页面就直抓**，带出处。
 
                                         统一走 `web_price_tool.lookup_price`（一处口径）：
                                         摘要抽价 → 命中白名单页面再抓正文抽价 → 拿不到如实 None。
+                                        目标是"把已有的网摘价升级成官方价"时（`prefer_official=True`），
+                                        查询带「官网」并遍历多个白名单候选页。
                                         """
                                         from core.web_price_tool import lookup_price
 
                                         _name = str(_item.get("name") or "")
                                         try:
-                                            return await lookup_price(_name, target_city, max_results=3)
+                                            return await lookup_price(
+                                                _name, target_city, max_results=3, prefer_official=prefer_official
+                                            )
                                         except Exception as _lookup_exc:
                                             from core.web_price_tool import build_observation
 
@@ -5442,18 +5460,24 @@ async def run_negotiate(msg: GatewayMessage):
                                         float(_price_budget) / max(1, len(_targets)),
                                     )
 
-                                    async def _lookup_bounded(_item: Dict[str, Any]) -> Dict[str, Any]:
+                                    async def _lookup_bounded(
+                                        _item: Dict[str, Any], *, prefer_official: Optional[bool] = None
+                                    ) -> Dict[str, Any]:
                                         from core.web_price_tool import build_observation
 
                                         _remaining = _deadline - _time.monotonic()
                                         _name = str(_item.get("name") or "")
+                                        _want_official = (
+                                            _name in _unsourced_names if prefer_official is None else bool(prefer_official)
+                                        )
                                         if _remaining <= 0.5:
                                             return build_observation(
                                                 name=_name, value=None, source="web", provider="search"
                                             ) | {"timeout": True, "error": "整体预算已用完，这个点没轮到"}
                                         try:
                                             return await asyncio.wait_for(
-                                                _lookup(_item), timeout=min(_remaining, _per_point_cap)
+                                                _lookup(_item, prefer_official=_want_official),
+                                                timeout=min(_remaining, _per_point_cap),
                                             )
                                         except asyncio.TimeoutError:
                                             return build_observation(
@@ -5482,6 +5506,81 @@ async def run_negotiate(msg: GatewayMessage):
                                     _merged = merge_observations(final_data, list(_observations))
                                     if _merged["updated"]:
                                         final_data["route"] = _merged["plan"]["route"]
+                                    # 这一轮"刚补到价"的节点名单（第二轮升级只做这些）
+                                    _filled = [
+                                        item for item in (_observations or [])
+                                        if isinstance(item, Mapping) and item.get("value") is not None
+                                    ]
+                                    _filled_names = {str(item.get("name") or "") for item in _filled}
+
+                                    # 👑 第二轮：**把这一轮刚补上的"网摘价"再试着升级成官方价**
+                                    #    （2026-10-05 真实推演发现的口径错位）：
+                                    #    上一版把"有数字没出处"当成**进入取价前的**既存状态 —— 实测
+                                    #    喀什跑完发现 `unsourced_before=0`，因为那 5 个"¥206(web)"
+                                    #    正是这一轮自己补出来的：先是空白 → 填上网摘价 → 变成"没出处"。
+                                    #    所以升级要放在**补价之后**，且只做一轮、只做少量（预算还剩才做）：
+                                    #    命中白名单官方页面就把来源从 `web`（估算）翻成 `web_page`（可核实）。
+                                    _upgraded: List[str] = []
+                                    _budget_left = _deadline - _time.monotonic()
+                                    _newly_unsourced = [
+                                        item
+                                        for item in unsourced_price_claims(final_data, limit=3)
+                                        if str(item.get("name") or "") in _filled_names
+                                        or str(item.get("name") or "") in _unsourced_names
+                                    ]
+                                    # 源全死时不空转：这一轮补到过价（说明源活着）才做第二轮；
+                                    # 被反爬挡住（安全验证页）时也不做 —— 换个查询词只会再撞一次墙，
+                                    # 白白多花 8~10s。
+                                    # ⚠️ `_blocked` 必须在用它之前算出来（2026-10-05 真实推演踩过：
+                                    #    顺序写反 → `UnboundLocalError: _blocked`，整个取价段被 except
+                                    #    接住、价格审计整块丢失，只剩一句 error）。
+                                    from core.web_price_tool import last_search_attempts as _upgrade_attempts
+                                    from core.web_price_tool import enabled_providers as _enabled_providers
+                                    from core.web_price_tool import provider_is_available as _provider_available
+
+                                    _blocked = any(
+                                        (not item.get("ok")) and "验证" in str(item.get("error") or "")
+                                        for item in (_upgrade_attempts or [])
+                                    )
+                                    # 还要看"有没有源是活的（不在冷却里）"：第一轮可能是**命中搜索缓存**
+                                    # 才补到价的（缓存命中不记尝试），此时 `_blocked` 为假，但源其实已经
+                                    # 被反爬打进了冷却 —— 第二轮换个查询词必然再撞一次墙。
+                                    _live_provider = any(_provider_available(item) for item in _enabled_providers())
+                                    if (_blocked or not _live_provider) and _newly_unsourced and _filled:
+                                        print(
+                                            "⏭️ [联网取价] 跳过官方页升级："
+                                            + ("取价源正在返回安全验证页" if _blocked else "所有取价源都在冷却中")
+                                            + f"（{len(_newly_unsourced)} 个网摘价继续保持未核实标注）",
+                                            flush=True,
+                                        )
+                                    if (
+                                        _newly_unsourced
+                                        and _filled
+                                        and _budget_left > 5.0
+                                        and not _blocked
+                                        and _live_provider
+                                    ):
+                                        for _item in _newly_unsourced:
+                                            _upgrade_observation = await _lookup_bounded(_item, prefer_official=True)
+                                            _observations.append(_upgrade_observation)
+                                        _merged = merge_observations(final_data, list(_observations))
+                                        if _merged["updated"]:
+                                            final_data["route"] = _merged["plan"]["route"]
+                                        _upgraded = sorted(
+                                            {
+                                                str(item.get("name") or "")
+                                                for item in _observations
+                                                if isinstance(item, Mapping)
+                                                and str(item.get("source") or "") == "web_page"
+                                            }
+                                        )
+                                        print(
+                                            f"⬆️ [联网取价] 官方页升级：试了 {len(_newly_unsourced)} 个网摘价，"
+                                            f"升级为可核实 {len(_upgraded)} 个"
+                                            + (f"（{'、'.join(_upgraded[:3])}）" if _upgraded else "（没命中白名单官方页面，仍是网摘价）"),
+                                            flush=True,
+                                        )
+
                                     _report = pending_price_report(final_data)
                                     # 取价源状态**从真实取价尝试里推导**（而不是再单独诊断一次）：
                                     # 单测/实测都表明"诊断比功能本身更容易超时"，
@@ -5507,10 +5606,14 @@ async def run_negotiate(msg: GatewayMessage):
                                                 f"冷却中（还剩 {_state.get('cooldown_remaining_s')}s）"
                                             )
                                             break
-                                    _filled = [
-                                        item for item in (_observations or [])
-                                        if isinstance(item, Mapping) and item.get("value") is not None
-                                    ]
+                                    # 升级成效要能看见："有数字没出处"的那批里，有多少个换成了
+                                    # 可核实来源（命中白名单官方页面），有多少个还是网摘 ——
+                                    # 只报"补到 N 条"会把"补了个新的网摘价"也算成功。
+                                    _unsourced_after = unsourced_price_claims(final_data, limit=99)
+                                    _unsourced_after_names = {str(item.get("name") or "") for item in _unsourced_after}
+                                    _upgraded = sorted(
+                                        set(_upgraded) | (_unsourced_names - _unsourced_after_names)
+                                    )
                                     _timed_out = [
                                         item for item in (_observations or [])
                                         if isinstance(item, Mapping) and item.get("timeout")
@@ -5545,6 +5648,12 @@ async def run_negotiate(msg: GatewayMessage):
                                         "provider_status": {"error": _attempt_error} if _attempt_error else {},
                                         "looked_up": len(_targets),
                                         "filled_from_web": len(_filled),
+                                        # "有数字没出处"的台账：查之前有几个、查之后还剩几个、
+                                        # 哪几个成功升级成可核实来源（命中白名单官方页面）
+                                        "unsourced_before": [str(item.get("name") or "") for item in _unsourced_before],
+                                        "unsourced_after": [str(item.get("name") or "") for item in _unsourced_after],
+                                        "unsourced_upgrade_attempted": len(_newly_unsourced),
+                                        "upgraded_to_verifiable": _upgraded,
                                         # 超预算没查完的**如实计数**（不再是整段失败、一片空白）
                                         "timed_out": len(_timed_out),
                                         # 预算只够查这么多：剩下的如实留给「需要你确认」，
@@ -5557,6 +5666,12 @@ async def run_negotiate(msg: GatewayMessage):
                                         f"（预算 {_price_budget:.0f}s，来源可达={_reachable}"
                                         + (f"，超预算 {len(_timed_out)} 个" if _timed_out else "")
                                         + "）"
+                                        + (
+                                            f"；有数字没出处 {len(_unsourced_before)} 个 → 升级为可核实 {len(_upgraded)} 个"
+                                            + (f"（{ '、'.join(_upgraded[:3]) }）" if _upgraded else "")
+                                            if _unsourced_before
+                                            else ""
+                                        )
                                         + (f"；失败原因：{_attempt_error}" if _attempt_error else ""),
                                         flush=True,
                                     )

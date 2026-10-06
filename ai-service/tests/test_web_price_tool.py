@@ -805,6 +805,83 @@ class PageFetchIntegrationTests(unittest.TestCase):
         self.assertTrue(observation["estimated"])
 
 
+class PreferOfficialUpgradeTests(unittest.TestCase):
+    """把"有数字没出处"的网摘价升级成白名单官方页面价（2026-10-05）。
+
+    升级请求和"填空白"不一样：目标是**可核实来源**，所以查询词补「官网」、
+    并且遍历多个白名单候选页面（填空白时只试第一个，省时间）。
+    """
+
+    def test_upgrade_query_asks_for_the_official_site(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        seen = {}
+
+        async def fake_search(query, max_results=3):
+            seen["query"] = query
+            return []
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            asyncio.run(web_price_tool.lookup_price("博斯腾湖", "库尔勒", prefer_official=True))
+        self.assertIn("官网", seen["query"])
+        self.assertEqual(seen["query"].split()[0], "库尔勒")
+
+    def test_upgrade_walks_past_a_dead_official_page(self):
+        """第一个白名单页面抓不到价格时，继续试下一个 —— 升级这类请求，官方价才是目标。"""
+        import asyncio
+
+        from core import web_price_tool
+
+        tried = []
+
+        async def fake_search(query, max_results=3):
+            return [
+                {"title": "门票", "snippet": "门票 45 元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou"},
+                {"title": "某景区管理局", "url": "https://www.example.gov.cn/a", "provider": "sogou"},
+                {"title": "另一官方页", "url": "https://www.example.gov.cn/b", "provider": "sogou"},
+            ]
+
+        async def fake_fetch(url, **_kwargs):
+            tried.append(url)
+            if url.endswith("/a"):
+                return {"ok": True, "url": url, "text": "本页只有简介，没有票价信息", "retrieved_at": 1.0}
+            return {"ok": True, "url": url, "text": "景区门票 60 元", "retrieved_at": 1.0}
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            with mock.patch("core.web_price_tool.fetch_page_text", fake_fetch):
+                observation = asyncio.run(
+                    web_price_tool.lookup_price("博斯腾湖", "库尔勒", prefer_official=True)
+                )
+        self.assertEqual(observation["value"], 60.0, observation)
+        self.assertEqual(observation["source"], "web_page")
+        self.assertEqual(observation["source_url"], "https://www.example.gov.cn/b")
+        self.assertEqual(len(tried), 2, "应当接着试第二个白名单页面")
+
+    def test_plain_lookup_still_falls_back_to_the_snippet(self):
+        """不做升级时行为不变：官方页拿不到就退回摘要价（标 web＝估算）。"""
+        import asyncio
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3):
+            return [
+                {"title": "门票", "snippet": "门票 45 元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou"},
+                {"title": "某景区管理局", "url": "https://www.example.gov.cn/a", "provider": "sogou"},
+            ]
+
+        async def fake_fetch(url, **_kwargs):
+            return {"ok": True, "url": url, "text": "本页只有简介，没有票价信息", "retrieved_at": 1.0}
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            with mock.patch("core.web_price_tool.fetch_page_text", fake_fetch):
+                observation = asyncio.run(web_price_tool.lookup_price("博斯腾湖", "库尔勒"))
+        self.assertEqual(observation["value"], 45.0)
+        self.assertEqual(observation["source"], "web")
+        self.assertTrue(observation["estimated"])
+
+
 class PriceStepBudgetTests(unittest.TestCase):
     """取价这一步不能"一超时就整段作废"（2026-10-05 矩阵实测：4 个场景里 3 个只剩一个 error）。
 
@@ -848,7 +925,61 @@ class PriceStepBudgetTests(unittest.TestCase):
         text = self._source()
         self.assertIn("_lookup_bounded", text, "取价必须逐点限时，而不是整体一刀切")
         self.assertIn("_deadline = _time.monotonic()", text)
-        self.assertIn("asyncio.wait_for(\n                                                _lookup(_item), timeout=min(_remaining, _per_point_cap)", text)
+        self.assertIn("timeout=min(_remaining, _per_point_cap)", text)
+        # 每点的上限还要能带"是否走官方页升级"这个开关（第二轮用）
+        self.assertIn("_lookup(_item, prefer_official=_want_official)", text)
+
+    def test_official_page_upgrade_runs_after_filling_and_only_when_sources_are_alive(self):
+        """第二轮（官方页升级）的触发条件必须有护栏，否则每次取价都多花 8~10s。
+
+        真实推演教训（2026-10-05）：喀什跑完 `unsourced_before=0` —— 那批"有数字没出处"
+        正是这一轮自己补出来的（空白 → 网摘价）。所以升级只能放在**补价之后**，
+        并且：补到过价（源活着）+ 预算还剩 + 没被反爬挡住，三条都满足才做。
+        """
+        text = self._source()
+        self.assertIn("第二轮", text)
+        self.assertIn("and _budget_left > 5.0", text)
+        self.assertIn("and not _blocked", text)
+        self.assertIn("and _live_provider", text, "第一轮靠搜索缓存补到价时，源可能已经在冷却里")
+        self.assertIn('"验证" in str(item.get("error") or "")', text)
+
+    def test_price_step_locals_are_assigned_before_they_are_used(self):
+        """取价段里的局部变量必须"先算后用"（AST 静态检查）。
+
+        真实事故（2026-10-05 真实推演）：把"跳过官方页升级"的判断写在了 `_blocked` 赋值之前，
+        抛 `UnboundLocalError`，被取价段外层 except 接住 —— `price_audit` 整块丢失、只剩一句 error，
+        界面上表现成"取价压根没跑"。这类错单测跑不到（那段代码只在真实链路里执行），
+        所以这里做一次"赋值必须早于使用"的静态检查，防止同样的顺序错再犯。
+        """
+        import ast
+        import io
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        source = io.open(os.path.join(root, "api", "agent.py"), encoding="utf-8").read()
+        tree = ast.parse(source)
+        target = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_negotiate"
+        )
+        names = ("_blocked", "_upgraded", "_newly_unsourced", "_filled_names", "_unsourced_after_names", "_live_provider")
+        first_store: dict = {}
+        first_load: dict = {}
+        for node in ast.walk(target):
+            if not isinstance(node, ast.Name) or node.id not in names:
+                continue
+            if isinstance(node.ctx, ast.Store):
+                first_store.setdefault(node.id, node.lineno)
+            else:
+                first_load.setdefault(node.id, node.lineno)
+        for name in names:
+            self.assertIn(name, first_store, f"{name} 在 run_negotiate 里没有被赋值？")
+            if name in first_load:
+                self.assertLess(
+                    first_store[name],
+                    first_load[name],
+                    f"{name} 在第 {first_load[name]} 行就被用了，但第 {first_store[name]} 行才赋值",
+                )
 
     def test_lookups_are_sequential_with_a_shared_deadline(self):
         """取价底层是**串行**的（全局锁 + 节流），所以并发只会排队。

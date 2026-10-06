@@ -16,6 +16,7 @@ from core.price_sources import (  # noqa: E402
     price_coverage,
     source_rank,
     summarize_merge,
+    unsourced_price_claims,
 )
 
 
@@ -68,6 +69,50 @@ class TestCoverageAndTargets(unittest.TestCase):
 
     def test_pending_targets_respects_limit(self):
         self.assertEqual(len(pending_price_targets(plan(), limit=1)), 1)
+
+    def test_unsourced_claims_are_the_numbers_without_a_verifiable_source(self):
+        """"有数字没出处"要能被单独挑出来（2026-10-05 抽查表发现：喀什 15 个节点里 5 个）。
+
+        这类节点原来**永远不会被取价步骤再查**（只挑 value is None），
+        但它最值得再查一次 —— 命中白名单官方页面就能把来源从"估算"变成"可核实"。
+        """
+        claims = unsourced_price_claims(plan())
+        self.assertEqual([item["name"] for item in claims], ["回民街小吃"])
+        self.assertEqual(claims[0]["current_source"], "web")
+        self.assertEqual(claims[0]["current_value"], 60.0)
+
+    def test_unsourced_claims_exclude_verified_and_missing(self):
+        names = [item["name"] for item in unsourced_price_claims(plan())]
+        self.assertNotIn("钟楼酒店", names, "高德价已可核实，不用再查")
+        self.assertNotIn("城墙南门", names, "完全没价格的走 pending 另一条路")
+        self.assertNotIn("陕西历史博物馆", names)
+
+    def test_pending_targets_put_unsourced_upgrades_first(self):
+        """预算有限（默认 12 个点）：先查"有数字没出处"的，再查空白的。"""
+        targets = pending_price_targets(plan(), include_estimated=True, include_unsourced=True)
+        self.assertEqual(targets[0]["name"], "回民街小吃", targets)
+        self.assertEqual(targets[0]["current_source"], "web")
+        self.assertIn("城墙南门", [item["name"] for item in targets])
+
+    def test_pending_targets_do_not_duplicate_the_same_node(self):
+        targets = pending_price_targets(plan(), include_estimated=True, include_unsourced=True)
+        names = [item["name"] for item in targets]
+        self.assertEqual(len(names), len(set(names)), names)
+
+    def test_unsourced_claims_respect_the_limit(self):
+        self.assertEqual(len(unsourced_price_claims(plan(), limit=1)), 1)
+
+    def test_unsourced_claim_can_be_upgraded_to_a_verifiable_source(self):
+        """升级路径：网摘价 → 白名单官方页面价，`estimated` 标记随之取消、数字被替换。"""
+        result = merge_observations(
+            plan(),
+            [make_observation("回民街小吃", 45, "web_page")],
+        )
+        merged = {item["name"]: item for item in result["plan"]["route"]}
+        self.assertEqual(merged["回民街小吃"]["cost_estimate"], "¥45")
+        self.assertEqual(merged["回民街小吃"]["data_sources"]["cost_estimate"], "web_page")
+        self.assertFalse(merged["回民街小吃"]["estimated"])
+        self.assertEqual(unsourced_price_claims(result["plan"]), [])
 
 
 class TestMerge(unittest.TestCase):

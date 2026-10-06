@@ -947,7 +947,13 @@ async def search_result_count(query: str, *, max_results: int = 3) -> int:
     return len(rows)
 
 
-async def lookup_price(name: str, city: str, *, max_results: int = 3) -> Dict[str, Any]:
+async def lookup_price(
+    name: str,
+    city: str,
+    *,
+    max_results: int = 3,
+    prefer_official: bool = False,
+) -> Dict[str, Any]:
     """一个地点的取价：先搜，再**能直抓官方页面就直抓**（用户口径：加入酒店官网/民宿白名单）。
 
     顺序与口径：
@@ -959,8 +965,15 @@ async def lookup_price(name: str, city: str, *, max_results: int = 3) -> Dict[st
     页面来的价格标 `source="web_page"`：**白名单里的官方/政府页面**按"可核实"计
     （2026-10-05 用户拍板：官方自己写的票价、带 URL 可点开，就算可核实）；
     不在白名单的页面根本不抓，搜索摘要仍然是估算（`source="web"`）。
+
+    `prefer_official=True`（用于"把已有的网摘价升级成官方价"）：
+      - 查询词补「官网」，把官方页面顶到前面；
+      - 摘要价先放一边，遍历**多个**白名单候选页面（默认只试第一个），
+        只要有一个页面正文抽出价格就采用 —— 升级这类请求，官方页面价才是目标。
     """
     query = f"{city} {name} 门票 价格 人均 每晚"
+    if prefer_official:
+        query = f"{city} {name} 门票价格 官网"
     try:
         rows = await search_texts(query, max_results=max_results)
     except Exception as exc:
@@ -969,28 +982,30 @@ async def lookup_price(name: str, city: str, *, max_results: int = 3) -> Dict[st
         }
 
     snippet_pick = pick_price_from_rows(rows)
-    page_url = ""
+    allowed_urls: List[str] = []
     for row in rows or []:
         candidate_url = str(row.get("url") or row.get("href") or "")
-        if candidate_url and host_is_allowed(candidate_url)[0]:
-            page_url = candidate_url
-            break
+        if candidate_url and host_is_allowed(candidate_url)[0] and candidate_url not in allowed_urls:
+            allowed_urls.append(candidate_url)
+    page_urls = allowed_urls[:3] if prefer_official else allowed_urls[:1]
 
-    if page_url:
+    for page_url in page_urls:
         page = await fetch_page_text(page_url)
-        if page.get("ok"):
-            candidates = extract_price_candidates(str(page.get("text") or ""))
-            if candidates:
-                best = candidates[0]
-                return build_observation(
-                    name=name,
-                    value=float(best["value"]),
-                    source="web_page",
-                    source_url=page_url,
-                    excerpt=str(best.get("excerpt") or ""),
-                    provider="official_page",
-                )
+        if not page.get("ok"):
+            continue
+        candidates = extract_price_candidates(str(page.get("text") or ""))
+        if candidates:
+            best = candidates[0]
+            return build_observation(
+                name=name,
+                value=float(best["value"]),
+                source="web_page",
+                source_url=page_url,
+                excerpt=str(best.get("excerpt") or ""),
+                provider="official_page",
+            )
 
+    page_url = page_urls[0] if page_urls else ""
     if snippet_pick is not None:
         return build_observation(
             name=name,

@@ -99,21 +99,26 @@ def price_coverage(plan: Any) -> Dict[str, Any]:
     }
 
 
-def pending_price_targets(plan: Any, limit: int = 20, include_estimated: bool = False) -> List[Dict[str, Any]]:
-    """挑出**需要去查价格**的节点（默认只挑完全没有价格的）。
+def unsourced_price_claims(plan: Any, limit: int = 20) -> List[Dict[str, Any]]:
+    """**有价格数字、但出处不可核实**的节点（"有数字没出处"）。
 
-    返回按意图分组用的清单：`[{name, intent, current_source, current_value}]`，
-    调用方据此逐节点检索（而不是像现在这样一次只查"城市+大类"）。
+    为什么单独挑出来（2026-10-05 抽查表上发现的真实形态）：喀什 15 个节点里有 5 个是
+    `¥206（source=web）`——数字来自搜索摘要（别人转载的页面），点开也不是官方报价。
+    这类节点原来的取价步骤**根本不会再看它**（`pending_price_targets` 只挑 `value is None`），
+    但它恰恰最值得再查一次：一旦命中白名单官方页面，来源就从 `web`（估算）
+    变成 `web_page`（可核实）—— 同一趟请求里，真实度是"不可核实 → 可核实"的翻转。
+
+    返回 `[{name, intent, current_value, current_source}]`（与 pending 清单同形状）。
     """
-    targets: List[Dict[str, Any]] = []
+    claims: List[Dict[str, Any]] = []
     for node in nodes_of(plan):
         value = cost_of(node)
+        if value is None:
+            continue
         source = _current_price_source(node)
-        if value is not None and not include_estimated:
+        if is_verified_source(source):
             continue
-        if value is not None and is_verified_source(source):
-            continue
-        targets.append(
+        claims.append(
             {
                 "name": node_name(node),
                 "intent": intent_of(node),
@@ -121,8 +126,50 @@ def pending_price_targets(plan: Any, limit: int = 20, include_estimated: bool = 
                 "current_source": source or "missing",
             }
         )
+        if len(claims) >= max(1, int(limit)):
+            break
+    return claims
+
+
+def pending_price_targets(
+    plan: Any,
+    limit: int = 20,
+    include_estimated: bool = False,
+    include_unsourced: bool = False,
+) -> List[Dict[str, Any]]:
+    """挑出**需要去查价格**的节点（默认只挑完全没有价格的）。
+
+    返回按意图分组用的清单：`[{name, intent, current_source, current_value}]`，
+    调用方据此逐节点检索（而不是像现在这样一次只查"城市+大类"）。
+
+    `include_unsourced=True`：把"有数字但出处不可核实"的节点**排在前面**先查。
+    取价预算有限（默认 12 个点 / 约 90s），优先顺序本身就是一次价值判断：
+    给空白填一个网摘估算价 vs 把已有的网摘价升级成官方页面价（可核实）——
+    后者能翻转真实度，且用户已经能看见那个数字、更需要知道它算不算数。
+    """
+    targets: List[Dict[str, Any]] = []
+    if include_unsourced:
+        targets.extend(unsourced_price_claims(plan, limit=max(1, int(limit))))
+    for node in nodes_of(plan):
         if len(targets) >= max(1, int(limit)):
             break
+        value = cost_of(node)
+        source = _current_price_source(node)
+        if value is not None and not include_estimated:
+            continue
+        if value is not None and is_verified_source(source):
+            continue
+        name = node_name(node)
+        if any(item.get("name") == name for item in targets):
+            continue
+        targets.append(
+            {
+                "name": name,
+                "intent": intent_of(node),
+                "current_value": value,
+                "current_source": source or "missing",
+            }
+        )
     return targets
 
 
