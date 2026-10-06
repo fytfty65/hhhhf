@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -204,6 +205,119 @@ def host_is_allowed(url: str) -> tuple[bool, str]:
     if any(host.endswith(suffix) or host == suffix.lstrip(".") for suffix in official_host_suffixes()):
         return True, "公开的官方/事业单位页面"
     return False, f"{host} 不在官方页面允许清单里（可用 WEB_PRICE_HOST_SUFFIXES 显式补充）"
+
+
+# —— 官方域名**候选发现**（只提议、不自动信任）——
+# 用户口径（2026-10-05）："把 gov/景区官网页面（白名单里的）视作可核实来源"。
+# 但白名单是**人工确认**的：景区官网域名千奇百怪（xxx-scenic.com / xxxlvyou.cn…），
+# 自动信任任意 .com 就等于把"可核实"这四个字废掉。所以这里只做一件事：
+# 从搜索结果里**认出"这看起来是官网"的域名**，记进待确认清单，由人加进
+# `WEB_PRICE_HOST_SUFFIXES`。提议不落库、不抓取、不影响当次价格结论。
+OFFICIAL_TITLE_MARKERS = (
+    "官网", "官方网站", "官方站", "景区官网", "管理委员会", "管委会", "旅游局",
+    "文化和旅游", "文旅集团", "旅游发展", "景区管理局", "自然保护区管理局",
+)
+
+
+def official_domain_hints(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    query_name: str = "",
+    max_items: int = 3,
+) -> List[Dict[str, Any]]:
+    """从搜索结果里挑出"像官网但不在白名单"的域名（纯函数，可单测）。
+
+    判定只用**搜索结果自己给出的信息**（标题/摘要/站点名），不额外抓页面：
+    - 标题或站点名里出现「官网/管委会/旅游局/文旅集团…」这类官方身份词；
+    - 域名不在允许清单里（已在清单里的没必要提议）；
+    - 平台电商页直接排除。
+    返回 `[{host, url, title, why}]`，供人工确认后写入 `WEB_PRICE_HOST_SUFFIXES`。
+    """
+    hints: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, Mapping):  # 搜索结果里混进 None/字符串不该把整段带崩
+            continue
+        url = str(row.get("url") or row.get("href") or "").strip()
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        host = _host_of(url)
+        if not host or host in seen:
+            continue
+        if any(marker in host for marker in BLOCKED_HOST_MARKERS):
+            continue
+        if host_is_allowed(url)[0]:
+            continue  # 已经在白名单里，没什么可确认的
+        title = str(row.get("title") or "")
+        site = str(row.get("cite_site") or row.get("publisher") or "")
+        text = f"{title} {site}"
+        why = next((marker for marker in OFFICIAL_TITLE_MARKERS if marker in text), "")
+        if not why:
+            continue
+        seen.add(host)
+        hints.append(
+            {
+                "host": host,
+                "url": url,
+                "title": title[:80],
+                "why": f"标题/站点名里出现「{why}」",
+                "query_name": str(query_name or ""),
+            }
+        )
+        if len(hints) >= max(1, int(max_items)):
+            break
+    return hints
+
+
+def domain_candidate_path() -> str:
+    """待确认的官方域名清单落盘位置（默认在 ai-service 目录下，可被环境变量覆盖）。"""
+    configured = str(os.getenv("WEB_PRICE_DOMAIN_CANDIDATES_FILE") or "").strip()
+    if configured:
+        return configured
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "official_domain_candidates.json")
+
+
+def load_domain_candidates() -> List[Dict[str, Any]]:
+    path = domain_candidate_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return []
+    items = data.get("candidates") if isinstance(data, dict) else data
+    return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def record_domain_candidates(hints: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """把"像官网"的域名追加进待确认清单（去重、只记域名与标题，不记正文）。
+
+    ⚠️ 只在**这次没能从白名单页面拿到价**时才值得记（调用方把关）：
+    已经能查到价的时候再去扩白名单是没有收益的动作。
+    `WEB_PRICE_RECORD_DOMAIN_CANDIDATES=0` 可整体关掉。
+    """
+    if str(os.getenv("WEB_PRICE_RECORD_DOMAIN_CANDIDATES") or "").strip().lower() in {"0", "false", "off", "no"}:
+        return {"recorded": 0, "reason": "WEB_PRICE_RECORD_DOMAIN_CANDIDATES=0（显式关闭）"}
+    clean = [dict(item) for item in (hints or []) if isinstance(item, Mapping) and item.get("host")]
+    if not clean:
+        return {"recorded": 0, "reason": "没有候选"}
+
+    path = domain_candidate_path()
+    existing = load_domain_candidates()
+    known = {str(item.get("host") or "") for item in existing}
+    added = [item for item in clean if str(item.get("host") or "") not in known]
+    if not added:
+        return {"recorded": 0, "reason": "这些域名已经在待确认清单里", "already_known": len(clean)}
+    merged = existing + [
+        {**item, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S")} for item in added
+    ]
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"candidates": merged}, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return {"recorded": 0, "reason": f"写入失败：{type(exc).__name__}: {str(exc)[:100]}"}
+    return {"recorded": len(added), "path": path, "hosts": [str(item.get("host") or "") for item in added]}
 
 
 def extract_price_candidates(text: str) -> List[Dict[str, Any]]:
@@ -1025,6 +1139,14 @@ async def lookup_price(
 
     page_url = page_urls[0] if page_urls else ""
     if snippet_pick is not None:
+        # 退回摘要价（估算）说明**白名单页面没帮上忙** —— 这时候才值得记"像官网的域名"，
+        # 让人工确认后把白名单扩起来（下次这类价格就有机会变成"可核实"）。
+        try:
+            from_hints = official_domain_hints(rows, query_name=name)
+            if from_hints:
+                record_domain_candidates(from_hints)
+        except Exception:
+            pass  # 记录候选绝不影响取价结果
         return build_observation(
             name=name,
             value=float(snippet_pick["value"]),
@@ -1035,6 +1157,12 @@ async def lookup_price(
             publisher=str(snippet_pick.get("publisher") or ""),
             source_date=str(snippet_pick.get("source_date") or ""),
         )
+    try:
+        from_hints = official_domain_hints(rows, query_name=name)
+        if from_hints:
+            record_domain_candidates(from_hints)
+    except Exception:
+        pass
     return build_observation(
         name=name,
         value=None,
