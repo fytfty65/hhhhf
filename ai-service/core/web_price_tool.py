@@ -956,8 +956,9 @@ async def lookup_price(name: str, city: str, *, max_results: int = 3) -> Dict[st
          从**页面正文**抽价 —— 这比摘要可靠（摘要可能只是标题里的数字）；
       3. 两者都拿不到 → 返回 `value=None` 并说明，绝不填数字。
 
-    页面来的价格仍标 `source="web_page"`（⇒ estimated）：我们抓的是公开页面文本，
-    不等于官方报价接口，不能冒充"已核实"。
+    页面来的价格标 `source="web_page"`：**白名单里的官方/政府页面**按"可核实"计
+    （2026-10-05 用户拍板：官方自己写的票价、带 URL 可点开，就算可核实）；
+    不在白名单的页面根本不抓，搜索摘要仍然是估算（`source="web"`）。
     """
     query = f"{city} {name} 门票 价格 人均 每晚"
     try:
@@ -1022,12 +1023,16 @@ def build_observation(
     publisher: str = "",
     source_date: str = "",
 ) -> Dict[str, Any]:
-    """一条取价结果：**必须带出处**，并明确它是估算而不是已核实。
+    """一条取价结果：**必须带出处**，并标明"可核实"还是"估算"。
 
     `publisher`/`source_date` 是给"这条价格什么时候发的"用的 —— 价格会过期，
-    用户需要判断新鲜度（真实搜狗结果里带发布日期，如 2026-09-19）。
+    用户需要判断新鲜度（真实结果里带发布日期，如 2026-09-19）。
+
+    口径（2026-10-05 用户拍板）：
+      · `web_page` = **白名单里的官方/政府页面正文** → **可核实**（官方自己写的票价，带 URL 可点开）；
+      · `web` = 搜索结果摘要/自媒体页 → 永远是**估算**。
     """
-    verified_sources = {"provider", "vendor", "official", "amap"}
+    verified_sources = {"provider", "vendor", "official", "amap", "web_page"}
     return {
         "name": str(name or ""),
         "value": value,
@@ -1039,7 +1044,7 @@ def build_observation(
         "publisher": str(publisher or "")[:60],
         "source_date": str(source_date or "")[:40],
         "retrieved_at": float(retrieved_at or time.time()),
-        # 搜索/网页来的价格永远是估算：不允许写成 verified
+        # 只有"可核实来源"（供应商/官方接口/**白名单官方页面**）才算 verified
         "verified": str(source) in verified_sources,
         "estimated": str(source) not in verified_sources,
     }

@@ -774,7 +774,8 @@ class PageFetchIntegrationTests(unittest.TestCase):
         self.assertEqual(observation["source"], "web_page")
         self.assertEqual(observation["provider"], "official_page")
         self.assertEqual(observation["source_url"], "https://www.huazhu.com/hotel/123")
-        self.assertTrue(observation["estimated"], "抓来的页面价仍是估算，不能标已核实")
+        self.assertFalse(observation["estimated"], "白名单官方页面（华住官网）的价格按「可核实」计")
+        self.assertTrue(observation["verified"], "2026-10-05 用户口径：白名单官方页面 = 可核实来源")
 
     def test_falls_back_to_snippet_when_page_unavailable(self):
         import asyncio

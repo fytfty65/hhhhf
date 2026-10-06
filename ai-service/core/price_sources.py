@@ -27,11 +27,15 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .candidate_index import intent_of, normalize_text
 from .plan_quality import cost_of, node_name, nodes_of
 
-# 来源可信度：数字越大越可信（强来源不被打败）
+# 来源可信度：数字越大越可信（强来源不打败弱来源）
+# `web_page` = **白名单里的官方/政府页面正文**（2026-10-05 用户口径：
+#   "把 gov/景区官网页面（白名单里的）视作可核实来源"）。
+#   它不等于"任意网页"：`web` 仍然是搜索结果摘要、一律估算。
 SOURCE_RANK: Dict[str, int] = {
     "provider": 4,
     "vendor": 4,
     "official": 4,
+    "web_page": 4,
     "amap": 3,
     "web": 2,
     "estimate": 1,
@@ -39,7 +43,8 @@ SOURCE_RANK: Dict[str, int] = {
     "": 0,
     "unavailable": 0,
 }
-VERIFIED_SOURCES = {"provider", "vendor", "official", "amap"}
+# 可核实来源：供应商/官方接口 + **白名单官方页面正文**
+VERIFIED_SOURCES = {"provider", "vendor", "official", "amap", "web_page"}
 
 
 def source_rank(source: Any) -> int:

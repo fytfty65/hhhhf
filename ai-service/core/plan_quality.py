@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .simulation import category_of, cost_of, dwell_minutes_of, travel_minutes_of
@@ -47,7 +48,9 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
 }
 
 # 一天的"活跃时长"上限，超过即视为过赶（分钟）
-DEFAULT_DAILY_ACTIVE_MINUTES = 600.0
+# 2026-10-05 用户口径："放宽上限吧" —— 真实方案里一天 6 个节点约 720 分钟（停留+通勤），
+# 按 600 分钟卡会把正常方案全判成"过赶"。放宽到 720，并把**饭点**从扣分项降为顾问提示。
+DEFAULT_DAILY_ACTIVE_MINUTES = 720.0
 # 单日节点数默认区间（节奏为 relaxed 时收紧）
 DEFAULT_MIN_NODES_PER_DAY = 2
 DEFAULT_MAX_NODES_PER_DAY = 6
@@ -62,7 +65,23 @@ MEAL_WINDOWS = ((11 * 60, 13 * 60 + 30), (17 * 60, 20 * 60))
 UNVERIFIED_SOURCES = {"unverified", "unavailable", "seed_template", "unknown", ""}
 # 需要来源的字段
 SOURCED_FIELDS = ("rating", "cost_estimate", "open_time")
-VERIFIED_SOURCES_OK = {"provider", "vendor", "amap", "rollinggo", "seniverse", "official"}
+VERIFIED_SOURCES_OK = {"provider", "vendor", "amap", "rollinggo", "seniverse", "official", "web_page"}
+# 「没有数据」的如实写法：这些**不是断言**，是披露（"未知"不扣分，装懂才扣分）。
+DISCLOSURE_MARKERS = ("暂无供应商数据", "暂无", "未核实", "待确认", "未知", "不详", "unavailable", "unknown")
+
+
+def _is_claim(value: Any) -> bool:
+    """这个字段是不是**真的做出了断言**（而不是"暂无数据"这类如实披露）。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    return not any(marker in text or marker in lowered for marker in DISCLOSURE_MARKERS)
+
+
+def _has_number(value: Any) -> bool:
+    """字段里有没有数字（"¥50（估算）"有，"暂无供应商数据"没有）。"""
+    return bool(re.search(r"\d", str(value or "")))
 
 
 # --------------------------------------------------------------------------
@@ -544,6 +563,7 @@ def score_pacing(
         by_day.setdefault(node_day(node, index), []).append(node)
 
     penalties: List[str] = []
+    advisories: List[str] = []
     day_reports: List[Dict[str, Any]] = []
     for day, day_nodes in sorted(by_day.items()):
         dwell = sum(dwell_minutes_of(n) for n in day_nodes)
@@ -577,21 +597,44 @@ def score_pacing(
             penalties.append(f"第 {day} 天 {len(day_nodes)} 个节点，超过上限 {max_nodes}")
         if total > active_budget:
             penalties.append(f"第 {day} 天预计 {total:.0f} 分钟（停留+通勤），超过 {active_budget:.0f} 分钟上限")
-        # 只在"行程本身跨过饭点"时才要求用餐节点，避免把早收工的日子误判为不合理
+        # 饭点：**只作为顾问提示，不扣分**（2026-10-05 用户口径）。
+        # 用户原话："放宽上限吧，要是用户不喜欢晚上不安排晚餐，在二次增量中说到就补充晚餐位置。"
+        # 也就是说：没排晚餐**不是缺陷**，是等用户表态的可选偏好 ——
+        # 扣分等于系统替用户认定"你必须吃晚饭"，而真正的动作是"用户提了就用增量补上"。
         if last_clock is not None and last_clock > MEAL_WINDOWS[0][1] and not has_lunch:
-            penalties.append(f"第 {day} 天行程跨过 13:30，却没有落在 11:00-13:30 的用餐节点")
+            advisories.append(f"第 {day} 天跨过 13:30 没有午餐节点（想要的话可以说「加一顿午饭」）")
         if last_clock is not None and last_clock > MEAL_WINDOWS[1][0] and not has_dinner:
-            penalties.append(f"第 {day} 天行程跨过 17:00，却没有落在 17:00-20:00 的用餐节点")
+            advisories.append(f"第 {day} 天跨过 17:00 没有晚餐节点（想要的话可以说「加一顿晚饭」）")
 
     value = max(0.0, 1.0 - 0.2 * len(penalties))
-    return {"value": value, "penalties": penalties, "days": day_reports}
+    return {"value": value, "penalties": penalties, "advisories": advisories, "days": day_reports}
 
 
 def score_space_efficiency(context: Mapping[str, Any], plan: Any) -> Dict[str, Any]:
+    """空间效率：单日移动里程相对**用户自己的距离口径**是否划算。
+
+    ⚠️ 这把尺子以前用固定刻度（40km 以内满分、120km 以上零分），于是：
+    用户明明说了"不介意跑远"，方案跑到 167km/天就被判 0 分 —— 拿一把**用户已经否掉**的
+    尺子去量他主动选择的东西。正确的口径是：以 `travel_feasibility.daily_budget_km(容忍度)`
+    为"当天预算"（normal 160 / high 320 / low 80），预算的 1/4 以内算高效、用满预算算 0 分。
+    用户说"远一点也能接受"，不是"效率不重要"，所以**超过他自己的预算照样 0 分**。
+    """
     nodes = nodes_of(plan)
     by_day: Dict[int, List[Dict[str, Any]]] = {}
     for index, node in enumerate(nodes, start=1):
         by_day.setdefault(node_day(node, index), []).append(node)
+
+    tolerance = str((context or {}).get("distance_tolerance") or "normal").strip().lower()
+    try:
+        from .travel_feasibility import daily_budget_km
+
+        budget = float(daily_budget_km(tolerance))
+    except Exception:  # 口径取不到时不假装宽松，回落到 normal 预算
+        budget = 160.0
+    comfortable = max(10.0, budget * 0.25)
+    # "一次长途跳跃"的门槛同样跟着口径走：对 normal 是 40km，对说"不介意跑远"的人就是 80km ——
+    # 否则等于用市内尺度去惩罚他自己选的跨州行程（同一个错尺子，换个地方又犯一次）。
+    long_hop_km = max(20.0, LONG_HOP_KM * budget / 160.0)
 
     total_km, long_hops = 0.0, 0
     day_km: List[float] = []
@@ -605,20 +648,24 @@ def score_space_efficiency(context: Mapping[str, Any], plan: Any) -> Dict[str, A
         for a, b in zip(coords, coords[1:]):
             distance = haversine_km(a, b)
             km += distance
-            if distance > LONG_HOP_KM:
+            if distance > long_hop_km:
                 long_hops += 1
         day_km.append(km)
         total_km += km
 
     days = max(1, len(by_day))
     per_day = total_km / days
-    # 参考尺度：市内单日 40km 以内视为高效，120km 以上视为很差
-    base = max(0.0, min(1.0, (120.0 - per_day) / 80.0))
+    # 参考尺度：舒适线以内满分，用满当天预算是 0 分，中间线性
+    base = max(0.0, min(1.0, (budget - per_day) / max(1.0, budget - comfortable)))
     # 坐标缺失不允许被当成"高效"：按有坐标的天数占比折算
     coverage = _ratio(days_with_coords, days, empty=0.0)
     value = base * coverage
+    # 来回折腾要扣，但**不能把"预算内的一天"直接扣成 0**（2026-10-05 实测）：
+    # 乌鲁木齐 106km/天（预算 160km）里有 3 段 >40km 的跳跃，旧写法 0.45-0.45 → 0.0，
+    # 与"远超预算"的喀什 447km 拿到同一个 0 分 —— 分不出"能接受但绕"和"根本跑不完"。
+    # 现在扣分上限是当前得分的 1/2，保留"绕"与"跑不完"的区别。
     if long_hops:
-        value = max(0.0, value - 0.15 * long_hops)
+        value = max(0.0, value - min(0.15 * long_hops, 0.5 * value))
     return {
         "value": value,
         "total_km": round(total_km, 1),
@@ -627,6 +674,9 @@ def score_space_efficiency(context: Mapping[str, Any], plan: Any) -> Dict[str, A
         "long_hops": long_hops,
         "days": days,
         "coordinate_coverage": round(coverage, 3),
+        "daily_budget_km": budget,
+        "long_hop_km": round(long_hop_km, 1),
+        "distance_tolerance": tolerance,
     }
 
 
@@ -692,15 +742,38 @@ def score_anchoring(context: Mapping[str, Any], plan: Any) -> Dict[str, Any]:
 
 
 def score_truthfulness(plan: Any) -> Dict[str, Any]:
+    """真实度：节点上**说出来的东西有没有出处**（"未知"不算错，装懂才算错）。
+
+    ⚠️ 这把尺子以前把两件事混成一件（2026-10-05 实测修正）：
+      它只要看到 `estimated: true` 就不给分。但 `estimated` 在真实链路里是
+      "**没有供应商价格**"的意思（节点上写着「暂无供应商数据」），也就是系统**如实说了不知道**。
+      结果：一份把"暂无供应商数据"逐条写在脸上的方案，真实度被判 0.0 —— 尺子在惩罚诚实。
+    现在的口径（与 doctrine「unknown ≠ 0 ≠ estimated」一致）：
+      - 只检查**真的做出了断言**的字段（数值/文字，不含"暂无供应商数据/未核实"这类披露）；
+      - 断言字段的 source 不在可核实集合里 → 记 `unsourced`（**这是"装懂"，真正要拦的**）；
+      - 什么都没断言、只写了"暂无数据" → 不算撒谎，计入 `disclosed_unknown`；
+      - `estimated_prices` 只做**透明性统计**（这份方案里有多少价格是"估"的），不参与扣分 ——
+        判"有没有出处"的依据是 source，不是那个估计标记：高德的人均消费（source=amap）
+        既真又带出处，只因为是"人均"就被判"不可信"同样是拿错尺子。
+    价格到底查到了没有、可不可信，由 `completeness.price_coverage` / `unknown_disclosed`
+    与这里的 `unsourced_claims` 分别回答。
+    """
     nodes = nodes_of(plan)
     if not nodes:
-        return {"value": 0.0, "verified_nodes": 0, "total_nodes": 0, "unsourced_claims": []}
+        return {
+            "value": 0.0,
+            "verified_nodes": 0,
+            "total_nodes": 0,
+            "unsourced_claims": [],
+            "unsourced_count": 0,
+            "estimated_prices": 0,
+            "disclosed_unknown": 0,
+        }
 
-    verified, unsourced = 0, []
+    verified, unsourced, estimated_prices, disclosed_unknown = 0, [], 0, 0
     for node in nodes:
         sources = node.get("data_sources") if isinstance(node.get("data_sources"), Mapping) else {}
-        estimated = node.get("estimated") is True
-        claimed = [f for f in SOURCED_FIELDS if node.get(f) not in (None, "", "暂无供应商数据")]
+        claimed = [f for f in SOURCED_FIELDS if _is_claim(node.get(f))]
         bad = [
             f
             for f in claimed
@@ -708,7 +781,14 @@ def score_truthfulness(plan: Any) -> Dict[str, Any]:
         ]
         if bad:
             unsourced.append({"name": node_name(node), "fields": bad})
-        if not estimated and not bad:
+        # 透明性统计：价格是"估"的（不参与扣分，出处由上面的 source 判定负责）
+        # ⚠️ 只看 cost_estimate：真实节点里的 `estimated` 是"**没有供应商原价**"的标记，
+        #    拿它去套 rating（"4.5" 也是数字）会把有 amap 出处的评分一起判成"估算"。
+        if bool(node.get("estimated")) and _has_number(node.get("cost_estimate")):
+            estimated_prices += 1
+        if not claimed:
+            disclosed_unknown += 1
+        if not bad:
             verified += 1
     return {
         "value": _ratio(verified, len(nodes)),
@@ -716,6 +796,8 @@ def score_truthfulness(plan: Any) -> Dict[str, Any]:
         "total_nodes": len(nodes),
         "unsourced_claims": unsourced[:10],
         "unsourced_count": len(unsourced),
+        "estimated_prices": estimated_prices,
+        "disclosed_unknown": disclosed_unknown,
     }
 
 

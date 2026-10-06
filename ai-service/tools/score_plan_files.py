@@ -24,6 +24,56 @@ def load(path: str) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _fact_value(facts: Dict[str, Any], *path: str) -> Any:
+    """读 `facts.<…>.value`（方案自己记录的事实），读不到就返回 None。
+
+    ⚠️ 为什么不写死默认值：这两个口径**方案自己记着**，用错的默认值去评它是"用错尺子"。
+    实测（2026-10-05）：3 天的喀什方案被 `days=2` 去评（缺省值），"日内距离/天数"怎么算都不对。
+    """
+    node: Any = facts
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    if isinstance(node, dict):
+        return node.get("value")
+    return None
+
+
+def context_from_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """按方案**自己记录的口径**构造评分上下文（天数 / 距离容忍度 / 预算）。"""
+    facts = plan.get("facts") if isinstance(plan.get("facts"), dict) else {}
+    days = _fact_value(facts, "request", "trip_days") or plan.get("trip_days") or 2
+    tolerance = _fact_value(facts, "constraints", "distance_tolerance") or "normal"
+    budget = _fact_value(facts, "request", "budget_total")
+    context: Dict[str, Any] = {"days": days, "distance_tolerance": str(tolerance)}
+    if isinstance(budget, (int, float)):
+        context["budget"] = budget
+    return context
+
+
+def signals_from_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """从方案记录的事实还原偏好信号（用户明说的诉求），供评分维度判"有没有满足个性化"。"""
+    facts = plan.get("facts") if isinstance(plan.get("facts"), dict) else {}
+    constraints = facts.get("constraints") if isinstance(facts.get("constraints"), dict) else {}
+    signals: Dict[str, Any] = {}
+    for key in ("wants_scenic", "wants_food", "wants_cultural", "wants_shopping", "wants_hotel", "exclude_cultural"):
+        value = _fact_value(facts, "constraints", key)
+        if isinstance(value, bool):
+            signals[key] = value
+    tolerance = _fact_value(facts, "constraints", "distance_tolerance")
+    if tolerance:
+        signals["distance_tolerance"] = str(tolerance)
+    requirements = _fact_value(facts, "request", "requirements")
+    if isinstance(requirements, list) and requirements:
+        signals["requirements"] = requirements
+    # `constraints` 里可能还有本函数没枚举到的键，尽量带上（不强求）
+    for key, item in constraints.items():
+        if key not in signals and isinstance(item, dict) and isinstance(item.get("value"), bool):
+            signals[key] = item["value"]
+    return signals
+
+
 def main() -> int:
     patterns = sys.argv[1:] or [os.path.join("work", "plans", "*.json")]
     paths = []
@@ -34,11 +84,13 @@ def main() -> int:
         return 1
     for path in paths:
         plan = load(path)
-        days = plan.get("trip_days") or 2
-        report = evaluate_plan({"days": days}, plan, signals={})
+        context = context_from_plan(plan)
+        signals = signals_from_plan(plan)
+        days = context.get("days") or 2
+        report = evaluate_plan(context, plan, signals=signals)
         dims = ", ".join(f"{key}={value['value']}" for key, value in report["dimensions"].items())
         print("=" * 78)
-        print(f"{os.path.basename(path)}｜天数 {days}｜节点 {report['nodes']}｜总分 {report['score']}｜{report['verdict']}")
+        print(f"{os.path.basename(path)}｜天数 {days}｜距离口径 {context.get('distance_tolerance')}｜节点 {report['nodes']}｜总分 {report['score']}｜{report['verdict']}")
         print(f"  维度：{dims}")
         place = report["dimensions"]["place_quality"]
         print(

@@ -221,6 +221,99 @@ class TestDimensions(unittest.TestCase):
         self.assertEqual(report["unsourced_count"], 1)
         self.assertIn("rating", report["unsourced_claims"][0]["fields"])
 
+    def test_saying_unknown_is_not_a_lie(self):
+        """写明"暂无供应商数据"的节点不是撒谎（2026-10-05 修正）。
+
+        真实方案的形态：11 个节点里 10 个价格写着「暂无供应商数据」、评分/开放时间有高德出处。
+        旧尺子一看到 `estimated: true` 就判 0 分 → 一份把"不知道"逐条写在脸上的方案，
+        真实度是 0.0 —— 尺子在惩罚诚实。口径应是：**只有断言了却给不出出处**才算不可信。
+        """
+        plan = {"route": [
+            node("天山大峡谷", 1, "08:30", cost="暂无供应商数据", open_time="暂无供应商数据", estimated=True),
+            node("水磨沟风景区", 1, "15:00", cost="暂无供应商数据", open_time="暂无供应商数据", estimated=True),
+        ]}
+        report = score_truthfulness(plan)
+        self.assertEqual(report["value"], 1.0, report)
+        self.assertEqual(report["unsourced_count"], 0)
+        self.assertEqual(report["disclosed_unknown"], 0, "评分字段仍有出处，不算整条未知")
+
+    def test_truthfulness_reports_unknown_only_nodes(self):
+        plan = {"route": [
+            {"day": 1, "name": "纯未知点", "time": "09:00", "cost_estimate": "暂无供应商数据",
+             "open_time": "暂无供应商数据", "rating": "暂无供应商数据", "estimated": True, "data_sources": {}},
+        ]}
+        report = score_truthfulness(plan)
+        self.assertEqual(report["value"], 1.0, "什么都不声称 → 不构成无出处断言")
+        self.assertEqual(report["disclosed_unknown"], 1)
+
+    def test_numeric_price_without_verifiable_source_is_flagged(self):
+        """有价格数字但出处是搜索摘要（web）→ 如实标成"没有可核实出处"（这正是要拦的）。"""
+        plan = {"route": [
+            {"day": 1, "name": "英吉沙国家湿地公园", "time": "09:00", "cost_estimate": "¥206",
+             "estimated": True, "data_sources": {"cost_estimate": "web", "rating": "amap"}},
+        ]}
+        report = score_truthfulness(plan)
+        self.assertEqual(report["unsourced_count"], 1)
+        self.assertIn("cost_estimate", report["unsourced_claims"][0]["fields"])
+
+    def test_estimated_price_with_verified_source_still_counts(self):
+        """高德人均消费（source=amap）是"真的且有出处"的：只因为是"人均"就判不可信同样是错尺子。"""
+        plan = {"route": [
+            node("正规餐厅", 1, "12:30", node_type="餐饮", cost="人均餐饮 ¥52.00",
+                 open_time="暂无供应商数据", estimated=True),
+        ]}
+        report = score_truthfulness(plan)
+        self.assertEqual(report["value"], 1.0, report)
+        self.assertEqual(report["estimated_prices"], 1, "仍要如实统计『有多少价格是估的』")
+
+    def test_whitelisted_official_page_counts_as_verifiable(self):
+        """用户口径（2026-10-05）：白名单里的景区/政府官网页面算可核实来源。"""
+        plan = {"route": [node("某景区", 1, "09:00", source="web_page")]}
+        report = score_truthfulness(plan)
+        self.assertEqual(report["value"], 1.0, report)
+        self.assertEqual(report["unsourced_count"], 0)
+
+    def test_space_efficiency_scales_with_the_users_own_tolerance(self):
+        """距离效率按**用户自己的口径**量：说"不介意跑远"的人不该被按市内刻度判 0 分。
+
+        同一条 ~110km 的一天：low（预算 80km）跑不动 → 0；normal（160km）能跑但要扣；
+        high（320km）在他自己的口径里很宽裕 → 满分。
+        """
+        plan = {"route": [
+            node("a", 1, "09:00", (108.94, 34.26)),
+            node("b", 1, "15:00", (109.96, 34.30)),
+        ]}
+        low = score_space_efficiency({"distance_tolerance": "low"}, plan)
+        normal = score_space_efficiency({"distance_tolerance": "normal"}, plan)
+        high = score_space_efficiency({"distance_tolerance": "high"}, plan)
+        self.assertEqual(low["value"], 0.0, low)
+        self.assertGreater(normal["value"], low["value"])
+        self.assertGreater(high["value"], normal["value"])
+        self.assertGreater(high["value"], 0.7, high)
+        self.assertEqual(high["daily_budget_km"], 320.0)
+        self.assertEqual(high["distance_tolerance"], "high")
+
+    def test_space_efficiency_is_full_marks_when_inside_the_comfortable_line(self):
+        """high 口径下 ~60km 的一天：舒适线（80km）以内、且不算长途跳跃 → 满分。"""
+        plan = {"route": [
+            node("a", 1, "09:00", (108.94, 34.26)),
+            node("b", 1, "15:00", (109.53, 34.34)),
+        ]}
+        report = score_space_efficiency({"distance_tolerance": "high"}, plan)
+        self.assertEqual(report["value"], 1.0, report)
+        self.assertEqual(report["long_hops"], 0)
+        self.assertEqual(report["long_hop_km"], 80.0)
+
+    def test_space_efficiency_still_zero_when_over_the_users_budget(self):
+        """"远一点也能接受"不等于"效率不重要"：超过他自己那档预算照样 0 分。"""
+        plan = {"route": [
+            node("a", 1, "09:00", (108.94, 34.26)),
+            node("b", 1, "20:00", (113.30, 34.40)),
+        ]}
+        report = score_space_efficiency({"distance_tolerance": "high"}, plan)
+        self.assertEqual(report["value"], 0.0, report)
+        self.assertGreater(report["per_day_km"], 320.0)
+
     def test_diversity_penalises_duplicates(self):
         diverse = {"route": [node("博物馆", 1, "09:00", node_type="博物馆"),
                              node("小吃街", 1, "12:00", node_type="餐饮"),
