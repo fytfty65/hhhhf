@@ -267,6 +267,93 @@ class ObservationTests(unittest.TestCase):
         self.assertFalse(node["estimated"], "可核实来源不该再标「估算」")
 
 
+class SearchHotelsTests(unittest.TestCase):
+    """城市级候选检索：让住宿候选**自带实价**（不再是"先选酒店再补价"）。"""
+
+    def _call_tool_returning(self, rows):
+        async def fake(tool, arguments, *, timeout=None):
+            fake.arguments = arguments
+            return {"ok": True, "payload": {"hotelInformationList": rows}}
+
+        return fake
+
+    def test_city_search_returns_normalized_hotels_with_prices(self):
+        import asyncio
+
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "_call_tool", self._call_tool_returning([REAL_ROW])):
+                result = asyncio.run(rollinggo_mcp.search_hotels("库尔勒", size=5))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["count"], 1)
+        hotel = result["hotels"][0]
+        self.assertEqual(hotel["name"], "尚客优酒店(喀什古城店)")
+        self.assertEqual(hotel["price"], 131.0)
+        self.assertIn("rollinggo.cn", hotel["booking_url"])
+
+    def test_budget_and_star_filters_go_to_the_server(self):
+        import asyncio
+
+        fake = self._call_tool_returning([REAL_ROW])
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "_call_tool", fake):
+                asyncio.run(
+                    rollinggo_mcp.search_hotels("库尔勒", max_price_per_night=400, min_star=4.0)
+                )
+        arguments = fake.arguments
+        self.assertEqual(arguments["hotelTags"], {"maxPricePerNight": 400.0})
+        self.assertEqual(arguments["filterOptions"], {"starRatings": [4.0, 5.0]})
+        self.assertEqual(arguments["placeType"], "城市")
+        self.assertEqual(arguments["place"], "库尔勒 中国")
+
+    def test_filters_are_omitted_when_not_requested(self):
+        import asyncio
+
+        fake = self._call_tool_returning([REAL_ROW])
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "_call_tool", fake):
+                asyncio.run(rollinggo_mcp.search_hotels("库尔勒"))
+        self.assertNotIn("hotelTags", fake.arguments)
+        self.assertNotIn("filterOptions", fake.arguments)
+
+    def test_empty_result_is_reported_not_faked(self):
+        import asyncio
+
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "_call_tool", self._call_tool_returning([])):
+                result = asyncio.run(rollinggo_mcp.search_hotels("某城"))
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["hotels"], [])
+        self.assertTrue(result["error"])
+
+    def test_call_failure_is_reported(self):
+        import asyncio
+
+        async def fake(tool, arguments, *, timeout=None):
+            return {"ok": False, "payload": None, "error": "HTTP 503"}
+
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "_call_tool", fake):
+                result = asyncio.run(rollinggo_mcp.search_hotels("某城"))
+        self.assertEqual(result["status"], "error")
+        self.assertIn("HTTP 503", result["error"])
+
+    def test_not_configured_short_circuits(self):
+        import asyncio
+
+        with mock.patch.dict(os.environ, {"ROLLINGGO_API_URL": "", "ROLLINGGO_API_KEY": ""}, clear=False):
+            result = asyncio.run(rollinggo_mcp.search_hotels("某城"))
+        self.assertEqual(result["status"], "not_configured")
+
+    def test_nameless_rows_are_dropped(self):
+        """"只有价格没有名字"的行没法用（也不能塞进方案），直接丢掉并如实计数。"""
+        import asyncio
+
+        with _env():
+            with mock.patch.object(rollinggo_mcp, "_call_tool", self._call_tool_returning([{"price": {"lowestPrice": 1}}])):
+                result = asyncio.run(rollinggo_mcp.search_hotels("某城"))
+        self.assertEqual(result["status"], "empty")
+
+
 class LodgingPassTests(unittest.TestCase):
     """`price_lodging_nodes`：给**最终路线**里的住宿查实价（住宿定型之后才调用）。"""
 
@@ -466,6 +553,28 @@ class WiringTests(unittest.TestCase):
         source = self._agent_source()
         self.assertIn('_web_targets = [item for item in _targets if str(item.get("intent") or "") != "hotel"]', source)
         self.assertIn("for _index, _item in enumerate(_web_targets):", source)
+
+    def test_lodging_candidates_come_from_the_supplier_with_prices(self):
+        """住宿候选要接上供应商实价（"按实价选酒店"，而不是先选完再补价）。"""
+        source = self._agent_source()
+        self.assertIn("_supplier_search_hotels(", source)
+        self.assertIn('"price_source": "rollinggo"', source)
+        self.assertIn('"data_source": "rollinggo"', source)
+        # 预算/档次交给服务端筛（少一次猜测）
+        self.assertIn("max_price_per_night=_nightly_cap", source)
+        self.assertIn("min_star=4.0 if is_luxury else None", source)
+
+    def test_supplier_candidate_block_only_uses_defined_names(self):
+        """那段代码里用到的局部名字必须都有定义/导入。
+
+        真实教训：先写了 `_normalize_text(...)` 却没有导入，`py_compile` 不会报错，
+        运行时才抛 NameError —— 而它被 except 接住，表现成"供应商没给候选"，
+        排查只能靠猜（跟之前 `_blocked` 那次是同一类问题）。
+        """
+        source = self._agent_source()
+        self.assertIn("from core.candidate_index import normalize_text as _normalize_text", source)
+        # 用到之前必须先绑定：导入行要在第一次使用之前
+        self.assertLess(source.index("import normalize_text as _normalize_text"), source.index("_normalize_text(str(item.get"))
 
     def test_agent_only_uses_read_only_rollinggo_helpers(self):
         """agent.py 里除了 price_lodging_nodes，不许出现别的 rollinggo 调用（更不许下单）。"""

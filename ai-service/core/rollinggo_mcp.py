@@ -297,6 +297,8 @@ def _arguments(
     adults: int = 2,
     size: int = 3,
     place_is_hotel: bool = True,
+    max_price_per_night: Optional[float] = None,
+    min_star: Optional[float] = None,
 ) -> Dict[str, Any]:
     """构造 `searchHotels` 参数（字段名与枚举照抄服务端 schema）。"""
     check_in_param: Dict[str, Any] = {
@@ -310,13 +312,19 @@ def _arguments(
         place, place_type = f"{name} {city}".strip(), "酒店"
     else:
         place, place_type = f"{city} 中国".strip(), "城市"
-    return {
+    arguments: Dict[str, Any] = {
         "originQuery": f"{city}住宿，{max(1, int(adults or 2))} 位成人，{max(1, int(nights or 1))} 晚",
         "place": place,
         "placeType": place_type,
         "checkInParam": check_in_param,
         "size": max(1, min(20, int(size or 3))),
     }
+    # 预算与档次是**用户的约束**，能在服务端筛就别拿回来再筛（少一次猜测、结果也更快）
+    if isinstance(max_price_per_night, (int, float)) and max_price_per_night > 0:
+        arguments["hotelTags"] = {"maxPricePerNight": float(max_price_per_night)}
+    if isinstance(min_star, (int, float)) and 0 < float(min_star) <= 5:
+        arguments["filterOptions"] = {"starRatings": [float(min_star), 5.0]}
+    return arguments
 
 
 async def hotel_price(
@@ -387,6 +395,62 @@ async def hotel_price(
             "check_in": check_in,
         }
     return {"status": "error", "name": name, "error": last_error or "没有拿到任何结果", "check_in": check_in}
+
+
+async def search_hotels(
+    city: str,
+    *,
+    check_in: str = "",
+    nights: int = 1,
+    adults: int = 2,
+    size: int = 5,
+    max_price_per_night: Optional[float] = None,
+    min_star: Optional[float] = None,
+    timeout: Optional[float] = None,
+) -> Dict[str, Any]:
+    """按城市查**有实价**的酒店候选（只读）。
+
+    为什么需要它（2026-10-05）：住宿候选一直只来自高德 —— 高德**不给房价**，
+    于是"选哪家住哪"这件事没有价格依据，最后还得标"需要你确认"。
+    供应商这边一次城市检索就能拿回「酒店名 + 实价 + 星级 + 地址 + 下单链接」，
+    等于让住宿候选本身带上真实价格（"按实价选酒店"，而不是先选完再想办法补价）。
+
+    `max_price_per_night` / `min_star` 是**用户的约束**，尽量交给服务端筛
+    （schema 里有 `hotelTags.maxPricePerNight` 与 `filterOptions.starRatings`）。
+
+    返回 `{status, city, check_in, nights, hotels: [normalize_hotel(...)], count, error}`；
+    拿不到就是 `status != "ok"`，**绝不编造**候选。
+    """
+    config = mcp_config()
+    if not config.get("enabled"):
+        return {"status": "not_configured", "city": city, "hotels": [], "error": config.get("reason")}
+
+    arguments = _arguments(
+        name="",
+        city=city,
+        check_in=check_in,
+        nights=nights,
+        adults=adults,
+        size=size,
+        place_is_hotel=False,
+        max_price_per_night=max_price_per_night,
+        min_star=min_star,
+    )
+    called = await _call_tool(DEFAULT_TOOL, arguments, timeout=timeout)
+    if not called.get("ok"):
+        return {"status": "error", "city": city, "hotels": [], "error": str(called.get("error") or "调用失败")}
+    rows = [normalize_hotel(item) for item in hotel_rows(called.get("payload"))]
+    # 只保留**有名字**的；价格可能有也可能没有（没有也如实保留，标 None 而不是 0）
+    rows = [row for row in rows if row.get("name")]
+    return {
+        "status": "ok" if rows else "empty",
+        "city": city,
+        "check_in": str(check_in or ""),
+        "nights": max(1, int(nights or 1)),
+        "hotels": rows,
+        "count": len(rows),
+        "error": "" if rows else "供应商没有返回任何酒店",
+    }
 
 
 async def price_lodging_nodes(

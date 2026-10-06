@@ -3121,6 +3121,94 @@ async def run_negotiate(msg: GatewayMessage):
                 pool_diagnostics["widening_error"] = _hotel_widen["error"]
                 print(f"⚠️ [候选补检索] 住宿补充检索失败（不影响主流程）: {_hotel_widen['error']}", flush=True)
 
+        # 👑 住宿候选接上**供应商实价**（2026-10-05）：高德不给房价，所以"住哪"一直没有价格依据，
+        #    最后只能标"需要你确认"。供应商一次城市检索就能拿回「酒店名 + 实价 + 星级 + 地址 +
+        #    下单链接」，于是住宿候选**本身带价**（"按实价选酒店"，而不是先选完再想办法补价）。
+        #    预算/档次是用户的约束，交给服务端筛（hotelTags.maxPricePerNight / starRatings）。
+        _lodging_supply: Dict[str, Any] = {"status": "not_attempted", "added": 0}
+        try:
+            from core.candidate_index import normalize_text as _normalize_text
+            from core.rollinggo_mcp import search_hotels as _supplier_search_hotels
+
+            _hotel_nights = max(1, trip_days - 1)
+            _nightly_cap = round(float(hotel_budget) / _hotel_nights) if hotel_budget else None
+            _supplier_hotels = await _supplier_search_hotels(
+                target_city,
+                check_in=str(user_prefs.get("start_date") or ""),
+                nights=_hotel_nights,
+                adults=max(1, _member_count),
+                size=6,
+                max_price_per_night=_nightly_cap,
+                min_star=4.0 if is_luxury else None,
+            )
+            _lodging_supply = {
+                "status": _supplier_hotels.get("status"),
+                "error": _supplier_hotels.get("error") or "",
+                "nightly_cap": _nightly_cap,
+                "min_star": 4.0 if is_luxury else None,
+                "added": 0,
+                "hotels": [],
+            }
+            if _supplier_hotels.get("status") == "ok":
+                _existing_hotel_keys = {
+                    _normalize_text(str(item.get("name") or ""))
+                    for item in cleaned_hotels
+                    if isinstance(item, Mapping)
+                }
+                for _hotel in _supplier_hotels.get("hotels") or []:
+                    _hotel_name = str(_hotel.get("name") or "")
+                    if not _hotel_name:
+                        continue
+                    _key = _normalize_text(_hotel_name)
+                    if _key in _existing_hotel_keys:
+                        continue
+                    _existing_hotel_keys.add(_key)
+                    cleaned_hotels.append(
+                        {
+                            "name": _hotel_name,
+                            "type": "住宿服务",
+                            "address": _hotel.get("address") or "",
+                            "lnglat": list(_hotel.get("lnglat") or []),
+                            "rating": _hotel.get("star"),
+                            "price": _hotel.get("price"),
+                            "price_source": "rollinggo",
+                            "source": "rollinggo",
+                            "booking_url": _hotel.get("booking_url") or "",
+                            # 候选来源要能区分：这些是**有实价**的供应商候选，不是模型凭记忆写的
+                            "data_source": "rollinggo",
+                            "is_hotel": True,
+                            "tags": ["住宿"],
+                        }
+                    )
+                    _lodging_supply["added"] += 1
+                _lodging_supply["hotels"] = [
+                    {
+                        "name": str(item.get("name") or ""),
+                        "price": item.get("price"),
+                        "star": item.get("star"),
+                        "address": str(item.get("address") or ""),
+                        "booking_url": str(item.get("booking_url") or ""),
+                        "message": str(item.get("message") or ""),
+                    }
+                    for item in (_supplier_hotels.get("hotels") or [])
+                ]
+                _lodging_supply["count"] = _supplier_hotels.get("count")
+                _lodging_supply["with_price"] = len(
+                    [item for item in (_supplier_hotels.get("hotels") or []) if isinstance(item.get("price"), (int, float))]
+                )
+                print(
+                    f"🏨 [住宿候选] 供应商实价候选 {_lodging_supply['count']} 家"
+                    f"（其中带价 {_lodging_supply['with_price']} 家）→ 并入候选池 {_lodging_supply['added']} 家"
+                    + (f"；每晚上限 ¥{_nightly_cap}" if _nightly_cap else "")
+                    + ("；只看 4 星以上" if is_luxury else ""),
+                    flush=True,
+                )
+            else:
+                print(f"🏨 [住宿候选] 供应商没给候选：{_lodging_supply['status']}｜{_lodging_supply['error']}", flush=True)
+        except Exception as _lodging_supply_exc:  # 供应商失败绝不影响出方案
+            _lodging_supply = {"status": "error", "error": f"{type(_lodging_supply_exc).__name__}: {str(_lodging_supply_exc)[:140]}"}
+            print(f"⚠️ [住宿候选] 供应商候选查询失败（不影响出方案）: {_lodging_supply_exc}", flush=True)
+
         # Specialist runtime: these domain tasks run independently and return
         # validated proposals before the coordinator performs final route
         # selection. Empty supplier data is kept as a degraded proposal rather
@@ -5349,6 +5437,10 @@ async def run_negotiate(msg: GatewayMessage):
                             # 说明"哪些地点来自数据源、哪些是靠模型知识补的"）
                             if candidate_supply:
                                 final_data["candidate_supply"] = candidate_supply
+                            # 住宿候选的供应商实价清单：住宿"能不能选得起、选哪家"的依据，
+                            # 必须随方案下发（只报"住哪"不报"还有哪些有实价的可选"等于没给选择权）
+                            if isinstance(_lodging_supply, dict) and _lodging_supply.get("status") not in (None, "not_attempted"):
+                                final_data["lodging_supply"] = _lodging_supply
                             if _governance.get("increment"):
                                 final_data["increment"] = _governance["increment"]
                             # 升/降档 → 排序偏好（网关 ranker 下次推演会读这些键；本次的配额填充与
