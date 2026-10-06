@@ -29,21 +29,33 @@ DAILY_FAR_LIMIT = {"low": 0, "normal": 1, "high": 1}
 
 
 def node_lnglat(node: Any) -> List[float]:
-    """节点坐标 → [lng, lat]；取不到就返回空列表（不当成 0,0）。"""
+    """节点坐标 → [lng, lat]；取不到就返回空列表（**不当成 0,0**）。
+
+    ⚠️ `(0, 0)` 是"几内亚湾海面上"，不是地点：数据源没给坐标时很容易写成 0/0，
+    而它一旦进了里程计算，就会算出"第 2 天移动 9440km"这种荒唐结论
+    （实测 2026-10-05：供应商候选没带坐标 → 被写成 [0,0] → 整天的里程与预算判断全废）。
+    与前端 `_valid_pt`、照片兜底等处保持同一口径：**0,0 = 没有坐标**。
+    """
     if not isinstance(node, Mapping):
         return []
     value = node.get("lnglat") or node.get("location") or node.get("coord")
     if isinstance(value, (list, tuple)) and len(value) >= 2:
         try:
-            return [float(value[0]), float(value[1])]
+            lng, lat = float(value[0]), float(value[1])
         except (TypeError, ValueError):
             return []
+        if lng == 0.0 and lat == 0.0:
+            return []
+        return [lng, lat]
     if isinstance(value, str) and "," in value:
         left, _, right = value.partition(",")
         try:
-            return [float(left), float(right)]
+            lng, lat = float(left), float(right)
         except ValueError:
             return []
+        if lng == 0.0 and lat == 0.0:
+            return []
+        return [lng, lat]
     return []
 
 

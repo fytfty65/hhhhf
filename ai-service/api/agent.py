@@ -3162,13 +3162,25 @@ async def run_negotiate(msg: GatewayMessage):
                     _key = _normalize_text(_hotel_name)
                     if _key in _existing_hotel_keys:
                         continue
+                    # ⚠️ 供应商**没给坐标**的候选不进候选池：它没有位置，规划会把它当"某个地方"，
+                    #    实测被写成 [0,0] → 那天里程算出 9440km（整个方案的空间判断全废）。
+                    #    这类候选仍然留在 `lodging_supply` 清单里（有名字、有实价、有地址），
+                    #    只是不参与排序与路径 —— 用户想住可以直接说。
+                    _hotel_lnglat = _hotel.get("lnglat")
+                    if not (
+                        isinstance(_hotel_lnglat, (list, tuple))
+                        and len(_hotel_lnglat) >= 2
+                        and not (float(_hotel_lnglat[0]) == 0.0 and float(_hotel_lnglat[1]) == 0.0)
+                    ):
+                        _lodging_supply.setdefault("without_coords", []).append(_hotel_name)
+                        continue
                     _existing_hotel_keys.add(_key)
                     cleaned_hotels.append(
                         {
                             "name": _hotel_name,
                             "type": "住宿服务",
                             "address": _hotel.get("address") or "",
-                            "lnglat": list(_hotel.get("lnglat") or []),
+                            "lnglat": [float(_hotel_lnglat[0]), float(_hotel_lnglat[1])],
                             "rating": _hotel.get("star"),
                             "price": _hotel.get("price"),
                             "price_source": "rollinggo",
@@ -3200,7 +3212,12 @@ async def run_negotiate(msg: GatewayMessage):
                     f"🏨 [住宿候选] 供应商实价候选 {_lodging_supply['count']} 家"
                     f"（其中带价 {_lodging_supply['with_price']} 家）→ 并入候选池 {_lodging_supply['added']} 家"
                     + (f"；每晚上限 ¥{_nightly_cap}" if _nightly_cap else "")
-                    + ("；只看 4 星以上" if is_luxury else ""),
+                    + ("；只看 4 星以上" if is_luxury else "")
+                    + (
+                        f"；供应商没给坐标 {len(_lodging_supply.get('without_coords') or [])} 家（留在可选清单里，不进路线）"
+                        if _lodging_supply.get("without_coords")
+                        else ""
+                    ),
                     flush=True,
                 )
             else:
@@ -6561,6 +6578,42 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["route"] = order_route_by_day(final_data.get("route") or [])
                         except Exception as _order_exc:  # 排序失败不影响出方案
                             print(f"⚠️ [路线排序] 按天排序失败（不影响出方案）: {_order_exc}", flush=True)
+
+                        # 👑 无效坐标清洗：`(0,0)` 是"海面上"，不是地点。数据源没给坐标时很容易被写成
+                        #    0/0（实测 2026-10-05：供应商候选没坐标 → 规划写 [0,0] → "第 2 天 9438km"，
+                        #    地图上还会把这个点画到几内亚湾）。这里把它**清成缺失**并如实登记：
+                        #    缺坐标的节点不参与里程/预算计算，配图交给带"位置示意"标注的兜底。
+                        try:
+                            _invalid_coord_names: List[str] = []
+                            for _node in final_data.get("route") or []:
+                                if not isinstance(_node, dict):
+                                    continue
+                                _coord_value = _node.get("lnglat")
+                                if (
+                                    isinstance(_coord_value, (list, tuple))
+                                    and len(_coord_value) >= 2
+                                ):
+                                    try:
+                                        _zero = float(_coord_value[0]) == 0.0 and float(_coord_value[1]) == 0.0
+                                    except (TypeError, ValueError):
+                                        _zero = False
+                                    if _zero:
+                                        _node["lnglat"] = []
+                                        _node["coordinate_status"] = "missing"
+                                        _node["coordinate_note"] = "数据源没给坐标（原值 0,0 已清掉，不参与里程计算）"
+                                        _invalid_coord_names.append(str(_node.get("name") or ""))
+                            if _invalid_coord_names:
+                                final_data["invalid_coordinates"] = {
+                                    "names": _invalid_coord_names,
+                                    "note": "这些节点没有可信坐标（数据源给了 0,0）：不参与里程与距离判断，地图上不标位置。",
+                                }
+                                print(
+                                    "🧹 [坐标清洗] 清掉 "
+                                    f"{len(_invalid_coord_names)} 个 0,0 坐标：{'、'.join(_invalid_coord_names[:4])}",
+                                    flush=True,
+                                )
+                        except Exception as _coord_exc:  # 清洗失败不影响出方案
+                            print(f"⚠️ [坐标清洗] 失败（不影响出方案）: {_coord_exc}", flush=True)
 
                         # 👑 酒店实时房价（供应商只读 MCP）—— **必须放在住宿定型之后**：
                         #    硬约束收口的最后一道是 `settle_lodging`（会补/换酒店），

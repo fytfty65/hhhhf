@@ -162,17 +162,22 @@ def node_day(node: Mapping[str, Any], fallback: int) -> int:
 
 
 def node_lnglat(node: Mapping[str, Any]) -> Optional[Tuple[float, float]]:
+    """节点坐标；取不到（含 `(0,0)`）返回 None。
+
+    ⚠️ `(0,0)` 是"几内亚湾海面上"，不是地点（2026-10-05 实测：数据源没给坐标时被写成 [0,0]，
+    评分由此算出"最赶的一天约 9438km"）。口径与 `core/travel_feasibility.node_lnglat` **一致** ——
+    这一层只做形状适配（也要认 `{"lng":…,"lat":…}`），值的判定交给同一个实现，
+    避免"管线里按没有坐标算、评分里按海面上算"这种两套口径（这次就是这么被抓到的）。
+    """
+    from .travel_feasibility import node_lnglat as _canonical_lnglat
+
     value = node.get("lnglat") or node.get("location_lnglat")
     if isinstance(value, Mapping):
-        lng, lat = value.get("lng"), value.get("lat")
-    elif isinstance(value, Sequence) and not isinstance(value, str) and len(value) >= 2:
-        lng, lat = value[0], value[1]
-    else:
+        value = [value.get("lng"), value.get("lat")]
+    normalized = _canonical_lnglat({"lnglat": value})
+    if not normalized:
         return None
-    try:
-        return float(lng), float(lat)
-    except (TypeError, ValueError):
-        return None
+    return float(normalized[0]), float(normalized[1])
 
 
 def haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:

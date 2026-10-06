@@ -576,6 +576,17 @@ class WiringTests(unittest.TestCase):
         # 用到之前必须先绑定：导入行要在第一次使用之前
         self.assertLess(source.index("import normalize_text as _normalize_text"), source.index("_normalize_text(str(item.get"))
 
+    def test_candidates_without_coordinates_never_enter_the_pool(self):
+        """供应商没给坐标的候选**不进候选池**（留在可选清单里）。
+
+        真实事故（2026-10-05 伊宁）：某候选没坐标 → 规划写成 `[0,0]` →
+        "第 2 天移动 9440km"（整个方案的空间判断全废，总分从 88 掉到 75）。
+        """
+        source = self._agent_source()
+        self.assertIn('_lodging_supply.setdefault("without_coords", []).append(_hotel_name)', source)
+        self.assertIn("if not (", source)
+        self.assertIn("== 0.0 and float(_hotel_lnglat[1]) == 0.0", source)
+
     def test_agent_only_uses_read_only_rollinggo_helpers(self):
         """agent.py 里除了 price_lodging_nodes，不许出现别的 rollinggo 调用（更不许下单）。"""
         tree = ast.parse(self._agent_source())
