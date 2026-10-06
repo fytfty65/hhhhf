@@ -50,6 +50,24 @@ type PriceAudit = {
   unsourced_upgrade_attempted?: number;
   upgraded_to_verifiable?: string[];
   unsourced_after?: string[];
+  /**
+   * 酒店实时房价（供应商只读 MCP）：查了几家、匹配到几家、其中几家给了数字。
+   * 为什么必须渲染：这是"高德不提供房价"这个最大缺口唯一的真来源（实测 ¥183/¥131），
+   * 但用户看到"住宿：暂无供应商数据"时并不知道系统其实查过、只是供应商那天没有可售报价。
+   */
+  rollinggo?: {
+    enabled?: boolean;
+    reason?: string;
+    error?: string;
+    queried?: number;
+    matched?: number;
+    with_price?: number;
+    without_price?: string[];
+    not_found?: string[];
+    prices?: Record<string, number>;
+    check_in?: string;
+    nights?: number;
+  };
   pending?: { name?: string; kind?: string; reason?: string; url?: string; estimated?: boolean; value?: number | null }[];
 };
 
@@ -207,6 +225,30 @@ export default function NegotiationDiagnostics({
           )}
           {priceAudit?.error && (
             <p className="mt-1 text-[11.5px] leading-relaxed text-amber-800">补价报错：{priceAudit.error}</p>
+          )}
+          {/* 酒店实时房价：这是"高德不提供房价"唯一的真来源，查到没查到都要说清楚 */}
+          {priceAudit?.rollinggo && (
+            <p className="mt-1 text-[11.5px] leading-relaxed text-slate-600" data-testid="diagnostics-hotel-price">
+              {priceAudit.rollinggo.error
+                ? `酒店实时房价查询失败：${priceAudit.rollinggo.error}`
+                : priceAudit.rollinggo.enabled === false
+                  ? `酒店实时房价未启用：${priceAudit.rollinggo.reason || '未配置供应商'}`
+                  : `酒店实时房价：查了 ${priceAudit.rollinggo.queried ?? 0} 家，供应商匹配到 ${
+                      priceAudit.rollinggo.matched ?? 0
+                    } 家` +
+                    ((priceAudit.rollinggo.with_price ?? 0) > 0
+                      ? `，其中给出实价 ${
+                          Object.entries(priceAudit.rollinggo.prices || {})
+                            .slice(0, 3)
+                            .map(([name, value]) => `${name} ¥${value}`)
+                            .join('、')
+                        }`
+                      : '，但这次没有给出数字（不是 0 元）') +
+                    ((priceAudit.rollinggo.not_found?.length ?? 0) > 0
+                      ? `；供应商没有这几家：${(priceAudit.rollinggo.not_found || []).slice(0, 3).join('、')}`
+                      : '') +
+                    `；报价口径：${priceAudit.rollinggo.check_in || '未标注入住日期'}`}
+            </p>
           )}
           {pending.length > 0 ? (
             <ul className="mt-2 space-y-1" data-testid="diagnostics-pending-links">

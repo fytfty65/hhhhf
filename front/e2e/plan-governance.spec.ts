@@ -123,6 +123,19 @@ const GOVERNANCE_PAYLOAD = {
     unsourced_upgrade_attempted: 2,
     upgraded_to_verifiable: ['博斯腾湖'],
     unsourced_after: ['城墙南门门票'],
+    // 酒店实时房价（供应商只读 MCP）：查了几家、匹配到几家、其中几家给了数字
+    rollinggo: {
+      enabled: true,
+      reason: '已配置只读酒店查询',
+      queried: 2,
+      matched: 2,
+      with_price: 1,
+      prices: { '库尔勒园林宾馆': 316 },
+      without_price: ['瑞德假日酒店(巴州博物馆市政府店)'],
+      not_found: [],
+      check_in: '（未给出发日期，供应商按明日报价）',
+      nights: 1,
+    },
     pending: [
       { name: '钟楼酒店', kind: 'hotel', reason: '高德不提供房价，需要你确认', url: 'https://uri.amap.com/marker?position=108.94,34.26&name=x' },
       { name: '城墙南门门票', kind: 'cultural', reason: '这是联网估算价（不是官方报价），可点开来源核对', url: 'https://www.xinjiang.gov.cn/ticket/45', estimated: true, value: 45 },
@@ -793,6 +806,11 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // "有数字没出处"的台账：这些价格点开只有网摘，系统有没有试着换成官方页面要能看见
     await expect(provenance).toContainText('另有 2 个价格原先只有网摘出处，已再查一次官方页面');
     await expect(provenance).toContainText('升级为可核实 1 个（博斯腾湖）');
+    // 酒店实时房价：查到没查到、报价是哪个日期的，都要能看到（"暂无供应商数据"不等于没查）
+    const hotelPrice = page.getByTestId('diagnostics-hotel-price');
+    await expect(hotelPrice).toContainText('查了 2 家，供应商匹配到 2 家');
+    await expect(hotelPrice).toContainText('给出实价 库尔勒园林宾馆 ¥316');
+    await expect(hotelPrice).toContainText('报价口径：（未给出发日期，供应商按明日报价）');
     await expect(page.getByTestId('diagnostics-pending-links')).toContainText('这是联网估算价（不是官方报价），可点开来源核对');
     // 出处链接必须指向**那条价格的真实来源**（按 href 精确定位；列表第一条是酒店的另一个链接）
     await expect(
