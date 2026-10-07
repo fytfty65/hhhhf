@@ -203,16 +203,17 @@ def price_max_nodes() -> int:
 
 
 def enabled_providers() -> List[str]:
-    # 默认顺序的由来（2026-10-07 实测重排）：
-    #   · 百度 → **安全验证页**（`baidu 返回安全验证页`），搜狗 → 0 条/验证码页，都已不可用；
-    #   · `duckduckgo_search` 已改名 `ddgs`（旧包告警且 0 条），装了新包后**能返回真结果**
-    #     （实测 5 条 ctrip/qunar/百度百科，票务平台链接也在里面）；
-    #   · Bing HTML（cn.bing.com）**不被验证码挡**，而且会带出 .gov.cn（英吉沙县政府、
-    #     喀什政府）—— 这正是"官方页面"那条链路的入口。
-    # 所以顺序改成 ddgs → bing → baidu → sogou；旧的 search（ddg 旧包）保留为兜底。
-    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "ddgs,bing,baidu,sogou,search,official_page").strip()
+    # 默认顺序的由来（2026-10-07 **按产出实测**重排，见 `tools/probe_provider_yield.py`）：
+    #   同一批 8 条真实 query（"城市 景点 门票 价格"）各问一遍的结果：
+    #     · **bing 8/8 成功、共 48 条**（不弹验证码，带出 .gov.cn —— 官方页面链路的入口）；
+    #     · baidu 先 8/8、随后开始返回**安全验证页**（直接调 `fetch_baidu` 会抛）；
+    #     · ddgs 只被轮到 2 次且 **TimeoutError**（限流），0 条；
+    #     · sogou 0 条；`search`（旧 `duckduckgo_search` 包）已改名失效，只会吃时间。
+    #   所以：**能出结果的排前面**，同时保留 ddgs（它好的时候能带出携程/去哪儿这类票务平台链接）。
+    #   merge 时还会按**近期健康分**动态排序（成功 +2/失败 −3），静态顺序只是并列时的兜底。
+    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "bing,baidu,ddgs,sogou,official_page").strip()
     items = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    return items or ["ddgs"]
+    return items or ["bing"]
 
 
 def search_proxy() -> str:
@@ -1072,6 +1073,10 @@ async def search_texts(
             "ok": False,
             "error": f"今日联网取价配额已用完（上限 {budget_daily_max_requests()} 次）",
         }]
+        # 配额用完要**留痕到用量文件之外**：方案层据此告诉用户"不是没有这个价，
+        # 而是今天的联网次数用完了"——否则用户看到一片"未核实"，会以为我们没查。
+        global last_quota_exhausted_at  # noqa: PLW0603
+        last_quota_exhausted_at = _time.time()
         return []
 
     async with _search_lock:
@@ -1094,6 +1099,19 @@ async def search_texts(
                 "cooldown_overridden": True,
                 "error": "所有取价源都在冷却中，仍强制试一次（避免因为熔断直接放弃）",
             })
+        # 👑 按**近期健康分**排序（相等时保持配置顺序）：取价是逐点串行的，
+        #    每多花一秒在一个已经坏掉的源上，就少查一个节点。
+        #    实测（2026-10-07）：ddgs TimeoutError、baidu 验证页、sogou 0 条、search 已改名失效，
+        #    而 bing 8/8 成功 —— 按配置顺序问就是每次都先撞死源。
+        if len(available) > 1:
+            available = sorted(available, key=lambda name: -int(_PROVIDER_SCORE.get(name) or 0))
+            # 👑 **已知坏掉的源，别在 merge 里再占名额**（2026-10-07 实测）：
+            #    merge 默认问 2 家，而"第 2 家"往往就是刚失败过的那个 ——
+            #    实测头 3 条 query 花了 12.6s/6.2s/10.9s（ddgs 超时 + baidu 验证页），
+            #    之后它们进了冷却才降到 1.5s/条。整轮 9 个取价点因此花了 43.4s。
+            #    所以：只问**健康分为非负**的源；全都为负时再退回完整列表（不能把自己饿死）。
+            healthy = [name for name in available if int(_PROVIDER_SCORE.get(name) or 0) >= 0]
+            available = healthy or available
         merged: List[Dict[str, Any]] = []
         merged_seen: set = set()
         asked = 0
@@ -1114,6 +1132,19 @@ async def search_texts(
                 else:
                     return []
                 record_request()  # 计入日配额（无论成败都算一次真实请求）
+                if rows and rows_look_like_shell(rows):
+                    # 壳页/验证页被解析成"结果"：必须记成**失败**，否则这个源会被当成健康的，
+                    # 继续占着 merge 的名额、把垃圾混进证据里（实测 baidu 就这样骗过一次）。
+                    attempts.append(
+                        {
+                            "provider": provider,
+                            "ok": False,
+                            "results": 0,
+                            "error": "结果页像搜索壳/验证页（已按失败处理并冷却）",
+                        }
+                    )
+                    _note_provider_result(provider, False)
+                    return []
                 attempts.append({"provider": provider, "ok": bool(rows), "results": len(rows)})
                 _note_provider_result(provider, bool(rows))
                 return [dict(row) for row in rows or []]
@@ -1157,6 +1188,9 @@ async def search_texts(
 # —— 提供方熔断状态（进程内）——
 _PROVIDER_FAILURES: Dict[str, int] = {}
 _PROVIDER_COOLDOWN_UNTIL: Dict[str, float] = {}
+# 近期健康分（成功 +2 / 失败 −3，范围 −20..20）：merge 时按它决定先问谁（见 `_note_provider_result`）
+_PROVIDER_SCORE: Dict[str, int] = {}
+_PROVIDER_LAST_OK: Dict[str, float] = {}
 # 连续失败几次就冷却：2 次足够区分"偶发失败"和"这个源现在不行了"
 PROVIDER_FAILURE_THRESHOLD = 2
 
@@ -1179,19 +1213,93 @@ def provider_is_available(provider: str, *, now: Optional[float] = None) -> bool
 
 
 def _note_provider_result(provider: str, ok: bool, *, now: Optional[float] = None) -> None:
-    """记一次成败：成功清零；连续失败到阈值就进入冷却（默认 180s）。"""
+    """记一次成败：成功清零；连续失败到阈值就进入冷却（默认 180s）。
+
+    同时维护一个**近期健康分**（`_PROVIDER_SCORE`）：merge 模式下用它决定"先问谁"——
+    否则每次都要先花几秒在已经坏掉的源上（实测 ddgs TimeoutError、baidu 验证页）。
+    分只增不减地封顶，成功 +2、失败 -3，越大越优先。
+    """
     import time as _time
 
     moment = float(now if now is not None else _time.monotonic())
     name = str(provider)
+    score = int(_PROVIDER_SCORE.get(name) or 0)
+    _PROVIDER_SCORE[name] = max(-20, min(20, score + (2 if ok else -3)))
     if ok:
         _PROVIDER_FAILURES[name] = 0
         _PROVIDER_COOLDOWN_UNTIL.pop(name, None)
+        _PROVIDER_LAST_OK[name] = moment
         return
     failures = int(_PROVIDER_FAILURES.get(name) or 0) + 1
     _PROVIDER_FAILURES[name] = failures
     if failures >= PROVIDER_FAILURE_THRESHOLD:
         _PROVIDER_COOLDOWN_UNTIL[name] = moment + provider_cooldown_seconds()
+
+
+def name_core_tokens(name: str) -> List[str]:
+    """地点名里**能用来判断"这条结果是不是在讲它"**的核心词。
+
+    中文景点名常带"国家/风景/森林/旅游/区/园"这类通词，去掉它们剩下的才是识别词
+    （「英吉沙国家湿地公园」→ 英吉沙、湿地公园；「图开沙漠冰雪乐园」→ 图开、沙漠冰雪乐园）。
+    太短的（≤1 字）丢掉，避免"湖"字匹配到一切。
+    """
+    import re
+
+    generic = ("国家", "风景", "旅游", "森林", "地质", "自然保护", "风景区", "景区", "公园", "乐园", "博物馆", "古城")
+    core = str(name or "").strip()
+    for word in generic:
+        core = core.replace(word, " ")
+    tokens = [token for token in re.split(r"[\s·]+", core) if len(token) > 1]
+    if not tokens:
+        tokens = [str(name or "")[:4]] if len(str(name or "")) >= 3 else []
+    return tokens
+
+
+def _page_worth_fetching(url: str, rows: Sequence[Mapping[str, Any]], name: str) -> bool:
+    """这个白名单 URL 值不值得抓页（只挡**站点首页**，官方详情页一律照抓）。"""
+    from urllib.parse import urlparse
+
+    row = next(
+        (
+            item
+            for item in rows or []
+            if isinstance(item, Mapping) and str(item.get("url") or item.get("href") or "") == str(url or "")
+        ),
+        None,
+    )
+    text = f"{row.get('title')} {row.get('body')} {row.get('snippet')}" if row else ""
+    tokens = name_core_tokens(name)
+    if tokens and any(token in text for token in tokens):
+        return True
+    parsed = urlparse(str(url or ""))
+    path = (parsed.path or "").strip("/")
+    if path and path.lower() not in {"index.html", "index.htm", "index.php", "index.jsp"}:
+        return True  # 有路径 → 详情/栏目页，值得抓
+    if parsed.query:
+        return True  # 带参数（如 detail?id=581）也是详情页
+    return False  # 只剩域名/首页，且摘要没提到这个地点 → 不值得抓
+
+
+def rows_look_like_shell(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """这批"结果"是不是**搜索壳/验证页**被解析出来的垃圾（2026-10-07 实测分歧）。
+
+    为什么要（实测同一分钟内两个探针结论相反）：`probe_provider_yield` 里 baidu 报
+    `ok=True results=6`，而直接调 `fetch_baidu` 却抛「返回安全验证页」—— 说明验证页的
+    HTML 里也能抠出 6 条"结果"，于是这个源被记成**健康**、继续占着 merge 的名额，
+    而它给的全是垃圾。判据（保守，宁可漏判也不误杀真结果）：
+      · 所有 URL 都指向搜索站自己（`baidu.com/search`、`wappass`、`sogou`、`bing.com/search`）；
+      · 或者标题**全部相同**（壳页里同一句提示重复出现）。
+    """
+    urls = [str(row.get("url") or row.get("href") or "") for row in rows or [] if isinstance(row, Mapping)]
+    titles = [str(row.get("title") or "").strip() for row in rows or [] if isinstance(row, Mapping)]
+    if not urls:
+        return True
+    engine_shells = ("wappass.baidu.com", "/search?", "verify", "captcha", "passport.")
+    if all(any(marker in url for marker in engine_shells) for url in urls):
+        return True
+    if len(titles) >= 2 and len(set(titles)) == 1:
+        return True
+    return False
 
 
 def provider_states(*, now: Optional[float] = None) -> Dict[str, Dict[str, Any]]:
@@ -1211,12 +1319,21 @@ def provider_states(*, now: Optional[float] = None) -> Dict[str, Dict[str, Any]]
 
 
 def reset_provider_state() -> None:
-    """清空熔断状态（测试与"换一换"重试时用）。"""
+    """清空熔断状态（测试与"换一换"重试时用）。
+
+    ⚠️ **健康分也要一起清**（2026-10-07 实测踩到）：只清失败计数、留下健康分，
+    会让"重置"之后的源顺序仍然受上一次运行影响 —— 单测之间就会互相干扰
+    （同一进程里先跑过的用例把 score 改了，后面的用例看到的是别的顺序）。
+    """
     _PROVIDER_FAILURES.clear()
     _PROVIDER_COOLDOWN_UNTIL.clear()
+    _PROVIDER_SCORE.clear()
+    _PROVIDER_LAST_OK.clear()
 
 
 last_search_attempts: List[Dict[str, Any]] = []
+# 最近一次因为**日配额用完**而放弃联网的时刻（方案层据此解释"为什么全是未核实"）
+last_quota_exhausted_at: float = 0.0
 _last_search_at: float = 0.0
 _search_cache: Dict[str, Any] = {}
 try:  # 锁在导入时创建（同进程内串行化搜索，避免互相触发限流）
@@ -1258,7 +1375,10 @@ async def search_ddgs(query: str, *, max_results: int = 3) -> List[Dict[str, Any
             if proxy:
                 os.environ["HTTP_PROXY"] = proxy
                 os.environ["HTTPS_PROXY"] = proxy
-            with _ddgs_client(min(6.0, price_timeout_seconds()), proxy) as ddgs:
+            # ddgs 被限流时会**一直挂到超时**，而它现在多数时候是挂的（2026-10-07 实测 8 条 query
+            # 只轮到 2 次、全是 TimeoutError）。超时就是纯损失：整轮取价 43.4s 里有 ~25s 是它。
+            # 所以把它的等待压到 3s（能给结果的场合 3s 内就给了）。
+            with _ddgs_client(min(3.0, price_timeout_seconds()), proxy) as ddgs:
                 rows = list(ddgs.text(query, max_results=max_results))
             return [
                 {
@@ -1502,7 +1622,17 @@ async def lookup_price(
         candidate_url = str(row.get("url") or row.get("href") or "")
         if candidate_url and host_is_allowed(candidate_url)[0] and candidate_url not in allowed_urls:
             allowed_urls.append(candidate_url)
-    page_urls = allowed_urls[:3] if prefer_official else allowed_urls[:1]
+    # 👑 **别抓"站点首页"**（2026-10-07 实测，省时间也省配额）：这些小众景点在 cn.bing.com 上
+    #    常常搜不到自己的页面 —— 实测「伊宁 图开沙漠冰雪乐园 门票 价格」返回的是伊宁百科/伊宁政务网
+    #    首页，而白名单页面抓取是最贵的一步（整轮取价 43.7s / 9 个点）。首页上不可能有这个景点的票价。
+    #    ⚠️ 只挡**首页**（没有路径/参数、摘要也没提到地点）：官方**详情页**必须照抓 ——
+    #    天鹅泉的 ¥30 就来自 `ylwl.xjyl.gov.cn/show/scenicspot/detail?id=581`，
+    #    而它的摘要里并不一定带着地点名。判据保守，宁可多抓一页，也不漏掉官方详情页。
+    relevant_urls = [url for url in allowed_urls if _page_worth_fetching(url, rows, name)]
+    # 抓几个白名单页面：玩点（景区/人文）抓 2 个、其他 1 个；official 模式多抓几个。
+    page_urls = (
+        relevant_urls[:3] if prefer_official else relevant_urls[: (2 if is_play else 1)]
+    )
 
     for page_url in page_urls:
         page = await fetch_page_text_stable(page_url)

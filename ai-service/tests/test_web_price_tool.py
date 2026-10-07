@@ -149,10 +149,10 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
             # 默认顺序把**当前真的能返回结果**的源放前面（2026-10-07 实测重排：
-            # 百度已成安全验证页、搜狗成验证码页；`ddgs` 新包能返回真结果，
-            # Bing 不弹验证码且结果里带 .gov.cn —— 官方页面那条链路就靠它）
+            # 8 条真实 query 各问一遍 → bing 8/8、48 条；baidu 随后变安全验证页；
+            # ddgs TimeoutError 0 条；sogou 0 条；旧 `search` 包已改名失效只会吃时间）
             self.assertEqual(
-                enabled_providers(), ["ddgs", "bing", "baidu", "sogou", "search", "official_page"]
+                enabled_providers(), ["bing", "baidu", "ddgs", "sogou", "official_page"]
             )
             self.assertEqual(search_proxy(), "")
 
@@ -176,8 +176,8 @@ class ConfigTests(unittest.TestCase):
         ):
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
-            # 空/非法配置退回**当前可用的**第一个源（2026-10-07：ddgs；旧值 sogou 已经查不动）
-            self.assertEqual(enabled_providers(), ["ddgs"])
+            # 空/非法配置退回**当前可用的**第一个源（2026-10-07 实测：bing 8/8 有结果）
+            self.assertEqual(enabled_providers(), ["bing"])
 
 
 class ObservationTests(unittest.TestCase):
@@ -517,6 +517,13 @@ class SogouParserTests(unittest.TestCase):
 
 class ProviderOrderTests(unittest.TestCase):
     """按配置顺序试提供方，第一个有结果的就用；全失败要留下尝试记录（供披露原因）。"""
+
+    def setUp(self):
+        # 源顺序现在会随**近期健康分**动态调整（2026-10-07），
+        # 用例之间必须互不影响 —— 否则先跑过的用例会把 score 改掉，后面的用例看到别的顺序。
+        from core import web_price_tool
+
+        web_price_tool.reset_provider_state()
 
     def test_first_provider_with_results_wins(self):
         import asyncio
@@ -1310,19 +1317,24 @@ class BaiduProviderTests(unittest.TestCase):
         self.assertEqual(parse_baidu_results("<html><body>nothing</body></html>", limit=3), [])
 
     def test_default_order_starts_with_a_source_that_actually_answers(self):
-        """顺序不是偏好问题，是**可达性**问题（2026-10-07 实测重排，原断言 pin 的是百度第一）。
+        """顺序不是偏好问题，是**可达性**问题（2026-10-07 按产出实测重排）。
 
-        原来的断言「百度第一」曾经是对的（2026-10-05 百度能返回真结果）；现在百度回
-        安全验证页、搜狗回验证码页，所以第一个必须是**实测能返回结果**的源 ——
-        否则每个取价点都先等一个死源失败，把单点预算吃光（这个坑 2026-10-05 已经踩过一次）。
+        这条断言换过两次，每次都跟着证据走：
+          · 2026-10-05 断言「百度第一」—— 那时百度能返回真结果；
+          · 之后百度变安全验证页，改成「ddgs 第一」；
+          · 2026-10-07 用 8 条真实 query 逐源测量（`tools/probe_provider_yield.py`）：
+            **bing 8/8 成功、48 条**；baidu 随后变安全验证页；ddgs 只轮到 2 次且 TimeoutError；
+            sogou 0 条；旧 `search` 包已改名失效。所以第一个必须是 bing。
+        顺序错了的代价很实在：每个取价点都先等一个死源失败，把单点预算吃光
+        （2026-10-05 实测"查了 6 个、补 0 条"就是这么来的）。
         """
         from core.web_price_tool import enabled_providers
 
         with isolated_env():
             order = enabled_providers()
-        self.assertEqual(order[0], "ddgs", order)
-        self.assertIn("bing", order, "Bing 是唯一能带出 .gov.cn 的源，官方页面链路靠它")
-        self.assertLess(order.index("ddgs"), order.index("baidu"), order)
+        self.assertEqual(order[0], "bing", order)
+        self.assertIn("ddgs", order, "ddgs 好的时候能带出携程/去哪儿这类票务平台链接")
+        self.assertNotIn("search", order, "旧 duckduckgo_search 包已改名失效，只会吃时间")
 
 
 class PriceContextRankingTests(unittest.TestCase):
@@ -1401,6 +1413,108 @@ class PriceFailureDisclosureTests(unittest.TestCase):
         self.assertIn("各源情况", str(entry.get("reason")))
         self.assertIn("baidu", str(entry.get("reason")))
         self.assertIn("WEB_SEARCH_PROXY", str(entry.get("reason")))
+
+
+class ShellPageTests(unittest.TestCase):
+    """验证页/壳页被解析成"结果"时，必须记成**失败**（2026-10-07 实测：同一条 query，
+    产量探针看到 `baidu ok=True results=6`，而直接调 `fetch_baidu` 却抛「返回安全验证页」——
+    说明验证页的 HTML 里也能抠出 6 条。这个源因此被当成健康、继续占 merge 名额、把垃圾混进证据）。
+    """
+
+    def setUp(self):
+        from core import web_price_tool
+
+        web_price_tool.reset_provider_state()
+
+    def test_rows_look_like_shell_detects_engine_pages(self):
+        from core.web_price_tool import rows_look_like_shell
+
+        self.assertTrue(
+            rows_look_like_shell([{"title": "百度安全验证", "url": "https://wappass.baidu.com/static/captcha"}]),
+            "验证页必须被判成壳页",
+        )
+        self.assertTrue(
+            rows_look_like_shell([{"title": "同一句提示", "url": "https://x.com/a"}, {"title": "同一句提示", "url": "https://y.com/b"}]),
+            "标题完全相同的重复块也是壳页特征",
+        )
+        self.assertFalse(
+            rows_look_like_shell(
+                [{"title": "英吉沙县湿地公园门票30元", "url": "http://www.xjjs.gov.cn/a.html"}]
+            ),
+            "真结果不许误杀",
+        )
+
+    def test_shell_rows_are_recorded_as_failure(self):
+        import asyncio
+
+        from core import web_price_tool
+
+        async def fake_bing(query, max_results=3, **_kwargs):
+            return [{"title": "百度安全验证", "url": "https://wappass.baidu.com/static/captcha", "provider": "bing"}]
+
+        with isolated_env(WEB_PRICE_PROVIDERS="bing"):
+            with mock.patch("core.web_price_tool.fetch_bing", fake_bing):
+                rows = asyncio.run(web_price_tool.search_texts("喀什 门票", merge=True, max_providers=1))
+        self.assertEqual(rows, [], "壳页结果不能当成结果返回")
+        attempts = web_price_tool.last_search_attempts
+        self.assertTrue(attempts)
+        self.assertFalse(attempts[0]["ok"], attempts)
+        self.assertIn("壳", str(attempts[0].get("error")), attempts)
+
+    def test_healthy_provider_is_asked_first(self):
+        """按近期健康分排序：坏过的源往后排（取价是逐点串行的，先撞死源等于少查节点）。"""
+        import asyncio
+
+        from core import web_price_tool
+
+        async def fake_bing(query, max_results=3, **_kwargs):
+            return [{"title": "B 结果", "url": "https://example-a.com/1", "provider": "bing"}]
+
+        async def fake_sogou(query, max_results=3, **_kwargs):
+            return [{"title": "S 结果", "url": "https://example-b.com/2", "provider": "sogou"}]
+
+        with isolated_env(WEB_PRICE_PROVIDERS="sogou,bing"):
+            with mock.patch("core.web_price_tool.fetch_bing", fake_bing):
+                with mock.patch("core.web_price_tool.fetch_sogou", fake_sogou):
+                    # 先制造"sogou 坏过"：连记两次失败
+                    web_price_tool._note_provider_result("sogou", False)
+                    web_price_tool._note_provider_result("sogou", False)
+                    web_price_tool._PROVIDER_COOLDOWN_UNTIL.pop("sogou", None)  # 只留健康分，不冷却
+                    rows = asyncio.run(web_price_tool.search_texts("喀什 门票", merge=True, max_providers=1))
+        providers = [item["provider"] for item in web_price_tool.last_search_attempts]
+        self.assertEqual(providers[:1], ["bing"], providers)
+        self.assertEqual(len(rows), 1, rows)
+
+
+class HomepageFetchGuardTests(unittest.TestCase):
+    """只挡"站点首页"，官方详情页一律照抓（2026-10-07）。
+
+    实测：小众景点在 cn.bing.com 上常搜到**城市政务网首页**（`http://www.xjks.gov.cn/`），
+    抓它纯属浪费（单轮取价 43.7s / 9 个点，白名单页面抓取是最贵的一步）。
+    但天鹅泉的 ¥30 来自 `ylwl.xjyl.gov.cn/show/scenicspot/detail?id=581` —— 那种详情页必须抓，
+    而且它的摘要里不一定带地点名，所以判据只能挡"没有路径也没有参数"的首页。
+    """
+
+    def test_site_homepage_without_the_name_is_skipped(self):
+        from core.web_price_tool import _page_worth_fetching
+
+        rows = [{"title": "喀什市人民政府", "url": "http://www.xjks.gov.cn/", "body": "2025-09-02 喀什市重污染天气应急预案"}]
+        self.assertFalse(_page_worth_fetching("http://www.xjks.gov.cn/", rows, "图开沙漠冰雪乐园"))
+
+    def test_official_detail_page_is_always_fetched(self):
+        from core.web_price_tool import _page_worth_fetching
+
+        rows = [{"title": "详情页", "url": "http://ylwl.xjyl.gov.cn/show/scenicspot/detail?id=581", "body": "门票30元/人"}]
+        self.assertTrue(
+            _page_worth_fetching("http://ylwl.xjyl.gov.cn/show/scenicspot/detail?id=581", rows, "天鹅泉湿地公园"),
+            "官方详情页即使摘要没提到地点名也要抓（天鹅泉 ¥30 就是这么来的）",
+        )
+
+    def test_homepage_is_fetched_when_the_row_mentions_the_place(self):
+        from core.web_price_tool import _page_worth_fetching
+
+        rows = [{"title": "英吉沙国家湿地公园 - 英吉沙县人民政府", "url": "http://www.xjjs.gov.cn/", "body": "景区门票"}]
+        self.assertTrue(_page_worth_fetching("http://www.xjjs.gov.cn/", rows, "英吉沙国家湿地公园"))
 
 
 if __name__ == "__main__":
