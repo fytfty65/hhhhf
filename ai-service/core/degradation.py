@@ -100,6 +100,23 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
 }
 
 
+def _unique_names(items: Any, key: str = "name", limit: int = 3) -> List[str]:
+    """从动作列表里取**去重后**的名字（保序）。
+
+    为什么需要（2026-10-05 实测）：收口分两道（门禁后 + 出稿前），同一个远点可能被移出两次
+    （第二次是它被补回来之后又移出），于是披露写成"已移出 2 个（巴楚博物馆、巴楚博物馆）" ——
+    用户看到的是"这里是不是写错了"。**动作次数可以是真的，但名字该去重**。
+    """
+    names: List[str] = []
+    for item in items or []:
+        value = str(_as_mapping(item).get(key) or "").strip()
+        if value and value not in names:
+            names.append(value)
+        if len(names) >= limit:
+            break
+    return names
+
+
 def _entry(source: str, status: str, reason: str) -> Dict[str, Any]:
     meta = DATA_SOURCES.get(source, {})
     return {
@@ -290,7 +307,8 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     repaired = _as_mapping(data.get("travel_repair"))
     moved_out = list(repaired.get("moved_out") or [])
     if moved_out:
-        names = "、".join(str(_as_mapping(item).get("name") or "") for item in moved_out[:3])
+        # 名字**去重**（同一个点可能被两道收口各移出一次）；次数保留真实动作数
+        names = "、".join(_unique_names(moved_out))
         items.append(
             _entry(
                 "travel_feasibility",

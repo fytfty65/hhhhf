@@ -249,5 +249,27 @@ class BudgetGraceTests(unittest.TestCase):
         self.assertAlmostEqual(effective_daily_budget_km("不存在"), 176.0, places=1)
 
 
+    def test_repeated_removals_of_the_same_node_are_named_once(self):
+        """同一道远点可能被两道收口各移出一次 —— 次数是真的，但名字该去重。
+
+        实测（2026-10-05 喀什）：披露写成"已移出 2 个（巴楚博物馆、巴楚博物馆）"，
+        用户看到的是"这里是不是写错了"。
+        """
+        from core.degradation import collect_degradations
+
+        payload = {
+            "travel_repair": {
+                "moved_out": [
+                    {"name": "巴楚博物馆", "day": 2, "reason": "一天跑不了两个远景区"},
+                    {"name": "巴楚博物馆", "day": 2, "reason": "一天跑不了两个远景区", "stage": "final_closeout"},
+                ]
+            }
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if item["source"] == "travel_feasibility"), None)
+        self.assertIsNotNone(entry)
+        self.assertIn("已移出 2 个（巴楚博物馆）", str(entry.get("reason")))
+
+
 if __name__ == "__main__":
     unittest.main()
