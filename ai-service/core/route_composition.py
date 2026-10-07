@@ -523,6 +523,7 @@ def rebalance_days_by_geography(
     *,
     min_gain_ratio: float = 0.15,
     classify=None,
+    protect_kinds: Sequence[str] = (),
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """按地理就近**重排天与天之间的点**，专治"远点被塞进市区那一天"（2026-10-07 实测）。
 
@@ -537,7 +538,14 @@ def rebalance_days_by_geography(
       · **每天的类别构成不变**（自然/人文/美食/其它 各几个照旧）—— 只换"哪个点去哪天"；
       · **每天节点数不变**（每日密度门禁不动）；
       · 没坐标的点按原地不动处理（判不了就别乱搬）；
-      · **只有在最赶的一天真的明显变短时才动**（默认要短 15% 以上），否则原样返回。
+      · **只有在最赶的一天真的明显变短时才动**（默认要短 15% 以上），否则原样返回；
+      · **不制造新的门禁失败**：某天原本有玩点、重排后一个都没有 → 不改；
+        `protect_kinds`（由调用方按用户诉求给，例如"想看自然风景"→ `("scenic",)`）
+        里的类别，某天原本有、重排后没有 → 也不改。
+        为什么要按诉求给（2026-10-07 实测）：门禁里有一条"以自然为主的行程每天至少 1 个自然景观"，
+        原来一刀切保护"自然+人文"，把伊宁一次很有价值的重排（167km → 130km）给否了，
+        而那个 `play_category_monotony` 失败在**重排前后都存在**（是 LLM 原始路线的问题）。
+        保护的范围应该跟着诉求走，而不是一律最严。
     返回 `(新路线, 报告)`；`报告["applied"]=False` 时路线与传入的等价。
     """
     items = [dict(node) for node in (route or []) if isinstance(node, Mapping)]
@@ -751,11 +759,16 @@ def rebalance_days_by_geography(
         return {category(node) for node in nodes if category(node) in play_kinds}
 
     for day in days:
-        lost = _play_kinds(fixed[day] + movable[day]) - _play_kinds(fixed[day] + assigned[day])
-        if lost:
+        before_kinds = _play_kinds(fixed[day] + movable[day])
+        after_kinds = _play_kinds(fixed[day] + assigned[day])
+        if before_kinds and not after_kinds:
+            report["note"] = f"重排会让第 {day} 天一个玩点都没有，因此不改动分天"
+            return items, report
+        lost_required = before_kinds & set(protect_kinds) - after_kinds
+        if lost_required:
             report["note"] = (
-                f"重排会让第 {day} 天丢掉「{'、'.join(sorted(lost))}」这一类玩点（可能触发每日类别门禁），"
-                "因此不改动分天"
+                f"重排会让第 {day} 天丢掉「{'、'.join(sorted(lost_required))}」"
+                "（这趟的诉求要求每天都有这一类），因此不改动分天"
             )
             return items, report
     if not moved_names:

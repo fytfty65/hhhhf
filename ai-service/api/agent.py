@@ -7018,11 +7018,27 @@ async def run_negotiate(msg: GatewayMessage):
                         #    （住宿/用户点名的点/没坐标的点不动、每天节点数与类别尽量不变、只在真的
                         #    明显变短时才动）。
                         try:
-                            _rebalanced, _rebalance_report = rebalance_days_by_geography(final_data.get("route") or [])
+                            # 保护哪一类玩点跟着**用户诉求**走（"想看自然风景"→ 每天保住自然景观）：
+                            # 一刀切保护"自然+人文"会把有价值的重排否掉（实测伊宁 167→130km 被否）。
+                            _signals_for_rebalance = _quality_signals if isinstance(_quality_signals, dict) else {}
+                            _wants_scenic = bool(_signals_for_rebalance.get("wants_scenic"))
+                            _wants_cultural = bool(_signals_for_rebalance.get("wants_cultural"))
+                            _protect_kinds: List[str] = []
+                            if _wants_scenic and not _wants_cultural:
+                                _protect_kinds = ["scenic"]
+                            elif _wants_cultural and not _wants_scenic:
+                                _protect_kinds = ["cultural"]
+                            _rebalanced, _rebalance_report = rebalance_days_by_geography(
+                                final_data.get("route") or [], protect_kinds=_protect_kinds
+                            )
                             if _rebalance_report.get("applied"):
                                 final_data["route"] = _rebalanced
                                 final_data["day_rebalance"] = _rebalance_report
                                 print(f"🧭 [按地理分天] {_rebalance_report['note']}", flush=True)
+                            elif _rebalance_report.get("moved"):
+                                # 算了但没采用也要留痕：否则"为什么没重排"事后无从回答
+                                final_data["day_rebalance"] = _rebalance_report
+                                print(f"🧭 [按地理分天] 未采用：{_rebalance_report['note']}", flush=True)
                         except Exception as _rebalance_exc:  # 重排失败不影响出方案
                             print(f"⚠️ [按地理分天] 失败（不影响出方案）: {_rebalance_exc}", flush=True)
 

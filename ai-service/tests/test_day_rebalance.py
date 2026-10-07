@@ -131,6 +131,27 @@ class RebalanceTests(unittest.TestCase):
         else:
             self.assertIn("丢", report["note"] + "丢")  # 判否理由必须说清
 
+    def test_protect_kinds_follows_the_user_request(self):
+        """`protect_kinds` 由调用方按诉求给：只保护那一类，别的类别允许跨天流动。
+
+        实测背景：一刀切保护"自然+人文"把伊宁一次有价值的重排（167km → 130km）否掉了，
+        而那个 `play_category_monotony` 失败在重排前后都存在（是原始路线的问题）。
+        """
+        route = self._route()
+        strict, strict_report = rebalance_days_by_geography(route, protect_kinds=["scenic", "cultural"])
+        loose, loose_report = rebalance_days_by_geography(route, protect_kinds=["scenic"])
+        # 只保护自然时，人文可以流动 → 应该能拿到改善
+        self.assertTrue(loose_report["applied"], loose_report)
+        self.assertGreaterEqual(strict_report["after_max_km"], loose_report["after_max_km"] - 0.01)
+        # 不管保护哪一类，"某天一个玩点都没有"永远不许发生
+        for candidate in (strict, loose):
+            kinds = {}
+            for node in candidate:
+                if node.get("type") in ("风景名胜", "博物馆"):
+                    kinds.setdefault(node["day"], set()).add(node["type"])
+            for day in kinds:
+                self.assertTrue(kinds[day], f"第 {day} 天不能没有玩点")
+
     def test_no_change_when_already_compact(self):
         # 四个点都在同一片区域、两天完全等价 → 怎么换都一样，不该动
         route = [
