@@ -907,10 +907,44 @@ def _coarse_category(node: Mapping[str, Any]) -> str:
     return "other"
 
 
-def score_diversity(plan: Any) -> Dict[str, Any]:
+def requested_palette(signals: Optional[Mapping[str, Any]]) -> set:
+    """用户**限定了类别**时返回那个类别集合，否则空集（空集＝按默认口径评）。
+
+    2026-10-07 用户裁决：「如果用户说只看自然，就没必要安排人文了，按照用户的需求来制定方案」。
+    这条同时适用于**评分口径**：这趟只要求自然风景，就不该因为"没有博物馆"掉多样性分 ——
+    否则尺子在惩罚"照着用户说的做"。
+    """
+    data = signals if isinstance(signals, Mapping) else {}
+    wants_scenic = bool(data.get("wants_scenic"))
+    wants_cultural = bool(data.get("wants_cultural"))
+    exclude_cultural = bool(data.get("exclude_cultural"))
+    if exclude_cultural and wants_scenic:
+        return {"scenic"}
+    if wants_scenic and not wants_cultural:
+        return {"scenic"}
+    if wants_cultural and not wants_scenic:
+        return {"cultural"}
+    return set()
+
+
+def score_diversity(plan: Any, *, palette: Optional[set] = None) -> Dict[str, Any]:
+    """类别多样性：熵 + 重复名 + "同类连排"。
+
+    `palette`（用户限定的类别，见 `requested_palette`）：限定之后，**该类别连排不算单调** ——
+    实测伊宁（诉求"想看自然风景"）11 个自然点、最大连排 5，多样性 0.426，扣分主要来自
+    "连排 5 个 scenic"；可那正是用户要的。限定类别时改为只统计**限定类别之外**的连排
+    （例如连排 4 家餐厅仍然要扣）。原始连排数照样回传（`max_run`），便于事后核对。
+    """
     nodes = nodes_of(plan)
     if not nodes:
-        return {"value": 0.0, "categories": {}, "duplicate_names": 0, "max_run": 0, "duplicate_name_list": []}
+        return {
+            "value": 0.0,
+            "categories": {},
+            "duplicate_names": 0,
+            "max_run": 0,
+            "duplicate_name_list": [],
+            "palette": sorted(palette or []),
+        }
 
     categories: Dict[str, int] = {}
     names: Dict[str, int] = {}
@@ -936,14 +970,26 @@ def score_diversity(plan: Any) -> Dict[str, Any]:
         current = current + 1 if current_item == previous else 1
         max_run = max(max_run, current)
 
+    # 限定类别时：把该类别从"连排"统计里剔除（它们是用户点名要的，不是单调）
+    counted_sequence = [item for item in sequence if item not in (palette or set())]
+    counted_run, counted_current = 1, 1
+    for previous, current_item in zip(counted_sequence, counted_sequence[1:]):
+        counted_current = counted_current + 1 if current_item == previous else 1
+        counted_run = max(counted_run, counted_current)
+    if not counted_sequence:
+        counted_run, counted_current = 1, 1
+
     duplicates = sum(1 for count in names.values() if count > 1)
-    value = max(0.0, evenness - 0.1 * duplicates - 0.1 * max(0, max_run - 2))
+    value = max(0.0, evenness - 0.1 * duplicates - 0.1 * max(0, counted_run - 2))
     return {
         "value": max(0.0, min(1.0, value)),
         "categories": categories,
         "duplicate_names": duplicates,
         "duplicate_name_list": [name for name, count in names.items() if count > 1][:5],
         "max_run": max_run,
+        # 限定类别时用的是"剔除该类别后的连排"（见 docstring），两个数都留着便于核对
+        "counted_run": counted_run,
+        "palette": sorted(palette or []),
     }
 
 
@@ -1150,7 +1196,7 @@ def evaluate_plan(
         "space_efficiency": score_space_efficiency(context, plan),
         "truthfulness": score_truthfulness(plan),
         "anchoring": score_anchoring(context, plan),
-        "diversity": score_diversity(plan),
+        "diversity": score_diversity(plan, palette=requested_palette(signals)),
         # 用户第一优先级「地点好不好」的可判定部分 + 「方案周全」
         "place_quality": score_place_quality(plan, candidates=candidates),
         "completeness": score_completeness(context, plan, expectations),

@@ -1417,6 +1417,7 @@ async def lookup_price(
     *,
     max_results: int = 3,
     prefer_official: bool = False,
+    kind: str = "",
 ) -> Dict[str, Any]:
     """一个地点的取价：先搜，再**能直抓官方页面就直抓**（用户口径：加入酒店官网/民宿白名单）。
 
@@ -1446,6 +1447,12 @@ async def lookup_price(
     query = f"{city} {name} 门票 价格 人均 每晚"
     if prefer_official:
         query = f"{city} {name} 门票价格 官网"
+    # 玩点（景区/人文）**只认门票专线**：实测（2026-10-07 伊宁真跑）通用抽价会给玩点安上
+    # 完全不相干的钱 ——
+    #   · 「草原遗迹 ¥3000」来自一篇"3条路线+5大景点+人均3000元"的游记（那是整趟预算）；
+    #   · 「英塔木镇天山公社 ¥388」来自另一篇游记里**那拉提**的民宿房价。
+    # 餐饮/住宿才需要通用抽价（人均/每晚）。判不了的钱就留"未核实"，不能塞个数字进去。
+    is_play = str(kind or "").strip().lower() in {"scenic", "cultural", "landmark", "park", "nature", "人文", "自然"}
     try:
         rows = await search_texts(query, max_results=max_results + 2, merge=True, max_providers=2)
     except Exception as exc:
@@ -1501,7 +1508,22 @@ async def lookup_price(
         page = await fetch_page_text_stable(page_url)
         if not page.get("ok"):
             continue
-        candidates = extract_price_candidates(str(page.get("text") or ""))
+        page_text = str(page.get("text") or "")
+        if is_play:
+            # 玩点只认**门票口径**的价格（同一套闸门：贴门票语境 + 地点名挨着数字）
+            ticket_on_page = extract_ticket_price(page_text, require_name=name)
+            if ticket_on_page:
+                return build_observation(
+                    name=name,
+                    value=float(ticket_on_page["value"]),
+                    source="web_page",
+                    source_url=page_url,
+                    excerpt=str(ticket_on_page.get("excerpt") or ""),
+                    provider="official_page",
+                    label="门票",
+                )
+            continue
+        candidates = extract_price_candidates(page_text)
         if candidates:
             best = candidates[0]
             return build_observation(
@@ -1514,9 +1536,10 @@ async def lookup_price(
             )
 
     page_url = page_urls[0] if page_urls else ""
-    if snippet_pick is not None:
+    if snippet_pick is not None and not is_play:
         # 退回摘要价（估算）说明**白名单页面没帮上忙** —— 这时候才值得记"像官网的域名"，
         # 让人工确认后把白名单扩起来（下次这类价格就有机会变成"可核实"）。
+        # ⚠️ 玩点不走这条路（见上面 is_play 的说明：会拿到别处的钱）。
         _maybe_record_domain_hints(rows, name)
         # 出处标注：白名单官方页 → 可核实；**票务平台** → 有出处但非官方（不许冒充官方价）；
         # 其余摘要 → 估算。实测（2026-10-07）：携程页面来的 ¥29 原来被写成 `web`，

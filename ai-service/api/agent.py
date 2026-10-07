@@ -851,9 +851,18 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
         re.search(r"(?:人文|文化|博物馆|古迹|历史)[^。；，,!?！?]{0,3}(?:少安排|少一点|少去|少逛|不用|不要|不去|免了|砍掉|去掉|别安排|别去)", t)
     )
     mentions_culture = any(word in t for word in ["人文", "文化", "博物馆", "博物院", "古迹", "历史"])
+    # ⚠️ 2026-10-07 用户裁决：「如果用户说只看自然，就没必要安排人文了，按照用户的需求来制定方案」。
+    #    原来的触发词只有"只想/只看/只要/专门/就想/全程"——真实的诉求「想看自然风景」**不匹配**，
+    #    于是 `exclude_cultural` 一直是 False、配比里仍留 20% 人文（伊宁真跑：9 景区 + 2 人文，
+    #    然后门禁反过来说"某天玩点全是人文"）。这里把"想看/想去看/主要是/以…为主/重点看"
+    #    一并算作"以自然为主"；`mentions_culture` 这道护栏不变（说了"也想去博物馆"就不排除）。
     nature_focus = bool(
-        re.search(r"(?:只想|只看|只要|专门|就想|就是为了|全程)[^。；，,!?！?]{0,6}(?:自然|风景|景区|户外|雪山|湖|草原|沙漠|峡谷|胡杨)", t)
-    )
+        re.search(
+            r"(?:只想|只看|只要|专门|就想|想去看|想看|主要是|重点看|以|全程|就是为了)"
+            r"[^。；，,!?！?]{0,6}(?:自然|风景|景区|户外|雪山|爬山|登山|徒步|山|湖|草原|沙漠|峡谷|胡杨|湿地|森林)",
+            t,
+        )
+    ) or bool(re.search(r"(?:自然|风景|景区|户外)[^。；，,!?！?]{0,4}(?:为主|优先|就行|即可)", t))
     if nature_focus and not mentions_culture:
         excludes_cultural = True
 
@@ -899,6 +908,9 @@ def extract_preference_signals(text: str) -> Dict[str, Any]:
         "森林公园", "山水", "公园", "景点", "景区", "户外", "峡谷", "草原", "温泉", "园林",
         "爬山", "徒步", "雪山", "海岛", "湖边", "看海", "湖泊", "森林", "湿地", "沙漠",
         "戈壁", "观景", "绿洲",
+        # 「以自然为主」这类说法也是明确的自然诉求（2026-10-07 用户裁决：以自然为主就别排人文）。
+        # 收的是**多字短语**，不会把"人文景观"误判成自然。
+        "自然为主", "以自然为主", "自然优先", "只看自然", "只想看自然",
     ]
     if any(k in t for k in scenic_phrases):
         # 实测事故（2026-10-04）：用户原话是"我想看更多的自然景观"，而词表里只有
@@ -2400,7 +2412,10 @@ class SemanticItineraryCache:
         #    看着像"我们不知道"，其实高德给过 —— 这类"看起来像事实的缺失"不该被缓存固化。
         # v10：取价链路换了（搜索源重排 + 门票专线 + 票务平台价）。旧条目里一整片"未核实"
         #    的价格，现在有一部分是查得到的 —— 命中旧条目会让用户继续看到过时的"查不到"。
-        raw = f"v10|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v11：**「只看自然就别排人文」的用户裁决**（2026-10-07）改了信号/配比/评分三处口径：
+        #    同一句"想看自然风景"以前会排 2 个人文点、多样性被打 0.426，现在不该再有人文点。
+        #    旧条目正是按老口径生成的，命中就是把已经改掉的错继续发给用户。
+        raw = f"v11|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
         if self.debug:
             # 缓存命中率低时，第一件要知道的事就是"键为什么不一样"：
             # 把参与哈希的原文打出来（只在本进程日志里），两次同样的请求一比就知道。
@@ -5871,7 +5886,12 @@ async def run_negotiate(msg: GatewayMessage):
                                         _name = str(_item.get("name") or "")
                                         try:
                                             return await lookup_price(
-                                                _name, target_city, max_results=3, prefer_official=prefer_official
+                                                _name,
+                                                target_city,
+                                                max_results=3,
+                                                prefer_official=prefer_official,
+                                                # 玩点只认门票口径（景区/人文）；餐饮/住宿才用通用抽价
+                                                kind=str(_item.get("intent") or ""),
                                             )
                                         except Exception as _lookup_exc:
                                             from core.web_price_tool import build_observation

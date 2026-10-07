@@ -249,11 +249,20 @@ class NatureOnlyIntentTests(unittest.TestCase):
         self.assertTrue(signals["wants_cultural"])
         self.assertFalse(signals["exclude_cultural"])
 
-    def test_plain_nature_request_keeps_cultural_available(self):
-        """只说"想看自然"没说"只要自然" → 不排除人文（默认口径是各半）。"""
+    def test_plain_nature_request_also_excludes_cultural(self):
+        """⚠️ **口径已按用户裁决改过（2026-10-07）**：原来这里断言"只说想看自然 → 不排除人文（默认各半）"。
+
+        用户原话：「如果用户说只看自然的时候，我觉得就没必要安排人文了，按照用户的需求来制定我们的方案。」
+        触发这次改动的是伊宁真跑：诉求「去看自然风景，不介意跑远」排出 9 景区 + 2 人文，
+        多样性只有 0.426，而门禁又反过来说"某天玩点全是人文" —— 两头都不对。
+        现在的口径：**提到自然、且整句没提人文/文化 → 人文让位**（`exclude_cultural=True`，
+        配比走 `no_cultural`：自然 0.7 / 人文 0 / 餐饮 0.3）。
+        护栏仍在：只要提了人文/文化就不排除（见 `test_nature_plus_culture_is_not_an_exclusion`）。
+        """
         signals = self._signals("去库尔勒玩2天，想看看自然风景")
         self.assertTrue(signals["wants_scenic"])
-        self.assertFalse(signals["exclude_cultural"])
+        self.assertTrue(signals["exclude_cultural"])
+        self.assertFalse(signals["wants_cultural"])
 
 
 if __name__ == "__main__":

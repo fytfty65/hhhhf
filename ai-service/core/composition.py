@@ -225,7 +225,13 @@ def composition_targets_met(plan: Any, policy: Mapping[str, Any]) -> Dict[str, A
         name: value for name, value in counts.items()
         if not (name == "scenic" and min_scenic > 0)
     }
-    share = max(monotony_counts.values()) / sum(monotony_counts.values()) if sum(monotony_counts.values()) else 0.0
+    basis = sum(monotony_counts.values())
+    # ⚠️ 分母太小时不许判"单调"（2026-10-07 实测抓到的假失败）：伊宁那份方案
+    #    12 个玩点里只有 1 个人文点、其余都是自然（已被排除），于是
+    #    `1 / 1 = 100% > 上限 60%` → 报"玩点里 1 个都是「cultural」，超过上限 60%"，
+    #    整个方案被判 fail。样本只有 1 个时根本谈不上"占比"。
+    min_basis = max(4, int(policy.get("max_category_share_basis") or 4))
+    share = (max(monotony_counts.values()) / basis) if basis >= min_basis else 0.0
 
     return {
         "counts": counts,
@@ -235,6 +241,8 @@ def composition_targets_met(plan: Any, policy: Mapping[str, Any]) -> Dict[str, A
         "cultural_total": cultural_total,
         "cultural_over_cap": bool(max_cultural is not None and cultural_total > int(max_cultural)),
         "category_share": round(share, 3),
+        "category_share_basis": basis,
+        "category_share_min_basis": min_basis,
         "share_over_cap": share > float(policy.get("max_category_share") or 1.0),
         "needs": (["scenic"] if shortfall_days else []) + (["scenic"] if policy.get("nature_destination") and not counts.get("scenic") else []),
     }

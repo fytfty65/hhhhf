@@ -131,6 +131,106 @@ class TicketRowSelectionTests(unittest.TestCase):
         self.assertFalse(host_is_ticket_platform("https://baike.baidu.com/item/x"))
 
 
+class PlayNodePriceTests(unittest.TestCase):
+    """玩点只认门票口径（2026-10-07 伊宁真跑抓到的两个**错价**）。"""
+
+    def test_travelogue_budget_is_not_a_ticket_price(self):
+        """「草原遗迹 ¥3000」来自游记"3条路线+5大景点+人均3000元" —— 那是整趟预算。"""
+        import asyncio
+        from unittest import mock
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3, **_kwargs):
+            return [
+                {
+                    "title": "草原遗迹 那拉提 3条路线+5大景点+人均3000元，新手闭眼抄",
+                    "body": "草原遗迹怎么玩？3条路线+5大景点+人均3000元，新手闭眼抄+FAQ",
+                    "url": "https://k.sina.cn/article_7879849925.html",
+                    "provider": "ddgs",
+                }
+            ]
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            observation = asyncio.run(
+                web_price_tool.lookup_price("草原遗迹", "伊宁", kind="scenic")
+            )
+        self.assertIsNone(observation["value"], observation)
+
+    def test_another_places_hotel_price_is_not_a_ticket_price(self):
+        """「英塔木镇天山公社 ¥388」来自另一篇游记里**那拉提**的民宿房价。"""
+        import asyncio
+        from unittest import mock
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3, **_kwargs):
+            return [
+                {
+                    "title": "伊宁县英塔木镇天山公社 游记",
+                    "body": "订的民宿(15平米大床房388元)后,就去了那拉提景区",
+                    "url": "https://www.meipian.cn/4tw614ut",
+                    "provider": "ddgs",
+                }
+            ]
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            observation = asyncio.run(
+                web_price_tool.lookup_price("伊宁县英塔木镇天山公社", "伊宁", kind="scenic")
+            )
+        self.assertIsNone(observation["value"], observation)
+
+    def test_gov_page_ticket_is_still_taken_for_a_play_node(self):
+        """真实的官方页票价照样要拿到：伊犁文旅页「天鹅泉湿地公园 门票30元/人」→ 可核实。"""
+        import asyncio
+        from unittest import mock
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3, **_kwargs):
+            return [
+                {
+                    "title": "天鹅泉湿地公园",
+                    "url": "http://ylwl.xjyl.gov.cn/show/scenicspot/detail?id=581",
+                    "body": "天鹅泉湿地公园",
+                    "provider": "bing",
+                }
+            ]
+
+        async def fake_fetch(url, **_kwargs):
+            return {"ok": True, "url": url, "text": "详情页 天鹅泉湿地公园 门票30元/人 地点 新疆伊宁县", "retrieved_at": 1.0}
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            with mock.patch("core.web_price_tool.fetch_page_text", fake_fetch):
+                observation = asyncio.run(
+                    web_price_tool.lookup_price("天鹅泉湿地公园", "伊宁", kind="scenic")
+                )
+        self.assertEqual(observation["value"], 30.0)
+        self.assertEqual(observation["source"], "web_page")
+        self.assertTrue(observation["verified"])
+
+    def test_food_nodes_still_use_the_general_extractor(self):
+        """餐饮/住宿保留通用抽价（人均/每晚），只是玩点不走了。"""
+        import asyncio
+        from unittest import mock
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3, **_kwargs):
+            return [
+                {
+                    "title": "老字号拌面王 人均",
+                    "body": "老字号拌面王 人均17元，本地人常去",
+                    "url": "https://www.dianping.com/shop/1",
+                    "provider": "ddgs",
+                }
+            ]
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            observation = asyncio.run(web_price_tool.lookup_price("老字号拌面王", "伊宁", kind="food"))
+        self.assertEqual(observation["value"], 17.0)
+
+
 class PlatformLabelTests(unittest.TestCase):
     def test_platform_price_is_labelled_non_official(self):
         """票务平台价必须**在用户看到的那一行里**说明非官方，且不计入可核实。"""
