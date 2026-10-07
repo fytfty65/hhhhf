@@ -2515,6 +2515,19 @@ async def run_negotiate(msg: GatewayMessage):
     # （"公园慢游"之类）让 pref_signals.wants_scenic=True，配比目标被算成"自然 6 / 人文 2" ——
     # 用户根本没提自然，却拿到一份自然压倒人文的目标。成员偏好仍会通过房间公平性参与平衡。
     own_signals = extract_preference_signals(intent_str)
+    # 👑 「个性化」这一项只认**发起人自己**说的话（本轮 + 历史轮）—— 用户裁决（2026-10-05）：
+    #    房间成员（受邀同行的其他人）的诉求走**公平性/满意度**维度，不进"个性化"评分。
+    #    为什么要单独一份：评分原来用的是 `pref_signals`（把成员的话也算上），于是
+    #    "用户本人没提的东西"会拉低他自己的方案分。实测（喀什 turbo26）：
+    #      · 发起人原话：「去喀什玩3天，想多看人文历史和古城」→ requirements=["文化历史"]；
+    #      · 探针里的成员占位意图「步调宽松，安排特色茶社或公园慢游」把 requirements 撑成
+    #        ["自然风景","文化历史","购物商圈","城市公园/乐园"] → 方案只满足 3/4 →
+    #        `preference_coverage=0.75`、总分 78.9；
+    #      · 而配比与检索口径**只看发起人**（`own_signals`）—— 两边打架，评分在替成员扣分。
+    #    ⚠️ 生成阶段（提示词）仍然把成员偏好带上：那是"尽量照顾一屋子人"，
+    #       成员到底满不满意由 fairness / team_satisfaction 那几项如实报。
+    self_text_context = " | ".join(history_sequence) + " " + intent_str
+    scoring_signals = extract_preference_signals(self_text_context)
     # 事件流：需求解析完成。解析出的信号是后面所有取舍的依据 —— 只留在日志里，
     # 事后就说不清"为什么给他排了这么多住宿"。producer=coordinator（解析目前内联在协调器里）。
     await event_bus.emit(OMNI_EVENTS_STREAM, "intent.parsed", {
@@ -2685,6 +2698,8 @@ async def run_negotiate(msg: GatewayMessage):
         # 他这轮没表态（normal）才让反馈把口径压成"就近"。
         own_signals = merge_feedback_into_signals(own_signals, feedback_signals)
         pref_signals = merge_feedback_into_signals(pref_signals, feedback_signals)
+        # 反馈是**发起人自己**点的/写的，所以"个性化"评分信号也吃反馈
+        scoring_signals = merge_feedback_into_signals(scoring_signals, feedback_signals)
     except Exception as _feedback_exc:  # 反馈解析失败绝不影响出方案
         feedback_signals = {"notes": [], "exclude_names": [], "counts": {}}
         feedback_exclude_names = []
@@ -5404,7 +5419,9 @@ async def run_negotiate(msg: GatewayMessage):
                             from core.increment import parse_increment
                             from core.planning_governance import prepare_governance
 
-                            _quality_signals = pref_signals if isinstance(pref_signals, dict) else None
+                            # 「个性化」评分只看发起人自己（本轮+历史轮）——
+                            # 成员诉求归 fairness/team_satisfaction，别拿它扣发起人的分（见上方裁决说明）
+                            _quality_signals = scoring_signals if isinstance(scoring_signals, dict) else None
                             # 用户说过"不想跑远"时，替换点要按"离市中心多远"来挑 —— 市中心坐标
                             # 来自 geocode（拿不到就传空，退回原行为：不按距离偏好挑，但也不会编）
                             _preferred_near_center: List[float] = []

@@ -21,6 +21,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# `api.agent` 在导入时就会建 OpenAI 客户端，缺 key 直接抛（与其它测试同一处理）
+os.environ.setdefault("LLM_API_KEY", "test-key-not-used")
+
 from core.plan_quality import evaluate_plan, plan_quality_snapshot  # noqa: E402
 from core.planning_governance import refresh_snapshot, tier_policy  # noqa: E402
 
@@ -179,6 +182,45 @@ class RulerFidelityTests(unittest.TestCase):
         self.assertEqual(fallback_source, "facts 重建")
 
 
+class InitiatorOnlyScoringTests(unittest.TestCase):
+    """「个性化」只认**发起人自己**说的话（本轮+历史轮）—— 用户裁决（2026-10-05）。
+
+    实测病根：探针里房间成员的**默认占位意图**「步调宽松，安排特色茶社或公园慢游」
+    让评分要求覆盖 自然风景/购物商圈/城市公园，方案只满足 3/4 → `preference_coverage=0.75`。
+    而配比与检索口径只看发起人（`own_signals`）—— 等于拿"用户本人没提的东西"扣他的分。
+    成员满不满意由 fairness / team_satisfaction 负责，不进"个性化"。
+    """
+
+    INITIATOR = "去喀什玩3天，想多看人文历史和古城"
+    MEMBER = "步调宽松，安排特色茶社或公园慢游"
+
+    def test_member_words_do_not_enter_the_scoring_signals(self):
+        from api.agent import extract_preference_signals
+
+        own = extract_preference_signals(self.INITIATOR)
+        with_member = extract_preference_signals(f"{self.INITIATOR} {self.MEMBER}")
+        # 成员提的公园/自然把信号撑起来了（这是原样保留的"生成阶段照顾一屋子人"）
+        self.assertTrue(with_member.get("wants_park"))
+        self.assertIn("城市公园/乐园", with_member.get("requirements") or [])
+        # 但发起人自己这份**不该**带上它们
+        self.assertNotIn("城市公园/乐园", own.get("requirements") or [])
+        self.assertNotIn("自然风景", own.get("requirements") or [])
+        self.assertFalse(own.get("wants_park"))
+        self.assertIn("文化历史", own.get("requirements") or [])
+
+    def test_coverage_no_longer_asks_for_member_wishes(self):
+        from api.agent import extract_preference_signals
+        from core.plan_quality import score_preference_coverage
+
+        plan = {"route": [{"day": 1, "name": "喀什博物馆", "type": "博物馆", "desc": "人文历史"}]}
+        own = score_preference_coverage({}, plan, extract_preference_signals(self.INITIATOR))
+        with_member = score_preference_coverage({}, plan, extract_preference_signals(f"{self.INITIATOR} {self.MEMBER}"))
+        self.assertEqual(own["requested"], ["cultural"])
+        self.assertEqual(own["value"], 1.0)
+        self.assertGreater(len(with_member["requested"]), len(own["requested"]))
+        self.assertLess(with_member["value"], own["value"])
+
+
 class CacheVersionTests(unittest.TestCase):
     """缓存里装的是**整份 payload**，所以生成逻辑一变就要 bump 精确缓存键版本。
 
@@ -244,6 +286,17 @@ class AgentWiringTests(unittest.TestCase):
         facts_at = self.source.index("build_plan_facts as _build_plan_facts_final")
         self.assertLess(gate_at, degrade_at, "闸门状态必须在披露重算之前登记")
         self.assertLess(degrade_at, facts_at)
+
+    def test_scoring_uses_initiator_only_signals(self):
+        """评分信号必须是"发起人自己（本轮+历史轮）"那份，不是含成员的 `pref_signals`。"""
+        self.assertIn("scoring_signals = extract_preference_signals(self_text_context)", self.source)
+        self.assertIn(
+            'self_text_context = " | ".join(history_sequence) + " " + intent_str', self.source
+        )
+        self.assertIn("_quality_signals = scoring_signals", self.source)
+        self.assertNotIn("_quality_signals = pref_signals", self.source)
+        # 反馈是发起人自己点的，评分信号也要吃
+        self.assertIn("scoring_signals = merge_feedback_into_signals(scoring_signals, feedback_signals)", self.source)
 
 
 if __name__ == "__main__":
