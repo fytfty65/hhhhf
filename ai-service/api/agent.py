@@ -6110,6 +6110,25 @@ async def run_negotiate(msg: GatewayMessage):
                                                     f"{type(_mct_exc).__name__}: {str(_mct_exc)[:60]}",
                                                     flush=True,
                                                 )
+                                            # 👑 第三条：**票务平台的结构化接口**
+                                            #    （2026-10-07 用户："既然票务平台能用为什么不用票务系统"）。
+                                            #    去哪儿 `ticket/list.json` 直接给票种与价格（成人票优先，
+                                            #    跟团游/演艺票被过滤）；携程建议词接口拿到详情页再抽价。
+                                            #    来源标 `platform` = 「票务平台价，非官方」，不冒充官方价。
+                                            try:
+                                                from core.ticket_platforms import (
+                                                    lookup_platform_price as _platform_price,
+                                                )
+
+                                                _platform = await _platform_price(_name)
+                                                if _platform.get("value") is not None:
+                                                    return _platform
+                                            except Exception as _platform_exc:
+                                                print(
+                                                    f"⚠️ [票务平台] {_name} 这条通道失败: "
+                                                    f"{type(_platform_exc).__name__}: {str(_platform_exc)[:60]}",
+                                                    flush=True,
+                                                )
                                         try:
                                             return await lookup_price(
                                                 _name,
