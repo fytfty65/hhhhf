@@ -497,6 +497,10 @@ async function installMocks(page: Page) {
         }
         send(raw: string) {
           const request = JSON.parse(raw);
+          // 记下前端发出的 WS 请求：一键换近点这类交互必须能验证"到底发了什么"，
+          // 否则只能断言"点了按钮"，无法证明意图真的带上了"不想跑那么远"。
+          const w = window as unknown as { __wsSends?: unknown[] };
+          w.__wsSends = [...(w.__wsSends || []), request];
           if (request.type !== 'agent_negotiate') return;
           const route = [
             { day: 1, location: '钟楼酒店', name: '钟楼酒店', time: '09:00', type: '住宿', cost_estimate: '¥300', tags: ['住宿'] },
@@ -936,6 +940,23 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByTestId('travel-alternatives-list')).toContainText('胡杨书院 → 喀什地区博物馆');
     await expect(panel.getByTestId('travel-alternatives-list')).toContainText('离当天其它点约 4.6km');
     await expect(alternatives).toContainText('想换直接说一句就行，不说就不动');
+
+    // 一键换近点：后端已经把"换成哪个近点"算好了，界面要能让用户**点一下**就换 ——
+    // 只写一句"你说一声就行"等于把闭环又交回给用户。
+    await page.getByTestId('swap-near-2-0').click();
+    await expect(page.getByTestId('swap-near-pending')).toContainText('已按你的要求把第 2 天的远点换成近点');
+    await expect
+      .poll(async () => page.evaluate(() => ((window as unknown as { __wsSends?: any[] }).__wsSends || []).length))
+      .toBeGreaterThan(1);
+    const swapSend = await page.evaluate(() => {
+      const sends = (window as unknown as { __wsSends?: any[] }).__wsSends || [];
+      return sends[sends.length - 1];
+    });
+    const swapIntent = String(swapSend?.payload?.user_preferences?.intent || '');
+    expect(swapIntent, `换点请求应带上"不想跑那么远"这句意图，实际：${swapIntent}`).toContain('不想跑那么远');
+    expect(swapIntent).toContain('第 2 天');
+    // 既有路线要一起带回去（否则后端不知道在改哪一版方案）
+    expect(Array.isArray(swapSend?.payload?.user_preferences?.current_existing_route)).toBe(true);
 
     // 住宿实价候选：同样的预算还有哪些**有实价**的可选（"住哪"的选择权）
     const lodgingSupply = panel.getByTestId('lodging-supply-block');

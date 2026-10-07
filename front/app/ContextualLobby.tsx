@@ -975,6 +975,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   const [dynamicRoutes, setDynamicRoutes] = useState<any[]>([]);
   const [replanProposal, setReplanProposal] = useState<any | null>(null);
   const [replanBusy, setReplanBusy] = useState(false);
+  // 一键换近点：记住用户点了哪一天（用于给个"正在按你的要求重排"的即时反馈）
+  const [swappingDay, setSwappingDay] = useState<number | null>(null);
   const [realPath, setRealPath] = useState<[number, number][]>([]);
   const [targetCityInfo, setTargetCityInfo] = useState<{name: string, lnglat: [number, number]} | null>(null);
 
@@ -1191,6 +1193,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           fd.feedback_applied || fd.lodging_supply || fd.travel_alternatives,
       );
       if (!hasGovernance) return;
+      // 新方案到了：清掉"正在按你的要求重排"的即时提示（换点已经落地或如实失败）
+      setSwappingDay(null);
       setPlanGovernance((prev) => ({
         quality: fd.quality ?? prev?.quality,
         budget: fd.budget_report ?? prev?.budget,
@@ -1628,6 +1632,46 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
     }).catch(() => {
       decisionEventRecordedRef.current = false;
     });
+  };
+
+  /**
+   * 一键换近点：把"第 N 天不想跑那么远"当成一句**增量**发回去重排。
+   *
+   * 为什么这么做（2026-10-05）：后端已经把"可以换成哪个近点"算好了（同类、同档次、离得近），
+   * 但界面上只写着"想换直接说一句就行" —— 等于把闭环又交回给用户。
+   * 这句话里的「不想跑那么远」会命中距离容忍度=low，于是：
+   *   ① 排除/替换点**优先选近的**；② 收口时把远点**就地换成算好的近点**（同一时段）。
+   */
+  const handleSwapNear = (day: number, from: string, to: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setApiError("连接正在恢复中，请 2 秒后再点一次");
+      return;
+    }
+    setSwappingDay(day);
+    setDeductionError(null);
+    setStreamedText("");
+    lastTokenTimeRef.current = Date.now();
+    wsRef.current.send(
+      JSON.stringify({
+        type: "agent_negotiate",
+        payload: {
+          destinations: [],
+          user_preferences: {
+            mode: activeMode,
+            role: activeRole,
+            // 用户点的是"就换成它"，但回传的是**意图**（第几天太远、要近一点的）——
+            // 后端按意图重排，并会把实际换成了谁如实报回来。
+            intent: `${userIntent}（第 ${day} 天太远了，不想跑那么远，换近一点的）`,
+            history_sequence: incrementalHistory,
+            current_existing_route: dynamicRoutes,
+            room_members: roomMembers.map((m: any) => ({
+              id: m.id, name: m.name, role: m.role, intent: m.intent, avatarUrl: m.avatarUrl || m.avatar_url || ''
+            }))
+          }
+        }
+      }),
+    );
+    setPlanGovernance((prev) => (prev ? { ...prev } : prev));
   };
 
   // 推演失败/超时后重试：重置状态并重新发送 agent_negotiate
@@ -2165,9 +2209,18 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
               （预算核对/已作调整/行程规模/本次调整/价格核对/跨城怎么走/长途分段/还需要你留意
               共 8 段）就把整列顶到 1200px 以上：正文区被压成 0 高、面板最后几段滚不到
               （1440×900 实测 header 1210px、正文 clientHeight 0、文档不可滚）。 */}
+          {/* 一键换近点的即时反馈：**放在阶段判断之外** —— 点下去之后界面会立刻回到
+              "推演中"（phase=drafting），如果这条提示只在 decision 阶段渲染，用户就永远看不到它。 */}
+          {swappingDay != null && (
+            <div className="px-5 pt-2 sm:px-8">
+              <p className="text-[12px] font-bold text-orange-700" data-testid="swap-near-pending">
+                已按你的要求把第 {swappingDay} 天的远点换成近点，正在重排…
+              </p>
+            </div>
+          )}
           {phase === 'decision' && workspaceLayer === 'evidence' && (
             <div className="px-5 pt-2 sm:px-8">
-              <PlanGovernancePanel data={planGovernance} />
+              <PlanGovernancePanel data={planGovernance} onSwapNear={handleSwapNear} />
             </div>
           )}
           <AnimatePresence mode="wait">

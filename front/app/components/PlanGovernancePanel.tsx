@@ -437,7 +437,18 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
   );
 }
 
-export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
+export default function PlanGovernancePanel({
+  data,
+  onSwapNear,
+}: {
+  data?: PlanGovernance | null;
+  /**
+   * 点「换成 X」时回调：把"第 N 天不想跑那么远"作为一句增量发回去重排。
+   * 为什么要有它：后端已经把"可以换成哪个近点"算好了，但只写成一句文案 ——
+   * 用户还得自己打字复述一遍，等于把闭环又交回给了他。
+   */
+  onSwapNear?: (day: number, from: string, to: string) => void;
+}) {
   if (!data) return null;
   const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation, feedbackApplied, lodgingSupply, travelAlternatives } = data;
 
@@ -588,6 +599,19 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                       {option.for_node} → <span className="font-bold text-slate-700">{option.name}</span>
                       {option.price != null ? `（¥${option.price}）` : ''}
                       {option.nearest_day_km != null ? `，离当天其它点约 ${option.nearest_day_km}km` : ''}
+                      {onSwapNear && item.day != null && option.for_node && option.name ? (
+                        <>
+                          {' '}
+                          <button
+                            type="button"
+                            data-testid={`swap-near-${item.day}-${index}`}
+                            onClick={() => onSwapNear(item.day as number, option.for_node as string, option.name as string)}
+                            className="rounded-md bg-orange-50 px-2 py-0.5 text-[11px] font-bold text-orange-700 hover:bg-orange-100"
+                          >
+                            就换成它
+                          </button>
+                        </>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
