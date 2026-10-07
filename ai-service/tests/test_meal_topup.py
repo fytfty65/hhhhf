@@ -12,6 +12,7 @@ import os
 import sys
 import unittest
 
+os.environ.setdefault("LLM_API_KEY", "test-key-not-used")  # api.agent 导入时要建 OpenAI 客户端
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.plan_review import top_up_missing_meals  # noqa: E402
@@ -169,6 +170,92 @@ class FoodClassificationTests(unittest.TestCase):
         self.assertEqual(
             intent_of({"name": "某某书院", "type": "科教文化服务", "desc": "位于博物馆后面，环境清幽"}), "cultural"
         )
+
+
+class NearbyFoodCandidatesTests(unittest.TestCase):
+    """按天做周边检索拿餐饮候选（2026-10-07）。
+
+    实测：喀什第 3 天（岳普湖方向）全城候选里最近的餐馆在 82.6km 外的市区；
+    按天做一次 `place/around`，同一片区域 9.1km 就有几家 —— 缺餐因此能**就地**补上，
+    而不是把市区餐馆硬塞到 200km 外的那一天。
+    """
+
+    def _route(self):
+        return [
+            {"day": 1, "name": "甲景区", "type": "风景名胜", "lnglat": [76.0, 39.4]},
+            {"day": 1, "name": "甲餐馆", "type": "餐饮服务", "lnglat": [76.0, 39.4]},
+            {"day": 2, "name": "乙景区", "type": "风景名胜", "lnglat": [77.0, 39.2]},
+            {"day": 2, "name": "乙民宿", "type": "住宿服务", "is_hotel": True, "lnglat": [77.0, 39.2]},
+        ]
+
+    def test_only_hungry_days_are_searched(self):
+        import asyncio
+
+        from api.agent import collect_nearby_food_candidates
+
+        calls = []
+
+        async def fake_nearby(center, keywords, **kwargs):
+            calls.append((list(center), keywords, kwargs))
+            return [{"name": "附近饭馆", "type": "餐饮服务", "lnglat": [77.01, 39.21]}]
+
+        pool, report = asyncio.run(
+            collect_nearby_food_candidates(self._route(), days=2, fetch_nearby=fake_nearby, radius_km=15.0)
+        )
+        self.assertEqual(len(calls), 1, "只有第 2 天缺餐，应该只查它")
+        self.assertEqual(calls[0][0], [77.0, 39.2])
+        self.assertEqual([item["name"] for item in pool["food"]], ["附近饭馆"])
+        self.assertEqual(report[0]["day"], 2)
+        self.assertEqual(report[0]["found"], 1)
+
+    def test_duplicate_names_are_not_added(self):
+        import asyncio
+
+        from api.agent import collect_nearby_food_candidates
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [{"name": "乙景区", "type": "风景名胜", "lnglat": [77.0, 39.2]}]
+
+        pool, _ = asyncio.run(
+            collect_nearby_food_candidates(self._route(), days=2, fetch_nearby=fake_nearby)
+        )
+        self.assertEqual(pool["food"], [], "已经在方案里的名字不许再作为候选")
+
+    def test_a_failing_day_does_not_break_the_others(self):
+        import asyncio
+
+        from api.agent import collect_nearby_food_candidates
+
+        async def fake_nearby(center, keywords, **kwargs):
+            raise RuntimeError("限流")
+
+        pool, report = asyncio.run(
+            collect_nearby_food_candidates(self._route(), days=2, fetch_nearby=fake_nearby)
+        )
+        self.assertEqual(pool["food"], [])
+        self.assertTrue(report[0].get("error"), report)
+
+    def test_nearby_candidate_is_accepted_by_the_top_up(self):
+        """周边候选 + 补餐：9km 的饭点会被采纳（而不是留空或被判太远）。"""
+        import asyncio
+
+        from api.agent import collect_nearby_food_candidates
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [{"name": "岳普湖县双福美食", "type": "餐饮服务", "lnglat": [77.05, 39.24]}]
+
+        route = [
+            {"day": 1, "name": "甲景区", "type": "风景名胜", "lnglat": [76.0, 39.4]},
+            {"day": 2, "name": "乙景区", "type": "风景名胜", "lnglat": [77.0, 39.2]},
+            {"day": 2, "name": "乙公园", "type": "风景名胜", "lnglat": [77.0, 39.2]},
+        ]
+        pool, _ = asyncio.run(
+            collect_nearby_food_candidates(route, days=2, fetch_nearby=fake_nearby, radius_km=15.0)
+        )
+        result = top_up_missing_meals({"days": 2}, {"route": route}, pool, {"max_nodes_per_day": 6, "meal_max_km": 30.0})
+        added = [item for item in result["actions"] if item["code"] == "add_meal"]
+        self.assertTrue(added, result)
+        self.assertLess(added[0]["distance_km"], 30.0)
 
 
 if __name__ == "__main__":

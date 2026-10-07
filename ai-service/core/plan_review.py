@@ -465,11 +465,60 @@ def top_up_missing_meals(
     grouped: Dict[int, List[Dict[str, Any]]] = {}
     for node in route:
         grouped.setdefault(node_day(node, 1), []).append(node)
+
+    def _leg_km(nodes: Sequence[Mapping[str, Any]]) -> float:
+        total = 0.0
+        previous: List[float] = []
+        for node in nodes:
+            coord = node_lnglat(node)
+            if coord and previous:
+                km = haversine_km(previous, coord)
+                if km == km:
+                    total += km
+            if coord:
+                previous = coord
+        return total
+
     ordered: List[Dict[str, Any]] = []
+    ladder = ["08:30", "10:00", "11:30", "13:30", "15:00", "17:00", "18:30", "19:30"]
     for day in sorted(grouped):
-        indexed = list(enumerate(grouped[day]))
-        indexed.sort(key=lambda pair: (_clock_of(pair[1]) if _clock_of(pair[1]) is not None else 10**6, pair[0]))
-        ordered.extend(node for _, node in indexed)
+        day_nodes = list(grouped[day])
+        # 👑 新补/挪进来的饭点要插在**最省里程**的位置，而不是按时刻硬塞
+        #    （2026-10-07 实测）：喀什第 3 天的玩点本身横跨 200km（英吉沙 ↔ 巴楚），
+        #    按 13:00 插进去会让当天从 231km 涨到 385km；插在"顺路"的位置只多几十公里。
+        for item in actions:
+            if item.get("day") != day:
+                continue
+            name = str(item.get("node") or "")
+            target = next((node for node in day_nodes if str(node.get("name") or "") == name), None)
+            if target is None or len(day_nodes) < 3:
+                continue
+            rest = [node for node in day_nodes if node is not target]
+            best_index, best_km = 1, None
+            for index in range(1, len(rest) + 1):
+                candidate_order = rest[:index] + [target] + rest[index:]
+                km = _leg_km(candidate_order)
+                if best_km is None or km < best_km - 1e-6:
+                    best_km, best_index = km, index
+            day_nodes = rest[:best_index] + [target] + rest[best_index:]
+        # 时刻：按顺序给非住宿节点排梯队，住宿保留自己的入住时间
+        slot = 0
+        for node in day_nodes:
+            clock = _clock_of(node)
+            if _intent_of_node(node) == "hotel" and clock is not None:
+                text = f"{clock // 60:02d}:{clock % 60:02d}"
+            else:
+                text = ladder[min(slot, len(ladder) - 1)]
+                slot += 1
+            suffix = ""
+            raw = str(node.get("time") or "")
+            if "|" in raw:
+                tail = raw.split("|")[-1].strip()
+                parts = tail.split(" ", 1)
+                if len(parts) == 2:
+                    suffix = parts[1].strip()
+            node["time"] = f"Day {day} | {text}" + (f" {suffix}" if suffix else "")
+        ordered.extend(day_nodes)
     return {"plan": {"route": ordered}, "actions": actions, "skipped": skipped, "changed": True}
 
 

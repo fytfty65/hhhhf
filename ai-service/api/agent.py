@@ -791,6 +791,75 @@ def classify_poi_category(name: str, poi_type: str = "", is_hotel: bool = False)
     return "other"
 
 
+async def collect_nearby_food_candidates(
+    route: Any,
+    *,
+    days: int,
+    fetch_nearby: Any,
+    radius_km: float = 15.0,
+    limit: int = 8,
+    keywords: str = "餐厅|美食|小吃",
+) -> "tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]":
+    """对**缺餐的那一天**做一次周边检索，拿"当天玩点附近真实存在的餐馆"。
+
+    为什么必须按天做（2026-10-07 实测）：候选池是全城取的，而缺餐的往往是**远点那天** ——
+    喀什第 3 天在岳普湖方向，全城候选里最近的餐馆在 **82.6km** 外的市区（塞进去等于没补），
+    而按天做周边检索，同一片区域 9~12km 内就有好几家（岳普湖县双福美食 9.1km 等）。
+
+    返回 `({“food”: [候选…]}, [逐天记录])`；`fetch_nearby(center, keywords, radius_km=…, limit=…)`
+    由调用方注入（便于单测），逐天失败**不影响其它天**、也不抛异常。
+    """
+    from core.plan_quality import node_day, node_lnglat, nodes_of
+
+    def _is_food(node: Mapping[str, Any]) -> bool:
+        text = f"{node.get('name')} {node.get('type')}"
+        return any(word in text for word in ("餐", "美食", "小吃", "米粉", "拌面", "馕", "烧烤", "火锅"))
+
+    def _is_lodging(node: Mapping[str, Any]) -> bool:
+        text = f"{node.get('name')} {node.get('type')}"
+        return bool(node.get("is_hotel")) or any(
+            word in text for word in ("酒店", "民宿", "客栈", "宾馆", "旅馆", "度假村")
+        )
+
+    # ⚠️ 两种入参都要吃（2026-10-07 实测踩到）：传 `plan` dict 时按 `route` 取值，
+    #    传**节点列表**时直接用 —— 第一版只走 `nodes_of()`，而它读 `plan["route"]`，
+    #    于是直接传列表时静默返回空列表、整个周边检索一次都没发出去。
+    if isinstance(route, Mapping):
+        nodes = [node for node in nodes_of(route)]
+    else:
+        nodes = [node for node in (route or []) if isinstance(node, Mapping)]
+    pool: Dict[str, List[Dict[str, Any]]] = {"food": []}
+    report: List[Dict[str, Any]] = []
+    total_days = max(1, int(days or 1))
+    for day in range(1, total_days + 1):
+        day_nodes = [node for node in nodes if node_day(node, 1) == day]
+        if not day_nodes:
+            continue
+        if any(_is_food(node) for node in day_nodes):
+            continue  # 这天已经有饭点了，不用查
+        coords = [node_lnglat(node) for node in day_nodes if not _is_lodging(node) and node_lnglat(node)]
+        if not coords:
+            continue
+        center = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        try:
+            rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
+        except Exception as exc:
+            report.append({"day": day, "error": f"{type(exc).__name__}: {str(exc)[:80]}"})
+            continue
+        existing = {str(node.get("name") or "").strip() for node in day_nodes}
+        added = 0
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name or name in existing or any(item.get("name") == name for item in pool["food"]):
+                continue
+            pool["food"].append({**dict(row), "planning_category": "food"})
+            added += 1
+        report.append({"day": day, "center": center, "found": added})
+    return pool, report
+
+
 def _desc_for(item: Any, city: str, provider_desc: Any = "") -> "tuple[str, str]":
     """一条候选记录能拿到的**诚实简介**：校验过的联网 > 供应商原文 > 高德字段事实 > 暂无简介。
 
@@ -1995,6 +2064,111 @@ class ExpertToolbox:
             except Exception as e:
                 print(f"🔥 [POI抓取异常]: {e}")
         return []
+
+    async def get_nearby_pois(
+        self,
+        center: Sequence[float],
+        keywords: str = "",
+        *,
+        radius_km: float = 10.0,
+        limit: int = 10,
+        play_worthy: bool = False,
+    ) -> List[Dict]:
+        """**围绕一个坐标**找 POI（高德 `place/around`）—— 专治"远点那天没有吃住"。
+
+        为什么要它（2026-10-07 实测）：喀什第 3 天在英吉沙/巴楚方向，而候选池是按**全城**
+        取的，餐饮候选全在市区 —— 最近的一家也在 82.6km 外，于是"缺餐"只能靠挪市区饭点
+        （82.6km，等于没补）或者留空。伊宁同样：吃住离当天玩点 17~38km（`anchoring=0.167`）。
+        按天做一次周边检索，就能拿到"当天玩点附近真实存在的餐馆/酒店"。
+
+        规矩与其他取数一致（否则会静默把候选变少）：
+          · 走高德闸门 `AmapGate`（并发会被限流，实测同一个 key）；
+          · 失败**如实打印**并按供应商错误分类（限流可重试），不伪装成"这里没有"；
+          · 结果按**离中心距离**排序（越近越靠前），空结果不缓存。
+        """
+        if not self.amap_key or not isinstance(center, (list, tuple)) or len(center) < 2:
+            return []
+        try:
+            lng, lat = float(center[0]), float(center[1])
+        except (TypeError, ValueError):
+            return []
+        if lng == 0.0 and lat == 0.0:
+            return []
+        location = f"{lng:.6f},{lat:.6f}"
+        # 坐标进缓存键（同一个城市不同位置的结果完全不同）—— 取整到 ~1km 以复用
+        rounded = f"{lng:.2f},{lat:.2f}"
+        _cache_key = f"around|{rounded}|{str(keywords).strip()}|{int(radius_km)}|{int(limit)}|{bool(play_worthy)}"
+        _cached_rows = _poi_cache_get(_cache_key)
+        if _cached_rows is not None:
+            _POI_CACHE_STATS["hits"] = int(_POI_CACHE_STATS.get("hits") or 0) + 1
+            return _cached_rows
+        _POI_CACHE_STATS["misses"] = int(_POI_CACHE_STATS.get("misses") or 0) + 1
+
+        from core.poi_pool import amap_error_is_retryable, amap_error_note, is_play_worthy, poi_record_from_amap
+
+        params: Dict[str, Any] = {
+            "key": self.amap_key,
+            "location": location,
+            "radius": max(100, int(float(radius_km) * 1000)),
+            "offset": max(1, int(limit)),
+            "page": 1,
+            "sortrule": "distance",
+            "extensions": "all",
+        }
+        if str(keywords or "").strip():
+            params["keywords"] = str(keywords).strip()
+        pois: List[Dict[str, Any]] = []
+        async with _http_client(6.0) as http_client:
+            data: Dict[str, Any] = {}
+            for attempt in range(2):
+                # ⚠️ **不要再套一层 `AmapGate`**：`_amap_get` 内部已经走闸门，
+                #    而闸门是**不可重入**的锁 —— 同一个任务套两层会直接死锁
+                #    （实测：探针卡住 5 分钟没有任何输出，就是这么来的）。
+                try:
+                    resp = await asyncio.wait_for(
+                        self._amap_get(http_client, f"{self.amap_url}/place/around", params=params),
+                        timeout=8.0,
+                    )
+                    data = resp.json()
+                except Exception as _around_exc:
+                    note_amap_result(False, info=f"{type(_around_exc).__name__}")
+                    print(f"⚠️ [周边检索] 请求失败：{type(_around_exc).__name__}: {str(_around_exc)[:80]}", flush=True)
+                    break
+                if str(data.get("status")) == "1":
+                    note_amap_result(True)
+                    break
+                info = str(data.get("info") or "")
+                note_amap_result(False, info=info)
+                if attempt == 0 and amap_error_is_retryable(info):
+                    await asyncio.sleep(1.2)
+                    continue
+                print(
+                    f"⚠️ [周边检索] {amap_error_note(info, data.get('status'))}："
+                    f"center={location} keywords={keywords!r}（不编造候选）",
+                    flush=True,
+                )
+                break
+            if data.get("status") == "1" and data.get("pois"):
+                for poi in data["pois"]:
+                    if not isinstance(poi, dict):
+                        continue
+                    record = poi_record_from_amap(poi, city="", amap_key=self.amap_key or "")
+                    name = str(record.get("name") or "")
+                    if not name:
+                        continue
+                    if play_worthy and not is_play_worthy(name, record.get("type"), strict_type=False):
+                        continue
+                    pois.append(record)
+        # 按离中心的真实距离排序（高德给了 sortrule=distance，但跨页/缺坐标时仍要自己兜住）
+        try:
+            from core.plan_quality import haversine_km as _haversine_km
+
+            pois.sort(key=lambda item: _haversine_km([lng, lat], item.get("lnglat") or []) or 0.0)
+        except Exception:
+            pass
+        if pois:
+            _poi_cache_set(_cache_key, pois)
+        return pois
 
     async def get_traffic_status(self, location_coord: str) -> Dict[str, Any]:
         if not location_coord:
@@ -7071,6 +7245,45 @@ async def run_negotiate(msg: GatewayMessage):
                             from core.plan_review import top_up_missing_meals as _top_up_meals
 
                             _meal_pool = _quality_pool_for_final if isinstance(_quality_pool_for_final, dict) else None
+                            # 👑 缺餐的往往是**远点那天**，而候选池是全城取的 —— 先按天做一次
+                            #    **周边检索**（高德 place/around），拿"当天玩点附近真实存在的餐馆"。
+                            #    实测：喀什第 3 天全城候选最近 82.6km，周边检索 9.1km 就有。
+                            _nearby_fetch = getattr(toolbox, "get_nearby_pois", None)
+                            if _nearby_fetch:
+                                try:
+                                    _meal_radius = (
+                                        40.0
+                                        if str((own_signals or {}).get("distance_tolerance") or "normal") == "high"
+                                        else 15.0
+                                    )
+                                    _nearby_pool, _nearby_report = await asyncio.wait_for(
+                                        collect_nearby_food_candidates(
+                                            final_data.get("route") or [],
+                                            days=trip_days,
+                                            fetch_nearby=_nearby_fetch,
+                                            radius_km=_meal_radius,
+                                        ),
+                                        timeout=POOL_FETCH_TIMEOUT_SECONDS,
+                                    )
+                                    if _nearby_pool.get("food"):
+                                        _meal_pool = {
+                                            **(dict(_meal_pool) if isinstance(_meal_pool, dict) else {}),
+                                            # 周边候选**排在前面**（它们离当天玩点最近）
+                                            "food": list(_nearby_pool["food"])
+                                            + list(((dict(_meal_pool) if isinstance(_meal_pool, dict) else {}).get("food")) or []),
+                                        }
+                                        final_data["meal_nearby_search"] = _nearby_report
+                                        print(
+                                            "🔎 [周边补餐] 对缺餐的那天做了周边检索："
+                                            + "、".join(
+                                                f"第 {item['day']} 天 {item.get('found')} 家"
+                                                for item in _nearby_report
+                                                if item.get("found") is not None
+                                            ),
+                                            flush=True,
+                                        )
+                                except Exception as _nearby_exc:
+                                    print(f"⚠️ [周边补餐] 周边检索失败（改用全城候选）: {_nearby_exc}", flush=True)
                             # 池子空的常见情况：这次规划不需要候选池（没有排他/配额/超预算），
                             # 于是 `_pool` 是 {}。缺餐要补就得**按需取一次餐饮候选**（只取这一类，便宜），
                             # 取不到就退回"从富余那天挪一个"（`top_up_missing_meals` 内部处理）。
