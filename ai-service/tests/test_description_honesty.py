@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.place_quality import (  # noqa: E402
     NO_DESC,
+    amap_fact_line,
     clean_web_knowledge,
     desc_relevance_problem,
     description_of,
@@ -136,6 +137,53 @@ class TruthfulnessCatchesItTests(unittest.TestCase):
         self.assertEqual(report["unrelated_descriptions"][0]["name"], "胡杨书院")
         # 有编造简介的节点不算"可核实"，诚实写「暂无简介」的算
         self.assertEqual(report["verified_nodes"], 1)
+
+
+class AmapFactLineTests(unittest.TestCase):
+    """联网拿不到简介时，用**高德真给过的字段**兜底（有出处的事实，不是赞美）。"""
+
+    def test_fact_line_uses_only_real_fields(self):
+        text = amap_fact_line(category="风景名胜", rating="4.5", address="英吉沙县", business_area="英吉沙")
+        self.assertIn("高德资料", text)
+        self.assertIn("风景名胜", text)
+        self.assertIn("评分 4.5", text)
+        self.assertIn("英吉沙", text)
+
+    def test_placeholder_values_are_dropped(self):
+        # 「暂无供应商数据」是我们的占位符，不是高德给的值 —— 不能当资料写出去
+        self.assertEqual(amap_fact_line(rating="暂无供应商数据", address=""), "")
+        self.assertEqual(amap_fact_line(rating="0", address=""), "")
+
+    def test_description_of_prefers_real_sources_then_facts(self):
+        facts = amap_fact_line(category="风景名胜", rating="4.5", address="英吉沙县")
+        text, source = description_of("英吉沙国家湿地公园", facts=facts, city="喀什")
+        self.assertEqual(source, "amap_fact")
+        self.assertIn("高德资料", text)
+        # 有校验过的联网简介时，事实行不抢位
+        text, source = description_of(
+            "英吉沙国家湿地公园",
+            web_knowledge="英吉沙国家湿地公园在喀什地区英吉沙县，以湿地鸟类为主。",
+            facts=facts,
+            city="喀什",
+        )
+        self.assertEqual(source, "web")
+
+    def test_fact_line_is_trusted_by_the_ruler(self):
+        """`amap_fact` 有出处（字段来自高德）—— 判"简介与地点对不上"时不该误伤。"""
+        plan = {
+            "route": [
+                {
+                    "day": 1,
+                    "name": "英吉沙国家湿地公园",
+                    "desc": "高德资料：风景名胜｜评分 4.5｜英吉沙县",
+                    "desc_source": "amap_fact",
+                }
+            ]
+        }
+        self.assertEqual(unrelated_descriptions(plan), [])
+        # 同样的文字若**没有**标来源，就该被当成可疑（避免"自说自话"）
+        plan["route"][0].pop("desc_source")
+        self.assertEqual(len(unrelated_descriptions(plan)), 1)
 
 
 class PipelineWiringTests(unittest.TestCase):

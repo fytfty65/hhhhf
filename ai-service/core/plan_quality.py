@@ -846,7 +846,7 @@ def score_truthfulness(plan: Any) -> Dict[str, Any]:
         claimed = [f for f in SOURCED_FIELDS if _is_claim(node.get(f))]
         desc_text = str(node.get("desc") or "").strip()
         desc_is_claim = bool(desc_text) and "暂无简介" not in desc_text
-        if desc_is_claim and str(node.get("desc_source") or "").strip() != "provider":
+        if desc_is_claim and str(node.get("desc_source") or "").strip() not in {"provider", "amap_fact"}:
             why = "没出处的套话" if is_boilerplate_desc(desc_text) else desc_relevance_problem(desc_text, node_name(node))
             if why:
                 unrelated_desc.append({"name": node_name(node), "why": why})

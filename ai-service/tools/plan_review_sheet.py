@@ -85,6 +85,30 @@ def _price_cell(node: Mapping[str, Any]) -> str:
     return cell
 
 
+def _info_cell(node: Mapping[str, Any]) -> str:
+    """地点资料：**有出处的**才写，并标明来源（地址/评分来自高德，简介标明 desc_source）。
+
+    为什么放在抽查表里：用户的第一优先级是「地点好不好」，而机器判不了；能帮人判断的资料
+    （在哪儿、什么类别、评分多少、简介哪来的）必须摆在人真正会读的那一页上。
+    2026-10-05 实测：`address` 在候选池那一层被丢掉，表格上只能看到空地址 ——
+    看起来像"我们不知道"，其实高德给过。
+    """
+    parts: List[str] = []
+    address = str(node.get("address") or "").strip()
+    if address:
+        parts.append(f"📍{address}")
+    rating = str(node.get("rating") or "").strip()
+    if rating and "暂无" not in rating:
+        parts.append(f"评分 {rating}")
+    desc = str(node.get("desc") or "").strip()
+    source = str(node.get("desc_source") or "").strip()
+    if desc and "暂无简介" not in desc:
+        parts.append(f"简介（{source or '未标来源'}）：{desc[:40]}")
+    elif desc:
+        parts.append("简介：暂无（未检索到可核实来源）")
+    return "｜".join(parts) or "—"
+
+
 def _day_rows(plan: Mapping[str, Any]) -> Dict[int, List[Mapping[str, Any]]]:
     grouped: Dict[int, List[Mapping[str, Any]]] = {}
     route = plan.get("route") if isinstance(plan.get("route"), list) else []
@@ -167,8 +191,8 @@ def render_single(plan: Mapping[str, Any], label: str) -> List[str]:
             "- 👀 待人工确认：" + "；".join(f"{item['name']}（{item['why']}）" for item in place["review_required"])
         )
     lines.append("")
-    lines.append("| 天 | 时间 | 地点 | 类别 | 价格（出处） | 距上一站 | 来源 | 请你打分 |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("| 天 | 时间 | 地点 | 类别 | 价格（出处） | 距上一站 | 地点资料（地址/评分/简介来源） | 来源 | 请你打分 |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for day in sorted(_day_rows(plan)):
         previous = None
         for node in _day_rows(plan)[day]:
@@ -190,7 +214,7 @@ def render_single(plan: Mapping[str, Any], label: str) -> List[str]:
             lines.append(
                 f"| D{day} | {str(node.get('time') or '—')[:5]} | {node_name(node)} | "
                 f"{CATEGORY_LABEL.get(_coarse_category(node), _coarse_category(node))} | {_price_cell(node)} | "
-                f"{distance} | {real} | 地点好不好(1-5)：__ ｜贴合诉求：是/否 ｜备注： |"
+                f"{distance} | {_info_cell(node)} | {real} | 地点好不好(1-5)：__ ｜贴合诉求：是/否 ｜备注： |"
             )
     lines.append("")
     return lines

@@ -35,7 +35,11 @@ from core.events import new_event  # 统一事件协议信封（correlation_id /
 # 候选池相关工具统一在模块级导入：实测教训（2026-10-04）—— 把它们各自写在函数内部局部导入，
 # 结果外层代码用了 `needs_widening` 却只在内层函数里导过 → NameError 让整条推演流中断，
 # 而单测全绿（因为没有任何单测覆盖这条长生成器路径）。放在顶层，缺名字在导入时就暴露。
-from core.place_quality import clean_web_knowledge, description_of  # 简介口径：能核实就用，不能就如实说没有
+from core.place_quality import (  # 简介口径：能核实就用，不能就如实说没有
+    amap_fact_line,
+    clean_web_knowledge,
+    description_of,
+)
 from core.poi_pool import (
     FOOD_WIDENING_KEYWORDS,
     LODGING_WIDENING_KEYWORDS,
@@ -784,6 +788,37 @@ def classify_poi_category(name: str, poi_type: str = "", is_hotel: bool = False)
         if kw in n:
             return "shopping"
     return "other"
+
+
+def _desc_for(item: Any, city: str, provider_desc: Any = "") -> "tuple[str, str]":
+    """一条候选记录能拿到的**诚实简介**：校验过的联网 > 供应商原文 > 高德字段事实 > 暂无简介。
+
+    统一入口的理由（2026-10-05 实测）：简介原来散在 7 处写法里，每处都有自己的"兜底好话"
+    （「本地高人气……」那类套话），一处漏改就又把编造放回用户面前。
+    现在只有这一个地方决定"写什么、算哪来的"，并且**地址/评分/类别**这些高德真给过的字段
+    会以「高德资料：…」的形式兜底（有出处的事实，用于判断地点好不好）。
+    """
+    facts = ""
+    category = (item or {}).get("type")
+    # ⚠️ 候选池里的 `type` 在高德没给时会写成占位默认值「风景」—— 那是**我们填充的**，
+    #    不能挂在"高德资料："后面当事实（`type_source` 明确标出它是默认值）。
+    if str((item or {}).get("type_source") or "").strip().lower() == "default" or (
+        not str((item or {}).get("type_source") or "").strip() and str(category or "").strip() == "风景"
+    ):
+        category = ""
+    facts = amap_fact_line(
+        category=category,
+        rating=(item or {}).get("rating"),
+        address=(item or {}).get("address"),
+        business_area=(item or {}).get("business_area"),
+    )
+    return description_of(
+        str((item or {}).get("name") or ""),
+        web_knowledge=(item or {}).get("web_knowledge"),
+        provider_desc=provider_desc if provider_desc is not None else (item or {}).get("desc"),
+        city=city,
+        facts=facts,
+    )
 
 
 def extract_preference_signals(text: str) -> Dict[str, Any]:
@@ -2359,7 +2394,10 @@ class SemanticItineraryCache:
         # v8：`desc`（地点简介）口径改了 —— 联网抓错页面的文字不再顶上，没出处就写「暂无简介」。
         #    旧条目里存着 YouTube 帮助中心、"中医认为酸奶有益健康"这类**假简介**，
         #    命中它们就是继续把编造当介绍渲染给用户。
-        raw = f"v8|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v9：`desc` 再进一层（联网取不到 → 用**高德字段**拼「高德资料：类别｜评分｜地址」），
+        #    同时把候选池里被丢掉的 `address` 带进节点。旧条目里地址是空的、简介是"暂无"，
+        #    看着像"我们不知道"，其实高德给过 —— 这类"看起来像事实的缺失"不该被缓存固化。
+        raw = f"v9|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
         if self.debug:
             # 缓存命中率低时，第一件要知道的事就是"键为什么不一样"：
             # 把参与哈希的原文打出来（只在本进程日志里），两次同样的请求一比就知道。
@@ -3954,6 +3992,13 @@ async def run_negotiate(msg: GatewayMessage):
                     'rating': str(p.get('rating') or '暂无供应商数据'),
                     'lnglat': lonlat,
                     'type': p_type or '风景',
+                    # 类别是不是**高德真给的**：`type` 的占位默认值不能挂在"高德资料："后面当事实
+                    'type_source': 'amap' if str(p_type or '').strip() else 'default',
+                    # ⚠️ 地址/商圈必须带下去（2026-10-05 实测：这里漏了 `address`，
+                    #    于是节点里 `address` 一律是空串 —— 高德明明给了地址却被丢掉，
+                    #    用户看到的是"没有地址"，把"我们没传"显示成"我们不知道"）
+                    'address': str(p.get('address') or ''),
+                    'business_area': str(p.get('business_area') or ''),
                     'cost_estimate': formatted_cost,
                     'photos': p.get('photos', []) if isinstance(p.get('photos'), list) else [],
                     'web_knowledge': str(web_info),
@@ -4180,11 +4225,7 @@ async def run_negotiate(msg: GatewayMessage):
                         _c_photos = chosen.get("photos") if isinstance(chosen.get("photos"), list) else []
                         _c_map = chosen.get("map_image") or _make_static_map(_c_lnglat)
                         # 简介口径：能核实的（校验过的联网简介 / 供应商原文）才用，否则如实说"暂无简介"
-                        _c_desc, _c_desc_src = description_of(
-                            str(chosen.get("name") or ""),
-                            web_knowledge=chosen.get("web_knowledge"),
-                            city=target_city,
-                        )
+                        _c_desc, _c_desc_src = _desc_for(chosen, target_city)
                         day_nodes.append({
                             "day": d,
                             "time": f"Day {d} | {slot_label} (建议游玩 1.5 小时)",
@@ -4219,11 +4260,7 @@ async def run_negotiate(msg: GatewayMessage):
                         _h_photos = hotel.get("photos") if isinstance(hotel.get("photos"), list) else []
                         _h_map = hotel.get("map_image") or _make_static_map(_h_lnglat)
                         # 「交通便利」是**断言**，我们并没有算过这家酒店的通勤 —— 没出处就别写
-                        _hotel_desc, _hotel_desc_src = description_of(
-                            str(hotel.get("name") or ""),
-                            web_knowledge=hotel.get("web_knowledge"),
-                            city=target_city,
-                        )
+                        _hotel_desc, _hotel_desc_src = _desc_for(hotel, target_city)
                         day_nodes.append({
                             "day": d,
                             "time": f"Day {d} | 21:30 入住",
@@ -4582,12 +4619,10 @@ async def run_negotiate(msg: GatewayMessage):
                             r["name"] = fallback.get("name")
                             r["type"] = fallback.get("type") or r.get("type")
                             # 置换之后简介也得**跟着换**，并且只能换成有出处的（否则如实说"暂无简介"）
-                            r["desc"], r["desc_source"] = description_of(
-                                str(fallback.get("name") or ""),
-                                web_knowledge=fallback.get("web_knowledge"),
-                                provider_desc=r.get("desc"),
-                                city=target_city,
+                            r["desc"], r["desc_source"] = _desc_for(
+                                fallback, target_city, provider_desc=r.get("desc")
                             )
+                            r["address"] = fallback.get("address") or r.get("address") or ""
                             r["cost_estimate"] = fallback.get("cost_estimate") or r.get("cost_estimate") or "暂无供应商数据"
                             r["is_hotel"] = bool(fallback.get("is_hotel", False))
                             r["trust_reason"] = "匹配度校验：未识别地点已置换为候选池真实 POI（100% 匹配）"
@@ -4624,9 +4659,7 @@ async def run_negotiate(msg: GatewayMessage):
 
                     def _make_node(_p, _d, _time):
                         _used.add(_norm_name(str(_p.get("name"))))
-                        _n_desc, _n_desc_src = description_of(
-                            str(_p.get("name") or ""), web_knowledge=_p.get("web_knowledge"), city=target_city
-                        )
+                        _n_desc, _n_desc_src = _desc_for(_p, target_city)
                         return {
                             "day": _d,
                             "name": _p.get("name") or "特色地标",
@@ -4808,9 +4841,7 @@ async def run_negotiate(msg: GatewayMessage):
                                 if not pool_left:
                                     break
                                 p = pool_left.pop(0)
-                                _s_desc, _s_desc_src = description_of(
-                                    str(p.get("name") or ""), web_knowledge=p.get("web_knowledge"), city=target_city
-                                )
+                                _s_desc, _s_desc_src = _desc_for(p, target_city)
                                 synth_nodes.append({
                                     "day": d,
                                     "name": p.get("name") or "特色地标",
@@ -4844,9 +4875,7 @@ async def run_negotiate(msg: GatewayMessage):
                     def _pool_node(p, day, time_label, is_hotel, tags):
                         _hotel = bool(is_hotel)
                         _lnglat = p.get("lnglat") or [0.0, 0.0]
-                        _h_desc, _h_desc_src = description_of(
-                            str(p.get("name") or ""), web_knowledge=p.get("web_knowledge"), city=target_city
-                        )
+                        _h_desc, _h_desc_src = _desc_for(p, target_city)
                         return {
                             "day": day,
                             "name": p.get("name") or "特色地标",

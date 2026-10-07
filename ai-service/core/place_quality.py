@@ -184,17 +184,55 @@ def clean_web_knowledge(text: Any, poi_name: str, city: str = "", *, max_chars: 
     return collapsed[:max_chars]
 
 
+def amap_fact_line(
+    *,
+    category: Any = "",
+    rating: Any = "",
+    address: Any = "",
+    business_area: Any = "",
+) -> str:
+    """用**高德真实字段**拼一行事实资料（不是简介、更不是赞美）：类别 / 评分 / 地址。
+
+    为什么需要（2026-10-05）：网络检索在这个环境里基本取不到可核实的简介（`probe_web_desc.py`
+    实测：百度安全验证页、搜狗/DDG 0 条），于是十几个节点的简介都成了「暂无简介」。
+    但**高德本来就把类别/评分/地址给了我们**（只是地址在候选池那一层被丢掉了）——
+    用这些字段拼一行事实，比"暂无简介"有用，而且每个字段都有出处（source=amap），
+    不属于"编"。注意措辞：只说"高德资料：类别｜评分｜地址"，**不评价值不值得去**。
+    """
+    parts: List[str] = []
+    category_text = str(category or "").strip()
+    if category_text and "暂无" not in category_text:
+        parts.append(category_text)
+    rating_text = str(rating or "").strip()
+    if rating_text and "暂无" not in rating_text and rating_text not in {"0", "0.0"}:
+        parts.append(f"评分 {rating_text}")
+    area_text = str(business_area or "").strip()
+    address_text = str(address or "").strip()
+    if address_text:
+        parts.append(address_text if not area_text else f"{area_text}·{address_text}")
+    if not parts:
+        return ""
+    return "高德资料：" + "｜".join(parts)
+
+
 def description_of(
     poi_name: str,
     *,
     web_knowledge: Any = "",
     provider_desc: Any = "",
     city: str = "",
+    facts: Any = "",
 ) -> Tuple[str, str]:
     """给一个地点的简介：能用**可核实**的就用，不能就如实说没有。返回 `(简介, 来源)`。
 
-    `来源` ∈ {`web`, `provider`, `missing`} —— 随节点下发（`desc_source`），
+    `来源` ∈ {`web`, `provider`, `amap_fact`, `missing`} —— 随节点下发（`desc_source`），
     界面与审计才能回答"这句话是哪来的"。
+
+    优先级（先有出处的、再有事实的、最后如实说没有）：
+      1. 校验过的联网简介（`web`）；
+      2. 供应商原文（`provider`，例如高德/供应商给的介绍字段）；
+      3. `facts`：用高德真实字段拼的一行资料（`amap_fact`，见 `amap_fact_line`）；
+      4. 都没有 → `NO_DESC`（`missing`）。
     """
     cleaned = clean_web_knowledge(web_knowledge, poi_name, city)
     if cleaned:
@@ -203,6 +241,9 @@ def description_of(
     if provider_text and provider_text != NO_DESC and not is_boilerplate_desc(provider_text):
         if not desc_relevance_problem(provider_text, poi_name, city):
             return " ".join(provider_text.split())[:160], "provider"
+    fact_text = str(facts or "").strip()
+    if fact_text and fact_text != NO_DESC and not is_boilerplate_desc(fact_text):
+        return " ".join(fact_text.split())[:160], "amap_fact"
     return NO_DESC, "missing"
 
 
@@ -217,8 +258,8 @@ def unrelated_descriptions(plan: Any) -> List[Dict[str, str]]:
         text = str(node.get("desc") or "").strip()
         if not text or text == NO_DESC:
             continue
-        if str(node.get("desc_source") or "").strip() == "provider":
-            # 供应商（高德）给的简介：有出处，按可信处理
+        if str(node.get("desc_source") or "").strip() in {"provider", "amap_fact"}:
+            # 供应商（高德）给的资料/字段：有出处，按可信处理（不是我们编的赞美）
             continue
         if is_boilerplate_desc(text):
             problems.append({"name": node_name(node), "why": "简介是没出处的套话（在断言「高人气/独特」却查不到来源）"})
