@@ -55,6 +55,24 @@ except Exception:  # pragma: no cover
 _GENERIC_NAME_MARKERS = ("漂亮的", "美丽的", "遗迹", "迷宫", "遗址公园", "公社", "大院")
 
 
+def nodes_missing_coordinates(plan: Any, *, only_lodging: bool = False) -> List[Mapping[str, Any]]:
+    """列出**没有可信坐标**的节点（`(0,0)` 与缺失都算），供上层去补。
+
+    为什么需要（2026-10-05 实测）：供应商给的酒店候选有时**只有名字和地址、没有坐标** ——
+    节点被清洗成"缺坐标"之后，通勤距离算不出来（`anchoring` 因此掉到 0.8），地图上也没法标位置。
+    而这些酒店的名字/地址是**真实存在**的，用高德按名字补一次坐标即可；
+    补不到就如实保持缺失（绝不编坐标）。
+    """
+    items: List[Mapping[str, Any]] = []
+    for node in nodes_of(plan):
+        if node_lnglat(node) is not None:
+            continue
+        if only_lodging and not _is_lodging(node):
+            continue
+        items.append(node)
+    return items
+
+
 def _is_lodging(node: Mapping[str, Any]) -> bool:
     if bool(node.get("is_hotel")):
         return True

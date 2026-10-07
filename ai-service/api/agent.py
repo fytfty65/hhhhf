@@ -6822,6 +6822,66 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _near_exc:  # 算不出替代点不影响出方案
                             print(f"⚠️ [远点替代] 计算失败（不影响出方案）: {_near_exc}", flush=True)
 
+                        # 👑 缺坐标的住宿：用高德按**名字**补一次坐标（2026-10-05 实测需要）
+                        #    供应商给的酒店候选有时只有名字和地址、没有坐标；节点被清成"缺坐标"
+                        #    之后通勤距离算不出来（`anchoring` 掉到 0.8）、地图上也标不出位置。
+                        #    这些名字是真实存在的，按名字查一次高德就能补上；**补不到就保持缺失**，
+                        #    绝不编坐标（`coordinate_status=missing` 会如实留在方案里）。
+                        try:
+                            from core.place_quality import nodes_missing_coordinates
+
+                            _coord_gap = nodes_missing_coordinates(final_data, only_lodging=True)[:3]
+                            _coord_filled: List[str] = []
+                            _coord_failed: List[str] = []
+                            for _node in _coord_gap:
+                                _node_name = str(_node.get("name") or "")
+                                if not _node_name:
+                                    continue
+                                _found: List[float] = []
+                                try:
+                                    _pois = await toolbox.get_dynamic_pois(
+                                        target_city, keywords=_node_name, types="100000", limit=3
+                                    )
+                                except Exception:
+                                    _pois = []
+                                for _poi in _pois or []:
+                                    if not isinstance(_poi, Mapping):
+                                        continue
+                                    _poi_name = _normalize_text(str(_poi.get("name") or ""))
+                                    if not _poi_name or _normalize_text(_node_name) not in _poi_name and _poi_name not in _normalize_text(_node_name):
+                                        continue
+                                    _candidate_coord = _poi.get("lnglat")
+                                    if isinstance(_candidate_coord, (list, tuple)) and len(_candidate_coord) >= 2:
+                                        try:
+                                            if float(_candidate_coord[0]) != 0.0 or float(_candidate_coord[1]) != 0.0:
+                                                _found = [float(_candidate_coord[0]), float(_candidate_coord[1])]
+                                                break
+                                        except (TypeError, ValueError):
+                                            continue
+                                if _found:
+                                    _node["lnglat"] = _found
+                                    _node["coordinate_status"] = "verified"
+                                    _node["coordinate_source"] = "amap_lookup"
+                                    _coord_filled.append(_node_name)
+                                else:
+                                    _coord_failed.append(_node_name)
+                            if _coord_filled or _coord_failed:
+                                final_data["coordinate_backfill"] = {
+                                    "filled": _coord_filled,
+                                    "failed": _coord_failed,
+                                    "note": "缺坐标的住宿按名字在高德补了一次。补到的标 coordinate_source=amap_lookup；"
+                                    "没补到的仍是缺失（**不编坐标**）。没补到的原因我们分不清是"
+                                    "「高德限流」还是「高德没有这家」——两种都如实留在这里，不猜。",
+                                }
+                                print(
+                                    "📍 [坐标补齐] 按名字补到 "
+                                    f"{len(_coord_filled)} 个（{'、'.join(_coord_filled) or '无'}）"
+                                    + (f"；仍缺 {len(_coord_failed)} 个（{'、'.join(_coord_failed)}）" if _coord_failed else ""),
+                                    flush=True,
+                                )
+                        except Exception as _coord_fill_exc:  # 补坐标失败不影响出方案
+                            print(f"⚠️ [坐标补齐] 失败（不影响出方案）: {_coord_fill_exc}", flush=True)
+
                         # 👑 可选住宿的**通勤距离**：只按价格/星级排是不够的（`anchoring` 实测掉到 0.8），
                         #    价格可比、距离也要可比 —— 用户才知道"这家便宜 60 块，但离玩点多 30km"。
                         try:
