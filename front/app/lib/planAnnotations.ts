@@ -118,13 +118,14 @@ export function dayNotices(plan: any): Record<number, DayNotice[]> {
         kind: 'long_day',
         text:
           `这天路上约 ${Math.round(km)}km，超过当天预算 ${Number.isFinite(budget) ? Math.round(budget) : '?'}km` +
+          '（含 10% 宽限）' +
           (far ? `：${far}` : '') +
           '。长途本身你早先说过可以接受，但请按这个里程预留时间',
       });
     } else if (farNodes.length) {
       push(day?.day, {
         kind: 'long_day',
-        text: `这天路上约 ${Math.round(km)}km（当天预算 ${Number.isFinite(budget) ? Math.round(budget) : '?'}km），含远郊点：${farNodes
+        text: `这天路上约 ${Math.round(km)}km（当天预算 ${Number.isFinite(budget) ? Math.round(budget) : '?'}km，含 10% 宽限），含远郊点：${farNodes
           .slice(0, 2)
           .map((node) => String(node?.name ?? ''))
           .join('、')}`,
@@ -134,9 +135,17 @@ export function dayNotices(plan: any): Record<number, DayNotice[]> {
 
   // ④ 地理重排动了分天：整条行程级提醒，挂在已经有提醒的那几天上（避免刷屏）
   if (plan?.day_rebalance?.applied) {
-    const before = Number(plan?.day_rebalance?.before_total_km ?? plan?.day_rebalance?.before_max_km);
-    const after = Number(plan?.day_rebalance?.after_total_km ?? plan?.day_rebalance?.after_max_km);
-    const text = `分天按地理就近重排过（${Number.isFinite(before) && Number.isFinite(after) ? `最赶或全程约 ${before}km → ${after}km` : '里程更省'}）`;
+    const totalBefore = Number(plan?.day_rebalance?.before_total_km);
+    const totalAfter = Number(plan?.day_rebalance?.after_total_km);
+    const maxBefore = Number(plan?.day_rebalance?.before_max_km);
+    const maxAfter = Number(plan?.day_rebalance?.after_max_km);
+    let scope = '';
+    if (Number.isFinite(totalBefore) && Number.isFinite(totalAfter)) {
+      scope = `全程 ${totalBefore}km → ${totalAfter}km`;
+    } else if (Number.isFinite(maxBefore) && Number.isFinite(maxAfter)) {
+      scope = `最赶的一天 ${maxBefore}km → ${maxAfter}km`;
+    }
+    const text = `分天按地理就近重排过${scope ? `（${scope}）` : ''}`;
     for (const key of Object.keys(out)) push(key, { kind: 'day_rebalanced', text });
   }
   return out;
