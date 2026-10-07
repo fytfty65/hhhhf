@@ -276,6 +276,27 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             _entry("price_web", STATUS_DEGRADED, f"{int(budget.get('unknown_count') or 0)} 个节点没有价格来源")
         )
 
+    # 3.45) 票务平台价（2026-10-07 用户放开"其他数据源"）：它**有出处但不是官方**，
+    #       必须单独说一句 —— 否则用户会把携程/去哪儿的页面价当成官方票价。
+    platform_priced = [
+        str(node.get("name") or node.get("location") or "").strip()
+        for node in _route_of(data)
+        if str((_as_mapping(node.get("data_sources")) or {}).get("cost_estimate") or "").strip().lower()
+        == "platform"
+    ]
+    platform_priced = [name for name in platform_priced if name]
+    if platform_priced:
+        names = _unique_names([{"name": name} for name in platform_priced], limit=4)
+        items.append(
+            _entry(
+                "price_web",
+                STATUS_DEGRADED,
+                f"{len(platform_priced)} 个价格来自票务平台（携程/去哪儿等，**非官方**，可能变动）："
+                + "、".join(names)
+                + "。节点上已标「票务平台价，非官方」，不计入「可核实合计」",
+            )
+        )
+
     # 3.5) 候选供给不足（真实缺口，2026-10-04）：数据源限流/覆盖不足时真实候选会很少，
     #      方案里的地点会有一部分来自模型知识 —— 这件事必须在"遗留问题"里说出来，
     #      否则"看起来挺全"的方案会被当成全部来自真实数据源。

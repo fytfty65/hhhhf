@@ -42,6 +42,10 @@ SOURCE_RANK: Dict[str, int] = {
     "web_page": 4,
     "rollinggo": 4,
     "amap": 3,
+    # `platform` = **票务平台**（携程/去哪儿等）页面或摘要里的票价（2026-10-07 用户放开数据源后加的）。
+    # 它**不是官方**，所以不进 `VERIFIED_SOURCES`（不冒充"可核实"）；但它**有出处**（带 URL 与原文片段），
+    # 所以也不能当"没出处的网摘"处理 —— 方案里按「票务平台价（非官方）」如实标明。
+    "platform": 3,
     "web": 2,
     "estimate": 1,
     "llm_estimate": 1,
@@ -50,6 +54,8 @@ SOURCE_RANK: Dict[str, int] = {
 }
 # 可核实来源：供应商/官方接口 + **白名单官方页面正文** + 供应商只读 MCP
 VERIFIED_SOURCES = {"provider", "vendor", "official", "amap", "web_page", "rollinggo"}
+# 「有出处」的来源（可核实 + 票务平台）：判"这句话有没有出处"用它，判"算不算可核实"用上面那个
+SOURCED_SOURCES = VERIFIED_SOURCES | {"platform"}
 
 
 def source_rank(source: Any) -> int:
@@ -298,6 +304,11 @@ def merge_observations(
 
         new_node = dict(node)
         new_node["cost_estimate"] = f"¥{float(value):g}"
+        # 票务平台价**不是官方**，必须在用户看到的那一行里说明（2026-10-07 用户放开数据源时
+        # 定的口径）：只写「¥38.5」会被读成"官方票价"，而它来自携程/去哪儿的页面。
+        if source == "platform":
+            new_node["cost_estimate"] = f"¥{float(value):g}（票务平台价，非官方）"
+            new_node["price_source_label"] = "票务平台价，非官方"
         sources = dict(new_node.get("data_sources") or {})
         sources["cost_estimate"] = source or "unavailable"
         new_node["data_sources"] = sources

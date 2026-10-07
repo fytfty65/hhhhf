@@ -2397,7 +2397,9 @@ class SemanticItineraryCache:
         # v9：`desc` 再进一层（联网取不到 → 用**高德字段**拼「高德资料：类别｜评分｜地址」），
         #    同时把候选池里被丢掉的 `address` 带进节点。旧条目里地址是空的、简介是"暂无"，
         #    看着像"我们不知道"，其实高德给过 —— 这类"看起来像事实的缺失"不该被缓存固化。
-        raw = f"v9|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v10：取价链路换了（搜索源重排 + 门票专线 + 票务平台价）。旧条目里一整片"未核实"
+        #    的价格，现在有一部分是查得到的 —— 命中旧条目会让用户继续看到过时的"查不到"。
+        raw = f"v10|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
         if self.debug:
             # 缓存命中率低时，第一件要知道的事就是"键为什么不一样"：
             # 把参与哈希的原文打出来（只在本进程日志里），两次同样的请求一比就知道。
@@ -5888,8 +5890,13 @@ async def run_negotiate(msg: GatewayMessage):
                                     import time as _time
 
                                     _deadline = _time.monotonic() + float(_price_budget)
+                                    # 单点上限要给得下**合并搜索**的开销（2026-10-07 实测修正）：
+                                    # 取价现在一个节点要问 2 家搜索源（ddgs 拿票务平台价、Bing 找官方页），
+                                    # 上限还按老的"一次搜索"给 6s，结果是**每个点都在发请求前就被取消** ——
+                                    # 表现成 `provider_attempts=[]`、`provider_status=单点取价超预算`、
+                                    # "查了 5 个补到 0 条"。所以按 2×单次上限算。
                                     _per_point_cap = max(
-                                        float(price_timeout_seconds()),
+                                        float(price_timeout_seconds()) * 2.0,
                                         float(_price_budget) / max(1, len(_targets)),
                                     )
 
@@ -5926,13 +5933,28 @@ async def run_negotiate(msg: GatewayMessage):
                                     # 酒店已经由 RollingGo（可核实来源）查过，这里只跑**剩下的**缺价节点：
                                     # 否则"所有源连续失败"的早停会被酒店查询的结果干扰，白等一轮。
                                     for _index, _item in enumerate(_web_targets):
-                                        # 👑 早停（2026-10-05 实测）：所有源都不可用时，
-                                        #    逐点重试只是白白花掉 20 多秒（实测 27.4s、补到 0 条）。
-                                        #    前两个点都没换来任何价格、且最近一次尝试没有任何源成功过，
-                                        #    就停下来，把剩下的节点留给「需要你确认」并如实说明。
-                                        if _index >= 2 and not any(
-                                            isinstance(item, Mapping) and item.get("value") is not None
-                                            for item in _observations
+                                        # 👑 早停（2026-10-05 实测，2026-10-07 收紧判据）：
+                                        #    "所有源都不可用"时逐点重试只是白花 20 多秒（实测 27.4s、补到 0 条），
+                                        #    该停；但**"搜到了、只是没抽到可核实的价格"不是源失败** ——
+                                        #    实测（2026-10-07）严门口径上线后，前两个点"查了没查到"就把整条
+                                        #    取价链叫停（查12/补0），后面 10 个节点根本没被问过。
+                                        #    所以判据改成：**只有"连搜索本身都没成功过"才早停** ——
+                                        #    看最近一次尝试的 provider_attempts 里有没有任何一家 ok=True。
+                                        from core.web_price_tool import last_search_attempts as _attempts_now
+
+                                        _last_attempts = list(_attempts_now or [])
+                                        _any_provider_ok = any(
+                                            isinstance(_attempt, Mapping) and _attempt.get("ok")
+                                            and str(_attempt.get("provider") or "") != "cache"
+                                            for _attempt in _last_attempts
+                                        )
+                                        if (
+                                            _index >= 2
+                                            and not _any_provider_ok
+                                            and not any(
+                                                isinstance(item, Mapping) and item.get("value") is not None
+                                                for item in _observations
+                                            )
                                         ):
                                             _early_stop_reason = "所有取价源连续失败，已提前停止（剩下的节点留给「需要你确认」）"
                                             print(f"⏹️ [联网取价] {_early_stop_reason}", flush=True)
@@ -7440,7 +7462,21 @@ async def run_negotiate(msg: GatewayMessage):
                     }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
 
                     # 🚀 写入 LLM 语义缓存（fire-and-forget，不阻塞后续 P2P 导航推送）
-                    if not is_refinement:
+                    # ⚠️ **半途而废的方案不进缓存**（2026-10-07 实测抓到）：联网取价被提前中止时
+                    #    （今日配额用完 / 所有源连续失败），这份 payload 里的"查不到价格"是**临时条件**
+                    #    造成的，不是事实。实测后果：第一次跑撞上配额用完 → 缓存了满屏"暂无供应商数据"，
+                    #    之后同样的诉求秒回那份残缺方案（补了配额也照样命中）。
+                    _price_audit_for_cache = final_data.get("price_audit") or {}
+                    _early_stop = str(_price_audit_for_cache.get("early_stop_reason") or "").strip()
+                    if is_refinement:
+                        pass
+                    elif _early_stop:
+                        print(
+                            f"⏭️ [语义缓存] 本次取价被提前中止（{_early_stop}）→ **不写缓存**："
+                            "否则「查不到价格」会被固化一整个 TTL",
+                            flush=True,
+                        )
+                    else:
                         asyncio.ensure_future(_semantic_cache.store(target_city, trip_days, profile_text, {
                             "final_data": final_data,
                             "budget_breakdown": budget_breakdown_payload,

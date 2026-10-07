@@ -65,7 +65,10 @@ MEAL_WINDOWS = ((11 * 60, 13 * 60 + 30), (17 * 60, 20 * 60))
 UNVERIFIED_SOURCES = {"unverified", "unavailable", "seed_template", "unknown", ""}
 # 需要来源的字段
 SOURCED_FIELDS = ("rating", "cost_estimate", "open_time")
-VERIFIED_SOURCES_OK = {"provider", "vendor", "amap", "rollinggo", "seniverse", "official", "web_page"}
+# 「有出处」的来源：可核实的（供应商/官方/高德/MCP）+ **票务平台**（2026-10-07 用户放开数据源）。
+# ⚠️ 这一项只回答"有没有出处"（"装懂"才扣分）；"算不算可核实"由 price_sources.VERIFIED_SOURCES
+#    与预算的三级模型回答 —— 票务平台价**不进**"可核实合计"。
+VERIFIED_SOURCES_OK = {"provider", "vendor", "amap", "rollinggo", "seniverse", "official", "web_page", "platform"}
 # 「没有数据」的如实写法：这些**不是断言**，是披露（"未知"不扣分，装懂才扣分）。
 DISCLOSURE_MARKERS = ("暂无供应商数据", "暂无", "未核实", "待确认", "未知", "不详", "unavailable", "unknown")
 

@@ -148,9 +148,12 @@ class ConfigTests(unittest.TestCase):
         with isolated_env():
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
-            # 默认顺序把**当前真的能返回结果**的源放前面（2026-10-05 实测：百度能返回真结果，
-            # 搜狗/必应被打成填充页，DuckDuckGo 时通时不通）
-            self.assertEqual(enabled_providers(), ["baidu", "sogou", "search", "official_page"])
+            # 默认顺序把**当前真的能返回结果**的源放前面（2026-10-07 实测重排：
+            # 百度已成安全验证页、搜狗成验证码页；`ddgs` 新包能返回真结果，
+            # Bing 不弹验证码且结果里带 .gov.cn —— 官方页面那条链路就靠它）
+            self.assertEqual(
+                enabled_providers(), ["ddgs", "bing", "baidu", "sogou", "search", "official_page"]
+            )
             self.assertEqual(search_proxy(), "")
 
     def test_env_overrides_are_honoured(self):
@@ -173,7 +176,8 @@ class ConfigTests(unittest.TestCase):
         ):
             self.assertEqual(price_timeout_seconds(), 6.0)
             self.assertEqual(price_max_nodes(), 12)
-            self.assertEqual(enabled_providers(), ["sogou"])
+            # 空/非法配置退回**当前可用的**第一个源（2026-10-07：ddgs；旧值 sogou 已经查不动）
+            self.assertEqual(enabled_providers(), ["ddgs"])
 
 
 class ObservationTests(unittest.TestCase):
@@ -519,10 +523,10 @@ class ProviderOrderTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        async def fake_sogou(query, max_results=3):
+        async def fake_sogou(query, max_results=3, **_kwargs):
             return [{"title": "门票45元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou"}]
 
-        async def fake_ddg(query, max_results=3):
+        async def fake_ddg(query, max_results=3, **_kwargs):
             raise AssertionError("搜狗有结果时不该再去问 DuckDuckGo")
 
         with isolated_env(WEB_PRICE_PROVIDERS="sogou,search"):
@@ -639,7 +643,7 @@ class PacingAndCacheTests(unittest.TestCase):
 
         calls = {"n": 0}
 
-        async def fake_sogou(query, max_results=3):
+        async def fake_sogou(query, max_results=3, **_kwargs):
             calls["n"] += 1
             return [{"title": "门票45元", "url": "https://x", "provider": "sogou"}]
 
@@ -699,7 +703,7 @@ class DailyQuotaTests(unittest.TestCase):
         web_price_tool.record_request(5)
         calls = {"n": 0}
 
-        async def fake_sogou(query, max_results=3):
+        async def fake_sogou(query, max_results=3, **_kwargs):
             calls["n"] += 1
             return [{"title": "x", "url": "https://x"}]
 
@@ -718,7 +722,7 @@ class DailyQuotaTests(unittest.TestCase):
         web_price_tool._search_cache.clear()
         web_price_tool._last_search_at = 0.0
 
-        async def fake_sogou(query, max_results=3):
+        async def fake_sogou(query, max_results=3, **_kwargs):
             return [{"title": "门票45元", "url": "https://x", "provider": "sogou"}]
 
         with mock.patch.dict(os.environ, {"WEB_PRICE_PROVIDERS": "sogou", "WEB_PRICE_MIN_INTERVAL_SECONDS": "0"}, clear=False):
@@ -758,7 +762,7 @@ class PageFetchIntegrationTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [
                 {"title": "某酒店", "snippet": "每晚 999 元", "url": "https://hotels.ctrip.com/x", "provider": "sogou"},
                 {"title": "官方房价", "url": "https://www.huazhu.com/hotel/123", "provider": "sogou"},
@@ -782,7 +786,7 @@ class PageFetchIntegrationTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [{"title": "博斯腾湖", "snippet": "门票45元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou", "cite_site": "相约久久"}]
 
         with mock.patch("core.web_price_tool.search_texts", fake_search):
@@ -796,7 +800,7 @@ class PageFetchIntegrationTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [{"title": "无关", "snippet": "今天天气不错", "url": "https://www.sogou.com/link?url=y"}]
 
         with mock.patch("core.web_price_tool.search_texts", fake_search):
@@ -819,7 +823,7 @@ class PreferOfficialUpgradeTests(unittest.TestCase):
 
         seen = {}
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             seen["query"] = query
             return []
 
@@ -836,7 +840,7 @@ class PreferOfficialUpgradeTests(unittest.TestCase):
 
         tried = []
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [
                 {"title": "门票", "snippet": "门票 45 元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou"},
                 {"title": "某景区管理局", "url": "https://www.example.gov.cn/a", "provider": "sogou"},
@@ -865,7 +869,7 @@ class PreferOfficialUpgradeTests(unittest.TestCase):
 
         from core import web_price_tool
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [
                 {"title": "门票", "snippet": "门票 45 元", "url": "https://www.sogou.com/link?url=x", "provider": "sogou"},
                 {"title": "某景区管理局", "url": "https://www.example.gov.cn/a", "provider": "sogou"},
@@ -928,7 +932,7 @@ class FetchStableTests(unittest.TestCase):
 
         calls = []
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [
                 {"title": "文化馆免费开放", "snippet": "免费开放", "url": "https://www.xjyn.gov.cn/a.shtml", "provider": "baidu"},
             ]
@@ -1305,11 +1309,20 @@ class BaiduProviderTests(unittest.TestCase):
         self.assertEqual(parse_baidu_results("", limit=3), [])
         self.assertEqual(parse_baidu_results("<html><body>nothing</body></html>", limit=3), [])
 
-    def test_baidu_is_first_in_the_default_order(self):
+    def test_default_order_starts_with_a_source_that_actually_answers(self):
+        """顺序不是偏好问题，是**可达性**问题（2026-10-07 实测重排，原断言 pin 的是百度第一）。
+
+        原来的断言「百度第一」曾经是对的（2026-10-05 百度能返回真结果）；现在百度回
+        安全验证页、搜狗回验证码页，所以第一个必须是**实测能返回结果**的源 ——
+        否则每个取价点都先等一个死源失败，把单点预算吃光（这个坑 2026-10-05 已经踩过一次）。
+        """
         from core.web_price_tool import enabled_providers
 
         with isolated_env():
-            self.assertEqual(enabled_providers()[0], "baidu", enabled_providers())
+            order = enabled_providers()
+        self.assertEqual(order[0], "ddgs", order)
+        self.assertIn("bing", order, "Bing 是唯一能带出 .gov.cn 的源，官方页面链路靠它")
+        self.assertLess(order.index("ddgs"), order.index("baidu"), order)
 
 
 class PriceContextRankingTests(unittest.TestCase):

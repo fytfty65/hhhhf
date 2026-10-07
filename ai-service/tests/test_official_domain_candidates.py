@@ -127,7 +127,7 @@ class LookupWiringTests(unittest.TestCase):
 
         recorded = {}
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [
                 {"title": "博斯腾湖景区官方网站", "snippet": "门票 45 元", "url": "https://www.bostenhu.com/t", "provider": "baidu"},
             ]
@@ -149,7 +149,7 @@ class LookupWiringTests(unittest.TestCase):
 
         calls = []
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [
                 {"title": "某景区官网", "url": "https://www.kanas.gov.cn/ticket", "provider": "baidu"},
                 {"title": "另一景区官网", "url": "https://other-scenic.cn/x", "provider": "baidu"},
@@ -168,7 +168,7 @@ class LookupWiringTests(unittest.TestCase):
     def test_recording_failure_never_breaks_the_price(self):
         import asyncio
 
-        async def fake_search(query, max_results=3):
+        async def fake_search(query, max_results=3, **_kwargs):
             return [{"title": "甲景区官网", "snippet": "门票 30 元", "url": "https://a-scenic.cn/1", "provider": "baidu"}]
 
         def boom(*args, **kwargs):

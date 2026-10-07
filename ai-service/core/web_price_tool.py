@@ -97,17 +97,23 @@ FREE_PRICE_EXCLUSIONS = ("取消", "停车", "wifi", "WiFi", "WIFI", "号码布"
 
 
 def budget_daily_max_requests() -> int:
-    """联网取价的**每日请求上限**（默认 120）。
+    """联网取价的**每日请求上限**（默认 240）。
 
     用户口径 2026-10-04：加一个日请求上限开关，避免无意中超量（批量预热几千个 POI 时尤其重要）。
     达到上限就不再发起请求，并**如实说明"今天配额用完了"**，而不是静默失败。
+
+    默认从 120 提到 240 的理由（2026-10-07 实测）：取价改成**多源合并**之后，
+    一个缺价节点要花 **2 次**请求（ddgs + Bing），120 次只够 60 个节点 ——
+    一份 5 天的方案光景点就能把额度吃光，表现成"查了 5 个、补到 0 条、
+    失败原因是今日配额已用完"（本次实跑就撞上了）。240 仍然是有界的：
+    它防的是"无意中批量预热"，不是正常规划。
     """
     raw = str(os.getenv("WEB_PRICE_DAILY_MAX_REQUESTS") or "").strip()
     try:
         value = int(raw)
     except ValueError:
-        return 120
-    return value if value > 0 else 120
+        return 240
+    return value if value > 0 else 240
 
 
 def usage_state_path() -> str:
@@ -165,6 +171,28 @@ def price_timeout_seconds() -> float:
     return value if value > 0 else 6.0
 
 
+def price_budget_seconds() -> float:
+    """一次规划里"联网取价"这条链路的**总时间预算**（默认 90s）。
+
+    这个数字是反推出来的：
+      - 2026-10-04 实测搜狗单次约 2.5s（+1.2s 节流）；
+      - 2026-10-05 用 `tools/probe_web_price.py` 连查 3 个库尔勒节点耗时 **19.7s**
+        （≈6.5s/节点：搜索 + 命中白名单页面还要再抓一次正文），而当时预算 25s 只够
+        5 个节点 × 6.5s = 32.5s 里的前 3~4 个 —— 矩阵里 4 个场景全部出现
+        "查了 5 个、超预算 4 个、补到 0 条"；
+      - 2026-10-07 再加一倍（45 → 90）：取价改成**多源合并**（一个节点要问 ddgs + Bing，
+        才既拿得到票务平台价、又有机会撞上官方页面），单点成本翻倍；而且**不缓存半途而废的方案**
+        之后，"预算不够"不再被缓存固化，值得多给一点时间。用户的优先级是方案质量，不是延迟。
+    仍然可配置：`WEB_PRICE_BUDGET_SECONDS`。
+    """
+    raw = str(os.getenv("WEB_PRICE_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 90.0
+    return value if value > 0 else 90.0
+
+
 def price_max_nodes() -> int:
     raw = str(os.getenv("WEB_PRICE_MAX_NODES") or "").strip()
     try:
@@ -175,11 +203,16 @@ def price_max_nodes() -> int:
 
 
 def enabled_providers() -> List[str]:
-    # 默认顺序的由来（2026-10-05 实测）：搜狗/必应已被反爬打成填充页、DuckDuckGo 时通时不通，
-    # 而**百度在同期能返回真结果**（1.25MB / 31 个结果块，第一个标题就带价格）。
-    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "baidu,sogou,search,official_page").strip()
+    # 默认顺序的由来（2026-10-07 实测重排）：
+    #   · 百度 → **安全验证页**（`baidu 返回安全验证页`），搜狗 → 0 条/验证码页，都已不可用；
+    #   · `duckduckgo_search` 已改名 `ddgs`（旧包告警且 0 条），装了新包后**能返回真结果**
+    #     （实测 5 条 ctrip/qunar/百度百科，票务平台链接也在里面）；
+    #   · Bing HTML（cn.bing.com）**不被验证码挡**，而且会带出 .gov.cn（英吉沙县政府、
+    #     喀什政府）—— 这正是"官方页面"那条链路的入口。
+    # 所以顺序改成 ddgs → bing → baidu → sogou；旧的 search（ddg 旧包）保留为兜底。
+    raw = str(os.getenv("WEB_PRICE_PROVIDERS") or "ddgs,bing,baidu,sogou,search,official_page").strip()
     items = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    return items or ["sogou"]
+    return items or ["ddgs"]
 
 
 def search_proxy() -> str:
@@ -760,26 +793,6 @@ async def fetch_baidu(query: str, *, max_results: int = 5) -> List[Dict[str, Any
         raise RuntimeError(last_error or "baidu 失败")
 
 
-def price_budget_seconds() -> float:
-    """一次规划里"联网取价"这条链路的**总时间预算**（默认 45s）。
-
-    这个数字是用**实测单点耗时**反推的，不是拍的：
-      - 2026-10-04 实测搜狗单次约 2.5s（+1.2s 节流）；
-      - 2026-10-05 用 `tools/probe_web_price.py` 连查 3 个库尔勒节点耗时 **19.7s**
-        （≈6.5s/节点：搜索 + 命中白名单页面还要再抓一次正文），
-        而当时预算 25s 只够 5 个节点 × 6.5s = 32.5s 里的前 3~4 个 ——
-        矩阵里 4 个场景全部出现"查了 5 个、超预算 4 个、补到 0 条"。
-      - 所以预算按"最多 6 个节点 × 7.2s"给到 45s，并且**逐点公平分预算**
-        （一个慢点不许吃光全部预算）。仍然可配置：`WEB_PRICE_BUDGET_SECONDS`。
-    """
-    raw = str(os.getenv("WEB_PRICE_BUDGET_SECONDS") or "").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return 45.0
-    return value if value > 0 else 45.0
-
-
 def affordable_target_count(max_nodes: int, *, budget_seconds: Optional[float] = None) -> int:
     """在时间预算内**大概**能查几个节点。
 
@@ -813,6 +826,160 @@ def search_cache_ttl_seconds() -> float:
     except ValueError:
         return 6 * 3600.0
     return value if value > 0 else 6 * 3600.0
+
+
+# 票务平台域名（用户 2026-10-07 放开"其他数据源"后加入取价链）：
+# 它们**不是官方**，所以标 `platform`（有出处但不冒充可核实）。
+TICKET_PLATFORM_MARKERS = (
+    "piao.qunar.com",
+    "qunar.com",
+    "ctrip.com",
+    "ly.com",
+    "tuniu.com",
+    "mafengwo.cn",
+    "lvmama.com",
+    "piaowang",
+)
+
+
+def host_is_ticket_platform(url: str) -> bool:
+    host = str(url or "").strip().split("//", 1)[-1].split("/", 1)[0].lower()
+    return any(marker in host for marker in TICKET_PLATFORM_MARKERS)
+
+
+# 门票价必须**贴着门票语境**：实测（2026-10-07）不带语境的数字会被误采 ——
+# 「森林公园」的摘要里出现"40元至100元是较为常见的价格区间"，被当成这个公园的门票 100 元。
+# 数字必须带**币种符号或"元"单位**（否则会抓到"314国道"这种路号），
+# 且左右 30 字窗口里要出现「门票/票价」——窗口放宽是安全的：只有带币种/单位的数字才算候选。
+_TICKET_PRICE_PATTERNS = (
+    re.compile(r"[¥￥]\s*(\d+(?:\.\d+)?)"),
+    re.compile(r"(\d+(?:\.\d+)?)\s*元"),
+)
+_TICKET_CONTEXT_MARKERS = ("门票", "票价")
+_TICKET_FREE_PATTERN = re.compile(r"(?:门票|票价)[^。；;]{0,8}?(?:免费|免票|免门票|不收费)")
+# 区间/模糊表述一律不采（"40元至100元""数十元""几百元"都不是一个确定价）
+_TICKET_PRICE_RANGE = re.compile(r"\d+\s*(?:元)?\s*(?:至|到|-|~|—)\s*\d+")
+_TICKET_PRICE_VAGUE = ("不等", "常见", "区间", "大约", "左右", "起价", "数十", "几百", "以现场")
+
+
+def extract_ticket_price(text: Any, *, require_name: str = "") -> Optional[Dict[str, Any]]:
+    """从一段文字里抽**确定的门票价**；抽不到就返回 None（纯函数）。
+
+    与 `extract_price_candidates` 的区别（为什么不能直接复用）：
+    后者是通用取价（人均/每晚/房价都收），对"门票"太宽 —— 实测把
+    「40元至100元是较为常见的价格区间」当成了某个公园的门票价、把"314国道"里的 314
+    当成了票价。这里只认带**币种/元单位**、且窗口里有「门票/票价」的数字，
+    并且**拒绝区间与模糊表述**；"门票免费/免票"是有效结论（0 元），单独识别。
+
+    `require_name`（2026-10-07 实测加）：要求**数字附近**就提到这个地点。
+    踩坑经过：只有"整页提到地名"不够 —— 喀什市政府的景区票价通知页整页确实提到「阳光公园」，
+    但紧挨着那个 30 元的是**香妃园**（"香妃园景区门票价格由30元/人·次调整为40元/人"），
+    于是阳光公园被安上了一个别人的价、而且是调价前的旧价。
+    两道新闸门：① 数字 ±30 字窗口里必须出现地点名；② 出现"调整为"时取**调整后**的价格
+    （旧价不是现价），取不到就放弃。
+    """
+    raw = str(text or "")
+    if not raw or _TICKET_PRICE_RANGE.search(raw):
+        return None
+    name = str(require_name or "").strip()
+    for pattern in _TICKET_PRICE_PATTERNS:
+        for match in pattern.finditer(raw):
+            window = raw[max(0, match.start() - 30): match.end() + 30]
+            if not any(marker in window for marker in _TICKET_CONTEXT_MARKERS):
+                continue
+            if any(marker in window for marker in _TICKET_PRICE_VAGUE):
+                continue
+            if name and name not in window:
+                continue
+            try:
+                value = float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if not (0 < value <= 3000):  # 门票不可能是这个量级 —— 八成抽错了
+                continue
+            # 调价公告：这个数字可能是**旧价**（"由 30 元调整为 40 元"）→ 取调整后的
+            if "调整" in window:
+                adjusted = re.search(r"调整(?:为|至)\s*[¥￥]?\s*(\d+(?:\.\d+)?)\s*元?", window)
+                if not adjusted:
+                    continue
+                try:
+                    value = float(adjusted.group(1))
+                except (TypeError, ValueError):
+                    continue
+                if not (0 < value <= 3000):
+                    continue
+            return {"value": value, "excerpt": window.strip()[:80], "context": "ticket"}
+    free_match = _TICKET_FREE_PATTERN.search(raw)
+    if free_match:
+        window = raw[max(0, free_match.start() - 30): free_match.end() + 30]
+        if name and name not in window:
+            return None
+        if not any(marker in window for marker in _TICKET_PRICE_VAGUE):
+            return {"value": 0.0, "excerpt": window.strip()[:80], "context": "ticket"}
+    return None
+
+
+def ticket_price_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+    name: str,
+    *,
+    require_named: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """从搜索结果里挑一条**这个地点的**门票价；挑不到返回 None（纯函数）。
+
+    两条硬门槛（都是实测逼出来的，2026-10-07）：
+      ① 摘要/标题/链接里必须提到**地点名**（去掉括号的核心名）—— 否则会拿别处的价：
+         实测「胡杨书院」被塞了金湖杨景区的 40 元、「疏勒历史博物馆」被塞了通用的免票政策；
+      ② 数字必须贴着门票语境，且不是区间（见 `extract_ticket_price`）。
+    排序：官方白名单页面 > 票务平台 > 其它（同档再看是否有 URL）。
+    """
+    core = str(name or "").strip()
+    for opener, closer in (("(", ")"), ("（", "）")):
+        if opener in core and closer in core:
+            core = core.split(opener)[0].strip()
+    if not core:
+        return None
+    best: Optional[Dict[str, Any]] = None
+    best_score: tuple = ()
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        url = str(row.get("url") or row.get("href") or "")
+        blob = f"{row.get('title') or ''} {row.get('body') or row.get('snippet') or ''} {url}"
+        if require_named and core not in blob:
+            continue
+        # ⚠️ 名称必须**挨着价格**（不是"整页提到过"）：实测喀什市政府的票价通知页整页提到
+        #    「阳光公园」，但紧挨 30 元的是香妃园 —— 于是阳光公园被安上了别人的价。
+        #    例外：**标题本身就是一个具体地点的页**（标题含地点名、且不长）→ 该行就是讲它的，
+        #    此时不再要求"名字紧挨数字"（票务平台的标题往往把名字放在价格前面很远）。
+        title = str(row.get("title") or "")
+        specific_title = bool(core) and core in title and len(title) <= 40
+        found = extract_ticket_price(
+            f"{title} {row.get('body') or row.get('snippet') or ''}",
+            require_name="" if specific_title else (core if require_named else ""),
+        )
+        if not found:
+            continue
+        try:
+            official = bool(url) and host_is_allowed(url)[0]
+        except Exception:
+            official = False
+        platform = host_is_ticket_platform(url)
+        score = (1 if official else 0, 1 if platform else 0, 1 if url else 0)
+        if best is None or score > best_score:
+            best = {
+                "value": float(found["value"]),
+                "excerpt": str(found.get("excerpt") or ""),
+                "url": url,
+                "provider": str(row.get("provider") or ""),
+                "publisher": str(row.get("cite_site") or ""),
+                "source_date": str(row.get("cite_date") or ""),
+                "official_source": official,
+                "platform_source": platform,
+                "source": "web_page" if official else ("platform" if platform else "web"),
+            }
+            best_score = score
+    return best
 
 
 def pick_price_from_rows(rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -859,10 +1026,22 @@ def pick_price_from_rows(rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str
     return best
 
 
-async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, Any]]:
+async def search_texts(
+    query: str,
+    *,
+    max_results: int = 3,
+    merge: bool = False,
+    max_providers: int = 3,
+) -> List[Dict[str, Any]]:
     """按配置的提供方顺序搜一次，返回**第一个有结果**的提供方给出的结果。
 
-    顺序默认 `sogou,search,official_page`（搜狗国内直连可达；DuckDuckGo 在境外网络可用）。
+    `merge=True`（**取价用**）：把最多 `max_providers` 家的结果**合起来**再返回。
+    为什么取价要合并（2026-10-07 实测）：各家覆盖是互补的 —— 同一条 query，
+    ddgs 给票务平台链接、Bing 给 gov 页面；"先到先得"等于把另一半证据扔掉。
+    取价是"能不能找到那个数字"的问题，不是"谁先答"的问题。
+
+    顺序默认 `ddgs,bing,baidu,sogou,search`（2026-10-07 实测重排：百度安全验证页、
+    搜狗验证码页；ddgs 新包可用、Bing 不弹验证码且带 gov.cn 链接）。
     带**同一进程内的节流与结果缓存**：
       - 两次搜索至少间隔 `WEB_PRICE_MIN_INTERVAL_SECONDS`（默认 1.2s）—— 防限流；
       - 相同 query 在 `WEB_SEARCH_CACHE_TTL_SECONDS`（默认 6h）内直接复用 —— 少打扰对方站点；
@@ -880,7 +1059,7 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
     import asyncio
     import time as _time
 
-    cache_key = f"{','.join(enabled_providers())}|{max_results}|{query}"
+    cache_key = f"{','.join(enabled_providers())}|{max_results}|{int(merge)}|{max_providers}|{query}"
     cached = _search_cache.get(cache_key)
     if cached and (_time.monotonic() - cached[0]) < search_cache_ttl_seconds():
         last_search_attempts = [{"provider": "cache", "ok": True, "results": len(cached[1])}]
@@ -915,52 +1094,63 @@ async def search_texts(query: str, *, max_results: int = 3) -> List[Dict[str, An
                 "cooldown_overridden": True,
                 "error": "所有取价源都在冷却中，仍强制试一次（避免因为熔断直接放弃）",
             })
-        for provider in available:
-            if provider == "sogou":
-                try:
+        merged: List[Dict[str, Any]] = []
+        merged_seen: set = set()
+        asked = 0
+
+        async def _ask(provider: str) -> List[Dict[str, Any]]:
+            """问一家；**绝不抛异常**（失败只记进 attempts，供诊断与披露）。"""
+            try:
+                if provider == "ddgs":
+                    rows = await search_ddgs(query, max_results=max_results)
+                elif provider == "bing":
+                    rows = await fetch_bing(query, max_results=max_results)
+                elif provider == "sogou":
                     rows = await fetch_sogou(query, max_results=max_results)
-                    record_request()  # 计入日配额（无论成败都算一次真实请求）
-                    attempts.append({"provider": "sogou", "ok": bool(rows), "results": len(rows)})
-                    _note_provider_result("sogou", bool(rows))
-                    if rows:
-                        _last_search_at = _time.monotonic()
-                        _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
-                        last_search_attempts = attempts
-                        return rows
-                except Exception as exc:
-                    attempts.append({"provider": "sogou", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
-                    _note_provider_result("sogou", False)
-            elif provider == "baidu":
-                try:
+                elif provider == "baidu":
                     rows = await fetch_baidu(query, max_results=max_results)
-                    record_request()
-                    attempts.append({"provider": "baidu", "ok": bool(rows), "results": len(rows)})
-                    _note_provider_result("baidu", bool(rows))
-                    if rows:
-                        _last_search_at = _time.monotonic()
-                        _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
-                        last_search_attempts = attempts
-                        return rows
-                except Exception as exc:
-                    attempts.append({"provider": "baidu", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
-                    _note_provider_result("baidu", False)
-            elif provider == "search":
-                try:
+                elif provider == "search":
                     rows = await search_duckduckgo(query, max_results=max_results)
-                    record_request()
-                    attempts.append({"provider": "search", "ok": bool(rows), "results": len(rows)})
-                    _note_provider_result("search", bool(rows))
-                    if rows:
-                        _last_search_at = _time.monotonic()
-                        _search_cache[cache_key] = (_last_search_at, [dict(row) for row in rows])
-                        last_search_attempts = attempts
-                        return rows
-                except Exception as exc:
-                    attempts.append({"provider": "search", "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
-                    _note_provider_result("search", False)
+                else:
+                    return []
+                record_request()  # 计入日配额（无论成败都算一次真实请求）
+                attempts.append({"provider": provider, "ok": bool(rows), "results": len(rows)})
+                _note_provider_result(provider, bool(rows))
+                return [dict(row) for row in rows or []]
+            except Exception as exc:
+                attempts.append({"provider": provider, "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+                _note_provider_result(provider, False)
+                return []
+
+        for provider in available:
+            if merge and asked >= max(1, max_providers):
+                break
+            asked += 1
+            rows = await _ask(provider)
+            if not merge:
+                if rows:
+                    _last_search_at = _time.monotonic()
+                    _search_cache[cache_key] = (_last_search_at, rows)
+                    last_search_attempts = attempts
+                    return rows
+                continue
+            # 合并模式：并集去重后继续问下一家（各家覆盖互补），换源之间留点间隔防限流
+            for row in rows:
+                key = str(row.get("url") or row.get("href") or row.get("title") or "")
+                if not key or key in merged_seen:
+                    continue
+                merged_seen.add(key)
+                merged.append(row)
+            if provider != available[-1]:
+                # ddgs 连续快查会被限流（实测 TimeoutError），但间隔也不能太大：
+                # 取价是**逐点串行**的，每多等 1s 就少查一个节点。0.4s 是实测的折中。
+                await asyncio.sleep(0.4)
             # official_page 不是通用搜索，跳过
         _last_search_at = _time.monotonic()
         last_search_attempts = attempts
+        if merged:
+            _search_cache[cache_key] = (_last_search_at, [dict(row) for row in merged])
+            return merged
         return []
 
 
@@ -1037,14 +1227,135 @@ except Exception:  # pragma: no cover - 极端环境下退化为无锁
     _search_lock = None
 
 
+def _ddgs_client(timeout: float, proxy: str):
+    """取 DDGS 客户端：优先新包 `ddgs`，退回旧包 `duckduckgo_search`。
+
+    2026-10-07 实测：旧包已废弃（运行时会告警"已改名为 ddgs"）且**返回 0 条**；
+    装上 `ddgs` 之后同一个查询能返回 5 条真结果（ctrip/qunar/百度百科）。
+    所以先试新包；两个都没有就抛错，让上层如实记"没有可用的搜索后端"。
+    """
+    kwargs: Dict[str, Any] = {"timeout": timeout}
+    if proxy:
+        kwargs["proxy"] = proxy
+    try:
+        from ddgs import DDGS  # type: ignore
+
+        return DDGS(**kwargs)
+    except Exception:
+        from duckduckgo_search import DDGS  # type: ignore
+
+        return DDGS(**kwargs)
+
+
+async def search_ddgs(query: str, *, max_results: int = 3) -> List[Dict[str, Any]]:
+    """ddgs（DuckDuckGo 的**新包**）：实测当前唯一"搜得到东西又不要验证码"的通用后端。"""
+    import asyncio
+
+    def _run() -> List[Dict[str, Any]]:
+        proxy = search_proxy()
+        saved = {key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
+        try:
+            if proxy:
+                os.environ["HTTP_PROXY"] = proxy
+                os.environ["HTTPS_PROXY"] = proxy
+            with _ddgs_client(min(6.0, price_timeout_seconds()), proxy) as ddgs:
+                rows = list(ddgs.text(query, max_results=max_results))
+            return [
+                {
+                    "title": str(row.get("title") or ""),
+                    "url": str(row.get("href") or row.get("url") or ""),
+                    "body": str(row.get("body") or ""),
+                    "provider": "ddgs",
+                }
+                for row in rows
+                if isinstance(row, dict)
+            ]
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    return await asyncio.wait_for(asyncio.to_thread(_run), timeout=price_timeout_seconds() + 2)
+
+
+def parse_bing_results(html: str, *, limit: int = 5) -> List[Dict[str, Any]]:
+    """从 Bing 结果页 HTML 里取结果（纯函数，可单测）。
+
+    Bing 现在**不弹验证码**（2026-10-07 实测），而且结果里带 `.gov.cn`
+    （英吉沙县政府 / 喀什政府）—— 官方页面这条链路就靠它。
+    结果块形如 `<li class="b_algo">…<h2><a href="URL">标题</a></h2>…<p>摘要</p>`；
+    Bing 的 href 有时是 `https://www.bing.com/ck/a?...&u=a1aHR0cHM6...` 的跳转壳，
+    这里一并解码（base64url 段），解不开就丢掉该条（不猜链接）。
+    """
+    import base64
+    import binascii
+
+    def _unwrap(href: str) -> str:
+        if "bing.com/ck/a" not in href:
+            return href
+        match = re.search(r"[?&]u=a1([A-Za-z0-9_\-=]+)", href)
+        if not match:
+            return ""
+        token = match.group(1)
+        token += "=" * (-len(token) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(token).decode("utf-8", errors="replace")
+        except (binascii.Error, ValueError):
+            return ""
+        return decoded if decoded.startswith("http") else ""
+
+    rows: List[Dict[str, Any]] = []
+    for block in re.split(r'<li class="b_algo"', html or "")[1:]:
+        match = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.S)
+        if not match:
+            continue
+        url = _unwrap(match.group(1))
+        if not url:
+            continue
+        title = _strip_tags(match.group(2))
+        body_match = re.search(r"<p[^>]*>(.*?)</p>", block, re.S)
+        rows.append(
+            {
+                "title": title,
+                "url": url,
+                "body": _strip_tags(body_match.group(1)) if body_match else "",
+                "provider": "bing",
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+async def fetch_bing(query: str, *, max_results: int = 5) -> List[Dict[str, Any]]:
+    """Bing 网页结果（HTML，不走官方 API key）。"""
+    import httpx
+
+    params = {"q": query, "count": str(max(10, max_results * 2)), "setlang": "zh-CN"}
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"}
+    proxy = search_proxy() or None
+    async with httpx.AsyncClient(timeout=min(15.0, price_timeout_seconds() + 6), headers=headers, proxy=proxy,
+                                 follow_redirects=True, **_ssl_verify_kwargs()) as client:
+        resp = await client.get("https://cn.bing.com/search", params=params)
+    html = resp.text or ""
+    if "安全验证" in html or "captcha" in html.lower():
+        raise RuntimeError("bing 返回验证页")
+    return parse_bing_results(html, limit=max_results)
+
+
 async def search_duckduckgo(query: str, *, max_results: int = 3) -> List[Dict[str, Any]]:
-    """DuckDuckGo（境外网络可用）。**把 WEB_SEARCH_PROXY 传进搜索引擎**。
+    """DuckDuckGo（旧包）。**把 WEB_SEARCH_PROXY 传进搜索引擎**。
 
     实测教训（2026-10-04）：这个模块最初只把代理给了 httpx（抓页面那条路径），
     而 DuckDuckGo 搜索根本没走代理 —— 于是界面上写着"可配置 WEB_SEARCH_PROXY 让搜索走代理"，
     配了也照样连不通。文档承诺与代码行为必须一致，所以这里显式传 `proxy=`，
     并额外在调用期间设置 HTTP(S)_PROXY 环境变量（DDGS 内部用 requests/urllib3，
     两层都覆盖），调用结束立刻恢复现场。
+
+    ⚠️ 2026-10-07：旧包实测返回 0 条，新包能返回真结果（见 `search_ddgs`）。
+    这里保留旧包作为兜底，顺序上排在新包之后。
     """
     import asyncio
 
@@ -1073,10 +1384,31 @@ async def search_duckduckgo(query: str, *, max_results: int = 3) -> List[Dict[st
     return await asyncio.wait_for(asyncio.to_thread(_run), timeout=price_timeout_seconds() + 2)
 
 
+async def search_texts_all(query: str, *, max_results: int = 6, providers: int = 3) -> List[Dict[str, Any]]:
+    """合并多家的搜索（`search_texts(merge=True)` 的便捷包装，供探针/诊断调用）。"""
+    return await search_texts(query, max_results=max_results, merge=True, max_providers=providers)
+
+
 async def search_result_count(query: str, *, max_results: int = 3) -> int:
     """诊断用：真正搜一次，返回结果条数（走同一套提供方顺序与代理处理）。"""
     rows = await search_texts(query, max_results=max_results)
     return len(rows)
+
+
+def _maybe_record_domain_hints(rows: Sequence[Mapping[str, Any]], name: str) -> None:
+    """价格**不是**从白名单页面拿到的时候，顺手记下"像官网但没白名单"的域名。
+
+    为什么要单独抽出来（2026-10-07）：门票专线加进来之后有**多个**非官方返回路径
+    （票务平台摘要、通用摘要、什么都没查到），任何一条漏记都会让"人工扩白名单"这个
+    闭环断掉 —— 于是"像官网的域名"永远进不了待确认清单，可核实价格也就永远多不起来。
+    记录失败绝不影响取价结果。
+    """
+    try:
+        from_hints = official_domain_hints(rows, query_name=name)
+        if from_hints:
+            record_domain_candidates(from_hints)
+    except Exception:
+        pass
 
 
 async def lookup_price(
@@ -1098,6 +1430,14 @@ async def lookup_price(
     （2026-10-05 用户拍板：官方自己写的票价、带 URL 可点开，就算可核实）；
     不在白名单的页面根本不抓，搜索摘要仍然是估算（`source="web"`）。
 
+    **门票价另走一条更严的路**（2026-10-07 用户放开"其他数据源"后加的）：
+      1. 先问**多家**搜索源并合并结果（`search_texts_all`，各家覆盖互补）；
+      2. 用 `ticket_price_from_rows` 抽**贴门票语境**的确定价，且要求摘要里真的提到这个地点；
+      3. 排序：官方白名单页面（`web_page`，可核实）> **票务平台**（`platform`，有出处但非官方）
+         > 其它（`web`，估算）。
+    为什么要单独一条：通用抽价会把「40元至100元是较为常见的价格区间」当成某个公园的门票，
+    也会把别处的票价记到这个地点头上（实测「胡杨书院」被塞了金湖杨景区的 40 元）。
+
     `prefer_official=True`（用于"把已有的网摘价升级成官方价"）：
       - 查询词补「官网」，把官方页面顶到前面；
       - 摘要价先放一边，遍历**多个**白名单候选页面（默认只试第一个），
@@ -1107,13 +1447,49 @@ async def lookup_price(
     if prefer_official:
         query = f"{city} {name} 门票价格 官网"
     try:
-        rows = await search_texts(query, max_results=max_results)
+        rows = await search_texts(query, max_results=max_results + 2, merge=True, max_providers=2)
     except Exception as exc:
         return build_observation(name=name, value=None, source="web", provider=",".join(enabled_providers())) | {
             "error": f"{type(exc).__name__}: {str(exc)[:120]}"
         }
 
+    # 门票专线（严格）：只有"贴门票语境 + 摘要提到这个地点"才采信
+    ticket_pick = ticket_price_from_rows(rows, name)
+    if ticket_pick is not None:
+        ticket_value = float(ticket_pick.get("value") or 0)
+        ticket_source = str(ticket_pick.get("source") or "web")
+        # 有价就采；「免费/免票」这种 0 元只在**票务平台/白名单官方页**上采 ——
+        # 内容农场说的"免票"不足以让我们对用户断言"这个景点不要钱"（unknown ≠ 0）
+        if ticket_value > 0 or ticket_source in {"platform", "web_page"}:
+            if ticket_source != "web_page":
+                _maybe_record_domain_hints(rows, name)
+            return build_observation(
+                name=name,
+                value=ticket_value,
+                source=ticket_source,
+                source_url=str(ticket_pick.get("url") or ""),
+                excerpt=str(ticket_pick.get("excerpt") or ""),
+                provider=str(ticket_pick.get("provider") or ""),
+                publisher=str(ticket_pick.get("publisher") or ""),
+                source_date=str(ticket_pick.get("source_date") or ""),
+                label="门票",
+            )
+
     snippet_pick = pick_price_from_rows(rows)
+    # 通用抽价的两道闸门（都是实跑抓到的误采）：
+    #  ① 抽到的若是**门票口径**的数字，必须过门票专线那一关 ——
+    #     否则「40元至100元是较为常见的价格区间」这种区间价会从后门溜进来；
+    #  ② 抽到 **0 元（"免费"）** 时，只有**白名单官方页/票务平台**才允许下这个断言 ——
+    #     实测内容农场（educfa.cn）的通用"免票政策详解"页让「英吉沙国家湿地公园」变成免费，
+    #     而它讲的根本不是这个公园。unknown ≠ 0：拿不到就不能替它说"不要钱"。
+    if snippet_pick is not None:
+        pick_excerpt = str(snippet_pick.get("excerpt") or "")
+        pick_url = str(snippet_pick.get("url") or "")
+        pick_value = float(snippet_pick.get("value") or 0)
+        if any(marker in pick_excerpt for marker in _TICKET_CONTEXT_MARKERS) and extract_ticket_price(pick_excerpt) is None:
+            snippet_pick = None
+        elif pick_value <= 0 and not (host_is_allowed(pick_url)[0] or host_is_ticket_platform(pick_url)):
+            snippet_pick = None
     allowed_urls: List[str] = []
     for row in rows or []:
         candidate_url = str(row.get("url") or row.get("href") or "")
@@ -1141,28 +1517,28 @@ async def lookup_price(
     if snippet_pick is not None:
         # 退回摘要价（估算）说明**白名单页面没帮上忙** —— 这时候才值得记"像官网的域名"，
         # 让人工确认后把白名单扩起来（下次这类价格就有机会变成"可核实"）。
+        _maybe_record_domain_hints(rows, name)
+        # 出处标注：白名单官方页 → 可核实；**票务平台** → 有出处但非官方（不许冒充官方价）；
+        # 其余摘要 → 估算。实测（2026-10-07）：携程页面来的 ¥29 原来被写成 `web`，
+        # 用户看到的是"网摘估算"，其实它来自票务平台 —— 标错来源等于把出处说小了。
+        _snippet_url = str(snippet_pick.get("url") or "")
         try:
-            from_hints = official_domain_hints(rows, query_name=name)
-            if from_hints:
-                record_domain_candidates(from_hints)
+            _snippet_official = bool(_snippet_url) and host_is_allowed(_snippet_url)[0]
         except Exception:
-            pass  # 记录候选绝不影响取价结果
+            _snippet_official = False
+        _snippet_platform = host_is_ticket_platform(_snippet_url)
+        _snippet_source = "web_page" if _snippet_official else ("platform" if _snippet_platform else "web")
         return build_observation(
             name=name,
             value=float(snippet_pick["value"]),
-            source="web",
-            source_url=str(snippet_pick.get("url") or ""),
+            source=_snippet_source,
+            source_url=_snippet_url,
             excerpt=str(snippet_pick.get("excerpt") or ""),
             provider=str(snippet_pick.get("provider") or ""),
             publisher=str(snippet_pick.get("publisher") or ""),
             source_date=str(snippet_pick.get("source_date") or ""),
         )
-    try:
-        from_hints = official_domain_hints(rows, query_name=name)
-        if from_hints:
-            record_domain_candidates(from_hints)
-    except Exception:
-        pass
+    _maybe_record_domain_hints(rows, name)
     return build_observation(
         name=name,
         value=None,
@@ -1183,22 +1559,26 @@ def build_observation(
     retrieved_at: Optional[float] = None,
     publisher: str = "",
     source_date: str = "",
+    label: str = "",
 ) -> Dict[str, Any]:
     """一条取价结果：**必须带出处**，并标明"可核实"还是"估算"。
 
     `publisher`/`source_date` 是给"这条价格什么时候发的"用的 —— 价格会过期，
     用户需要判断新鲜度（真实结果里带发布日期，如 2026-09-19）。
 
-    口径（2026-10-05 用户拍板）：
+    口径（2026-10-05 用户拍板，2026-10-07 增补票务平台）：
       · `web_page` = **白名单里的官方/政府页面正文** → **可核实**（官方自己写的票价，带 URL 可点开）；
+      · `platform` = **票务平台**（携程/去哪儿等）→ **有出处但非官方**，标「票务平台价（非官方）」，
+        不计入"可核实合计"；
       · `web` = 搜索结果摘要/自媒体页 → 永远是**估算**。
     """
     verified_sources = {"provider", "vendor", "official", "amap", "web_page"}
+    normalized = str(source)
     return {
         "name": str(name or ""),
         "value": value,
         "currency": "CNY",
-        "source": str(source),
+        "source": normalized,
         "source_url": str(source_url or ""),
         "excerpt": str(excerpt or "")[:160],
         "provider": str(provider or ""),
@@ -1206,6 +1586,8 @@ def build_observation(
         "source_date": str(source_date or "")[:40],
         "retrieved_at": float(retrieved_at or time.time()),
         # 只有"可核实来源"（供应商/官方接口/**白名单官方页面**）才算 verified
-        "verified": str(source) in verified_sources,
-        "estimated": str(source) not in verified_sources,
+        "verified": normalized in verified_sources,
+        "estimated": normalized not in verified_sources,
+        # 这条价是什么口径（门票/人均/每晚…）：合并回节点时用它决定怎么写
+        "label": str(label or ""),
     }
