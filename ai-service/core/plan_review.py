@@ -522,6 +522,121 @@ def top_up_missing_meals(
     return {"plan": {"route": ordered}, "actions": actions, "skipped": skipped, "changed": True}
 
 
+async def adjust_lodging_by_geography(
+    route: Any,
+    *,
+    days: int,
+    fetch_nearby: Any,
+    threshold_km: float = 15.0,
+    radius_km: float = 20.0,
+    keywords: str = "酒店|民宿|客栈|宾馆",
+    limit: int = 8,
+    min_gain_ratio: float = 0.4,
+) -> Dict[str, Any]:
+    """把"住得太远"的那晚换成**当天玩点附近**的真实酒店（2026-10-07）。
+
+    真实缺口（伊宁实测 `anchoring=0.143`）：第 1 天的玩点在英塔木镇（天鹅泉/马场），
+    酒店却在 38.5km 外的市区；第 2 天玩点在西边，酒店在 46.9km 外 —— 吃住离玩点 17~38km。
+    根因：`ensure_lodging_per_night` 只在**缺夜**时按"离当天最近"补，
+    已经有酒店的那一晚**没人再回头看它是不是太远**。
+
+    规则（与"按地理分天"同一套谨慎口径）：
+      · 只换**明显更近**的：新距离 ≤ 老距离 × (1 - min_gain_ratio)，且新距离 ≤ 阈值；
+      · 候选必须来自**真实的周边检索**（调用方注入 `fetch_nearby`），同名不重复，绝不编造；
+      · 每晚仍然**一家**、入住时刻沿用原来那一刻（门禁的夜晚槽位不变）；
+      · 查不到更好的 → 如实记进 `skipped`（含"现在多远"），不改动。
+
+    返回 `{plan, actions, skipped, changed}`。
+    """
+    from .increment import build_node_from_candidate
+    from .plan_quality import haversine_km, node_day, node_lnglat
+
+    nodes = [dict(node) for node in (nodes_of(route) if isinstance(route, Mapping) else (route or []))]
+    if not nodes:
+        return {"plan": {"route": nodes}, "actions": [], "skipped": [], "changed": False}
+    used = {str(node.get("name") or "").strip() for node in nodes}
+    actions: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    measured: List[Dict[str, Any]] = []
+    changed = False
+
+    for day in range(1, max(1, int(days or 1)) + 1):
+        day_nodes = [node for node in nodes if node_day(node, 1) == day]
+        if not day_nodes:
+            continue
+        hotels = [node for node in day_nodes if _intent_of_node(node) == "hotel"]
+        if not hotels:
+            # 这一晚没有酒店节点（不需要住 / 还没排）—— 记下来，便于事后回答"为什么没查这天"
+            measured.append({"day": day, "status": "no_hotel"})
+            continue
+        plays = [
+            node
+            for node in day_nodes
+            if _intent_of_node(node) not in {"food", "hotel"} and node_lnglat(node)
+        ]
+        if not plays:
+            measured.append({"day": day, "status": "no_play_with_coords", "hotel": str(hotels[0].get("name") or "")})
+            continue
+        coords = [node_lnglat(node) for node in plays]
+        center = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        hotel = hotels[0]
+        hotel_coord = node_lnglat(hotel)
+        if not hotel_coord:
+            measured.append({"day": day, "status": "no_hotel_coord", "hotel": str(hotel.get("name") or "")})
+            continue
+        current_km = float(haversine_km(center, hotel_coord))
+        measured.append(
+            {"day": day, "hotel": str(hotel.get("name") or ""), "km": round(current_km, 1), "plays": len(plays)}
+        )
+        if current_km <= float(threshold_km):
+            continue
+        try:
+            rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
+        except Exception as exc:
+            skipped.append({"day": day, "current_km": round(current_km, 1), "error": f"{type(exc).__name__}: {str(exc)[:80]}"})
+            continue
+        best = None
+        best_km = None
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("name") or "").strip()
+            coord = node_lnglat(row)
+            if not name or not coord or name in used:
+                continue
+            km = float(haversine_km(center, coord))
+            if km > float(threshold_km):
+                continue
+            if best_km is None or km < best_km:
+                best, best_km = dict(row), km
+        if best is None or best_km is None or best_km > current_km * (1 - float(min_gain_ratio)):
+            skipped.append(
+                {
+                    "day": day,
+                    "current_km": round(current_km, 1),
+                    "nearest_km": round(best_km, 1) if best_km is not None else None,
+                    "reason": "周边没有明显更近的真实住宿，保持原样",
+                }
+            )
+            continue
+        replacement = build_node_from_candidate(best, day, "21:00", "hotel")
+        replacement["time"] = str(hotel.get("time") or f"Day {day} | 21:00 入住")
+        replacement["replaced_lodging"] = str(hotel.get("name") or "")
+        nodes = [replacement if node is hotel else node for node in nodes]
+        used.add(str(best.get("name") or "").strip())
+        changed = True
+        actions.append(
+            {
+                "day": day,
+                "from": str(hotel.get("name") or ""),
+                "to": str(best.get("name") or ""),
+                "from_km": round(current_km, 1),
+                "to_km": round(best_km, 1),
+            }
+        )
+    return {"plan": {"route": nodes}, "actions": actions, "skipped": skipped, "measured": measured, "changed": changed}
+
+
 def fill_structural_gaps(
     context: Mapping[str, Any],
     plan: Any,

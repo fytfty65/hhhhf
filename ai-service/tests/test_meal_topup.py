@@ -258,5 +258,121 @@ class NearbyFoodCandidatesTests(unittest.TestCase):
         self.assertLess(added[0]["distance_km"], 30.0)
 
 
+class LodgingGeographyTests(unittest.TestCase):
+    """住得太远就换成当天玩点附近的（2026-10-07：伊宁 anchoring=0.143）。
+
+    真实数据：第 1 天玩点在英塔木镇（天鹅泉/马场），酒店却在 38.5km 外的市区；
+    `ensure_lodging_per_night` 只在**缺夜**时按"离当天最近"补，已经有酒店的那一晚没人回头看。
+    """
+
+    def _route(self):
+        return [
+            {"day": 1, "name": "天鹅泉湿地公园", "type": "风景名胜", "lnglat": [81.65, 43.70]},
+            {"day": 1, "name": "甲餐馆", "type": "餐饮服务", "lnglat": [81.65, 43.70]},
+            {
+                "day": 1,
+                "name": "市区大酒店",
+                "type": "住宿服务",
+                "is_hotel": True,
+                "lnglat": [81.30, 43.94],
+                "time": "Day 1 | 21:30 入住",
+            },
+            {"day": 2, "name": "伊犁河景区", "type": "风景名胜", "lnglat": [81.29, 43.89]},
+            {
+                "day": 2,
+                "name": "河边民宿",
+                "type": "住宿服务",
+                "is_hotel": True,
+                "lnglat": [81.29, 43.89],
+                "time": "Day 2 | 21:30 入住",
+            },
+        ]
+
+    def test_a_far_hotel_is_replaced_by_a_nearby_real_one(self):
+        import asyncio
+
+        from core.plan_review import adjust_lodging_by_geography
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [{"name": "英塔木镇民宿", "type": "住宿服务", "lnglat": [81.66, 43.71]}]
+
+        result = asyncio.run(
+            adjust_lodging_by_geography(self._route(), days=2, fetch_nearby=fake_nearby, threshold_km=15.0)
+        )
+        self.assertTrue(result["changed"])
+        action = result["actions"][0]
+        self.assertEqual(action["day"], 1)
+        self.assertEqual(action["to"], "英塔木镇民宿")
+        self.assertGreater(action["from_km"], 30)
+        self.assertLess(action["to_km"], 5)
+        names = [node["name"] for node in result["plan"]["route"]]
+        self.assertNotIn("市区大酒店", names)
+        self.assertIn("河边民宿", names, "本来就近的那晚不许动")
+        hotel = next(node for node in result["plan"]["route"] if node["name"] == "英塔木镇民宿")
+        self.assertEqual(hotel["time"], "Day 1 | 21:30 入住", "入住时刻要沿用原来那一刻")
+
+    def test_a_slightly_closer_hotel_is_not_worth_swapping(self):
+        """明显更近才换（跟按地理分天同一个谨慎口径）：只近一点点不值得让用户看到换店。
+
+        这里酒店离玩点约 18km（刚超过 15km 阈值），周边最近的约 12km —— 近了但不到 40%，不换。
+        """
+        import asyncio
+
+        from core.plan_review import adjust_lodging_by_geography
+
+        route = [
+            {"day": 1, "name": "天鹅泉湿地公园", "type": "风景名胜", "lnglat": [81.65, 43.70]},
+            {
+                "day": 1,
+                "name": "稍远酒店",
+                "type": "住宿服务",
+                "is_hotel": True,
+                "lnglat": [81.44, 43.78],
+                "time": "Day 1 | 21:30 入住",
+            },
+            {"day": 2, "name": "伊犁河景区", "type": "风景名胜", "lnglat": [81.29, 43.89]},
+        ]
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [{"name": "半路客栈", "type": "住宿服务", "lnglat": [81.50, 43.75]}]
+
+        result = asyncio.run(
+            adjust_lodging_by_geography(route, days=1, fetch_nearby=fake_nearby, threshold_km=15.0)
+        )
+        self.assertFalse(result["changed"], result["actions"])
+        self.assertEqual(result["skipped"][0]["day"], 1)
+        self.assertGreater(result["skipped"][0]["current_km"], 15.0)
+        self.assertIsNotNone(result["skipped"][0]["nearest_km"])
+
+    def test_nothing_happens_when_the_search_finds_nothing(self):
+        import asyncio
+
+        from core.plan_review import adjust_lodging_by_geography
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return []
+
+        result = asyncio.run(
+            adjust_lodging_by_geography(self._route(), days=2, fetch_nearby=fake_nearby, threshold_km=15.0)
+        )
+        self.assertFalse(result["changed"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual([node["name"] for node in result["plan"]["route"]][2], "市区大酒店")
+
+    def test_a_failing_search_leaves_the_plan_alone(self):
+        import asyncio
+
+        from core.plan_review import adjust_lodging_by_geography
+
+        async def fake_nearby(center, keywords, **kwargs):
+            raise RuntimeError("高德限流")
+
+        result = asyncio.run(
+            adjust_lodging_by_geography(self._route(), days=2, fetch_nearby=fake_nearby, threshold_km=15.0)
+        )
+        self.assertFalse(result["changed"])
+        self.assertTrue(result["skipped"][0].get("error"))
+
+
 if __name__ == "__main__":
     unittest.main()

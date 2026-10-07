@@ -492,6 +492,32 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.66) 住宿就近换店（2026-10-07 实测）：伊宁第 1 天玩点在英塔木镇、酒店在 38.5km 外的市区。
+    #       换过要说（用户看到"酒店怎么变了"时有据可查）；换不动（周边没有明显更近的真实住宿）
+    #       也要说 —— 否则用户以为我们没查。
+    lodging_adjust = _as_mapping(data.get("lodging_geo_adjust"))
+    for item in (lodging_adjust.get("actions") or [])[:2]:
+        if not isinstance(item, Mapping):
+            continue
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                f"第 {item.get('day')} 天的住宿换成了离当天玩点更近的："
+                f"{item.get('from')}（{item.get('from_km')}km）→ {item.get('to')}（{item.get('to_km')}km）",
+            )
+        )
+    for item in (lodging_adjust.get("skipped") or [])[:2]:
+        if not isinstance(item, Mapping) or not item.get("reason"):
+            continue
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                f"第 {item.get('day')} 天的住宿离当天玩点约 {item.get('current_km')}km：{item.get('reason')}",
+            )
+        )
+
     # 3.9) 高德被限流（2026-10-05）：限流会**静默让候选变少** —— 看起来像"这城市没什么景点"，
     #      必须说出来，否则用户会把"供应商限流"读成"这里没得玩"。
     gate = _as_mapping(data.get("amap_gate"))

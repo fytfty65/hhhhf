@@ -7578,6 +7578,129 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _coord_fill_exc:  # 补坐标失败不影响出方案
                             print(f"⚠️ [坐标补齐] 失败（不影响出方案）: {_coord_fill_exc}", flush=True)
 
+
+                        # 👑 住宿离当天玩点太远就换成附近的（2026-10-07：伊宁 anchoring=0.143，
+                        #    第 1 天玩点在英塔木镇、酒店在 38.5km 外的市区，第 2 天 46.9km）。
+                        #    `ensure_lodging_per_night` 只在缺夜时按"离当天最近"补 ——
+                        #    已经有酒店的那一晚没人回头看它远不远，这里补上这一眼。
+                        # ⚠️ **必须放在「坐标补齐」之后**（2026-10-07 实测踩到的顺序坑）：
+                        #    放在取价之前时，那一晚的酒店那时**还没有坐标**
+                        #    （日志原话：`第 1 天 跳过（no_hotel_coord）`）—— 坐标是"按名字在高德查一次"
+                        #    那一步才拿到的，于是"离玩点多远"根本量不出来，38.5km 外的酒店就漏过去了。
+                        #    换过店之后**再把这个新酒店单独问一次供应商价**（补回顺序带来的缺口）。
+                        try:
+                            from core.plan_review import adjust_lodging_by_geography as _adjust_lodging
+
+                            _lodging_fetch = getattr(toolbox, "get_nearby_pois", None)
+                            if _lodging_fetch:
+                                # ⚠️ 住宿的**距离阈值不跟着"不介意跑远"放宽**：那句话说的事是
+                                #    "一天可以开很远"，不是"住得离玩点很远没关系"。住得近是质量目标，
+                                #    跟里程容忍度无关 —— 否则会出现"用户说能跑远，我们就把 38km 外的
+                                #    酒店留着"（伊宁第 1 天就是这样，尺子照旧判它不合格）。
+                                _lodging_fix = await asyncio.wait_for(
+                                    _adjust_lodging(
+                                        final_data.get("route") or [],
+                                        days=trip_days,
+                                        fetch_nearby=_lodging_fetch,
+                                        threshold_km=15.0,
+                                        radius_km=25.0,
+                                    ),
+                                    timeout=POOL_FETCH_TIMEOUT_SECONDS,
+                                )
+                                if _lodging_fix.get("measured"):
+                                    # 逐晚**量出来的距离**都要留痕：不然"为什么这一晚没换"
+                                    # 事后无法回答（实测就是这么卡住的）
+                                    print(
+                                        "🏨 [住宿就近] 各晚距当天玩点："
+                                        + "、".join(
+                                            (
+                                                f"第 {item['day']} 天 {item['km']}km"
+                                                if item.get("km") is not None
+                                                else f"第 {item['day']} 天 跳过（{item.get('status')}）"
+                                            )
+                                            for item in _lodging_fix["measured"]
+                                        ),
+                                        flush=True,
+                                    )
+                                if _lodging_fix.get("changed"):
+                                    final_data["route"] = order_route_by_day(_lodging_fix["plan"]["route"])
+                                    final_data["lodging_geo_adjust"] = {
+                                        "actions": _lodging_fix["actions"],
+                                        "skipped": _lodging_fix.get("skipped") or [],
+                                    }
+                                    print(
+                                        "🏨 [住宿就近] 换掉太远的那晚："
+                                        + "、".join(
+                                            f"第 {item['day']} 天 {item['from']}（{item['from_km']}km）→ "
+                                            f"{item['to']}（{item['to_km']}km）"
+                                            for item in _lodging_fix["actions"][:2]
+                                        ),
+                                        flush=True,
+                                    )
+                                    # 换过的酒店**现在**才存在，所以单独问一次供应商价：
+                                    # 不查就只能是"暂无供应商数据"，而那本来是能查到的（顺序问题，不是数据问题）。
+                                    try:
+                                        from core.rollinggo_mcp import price_lodging_nodes as _price_swapped
+
+                                        _swapped_names = {
+                                            str(item.get("to") or "") for item in _lodging_fix["actions"]
+                                        }
+                                        _swapped_nodes = [
+                                            node
+                                            for node in (final_data.get("route") or [])
+                                            if str(node.get("name") or "") in _swapped_names
+                                        ]
+                                        if _swapped_nodes:
+                                            _swapped_price = await asyncio.wait_for(
+                                                _price_swapped(
+                                                    {"route": _swapped_nodes},
+                                                    city=target_city,
+                                                    nights=1,
+                                                    start_date=str(user_prefs.get("start_date") or ""),
+                                                    limit=1,
+                                                ),
+                                                timeout=25.0,
+                                            )
+                                            _priced = {
+                                                str(node.get("name") or ""): node
+                                                for node in ((_swapped_price.get("plan") or {}).get("route") or [])
+                                            }
+                                            if _priced:
+                                                final_data["route"] = [
+                                                    _priced.get(str(node.get("name") or ""), node)
+                                                    for node in (final_data.get("route") or [])
+                                                ]
+                                            _swapped_report = _swapped_price.get("report") or {}
+                                            final_data["price_audit"] = {
+                                                **(final_data.get("price_audit") or {}),
+                                                "rollinggo_after_lodging_swap": _swapped_report,
+                                            }
+                                            print(
+                                                "🏨 [住宿就近·补价] 换过的酒店单独查了一次："
+                                                f"查 {_swapped_report.get('queried', 0)} 家、"
+                                                f"给出数字 {_swapped_report.get('with_price', 0)} 家",
+                                                flush=True,
+                                            )
+                                    except Exception as _swapped_exc:  # 补价失败不影响出方案
+                                        print(
+                                            f"⚠️ [住宿就近·补价] 失败（新酒店价格按未核实处理）: {_swapped_exc}",
+                                            flush=True,
+                                        )
+                                elif _lodging_fix.get("skipped"):
+                                    final_data["lodging_geo_adjust"] = {
+                                        "actions": [],
+                                        "skipped": _lodging_fix["skipped"],
+                                    }
+                                    for _item in _lodging_fix["skipped"][:2]:
+                                        if _item.get("reason"):
+                                            print(
+                                                f"🏨 [住宿就近] 第 {_item.get('day')} 天住宿距玩点 "
+                                                f"{_item.get('current_km')}km：{_item.get('reason')}",
+                                                flush=True,
+                                            )
+                        except Exception as _lodging_exc:  # 住宿就近失败不影响出方案
+                            print(f"⚠️ [住宿就近] 失败（不影响出方案）: {_lodging_exc}", flush=True)
+
                         # 👑 可选住宿的**通勤距离**：只按价格/星级排是不够的（`anchoring` 实测掉到 0.8），
                         #    价格可比、距离也要可比 —— 用户才知道"这家便宜 60 块，但离玩点多 30km"。
                         try:
