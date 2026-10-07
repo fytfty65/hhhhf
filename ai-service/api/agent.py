@@ -247,12 +247,84 @@ def _amap_gate_lock() -> asyncio.Lock:
 
 
 def amap_min_interval_seconds() -> float:
+    """闸门的**下限**间隔（可配，默认 0.15s）。自适应退避只会把它调大，不会调小到它以下。"""
     raw = str(os.getenv("AMAP_MIN_INTERVAL_SECONDS") or "").strip()
     try:
         value = float(raw)
     except ValueError:
         return 0.15
     return value if value >= 0 else 0.15
+
+
+def amap_max_interval_seconds() -> float:
+    """退避上限（默认 2.0s）：再慢也得能跑完一次规划。"""
+    raw = str(os.getenv("AMAP_MAX_INTERVAL_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 2.0
+    floor = amap_min_interval_seconds()
+    return value if value >= floor else floor
+
+
+# —— 高德闸门的**自适应退避**状态（2026-10-05）——
+# 为什么固定间隔不够：这把 key 的 QPS 档位是**外部事实**，而且会随时间/配额变化。
+# 实测（tools/probe_hotel_geocode.py）固定 0.15s 时连"酒店"这种宽关键词都回
+# CUQPS_HAS_EXCEEDED_THE_LIMIT、静默返回 0 条 —— 候选池因此凭空变小，
+# 而方案里看不出任何异样（"这里好像没什么景点"）。
+# 做法：被限流就把间隔**翻倍**（翻到上限为止），成功一次就回落一点（不低于下限）。
+# 全部状态都暴露出来（`amap_gate_state()`），日志与方案里能如实说"这轮被限流过几次"。
+_AMAP_THROTTLE: Dict[str, Any] = {"interval": 0.0, "limits": 0, "requests": 0, "last_limit_at": 0.0}
+
+
+def note_amap_result(ok: bool, *, info: str = "", now: Optional[float] = None) -> float:
+    """上报一次高德调用的结果，返回**下一次要用的间隔**。
+
+    - 失败（限流/其它错误）：间隔 ×2（上限 `amap_max_interval_seconds()`）；
+    - 成功：间隔 ×0.8（下限 `amap_min_interval_seconds()`）——慢慢回落，不立刻打回原形，
+      否则"刚被限流又立刻全速"会震荡。
+    """
+    moment = float(now if now is not None else time.monotonic())
+    floor = amap_min_interval_seconds()
+    ceiling = amap_max_interval_seconds()
+    current = float(_AMAP_THROTTLE.get("interval") or 0.0) or floor
+    _AMAP_THROTTLE["requests"] = int(_AMAP_THROTTLE.get("requests") or 0) + 1
+    if ok:
+        current = max(floor, current * 0.8)
+    else:
+        current = min(ceiling, max(floor, current) * 2.0)
+        _AMAP_THROTTLE["limits"] = int(_AMAP_THROTTLE.get("limits") or 0) + 1
+        _AMAP_THROTTLE["last_limit_at"] = moment
+        if info:
+            _AMAP_THROTTLE["last_info"] = str(info)[:120]
+        print(f"🚦 [高德闸门] 被限流（{str(info)[:60]}）→ 间隔退避到 {current:.2f}s", flush=True)
+    _AMAP_THROTTLE["interval"] = current
+    return current
+
+
+def amap_throttle_interval_seconds() -> float:
+    """当前生效的间隔（没退避过就是下限）。"""
+    floor = amap_min_interval_seconds()
+    return float(_AMAP_THROTTLE.get("interval") or 0.0) or floor
+
+
+def amap_gate_state() -> Dict[str, Any]:
+    """闸门状态：当前间隔 / 这轮被限流几次 / 发过几次请求（供日志与方案披露）。"""
+    floor = amap_min_interval_seconds()
+    interval = amap_throttle_interval_seconds()
+    return {
+        "interval_seconds": round(interval, 3),
+        "base_interval_seconds": round(floor, 3),
+        "throttled": interval > floor + 1e-9,
+        "limits": int(_AMAP_THROTTLE.get("limits") or 0),
+        "requests": int(_AMAP_THROTTLE.get("requests") or 0),
+        "last_info": str(_AMAP_THROTTLE.get("last_info") or ""),
+    }
+
+
+def reset_amap_throttle() -> None:
+    _AMAP_THROTTLE.update({"interval": 0.0, "limits": 0, "requests": 0, "last_limit_at": 0.0})
+    _AMAP_THROTTLE.pop("last_info", None)
 
 
 class AmapGate:
@@ -278,7 +350,9 @@ class AmapGate:
         _AMAP_GATE_STATS["count"] = float(_AMAP_GATE_STATS.get("count") or 0.0) + 1.0
         _AMAP_GATE_STATS["wait"] = float(_AMAP_GATE_STATS.get("wait") or 0.0) + (time.monotonic() - _wait_started)
         try:
-            gap = amap_min_interval_seconds() - (time.monotonic() - float(_AMAP_LAST_AT_BY_LOOP.get(key) or 0.0))
+            # 用**自适应间隔**（被限流就退避、成功再回落），而不是写死的 0.15s ——
+            # 这把 key 的 QPS 档位是外部事实，固定间隔在它变紧时会静默丢整条查询。
+            gap = amap_throttle_interval_seconds() - (time.monotonic() - float(_AMAP_LAST_AT_BY_LOOP.get(key) or 0.0))
             if gap > 0:
                 await asyncio.sleep(gap)
             _AMAP_LAST_AT_BY_LOOP[key] = time.monotonic()
@@ -1719,8 +1793,12 @@ class ExpertToolbox:
                         data = resp.json()
                         _note_fetch("place/text(请求)", time.monotonic() - _fetch_started)
                     if str(data.get("status")) == "1":
+                        note_amap_result(True)
                         break
                     info = str(data.get("info") or "")
+                    # 把结果告诉闸门：被限流就自动退避（下一次间隔翻倍），
+                    # 否则"固定 0.15s"会在 key 的 QPS 变紧时继续硬撞、静默丢整条查询
+                    note_amap_result(False, info=info)
                     if attempt == 0 and amap_error_is_retryable(info):
                         print(f"⚠️ [POI 检索] 高德限流（{info}），city={city} keywords={keywords!r} 等 1.2s 重试一次", flush=True)
                         await asyncio.sleep(1.2)
@@ -1849,8 +1927,12 @@ class ExpertToolbox:
                         except Exception as e:
                             print(f"🔥 [实景图增强异常]: {e}")
                     # 只缓存**成功且非空**的结果：失败/空结果不缓存，
-                    # 否则一次限流会被固化半小时（"这里没有 POI"的假象）
-                    _poi_cache_set(_cache_key, pois)
+                    # 否则一次限流会被固化半小时（"这里没有 POI"的假象）。
+                    # ⚠️ 原来这里**无条件** `_poi_cache_set`（注释写着"只缓存非空"、代码没做）——
+                    #    限流/报错时 `pois` 是空列表，于是被当成"这城市没有 POI"缓存 30 分钟，
+                    #    后续所有相同查询都拿到空结果（实测：探针连续几轮全 0 条）。
+                    if pois:
+                        _poi_cache_set(_cache_key, pois)
                     return pois
             except Exception as e:
                 print(f"🔥 [POI抓取异常]: {e}")
@@ -1946,7 +2028,17 @@ class ExpertToolbox:
         """
         _kind = url.rsplit("/", 1)[-1] or "amap"
         async with AmapGate(_kind):
-            return await http_client.get(url, **kwargs)
+            response = await http_client.get(url, **kwargs)
+        # 让闸门知道这一条成没成（限流就退避）：响应体已被 httpx 读完并缓存，
+        # 调用方后面再 `.json()` 不受影响。
+        try:
+            _payload = response.json()
+            note_amap_result(
+                str(_payload.get("status")) == "1", info=str(_payload.get("info") or "")
+            )
+        except Exception:
+            pass
+        return response
 
     async def _collect_travel_options(self, http_client, tasks, names, cache_key: str) -> Dict[str, Any]:
         try:
@@ -2250,7 +2342,11 @@ class SemanticItineraryCache:
         # 换了模型之后用户拿到的还是旧模型缓存的那份方案 —— "切换模型"这件事在
         # 真实验收里就不可观测了（冷跑会被缓存秒回掩盖）。换模型即失效，代价只是
         # 重算一次，换来的是"所见即本次模型产出"。
-        raw = f"v6|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v7：缓存里装的是**整份 payload**（含 `route` 的坐标、`quality` 的分数与明细），
+        #    而这两块刚修了两个"结论早于最终路线"的错（缺坐标住宿补的坐标没写回路线、
+        #    质量分在收口前就算完了）。旧条目里的这两项**已知是错的**，继续命中就是拿
+        #    错数据骗人（实测：同样的诉求秒回 394ms，日志里没有「📐 [质量重算]」）。
+        raw = f"v7|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
         if self.debug:
             # 缓存命中率低时，第一件要知道的事就是"键为什么不一样"：
             # 把参与哈希的原文打出来（只在本进程日志里），两次同样的请求一比就知道。
@@ -2360,6 +2456,10 @@ async def run_negotiate(msg: GatewayMessage):
 
     reset_fetch_timing()
     reset_pool_cache_stats()
+    # 闸门退避状态**不重置**（它是跨请求的进程级状态：这把 key 的 QPS 档位是外部事实，
+    # 上一次被限流说明下一条请求也该慢一点），但每次请求记下**本轮**的限流次数，
+    # 好让方案里如实说"这一轮被限流过几次"（而不是只报一个进程累计值）。
+    _amap_limits_at_start = int(amap_gate_state().get("limits") or 0)
     _stage_marks: Dict[str, float] = {"开始": _stage_time.monotonic()}
 
     def _stage(name: str) -> None:
@@ -5152,6 +5252,14 @@ async def run_negotiate(msg: GatewayMessage):
 
                     # 回发校正后的最终路线，前端以 final_route 为准（真实图片/坐标/完整天数）
                     # 🧠 智能时间管理：注入节奏判断 + 周一闭馆感知
+                    # 👑 收口之后要按**最终路线**重算质量分（与 degradations/facts 同一处、同一理由）：
+                    #    重算需要这一段里的 context/signals/候选池，但它们只在这个分支里才被赋值，
+                    #    所以先在分支开头置空 —— 否则"分支没走到却引用"会抛 NameError，
+                    #    而重算又包在 `except: print` 里，会**静默**变成"没重算"。
+                    _quality_context_for_final: Optional[Dict[str, Any]] = None
+                    _quality_signals_for_final: Optional[Dict[str, Any]] = None
+                    _quality_increment_for_final: Optional[Dict[str, Any]] = None
+                    _quality_pool_for_final: Optional[Dict[str, Any]] = None
                     if isinstance(final_data.get("route"), list):
                         final_data["pace_profile"] = analyze_pace(trip_days, len(final_data["route"]), intent_str)
                         final_data["monday_closure_notes"] = monday_closure_notes(final_data["route"])
@@ -5485,6 +5593,12 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["quality"] = _snapshot["quality"]
                             final_data["budget_report"] = _snapshot["budget"]
                             final_data["horizon"] = _snapshot["horizon"]
+                            # 记下这次快照的输入：收口之后（换近点/补坐标/查实价）路线还会变，
+                            # 出稿前要用**同一批输入**重算一次，否则面板上的分数与最终路线对不上。
+                            _quality_context_for_final = _quality_context
+                            _quality_signals_for_final = _quality_signals
+                            _quality_increment_for_final = _refinement_delta
+                            _quality_pool_for_final = _pool if _pool else None
                             # 👎 反馈落地情况随方案下发：用户点的"不喜欢"到底改了没有，
                             # 必须能看见（没渲染出来的"已按你的反馈修正"等于没做）。
                             if feedback_exclude_names or (feedback_signals.get("notes") or []):
@@ -6902,7 +7016,10 @@ async def run_negotiate(msg: GatewayMessage):
                         try:
                             from core.place_quality import nodes_missing_coordinates
 
-                            _coord_gap = nodes_missing_coordinates(final_data, only_lodging=True)[:3]
+                            # ⚠️ 必须 `copy=False`（2026-10-05 实测抓到）：默认返回的是**浅拷贝**，
+                            #    改拷贝写不回 `final_data["route"]` —— 日志会骗人（打了"补到 1 个"，
+                            #    payload 里还是 `lnglat: []`，`anchoring` 也没变）。见 nodes_of 的说明。
+                            _coord_gap = nodes_missing_coordinates(final_data, only_lodging=True, copy=False)[:3]
                             _coord_filled: List[str] = []
                             _coord_failed: List[str] = []
                             for _node in _coord_gap:
@@ -6911,8 +7028,15 @@ async def run_negotiate(msg: GatewayMessage):
                                     continue
                                 _found: List[float] = []
                                 try:
+                                    # ⚠️ **必须显式 `play_worthy=False`**（2026-10-05 实测）：
+                                    #    `is_play_worthy` 会把"住宿服务"整类当非玩点丢掉，
+                                    #    于是"按名字查酒店"永远 0 条 —— 我一开始把它误判成
+                                    #    "高德没有这家/被限流"，探针一比对才看清是过滤器的问题
+                                    #    （`tools/probe_hotel_play_worthy.py`：同一个名字
+                                    #    play_worthy=True 回 0 条、False 回 1 条且带坐标）。
+                                    #    有 keywords 时也不要再传 types（会把关键词相关性打没）。
                                     _pois = await toolbox.get_dynamic_pois(
-                                        target_city, keywords=_node_name, types="100000", limit=3
+                                        target_city, keywords=_node_name, limit=3, play_worthy=False
                                     )
                                 except Exception:
                                     _pois = []
@@ -6941,9 +7065,9 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["coordinate_backfill"] = {
                                     "filled": _coord_filled,
                                     "failed": _coord_failed,
-                                    "note": "缺坐标的住宿按名字在高德补了一次。补到的标 coordinate_source=amap_lookup；"
-                                    "没补到的仍是缺失（**不编坐标**）。没补到的原因我们分不清是"
-                                    "「高德限流」还是「高德没有这家」——两种都如实留在这里，不猜。",
+                                    "note": "缺坐标的住宿按名字在高德补了一次（`play_worthy=False`，否则住宿会被当非玩点整类丢掉）。"
+                                    "补到的标 coordinate_source=amap_lookup；没补到的仍是缺失（**不编坐标**）——"
+                                    "没补到就是高德按这个名字也查不到（或查询被限流），两种可能我们分不清，不猜。",
                                 }
                                 print(
                                     "📍 [坐标补齐] 按名字补到 "
@@ -7077,6 +7201,70 @@ async def run_negotiate(msg: GatewayMessage):
                             )
                     except Exception as _balance_recheck_exc:  # 重算失败不影响出方案
                         print(f"⚠️ [每日密度] 收口后重算失败: {_balance_recheck_exc}", flush=True)
+
+                    # 👑 质量分也必须按**最终路线**重算（2026-10-05 实测抓到，与下面两步同一类错）
+                    #    上面 `final_data["quality"]` 是治理快照阶段算的，之后的收口还会改路线：
+                    #    移出跑不了的远景点、按"不想跑远"就地换近点、给缺坐标的住宿按名字补坐标、
+                    #    查实时房价（`cost_estimate` 从估算变可核实）。
+                    #    实测症状：运行日志打了「📍 [坐标补齐] 按名字补到 1 个（喀什古城步行街亚朵酒店）」，
+                    #    但 payload 里 `quality.anchoring.coordinate_coverage` 还是补之前的 0.833，
+                    #    前端因此仍然提示"这批吃住点没坐标" —— **做了但没算进去**。
+                    #    重算是纯确定性、零网络、不改路线的，所以直接按最终路线再算一遍。
+                    try:
+                        if _quality_context_for_final is None:
+                            pass  # 没有质量上下文（这条路没走到治理阶段）→ 保持原样，不猜
+                        else:
+                            from core.planning_governance import refresh_snapshot as _refresh_quality_snapshot
+
+                            _final_snapshot = _refresh_quality_snapshot(
+                                _quality_context_for_final,
+                                final_data,
+                                signals=_quality_signals_for_final,
+                                increment=_quality_increment_for_final,
+                                candidates_by_intent=_quality_pool_for_final,
+                            )
+                            _quality_before = (final_data.get("quality") or {}).get("score")
+                            final_data["quality"] = _final_snapshot["quality"]
+                            final_data["budget_report"] = _final_snapshot["budget"]
+                            # `horizon`（含长途衔接顾问）也是从路线推出来的，一起按最终路线刷新
+                            final_data["horizon"] = _final_snapshot["horizon"]
+                            _anchor_after = _final_snapshot["quality"].get("anchoring") or {}
+                            print(
+                                "📐 [质量重算] 按最终路线重算：score="
+                                f"{_quality_before} → {_final_snapshot['quality'].get('score')}"
+                                f"，anchoring={(_final_snapshot['quality'].get('dimensions') or {}).get('anchoring')}"
+                                f"，坐标覆盖={_anchor_after.get('coordinate_coverage')}",
+                                flush=True,
+                            )
+                    except Exception as _quality_recheck_exc:
+                        print(f"⚠️ [质量重算] 收口后重算失败: {_quality_recheck_exc}", flush=True)
+
+                    # 👑 高德闸门状态先登记（2026-10-05 实测抓到顺序错了）：这一轮被限流几次、
+                    #    闸门退避到多少秒。限流会**静默让候选变少**（看起来像"这城市没什么景点"）——
+                    #    用户与我们都需要知道"这次是不是因为被限流才薄"。
+                    # ⚠️ 必须在下面「披露按最终路线重算」**之前**登记：原来它排在重算之后，
+                    #    于是 `amap_gate` 进了 payload、`degradations` 里却没有这条 ——
+                    #    面板上「遗留问题」把限流整条漏掉，**该说的没说**（实测喀什 turbo25 复现）。
+                    #    （之后只剩"路网与推送"还会打高德，那一步只画线、不影响候选多少。）
+                    try:
+                        _gate_state = amap_gate_state()
+                        _gate_limits_this_round = max(
+                            0, int(_gate_state.get("limits") or 0) - int(_amap_limits_at_start)
+                        )
+                        if _gate_limits_this_round or _gate_state.get("throttled"):
+                            final_data["amap_gate"] = {
+                                **_gate_state,
+                                "limits_this_round": _gate_limits_this_round,
+                                "note": "高德请求被限流过，闸门已自动放慢间隔；候选可能因此变少（不是这座城市没有景点）。",
+                            }
+                            print(
+                                f"🚦 [高德闸门] 本轮限流 {_gate_limits_this_round} 次，"
+                                f"间隔已退避到 {_gate_state.get('interval_seconds')}s"
+                                f"（基准 {_gate_state.get('base_interval_seconds')}s）",
+                                flush=True,
+                            )
+                    except Exception:  # 闸门状态只是观测，取不到不影响出方案
+                        pass
 
                     # 👑 披露与事实快照必须按**最终路线**重算（2026-10-05 实测抓到）
                     #    上面那两处登记（degradations / facts）跑在"最终均衡门禁 + 出稿前硬约束收口"

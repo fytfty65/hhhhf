@@ -146,6 +146,36 @@ async def prepare_governance(
     }
 
 
+def refresh_snapshot(
+    context: Mapping[str, Any],
+    plan: Any,
+    *,
+    signals: Optional[Mapping[str, Any]] = None,
+    expectations: Optional[Mapping[str, Any]] = None,
+    increment: Optional[Mapping[str, Any]] = None,
+    candidates_by_intent: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """按**当前（最终）路线**重算质量快照 —— 收口之后调用。
+
+    为什么需要（2026-10-05 实测）：`prepare_governance` 的快照是在方案还没收口时算的，
+    之后路线还会被改动（移出跑不了的远景点、按用户口径就近替换、给缺坐标的住宿补坐标、
+    查实时房价），于是 payload 里的分数/覆盖率和**真正的最终路线**对不上 ——
+    实测症状：日志说「按名字补到 1 个」坐标，`quality.anchoring.coordinate_coverage`
+    仍然是补之前的 0.833，用户看到的还是"这个点没坐标"。
+
+    纯确定性、零网络、不改 `plan`；参数口径与 `prepare_governance` 保持一致
+    （同一份 context/signals、同一个 `tier_policy`、同一批候选池），所以重算前后可比。
+    """
+    return plan_quality_snapshot(
+        context,
+        plan,
+        expectations=expectations,
+        signals=signals,
+        candidates_by_intent=candidates_by_intent or None,
+        tier_policy=tier_policy(increment or {}),
+    )
+
+
 def fallback_with_pool(
     context: Mapping[str, Any],
     plan: Any,

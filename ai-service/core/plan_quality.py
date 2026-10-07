@@ -135,8 +135,17 @@ def parse_open_window(value: Any) -> Optional[Tuple[int, int]]:
     return None
 
 
-def nodes_of(plan: Any) -> List[Dict[str, Any]]:
-    """把 plan 里的 route 节点摊平（容忍 route/nodes/days 等结构差异）。"""
+def nodes_of(plan: Any, *, copy: bool = True) -> List[Dict[str, Any]]:
+    """把 plan 里的 route 节点摊平（容忍 `route`/`nodes` 两种字段名、以及 list-of-list 的嵌套）。
+
+    （原注释写的是"容忍 route/nodes/days" —— 但代码其实**不认 `days`**，这里改成如实描述；
+    实际链路上 `final_data` 一定有 `route`，所以没造成过错，只是注释不能比代码多。）
+
+    `copy`（2026-10-05 实测补的）：默认 `True` 返回**浅拷贝**，读/算分时改动不会污染方案；
+    但"就地补字段"的调用方（例如按名字给住宿补坐标）**必须传 `copy=False`**，
+    否则改的是拷贝，落不到 `final_data["route"]` 上 —— 实测症状是运行日志明明打了
+    「📍 [坐标补齐] 按名字补到 1 个」，最终 payload 里那个住宿节点仍然是 `lnglat: []`。
+    """
     if not isinstance(plan, Mapping):
         return []
     raw = plan.get("route") or plan.get("nodes") or []
@@ -145,11 +154,11 @@ def nodes_of(plan: Any) -> List[Dict[str, Any]]:
     nodes: List[Dict[str, Any]] = []
     for item in raw if isinstance(raw, Sequence) and not isinstance(raw, str) else []:
         if isinstance(item, Mapping):
-            nodes.append(dict(item))
+            nodes.append(dict(item) if copy else item)  # type: ignore[arg-type]
         elif isinstance(item, Sequence) and not isinstance(item, str):
             for nested in item:
                 if isinstance(nested, Mapping):
-                    nodes.append(dict(nested))
+                    nodes.append(dict(nested) if copy else nested)  # type: ignore[arg-type]
     return nodes
 
 

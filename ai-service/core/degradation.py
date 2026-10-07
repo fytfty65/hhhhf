@@ -33,6 +33,11 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "高德地点数据",
         "impact": "地点本身与坐标可能缺，评分/营业时间按「未核实」呈现",
     },
+    # 高德被限流：候选会**静默变少**，看起来像"这城市没什么景点"（2026-10-05）
+    "amap_gate": {
+        "label": "高德请求闸门",
+        "impact": "被限流时候选会变少（不是这座城市没有景点），闸门已自动放慢间隔",
+    },
     "price_web": {
         "label": "价格检索",
         "impact": "没查到价格的花费只能标「估算/未核实」，不计入已核实合计",
@@ -423,6 +428,22 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                 "route_composition",
                 STATUS_DEGRADED,
                 "；".join(composition_notes[:2]) if composition_notes else "实际配比与目标不符",
+            )
+        )
+
+    # 3.9) 高德被限流（2026-10-05）：限流会**静默让候选变少** —— 看起来像"这城市没什么景点"，
+    #      必须说出来，否则用户会把"供应商限流"读成"这里没得玩"。
+    gate = _as_mapping(data.get("amap_gate"))
+    if gate:
+        limits = int(gate.get("limits_this_round") or gate.get("limits") or 0)
+        items.append(
+            _entry(
+                "amap_gate",
+                STATUS_DEGRADED,
+                f"高德请求被限流 {limits} 次，闸门已自动放慢到 {gate.get('interval_seconds')}s"
+                f"（基准 {gate.get('base_interval_seconds')}s）"
+                + (f"：{str(gate.get('last_info'))[:60]}" if gate.get("last_info") else "")
+                + "。候选可能因此变少 —— 这不是「这城市没什么景点」",
             )
         )
 
