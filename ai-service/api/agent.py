@@ -7225,6 +7225,19 @@ async def run_negotiate(msg: GatewayMessage):
                             )
                             _quality_before = (final_data.get("quality") or {}).get("score")
                             final_data["quality"] = _final_snapshot["quality"]
+                            # 👑 把**这次评分用的输入**随方案下发（2026-10-05 实测抓到"两把尺子"）：
+                            #    分数是拿 `pref_signals`（历史+成员的话）算的，而 `facts` 只记发起人
+                            #    自己说的话 —— 离线尺子从 facts 重建信号就会比管线松。
+                            #    实测：同一份喀什方案，管线 78.9 / 尺子 83.6（个性化那项 0.75 vs 1.0）。
+                            #    方案自己记着输入，尺子才能复现同一个分数。
+                            try:
+                                from core.plan_quality import scoring_inputs as _scoring_inputs
+
+                                final_data["quality"]["scoring_inputs"] = _scoring_inputs(
+                                    _quality_context_for_final, _quality_signals_for_final
+                                )
+                            except Exception as _scoring_inputs_exc:  # 记不上不影响出方案
+                                print(f"⚠️ [评分输入] 记录失败: {_scoring_inputs_exc}", flush=True)
                             final_data["budget_report"] = _final_snapshot["budget"]
                             # `horizon`（含长途衔接顾问）也是从路线推出来的，一起按最终路线刷新
                             final_data["horizon"] = _final_snapshot["horizon"]

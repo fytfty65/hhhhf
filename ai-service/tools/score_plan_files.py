@@ -74,6 +74,24 @@ def signals_from_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     return signals
 
 
+def scoring_basis(plan: Dict[str, Any]) -> Any:
+    """尺子该拿哪份输入去评：**优先方案自己记的评分输入**，记不到才从 facts 重建。
+
+    为什么必须优先（2026-10-05 实测抓到"两把尺子"）：方案里的分数是拿 `pref_signals`
+    （历史 + 房间成员的话都算）算出来的，而 `facts` 只记**发起人自己这一轮**说的话
+    （这是配比口径的要求，不是 bug）。于是从 facts 重建信号时看不到那部分偏好：
+    同一份喀什方案，管线里 `preference_coverage=0.75` → 总分 78.9，尺子重建出 1.0 → 83.6。
+    尺子比管线**松 4.7 分**，正好把用户最在意的"个性化有没有满足"漏掉。
+
+    返回 `(context, signals, source)`，`source` 会打印出来 —— 尺子也要如实交代自己的口径。
+    """
+    recorded = (plan.get("quality") or {}).get("scoring_inputs") if isinstance(plan.get("quality"), dict) else None
+    if isinstance(recorded, dict) and isinstance(recorded.get("context"), dict) and recorded["context"]:
+        signals = recorded.get("signals")
+        return dict(recorded["context"]), (dict(signals) if isinstance(signals, dict) else {}), "方案记录"
+    return context_from_plan(plan), signals_from_plan(plan), "facts 重建"
+
+
 def main() -> int:
     patterns = sys.argv[1:] or [os.path.join("work", "plans", "*.json")]
     paths = []
@@ -84,13 +102,19 @@ def main() -> int:
         return 1
     for path in paths:
         plan = load(path)
-        context = context_from_plan(plan)
-        signals = signals_from_plan(plan)
+        context, signals, basis = scoring_basis(plan)
         days = context.get("days") or 2
         report = evaluate_plan(context, plan, signals=signals)
         dims = ", ".join(f"{key}={value['value']}" for key, value in report["dimensions"].items())
         print("=" * 78)
-        print(f"{os.path.basename(path)}｜天数 {days}｜距离口径 {context.get('distance_tolerance')}｜节点 {report['nodes']}｜总分 {report['score']}｜{report['verdict']}")
+        print(
+            f"{os.path.basename(path)}｜天数 {days}｜距离口径 {context.get('distance_tolerance')}"
+            f"｜节点 {report['nodes']}｜总分 {report['score']}｜{report['verdict']}｜口径来源 {basis}"
+        )
+        payload_score = ((plan.get("quality") or {}).get("score")) if isinstance(plan.get("quality"), dict) else None
+        if isinstance(payload_score, (int, float)) and abs(float(payload_score) - float(report["score"])) > 0.05:
+            # 尺子与方案自报的分数不一致 → 必须说出来，别让两个数字并存
+            print(f"  ⚠️ 尺子 {report['score']} ≠ 方案自报 {payload_score}（口径没对齐，分数不可比）")
         print(f"  维度：{dims}")
         place = report["dimensions"]["place_quality"]
         print(

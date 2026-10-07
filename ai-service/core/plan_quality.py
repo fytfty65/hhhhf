@@ -945,6 +945,45 @@ def stability_score(plans: Sequence[Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 # 汇总
 # --------------------------------------------------------------------------
+# 评分时**真正影响分数**的上下文键：尺子要能复现分数，就必须拿到同一份输入。
+# 少一个键就会"两把尺子"（实测：个性化覆盖 0.75 vs 1.0 → 同一份方案 78.9 vs 83.6）。
+SCORING_CONTEXT_KEYS = (
+    "days",
+    "trip_days",
+    "budget",
+    "distance_tolerance",
+    "request_text",
+    "request",
+    "daily_active_minutes",
+    "preferences",
+)
+
+
+def _jsonable(value: Any) -> Any:
+    """转成能随 payload 下发的形状（保持 dict/list/标量，其它转字符串）。"""
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def scoring_inputs(context: Mapping[str, Any], signals: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """把**这次评分用的输入**打成一份可下发、可复现的快照（2026-10-05）。
+
+    为什么要（实测抓到"两把尺子"）：方案里的分数是拿 `pref_signals`（历史 + 房间成员的话都算）
+    算出来的，而 `facts` 里如实记的只有**发起人自己这一轮**说的话（这是配比口径的要求）。
+    于是离线尺子从 `facts` 重建信号时看不到那部分偏好 —— 同一份喀什方案，
+    管线里 `preference_coverage=0.75` → 总分 78.9，尺子重建出 1.0 → 83.6。
+    **尺子比管线松 4.7 分**，等于评测把"个性化没满足"这件事漏掉。
+    解法：让方案自己记着评分输入，尺子优先用它（记不到才退回从 facts 重建）。
+    """
+    recorded = {key: _jsonable(context[key]) for key in SCORING_CONTEXT_KEYS if key in context}
+    return {"context": recorded, "signals": _jsonable(dict(signals or {}))}
+
+
 def _flatten_candidates(candidates_by_intent: Optional[Mapping[str, Any]]) -> List[Any]:
     """把"意图 → 候选列表"摊平成一串候选（供地点质量维度判断"这个节点是不是检索到的"）。"""
     flat: List[Any] = []

@@ -14,14 +14,15 @@
 """
 
 import io
+import json
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.plan_quality import evaluate_plan, plan_quality_snapshot  # noqa: E402
 from core.planning_governance import refresh_snapshot, tier_policy  # noqa: E402
-from core.plan_quality import plan_quality_snapshot  # noqa: E402
 
 CENTER = [75.99, 39.47]
 
@@ -87,6 +88,95 @@ class RefreshSnapshotTests(unittest.TestCase):
         self.assertEqual(tier_policy(increment), tier_policy(increment))
         refreshed = refresh_snapshot(CONTEXT, plan, increment=increment)
         self.assertIn("score", refreshed["quality"])
+
+
+class RulerFidelityTests(unittest.TestCase):
+    """尺子必须能**复现方案自报的分数**（2026-10-05 实测抓到"两把尺子"）。
+
+    方案分数是拿 `pref_signals`（历史 + 房间成员的话）算的；`facts` 只记发起人自己说的话
+    （配比口径要求）。于是尺子从 facts 重建信号时会漏掉那部分偏好 —— 同一份喀什方案，
+    管线 78.9、尺子 83.6（个性化那项 0.75 vs 1.0）。**尺子比管线松 4.7 分**，
+    正好把用户第一优先级里的"个性化有没有满足"漏掉。
+    解法：方案把评分输入记下来（`quality.scoring_inputs`），尺子优先用它。
+    """
+
+    CONTEXT = {"days": 2, "budget": 3000, "distance_tolerance": "normal"}
+
+    @staticmethod
+    def _plan():
+        return {
+            "route": [
+                {"day": 1, "name": "喀什博物馆", "type": "博物馆", "lnglat": CENTER, "time": "Day 1 | 09:00"},
+                {"day": 1, "name": "住宿", "type": "住宿服务", "is_hotel": True, "lnglat": CENTER, "time": "Day 1 | 21:30"},
+            ]
+        }
+
+    def _pipeline_payload(self):
+        """模拟管线：分数拿"更全的信号"（这里额外要了自然风景，方案里没排）算。"""
+        signals = {"interest": ["自然风景"], "requirements": ["文化历史"]}
+        snapshot = plan_quality_snapshot(self.CONTEXT, self._plan(), signals=signals, tier_policy=tier_policy({}))
+        payload = self._plan()
+        payload["quality"] = dict(snapshot["quality"])
+        payload["facts"] = {
+            "request": {
+                "trip_days": {"value": 2, "source": "user_intent", "verified": True},
+                "requirements": {"value": ["文化历史"], "source": "user_intent", "verified": True},
+            },
+            "constraints": {
+                "distance_tolerance": {"value": "normal", "source": "user_intent", "verified": True},
+                # ⚠️ facts 里**没有** signals["interest"]（自然风景）—— 这正是两把尺子的来源
+                "wants_scenic": {"value": False, "source": "user_intent", "verified": True},
+            },
+        }
+        return payload, signals, snapshot
+
+    def test_recorded_inputs_reproduce_the_pipeline_score_exactly(self):
+        from core.plan_quality import scoring_inputs
+
+        payload, signals, snapshot = self._pipeline_payload()
+        payload["quality"]["scoring_inputs"] = scoring_inputs(self.CONTEXT, signals)
+        # 过一遍 JSON（真实链路上 payload 会序列化）
+        recorded = json.loads(json.dumps(payload["quality"]["scoring_inputs"], ensure_ascii=False))
+        again = evaluate_plan(recorded["context"], payload, signals=recorded["signals"])
+        self.assertEqual(again["score"], snapshot["quality"]["score"], "尺子必须复现同一个分数")
+        self.assertEqual(
+            again["dimensions"]["preference_coverage"]["value"],
+            snapshot["quality"]["dimensions"]["preference_coverage"],
+        )
+
+    def test_facts_only_rebuild_is_looser_than_the_pipeline(self):
+        """钉住病根：只从 facts 重建会**偏高**（这把尺子会漏掉没满足的个性化）。"""
+        import sys as _sys
+
+        _sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        from score_plan_files import signals_from_plan  # noqa: E402
+
+        payload, _, snapshot = self._pipeline_payload()
+        rebuilt = evaluate_plan(self.CONTEXT, payload, signals=signals_from_plan(payload))
+        self.assertLess(
+            snapshot["quality"]["score"],
+            rebuilt["score"],
+            "facts 重建只看到发起人的话，会把没满足的个性化算成满足（分数偏高）",
+        )
+
+    def test_ruler_prefers_recorded_inputs(self):
+        import sys as _sys
+
+        _sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        from score_plan_files import scoring_basis  # noqa: E402
+
+        payload, signals, _ = self._pipeline_payload()
+        from core.plan_quality import scoring_inputs
+
+        payload["quality"]["scoring_inputs"] = scoring_inputs(self.CONTEXT, signals)
+        context, used_signals, source = scoring_basis(payload)
+        self.assertEqual(source, "方案记录")
+        self.assertEqual(used_signals.get("interest"), signals["interest"])
+        self.assertEqual(context.get("days"), 2)
+        # 没记录时退回 facts 重建（老方案仍能评，但要如实说明口径来源）
+        del payload["quality"]["scoring_inputs"]
+        _, _, fallback_source = scoring_basis(payload)
+        self.assertEqual(fallback_source, "facts 重建")
 
 
 class CacheVersionTests(unittest.TestCase):
