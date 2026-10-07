@@ -503,9 +503,33 @@ async function installMocks(page: Page) {
           w.__wsSends = [...(w.__wsSends || []), request];
           if (request.type !== 'agent_negotiate') return;
           const route = [
-            { day: 1, location: '钟楼酒店', name: '钟楼酒店', time: '09:00', type: '住宿', cost_estimate: '¥300', tags: ['住宿'] },
-            { day: 1, location: '陕西历史博物馆', name: '陕西历史博物馆', time: '10:30', type: '博物馆', cost_estimate: '¥0', tags: ['文化'] },
-            { day: 1, location: '回民街小吃', name: '回民街小吃', time: '12:30', type: '餐饮', cost_estimate: '¥60', tags: ['美食'] },
+            { day: 1, location: '钟楼酒店', name: '钟楼酒店', time: '09:00', type: '住宿', cost_estimate: '¥300', tags: ['住宿'], data_sources: { cost_estimate: 'rollinggo' }, price_excerpt: '查价成功。1晚总价：300CNY' },
+            {
+              day: 1,
+              location: '陕西历史博物馆',
+              name: '陕西历史博物馆',
+              time: '10:30',
+              type: '博物馆',
+              cost_estimate: '¥0',
+              tags: ['文化'],
+              // 官方价：来自白名单里的官方页 → 前端必须标成"可核实"并给出处链接
+              data_sources: { cost_estimate: 'web_page' },
+              price_source_url: 'https://www.sxhm.com/ticket',
+              price_excerpt: '门票价格 门票0元/人（免费预约）',
+            },
+            {
+              day: 1,
+              location: '回民街小吃',
+              name: '回民街小吃',
+              time: '12:30',
+              type: '餐饮',
+              cost_estimate: '¥60（票务平台价，非官方）',
+              tags: ['美食'],
+              // 票务平台价：必须标"非官方"并把票种名照原样带出来
+              data_sources: { cost_estimate: 'platform' },
+              price_source_url: 'https://piao.qunar.com/ticket/detail_1.html',
+              price_excerpt: '回民街美食通兑券成人票',
+            },
             { day: 2, location: '城墙南门', name: '城墙南门', time: '09:30', type: '文化', cost_estimate: '¥54', tags: ['地标'] },
             { day: 2, location: '永兴坊美食', name: '永兴坊美食', time: '12:30', type: '餐饮', cost_estimate: '¥70', tags: ['美食'] },
           ];
@@ -528,6 +552,14 @@ async function installMocks(page: Page) {
                     // ai-service 在 final_route 里回填的关联键：前端必须随行程一起存下去，
                     // 否则网关侧的"采纳/到访/重规划"事件只能退回 trip_id，跨服务轨迹串不起来
                     correlation_id: 'plan-e2e-1',
+                    // 文旅部名录登记的官方预约入口（按节点名索引）→ 前端要把它渲染成可点链接
+                    official_profiles: {
+                      陕西历史博物馆: {
+                        official_name: '陕西历史博物馆',
+                        official_site: 'https://www.sxhm.com/',
+                        official_booking: 'https://www.sxhm.com/visit',
+                      },
+                    },
                     quality: payload.governance.quality,
                     budget_report: payload.governance.budget_report,
                     fallback: payload.governance.fallback,
@@ -558,7 +590,21 @@ async function installMocks(page: Page) {
             this.onmessage?.({
               data: JSON.stringify({
                 type: 'final_route',
-                payload: { status: 'degraded_fallback', route, negotiation_summary: '已按预算与偏好完成协商' },
+                payload: {
+                  status: 'degraded_fallback',
+                  route,
+                  negotiation_summary: '已按预算与偏好完成协商',
+                  correlation_id: 'plan-e2e-1',
+                  // 官方预约入口在 final_route 这条路上也要带：stream 与 final_route 两条都能到，
+                  // 只补一条的话"渲染出来没有"会随到达顺序变化（实测就是这么红的）。
+                  official_profiles: {
+                    陕西历史博物馆: {
+                      official_name: '陕西历史博物馆',
+                      official_site: 'https://www.sxhm.com/',
+                      official_booking: 'https://www.sxhm.com/visit',
+                    },
+                  },
+                },
               }),
             });
           }, 120);
@@ -1130,5 +1176,53 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     const dayLayout = await probeLayout('day');
     expect(dayLayout.found, '行程正文（第 N 天 行程安排）必须存在').toBe(true);
     expect(dayLayout.inView, `行程正文必须能滚进视口：${JSON.stringify(dayLayout)}`).toBe(true);
+  });
+
+  // 👑 价格**出处**必须渲染出来（2026-10-07）
+  //    后端这轮把门票接成了三条定向通道（官方文旅名录 / 文旅部 5A 名录 / 票务平台接口），
+  //    方案里带回了票种名、来源 URL、官方预约入口 —— 但如果前端只显示"预估花销：¥60"，
+  //    用户根本分不清这是官方门票、平台的哪种票、还是网摘估算（"没渲染出来的'已做'等于没做"）。
+  test('价格出处：官方价 / 票务平台价 / 来源链接 / 官方预约都要看得见', async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installMocks(page);
+    await page.goto('/');
+    await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
+    await reachDecision(page, {
+      referenceText: '乌鲁木齐4天，人均300，住民宿，南山牧场看雪山，晚上夜市吃烧烤大盘鸡，节奏轻松',
+    });
+    await page.getByTestId('workspace-layer-plan').click();
+
+    // 官方页来的价 → 标"官方价（可核实）"，并给出处链接（href 必须真指向官方页）
+    const official = page.locator('[data-testid="price-provenance"]', { hasText: '官方价（可核实）' }).first();
+    await expect(official).toBeVisible({ timeout: 15_000 });
+    await expect(official).toContainText('门票价格 门票0元/人');
+    const officialLink = official.locator('a', { hasText: '来源' });
+    await expect(officialLink).toHaveAttribute('href', 'https://www.sxhm.com/ticket');
+
+    // 票务平台来的价 → 必须写明"非官方"，并把**票种名**照原样带出来
+    const platform = page.locator('[data-testid="price-provenance"]', { hasText: '票务平台价（非官方）' }).first();
+    await expect(platform).toBeVisible();
+    await expect(platform).toContainText('回民街美食通兑券成人票');
+    await expect(platform.locator('a', { hasText: '来源' })).toHaveAttribute(
+      'href',
+      'https://piao.qunar.com/ticket/detail_1.html',
+    );
+
+    // 文旅部名录登记的官方预约入口 → 可点，且指向登记的那个 URL
+    const booking = page.getByTestId('official-booking').first();
+    await expect(booking).toBeVisible();
+    await expect(booking).toHaveAttribute('href', 'https://www.sxhm.com/visit');
+
+    // 供应商实时价（酒店）也要标出来源类型，不能和"官方门票"混为一谈
+    await expect(
+      page.locator('[data-testid="price-provenance"]', { hasText: '供应商实时价（可核实）' }).first(),
+    ).toBeVisible();
+
+    // 留一张图给人工审阅：价格出处这一排在小屏/长票种名下会不会挤坏
+    // （截**标签所在的这一排**，不是整页——整页图里这些标签在折叠线以下，等于没证据）
+    await official
+      .locator('xpath=..')
+      .screenshot({ path: '../work/price-provenance.png', animations: 'disabled' });
   });
 });

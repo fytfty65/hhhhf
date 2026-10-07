@@ -12,6 +12,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, BrainCircuit, CheckCircle2, Clock, ExternalLink, Footprints, Hotel, MapPin, PiggyBank, RefreshCw, RotateCw, ShieldCheck, Split, Sun, ThumbsDown, ThumbsUp, Wand2 } from 'lucide-react';
 import { getCleanPhotoUrl } from '../lib/lobbyUtils';
 import PoiImage from './PoiImage';
+import PriceProvenanceChip from './PriceProvenance';
 import DynamicBudgetCard from './DynamicBudgetCard';
 import ExpandableConnectorNav from './ExpandableConnectorNav';
 import TeamPresenceBar from './TeamPresenceBar';
@@ -204,6 +205,10 @@ export default function MafengwoStylePanel({
                           <span>预估花销：{pt.cost}</span>
                         </span>
                       )}
+
+                      {/* 价格出处：官方价 / 票务平台价（哪种票）/ 网摘估算 + 来源链接 + 官方预约入口
+                          （2026-10-07：后端已带回这些字段，不渲染出来等于没做） */}
+                      <PriceProvenanceChip node={pt} />
                     </div>
 
                     <div className="flex items-center gap-1.5">

@@ -16,6 +16,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { API_BASE, WS_BASE, apiFetch, apiJson, getAuthToken, installApiFetchInterceptor } from './lib/utils';
 import { shortenRegionName, tryExtractJson, normalizeLnglat, extractStreamingRoutes } from './lib/lobbyUtils';
+import { officialFieldsFor } from './lib/priceProvenance';
 import type { Phase, RoomMember, UserProfile } from './types';
 
 // 底部行程节点横向卡片条（自 ContextualLobby 拆分出来的展示型组件）
@@ -1127,7 +1128,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   }, [dynamicRoutes, nodeVotes, roomMembers]);
 
   // 👑 将后端路线节点规范化为前端展示结构（与 final_route 映射保持一致）
-  const mapRouteForDynamic = (fr: any[]) => (Array.isArray(fr) ? fr : []).map((r: any) => ({
+  //    `plan` 可选：传进来时把方案级的 official_profiles 铺到每个节点（官方预约入口用）
+  const mapRouteForDynamic = (fr: any[], plan?: any) => (Array.isArray(fr) ? fr : []).map((r: any) => ({
     day: r.day || 1,
     name: r.location || r.name,
     lnglat: normalizeLnglat(r.lnglat),
@@ -1142,6 +1144,12 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
     cost: r.cost_estimate || r.cost || "暂无供应商数据",
     cost_estimate: r.cost_estimate ?? r.cost ?? null,
     data_sources: r.data_sources || {},
+    price_excerpt: r.price_excerpt || "",
+    price_source_url: r.price_source_url || r.cost_source_url || "",
+    price_source_label: r.price_source_label || "",
+    official_name: r.official_name || "",
+    official_site: r.official_site || "",
+    official_booking: r.official_booking || "",
     estimated: Boolean(r.estimated),
     photos: r.photos || [],
     trust_reason: r.trust_reason || "核心地标推荐",
@@ -1292,6 +1300,13 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                     cost: r.cost_estimate || r.cost || "暂无供应商数据",
                     cost_estimate: r.cost_estimate ?? r.cost ?? null,
                     data_sources: r.data_sources || {},
+                    // 👑 价格**出处**（2026-10-07）：三条定向通道（官方文旅名录/文旅部 5A/票务平台）
+                    //    带回了票种名与来源 URL，必须传到面板上，否则用户只看到"预估花销 ¥30"，
+                    //    分不清是官方门票、平台的哪种票、还是网摘估算。
+                    price_excerpt: r.price_excerpt || "",
+                    price_source_url: r.price_source_url || r.cost_source_url || "",
+                    price_source_label: r.price_source_label || "",
+                    ...officialFieldsFor(r.name || r.location, finalData),
                     estimated: Boolean(r.estimated),
                     photos: r.photos || [],
                     trust_reason: r.trust_reason || "核心地标推荐",
@@ -1314,7 +1329,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   // 分支同样写入 planVariants；此前只有 final_route 分支写，导致正常出方案时
                   // 裁决看板的「保留方案 / 替代方案」两列永远是空的，只剩一套方案。
                   const streamVariants = Array.isArray(finalData.plan_variants)
-                    ? finalData.plan_variants.map((v: any) => ({ id: v.id, name: v.name, style: v.style, desc: v.desc, nodes: mapRouteForDynamic(v.route) })).filter((v: any) => Array.isArray(v.nodes) && v.nodes.length > 0)
+                    ? finalData.plan_variants.map((v: any) => ({ id: v.id, name: v.name, style: v.style, desc: v.desc, nodes: mapRouteForDynamic(v.route, finalData) })).filter((v: any) => Array.isArray(v.nodes) && v.nodes.length > 0)
                     : [];
                   setPlanVariants([{ id: 'primary', name: 'AI 主方案', style: 'primary', desc: '', nodes: mappedRoutes }, ...streamVariants]);
                   setActivePlanId('primary');
@@ -1413,6 +1428,11 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   cost: r.cost_estimate || r.cost || "暂无供应商数据",
                   cost_estimate: r.cost_estimate ?? r.cost ?? null,
                   data_sources: r.data_sources || {},
+                  // 价格出处（同上：官方/票务平台/网摘 + 来源链接 + 官方预约入口）
+                  price_excerpt: r.price_excerpt || "",
+                  price_source_url: r.price_source_url || r.cost_source_url || "",
+                  price_source_label: r.price_source_label || "",
+                  ...officialFieldsFor(r.name || r.location, fd),
                   estimated: Boolean(r.estimated),
                   photos: r.photos || [],
                   trust_reason: r.trust_reason || "核心地标推荐",
@@ -1434,7 +1454,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                 setPhase('decision');
                 // 👑 多方案：主方案 + 后端返回的差异化方案，一并存入供切换
                 const _vs = Array.isArray(fd.plan_variants)
-                  ? fd.plan_variants.map((v: any) => ({ id: v.id, name: v.name, style: v.style, desc: v.desc, nodes: mapRouteForDynamic(v.route) })).filter((v: any) => Array.isArray(v.nodes) && v.nodes.length > 0)
+                  ? fd.plan_variants.map((v: any) => ({ id: v.id, name: v.name, style: v.style, desc: v.desc, nodes: mapRouteForDynamic(v.route, fd) })).filter((v: any) => Array.isArray(v.nodes) && v.nodes.length > 0)
                   : [];
                 setPlanVariants([{ id: 'primary', name: 'AI 主方案', style: 'primary', desc: '', nodes: mapped }, ..._vs]);
                 setActivePlanId('primary');
