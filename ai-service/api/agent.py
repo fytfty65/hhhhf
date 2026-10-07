@@ -6123,6 +6123,14 @@ async def run_negotiate(msg: GatewayMessage):
                                                 _platform = await _platform_price(_name)
                                                 if _platform.get("value") is not None:
                                                     return _platform
+                                                # 👑 平台**已经给过结论**（有景区、但只有跟团游/没有门票；
+                                                #    或平台根本没有这个景区）→ 不再退回通用搜索。
+                                                #    为什么（2026-10-07 实测）：三个通道串起来后每个节点要
+                                                #    7~9s，喀什那一轮"超预算 8 个"——后 8 个节点**根本没被问过**；
+                                                #    而通用搜索对这些小众 POI 的产出实测是 0。
+                                                #    只有平台**报错**（网络失败，没有结论）时才继续往下试。
+                                                if _platform.get("platform_checked"):
+                                                    return _platform
                                             except Exception as _platform_exc:
                                                 print(
                                                     f"⚠️ [票务平台] {_name} 这条通道失败: "

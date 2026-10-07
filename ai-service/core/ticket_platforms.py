@@ -203,6 +203,7 @@ async def lookup_qunar_price(name: str, *, fetch_json: Any = None) -> Dict[str, 
     if not entry:
         return build_observation(name=name, value=None, source="platform", provider="qunar") | {
             "note": f"去哪儿没有「{name}」这个景区（返回 {len(items)} 条近似结果，都不匹配）",
+            "platform_checked": True,
         }
     picked = adult_ticket_price(entry)
     if not picked:
@@ -212,6 +213,7 @@ async def lookup_qunar_price(name: str, *, fetch_json: Any = None) -> Dict[str, 
                 "（可能只有跟团游/演艺票）—— 不采信"
             ),
             "source_url": qunar_detail_url(entry.get("sightId")),
+            "platform_checked": True,
         }
     value = float(picked["value"])
     ticket_name = str(picked.get("ticket_name") or "")
@@ -264,6 +266,7 @@ async def lookup_ctrip_price(name: str, *, fetch_json: Any = None, fetch_page: A
     if not entry or not url:
         return build_observation(name=name, value=None, source="platform", provider="ctrip") | {
             "note": f"携程建议词里没有「{name}」这个景区（{len(sights)} 条景区候选都不匹配）",
+            "platform_checked": True,
         }
     page_fetch = fetch_page
     if page_fetch is None:
@@ -285,6 +288,7 @@ async def lookup_ctrip_price(name: str, *, fetch_json: Any = None, fetch_page: A
             "source_url": url,
             "note": "携程详情页里没有写出这个景区的票价（可能是免费开放/需现场购票）",
             "platform": "携程",
+            "platform_checked": True,
         }
     return build_observation(
         name=name,
