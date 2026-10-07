@@ -974,6 +974,9 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
 
   const [userIntent, setUserIntent] = useState(initialDestination ? `去${initialDestination}玩3天` : '');
   const [dynamicRoutes, setDynamicRoutes] = useState<any[]>([]);
+  // 方案台账（meal_topup / lodging_geo_adjust / meal_geo_adjust / day_rebalance / official_profiles）：
+  // 后端为"吃得着、住得近"做的结构性改动都记在这里，正文上要看得见（2026-10-07）
+  const [planLedgers, setPlanLedgers] = useState<any>({});
   const [replanProposal, setReplanProposal] = useState<any | null>(null);
   const [replanBusy, setReplanBusy] = useState(false);
   // 一键换近点 / 换住这家：记住用户点了哪一处（数字=第几天、字符串='住宿'），用于即时反馈
@@ -1324,6 +1327,13 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   }));
                   
                   setDynamicRoutes(mappedRoutes);
+                  setPlanLedgers({
+                    meal_topup: finalData.meal_topup || null,
+                    lodging_geo_adjust: finalData.lodging_geo_adjust || null,
+                    meal_geo_adjust: finalData.meal_geo_adjust || null,
+                    day_rebalance: finalData.day_rebalance || null,
+                    official_profiles: finalData.official_profiles || null,
+                  });
                   // 👑 多方案：主方案 + 后端差异化方案。
                   // 流式路径（stream_token → [FINAL_JSON]）是正常到达方式，必须与 final_route
                   // 分支同样写入 planVariants；此前只有 final_route 分支写，导致正常出方案时
@@ -1449,6 +1459,13 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   crowdedness: r.crowdedness || "",
                 }));
                 setDynamicRoutes(mapped);
+                setPlanLedgers({
+                  meal_topup: fd.meal_topup || null,
+                  lodging_geo_adjust: fd.lodging_geo_adjust || null,
+                  meal_geo_adjust: fd.meal_geo_adjust || null,
+                  day_rebalance: fd.day_rebalance || null,
+                  official_profiles: fd.official_profiles || null,
+                });
                 setSelectedPoiIndex(0);
                 setActiveDayIndex(0);
                 setPhase('decision');
@@ -2525,6 +2542,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   routes={currentDayRoutes} 
                   totalDays={totalDays}
                   activeDayIndex={activeDayIndex}
+                  // 方案台账（缺餐/换餐/换住宿/分天重排 + 官方档案）：正文上要看得见，不能只躺在 JSON 里
+                  planLedgers={planLedgers}
                   onSelectDay={setActiveDayIndex}
                   travelDetails={travelDetails} 
                   selectedPoiIndex={selectedPoiIndex} 

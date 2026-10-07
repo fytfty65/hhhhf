@@ -12,7 +12,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, BrainCircuit, CheckCircle2, Clock, ExternalLink, Footprints, Hotel, MapPin, PiggyBank, RefreshCw, RotateCw, ShieldCheck, Split, Sun, ThumbsDown, ThumbsUp, Wand2 } from 'lucide-react';
 import { getCleanPhotoUrl } from '../lib/lobbyUtils';
 import PoiImage from './PoiImage';
-import PriceProvenanceChip from './PriceProvenance';
+import PriceProvenanceChip, { PlanAnnotationList, OfficialDetailBlock, DayNoticeList } from './PriceProvenance';
 import DynamicBudgetCard from './DynamicBudgetCard';
 import ExpandableConnectorNav from './ExpandableConnectorNav';
 import TeamPresenceBar from './TeamPresenceBar';
@@ -25,7 +25,7 @@ export default function MafengwoStylePanel({
   onSwapPoi, onMarkVisited, visitedNodes = [], roomCode, roomMembers, teamSatisfaction, arbitrationRecords, nodeVotes, onVote,
   wsConnected = true, fairnessAudit,
   safetyInfo, safetyBrief, briefLoading, onGenerateSafetyBrief, targetCity,
-  onPhotoClick, currentUser, onApplyScenario, onSecondaryPlan
+  onPhotoClick, currentUser, onApplyScenario, onSecondaryPlan, planLedgers
 }: any) {
   const [showWeatherForecast, setShowWeatherForecast] = useState(false);
 
@@ -167,6 +167,9 @@ export default function MafengwoStylePanel({
         )}
 
         <h2 className="text-2xl font-black text-slate-800 mb-8 tracking-tight">第 {totalDays[activeDayIndex] || 1} 天 行程安排</h2>
+        {/* 当天提醒：缺餐（"宁可不塞"）/ 补过餐 / 分天被重排过 ——
+            这些台账以前只在 JSON 里，正文上看不出来（2026-10-07） */}
+        <DayNoticeList plan={planLedgers} day={totalDays[activeDayIndex] || 1} />
 
         <div className="relative pl-6">
           <div className="absolute top-3 bottom-6 left-[11px] w-[2px] bg-slate-200/80"></div>
@@ -283,6 +286,13 @@ export default function MafengwoStylePanel({
                       <span>建议游玩时段：{pt.time}</span>
                     </div>
                   )}
+
+                  {/* 这个节点身上发生过的结构性改动：换过酒店/餐馆（从多远换到多远）、
+                      被补/挪进来、按地理重排换过天（2026-10-07：台账要出现在正文里） */}
+                  <PlanAnnotationList plan={planLedgers} nodeName={pt.name} />
+
+                  {/* 官方登记资料（文旅部 A 级景区名录的官方简介/地址） */}
+                  <OfficialDetailBlock plan={planLedgers} nodeName={pt.name} />
 
                   {(pt.open_time || pt.address) && (
                     <div className="mb-3 flex flex-wrap gap-2 text-[11px] font-medium text-slate-500">

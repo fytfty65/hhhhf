@@ -552,12 +552,32 @@ async function installMocks(page: Page) {
                     // ai-service 在 final_route 里回填的关联键：前端必须随行程一起存下去，
                     // 否则网关侧的"采纳/到访/重规划"事件只能退回 trip_id，跨服务轨迹串不起来
                     correlation_id: 'plan-e2e-1',
+                    // 方案台账（后端为"吃得着、住得近"做的结构性改动）：正文上必须看得见
+                    meal_topup: {
+                      actions: [
+                        { code: 'move_meal', day: 2, node: '永兴坊美食', from_day: 1, distance_km: 27.7, detail: '' },
+                      ],
+                      skipped: [
+                        { day: 1, nearest_km: 82.6, reason: '最近的饭点在 82.6km 外（超过 30km 上限），宁可不塞' },
+                      ],
+                    },
+                    lodging_geo_adjust: {
+                      actions: [{ day: 1, from: '旧钟楼旅社', to: '钟楼酒店', from_km: 46.9, to_km: 2.1 }],
+                      skipped: [],
+                    },
+                    meal_geo_adjust: {
+                      actions: [{ day: 1, from: '远在县城的馆子', to: '回民街小吃', from_km: 31.5, to_km: 1.9 }],
+                      skipped: [],
+                    },
+                    day_rebalance: { applied: true, before_max_km: 444.5, after_max_km: 231.4, moved: ['永兴坊美食'] },
                     // 文旅部名录登记的官方预约入口（按节点名索引）→ 前端要把它渲染成可点链接
                     official_profiles: {
                       陕西历史博物馆: {
                         official_name: '陕西历史博物馆',
                         official_site: 'https://www.sxhm.com/',
                         official_booking: 'https://www.sxhm.com/visit',
+                        official_address: '陕西省西安市雁塔区小寨东路91号',
+                        official_intro: '中国第一座大型现代化国家级博物馆，馆藏文物 170 余万件。',
                       },
                     },
                     quality: payload.governance.quality,
@@ -597,11 +617,26 @@ async function installMocks(page: Page) {
                   correlation_id: 'plan-e2e-1',
                   // 官方预约入口在 final_route 这条路上也要带：stream 与 final_route 两条都能到，
                   // 只补一条的话"渲染出来没有"会随到达顺序变化（实测就是这么红的）。
+                  meal_topup: {
+                    actions: [{ code: 'move_meal', day: 2, node: '永兴坊美食', from_day: 1, distance_km: 27.7, detail: '' }],
+                    skipped: [{ day: 1, nearest_km: 82.6, reason: '最近的饭点在 82.6km 外（超过 30km 上限），宁可不塞' }],
+                  },
+                  lodging_geo_adjust: {
+                    actions: [{ day: 1, from: '旧钟楼旅社', to: '钟楼酒店', from_km: 46.9, to_km: 2.1 }],
+                    skipped: [],
+                  },
+                  meal_geo_adjust: {
+                    actions: [{ day: 1, from: '远在县城的馆子', to: '回民街小吃', from_km: 31.5, to_km: 1.9 }],
+                    skipped: [],
+                  },
+                  day_rebalance: { applied: true, before_max_km: 444.5, after_max_km: 231.4, moved: ['永兴坊美食'] },
                   official_profiles: {
                     陕西历史博物馆: {
                       official_name: '陕西历史博物馆',
                       official_site: 'https://www.sxhm.com/',
                       official_booking: 'https://www.sxhm.com/visit',
+                      official_address: '陕西省西安市雁塔区小寨东路91号',
+                      official_intro: '中国第一座大型现代化国家级博物馆，馆藏文物 170 余万件。',
                     },
                   },
                 },
@@ -1224,5 +1259,45 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await official
       .locator('xpath=..')
       .screenshot({ path: '../work/price-provenance.png', animations: 'disabled' });
+  });
+
+  // 👑 方案**台账**也要出现在正文里（2026-10-07）
+  //    "第 3 天没有晚餐（最近候选 82.6km，宁可不塞）"、"酒店从 46.9km 换到 2.1km"这类事
+  //    以前只躺在 JSON 台账/遗留问题里，行程正文上是隐形的 —— 用户最容易漏掉的就是这些。
+  test('台账要落到正文：缺餐提醒 / 换店标记 / 官方简介', async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installMocks(page);
+    await page.goto('/');
+    await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
+    await reachDecision(page, {
+      referenceText: '乌鲁木齐4天，人均300，住民宿，南山牧场看雪山，晚上夜市吃烧烤大盘鸡，节奏轻松',
+    });
+    await page.getByTestId('workspace-layer-plan').click();
+
+    // ① 当天的缺餐提醒（正文里就要看到，不能只进"遗留问题"）
+    const dayNotice = page.getByTestId('day-notices').first();
+    await expect(dayNotice).toBeVisible({ timeout: 15_000 });
+    await expect(dayNotice).toContainText('这天没有安排餐饮');
+    await expect(dayNotice).toContainText('82.6km');
+
+    // ② 换过酒店/餐馆的节点要标出来，且带"从多远换到多远"
+    const hotelAnnotation = page.locator('[data-annotation-kind="lodging_swap"]').first();
+    await expect(hotelAnnotation).toBeVisible();
+    await expect(hotelAnnotation).toContainText('46.9km');
+    await expect(hotelAnnotation).toContainText('2.1km');
+    const mealAnnotation = page.locator('[data-annotation-kind="meal_swap"]').first();
+    await expect(mealAnnotation).toContainText('31.5km');
+
+    // ③ 官方登记资料（文旅部名录）的地址与简介要出现在地点资料里
+    const officialDetail = page.getByTestId('official-detail').first();
+    await expect(officialDetail).toBeVisible();
+    await expect(officialDetail).toContainText('小寨东路91号');
+    await expect(officialDetail).toContainText('馆藏文物 170 余万件');
+
+    await page.getByTestId('day-notices').first().screenshot({ path: '../work/plan-ledgers.png', animations: 'disabled' });
+    // 换店标记也留一张（人工审阅：两行标签 + 官方简介在卡片里会不会太挤）
+    await page.locator('[data-annotation-kind="lodging_swap"]').first().locator('xpath=..')
+      .screenshot({ path: '../work/plan-annotations.png', animations: 'disabled' });
   });
 });
