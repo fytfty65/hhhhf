@@ -58,6 +58,11 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "日内里程",
         "impact": "同一天里的移动里程或远景区数量偏多，实际跑起来会赶",
     },
+    # 远的一天可以接受、但要标明；并且**把"想换的话换哪个"一起给出来**（2026-10-05）
+    "travel_alternatives": {
+        "label": "远点的可换选项",
+        "impact": "跑得远的那天有同类近点可换；说一句就换，不说就不动",
+    },
     # 吃住离当天的玩点偏远：不是"没排"，是"来回通勤会吃掉游玩时间"（2026-10-05 实测 anchoring 掉分）
     "anchoring": {
         "label": "吃住与玩点的距离",
@@ -450,6 +455,31 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                     "这些点的通勤距离请在导航里确认",
                 )
             )
+
+    # 4.7) 跑得远的那天：**可换的近点**（2026-10-05 用户口径：远的一天可以接受、但要标明；
+    #      真想换得等他说一句 —— 所以这里把"换哪个"先摆出来，让他一句话就能兑现）
+    alternatives = _as_mapping(data.get("travel_alternatives"))
+    alt_days = [item for item in (alternatives.get("days") or []) if isinstance(item, Mapping)]
+    if alt_days:
+        parts: List[str] = []
+        for item in alt_days[:3]:
+            options = [option for option in (item.get("options") or []) if isinstance(option, Mapping)]
+            if options:
+                parts.append(
+                    f"第 {item.get('day')} 天（约 {item.get('travel_km')}km）可换成 "
+                    + "、".join(
+                        f"{option.get('name')}（离当天其它点约 {option.get('nearest_day_km')}km）" for option in options[:2]
+                    )
+                )
+            else:
+                parts.append(f"第 {item.get('day')} 天（约 {item.get('travel_km')}km）候选池里没有同类近点可换")
+        items.append(
+            _entry(
+                "travel_alternatives",
+                STATUS_DEGRADED,
+                "；".join(parts) + "。想换直接说一句就行，不说就不动",
+            )
+        )
 
     # 5) 跨城出行方式
     transport = _as_mapping(data.get("transport_audit"))

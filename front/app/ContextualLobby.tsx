@@ -1188,7 +1188,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           fd.increment || fd.price_audit || fd.transport_audit || fd.long_trip ||
           fd.review || fd.constraints || fd.degradations || fd.daily_balance ||
           fd.lodging_joint || fd.reference_profile || fd.candidate_supply || fd.composition || fd.negotiation || fd.facts ||
-          fd.feedback_applied || fd.lodging_supply,
+          fd.feedback_applied || fd.lodging_supply || fd.travel_alternatives,
       );
       if (!hasGovernance) return;
       setPlanGovernance((prev) => ({
@@ -1223,6 +1223,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         feedbackApplied: fd.feedback_applied ?? prev?.feedbackApplied,
         // 住宿候选的供应商实价清单：同样的预算还有哪些有实价的可选（用户的选择权）
         lodgingSupply: fd.lodging_supply ?? prev?.lodgingSupply,
+        // 跑得远的那天"可以换成哪个近点"（只提议、不改方案；说一句才换）
+        travelAlternatives: fd.travel_alternatives ?? prev?.travelAlternatives,
       }));
     };
 

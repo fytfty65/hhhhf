@@ -241,6 +241,31 @@ const GOVERNANCE_PAYLOAD = {
       { name: '维也纳国际酒店(库尔勒天鹅河店)', price: 694, star: 4, address: '民心路5号', booking_url: 'https://rollinggo.cn/pages/hotel/detail/index?id=2', nearest_play_km: 41.2, nearest_play_name: '博斯腾湖风景名胜区', far_from_plays: true },
     ],
   },
+  // 跑得远的那天"可以换成哪个近点"（core/travel_feasibility.suggest_near_alternatives）：
+  // 只提议、不改方案 —— 用户一句话就能兑现
+  travel_alternatives: {
+    note: '这些只是可换的近点（同类别、离当天其它点更近）；想换直接说一句就行，不说就不动。',
+    days: [
+      {
+        day: 2,
+        travel_km: 447.8,
+        budget_km: 160,
+        far_nodes: [{ name: '胡杨书院', distance_km: 221.4 }],
+        options: [
+          {
+            for_node: '胡杨书院',
+            for_node_km: 221.4,
+            name: '喀什地区博物馆',
+            category: 'cultural',
+            center_km: 3.2,
+            nearest_day_km: 4.6,
+            price: 0,
+            why: '替换「胡杨书院」（离市中心约 221km）：这个点在市中心 3km 内、离当天其它点约 5km',
+          },
+        ],
+      },
+    ],
+  },
   // 数据降级登记（core/degradation.collect_degradations）：文案与"用户损失"都由后端注册表给出
   degradations: {
     total: 2,
@@ -518,6 +543,7 @@ async function installMocks(page: Page) {
                     facts: payload.governance.facts,
                     feedback_applied: payload.governance.feedback_applied,
                     lodging_supply: payload.governance.lodging_supply,
+                    travel_alternatives: payload.governance.travel_alternatives,
                   }),
               }),
             });
@@ -901,6 +927,15 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(feedbackBlock).toContainText('你上次把「胡杨书院」标为不喜欢（原因：太远了，来回太折腾）');
     await expect(feedbackBlock).toContainText('这次不再安排：胡杨书院');
     await expect(feedbackBlock).toContainText('按"就近"收缩当天的距离半径');
+
+    // 远点的可换选项：跑超预算的那天，系统把"换哪个"先算出来（说一句才换）
+    const alternatives = panel.getByTestId('travel-alternatives-block');
+    await expect(alternatives).toBeVisible();
+    await expect(alternatives).toContainText('这天想少跑点，可以换成');
+    await expect(alternatives).toContainText('第 2 天（约 447.8km，当天预算 160km）');
+    await expect(panel.getByTestId('travel-alternatives-list')).toContainText('胡杨书院 → 喀什地区博物馆');
+    await expect(panel.getByTestId('travel-alternatives-list')).toContainText('离当天其它点约 4.6km');
+    await expect(alternatives).toContainText('想换直接说一句就行，不说就不动');
 
     // 住宿实价候选：同样的预算还有哪些**有实价**的可选（"住哪"的选择权）
     const lodgingSupply = panel.getByTestId('lodging-supply-block');

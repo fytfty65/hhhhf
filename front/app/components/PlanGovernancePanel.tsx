@@ -190,6 +190,26 @@ export type PlanGovernance = {
       far_from_plays?: boolean | null;
     }[];
   };
+  /** 跑得远的那天：**可换的近点**（只提议，不改方案 —— 说一句才换） */
+  travelAlternatives?: {
+    note?: string;
+    days?: {
+      day?: number;
+      travel_km?: number;
+      budget_km?: number;
+      far_nodes?: { name?: string; distance_km?: number }[];
+      options?: {
+        for_node?: string;
+        for_node_km?: number;
+        name?: string;
+        category?: string;
+        center_km?: number;
+        nearest_day_km?: number;
+        price?: number | null;
+        why?: string;
+      }[];
+    }[];
+  };
   /** 数据降级登记：哪个数据源没取到、用户损失了什么（文案由后端注册表给出） */
   degradations?: {
     items?: { source?: string; label?: string; impact?: string; status?: string; reason?: string }[];
@@ -419,7 +439,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 
 export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | null }) {
   if (!data) return null;
-  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation, feedbackApplied, lodgingSupply } = data;
+  const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation, feedbackApplied, lodgingSupply, travelAlternatives } = data;
 
   const budgetStatus = budget?.status ? BUDGET_STATUS[budget.status] : undefined;
   const failures = (quality?.gate_failures || []).filter((item) => item && item.code);
@@ -455,6 +475,9 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
   const hasLodgingSupplyBlock = Boolean(
     lodgingSupply && ((lodgingSupply.hotels?.length ?? 0) > 0 || lodgingSupply.error),
   );
+  // 远点的可换选项：有超预算的天才显示
+  const alternativeDays = (travelAlternatives?.days || []).filter((item) => (item?.options?.length ?? 0) > 0);
+  const hasAlternativesBlock = alternativeDays.length > 0;
   const hasDegradationBlock = Boolean(
     degradations && ((degradations.items?.length ?? 0) > 0 || degradations.error),
   );
@@ -485,7 +508,7 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
     !hasIncrementBlock && !hasPriceBlock && !hasTransportBlock && !hasLongTripBlock &&
     !hasReviewBlock && !hasConstraintBlock && !hasDegradationBlock && !hasLodgingJointBlock &&
     !hasReferenceProfileBlock && !hasCandidateSupplyBlock && !hasCompositionBlock && !hasNegotiationBlock &&
-    !hasFeedbackBlock && !hasLodgingSupplyBlock
+    !hasFeedbackBlock && !hasLodgingSupplyBlock && !hasAlternativesBlock
   ) {
     return null;
   }
@@ -544,6 +567,36 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
               ))}
             </ul>
           )}
+        </div>
+      )}
+      {hasAlternativesBlock && (
+        <div
+          className="mt-3 border-t border-slate-200 pt-3 first:mt-0 first:border-t-0 first:pt-0"
+          data-testid="travel-alternatives-block"
+        >
+          <SectionLabel icon={<Route className="h-3 w-3" />}>这天想少跑点，可以换成</SectionLabel>
+          <ul className="mt-1.5 space-y-2" data-testid="travel-alternatives-list">
+            {alternativeDays.slice(0, 3).map((item) => (
+              <li key={`alt-${item.day}`} className="text-[12.5px] leading-relaxed text-slate-600">
+                <span className="font-bold text-slate-700">
+                  第 {item.day} 天（约 {item.travel_km}km，当天预算 {item.budget_km}km）
+                </span>
+                <ul className="mt-0.5 space-y-0.5">
+                  {(item.options || []).slice(0, 2).map((option, index) => (
+                    <li key={`alt-${item.day}-${index}`}>
+                      <span className="text-slate-400">·</span>{' '}
+                      {option.for_node} → <span className="font-bold text-slate-700">{option.name}</span>
+                      {option.price != null ? `（¥${option.price}）` : ''}
+                      {option.nearest_day_km != null ? `，离当天其它点约 ${option.nearest_day_km}km` : ''}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-[11.5px] leading-relaxed text-slate-500">
+            {travelAlternatives?.note || '这些只是可换的近点；想换直接说一句就行，不说就不动。'}
+          </p>
         </div>
       )}
       {hasLodgingSupplyBlock && (

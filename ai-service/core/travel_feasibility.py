@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 FAR_NODE_KM = 40.0  # 离市中心多远算"远景区"（库尔勒市区景点普遍 ≤5km，博斯腾湖 47km）
 
@@ -179,6 +179,141 @@ def evaluate_travel_feasibility(
         "days": report_days,
         "violations": violations,
         "notes": notes,
+    }
+
+
+def suggest_near_alternatives(
+    route: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    city_center: Optional[Sequence[float]] = None,
+    distance_tolerance: str = "normal",
+    category_of: Optional[Callable[[Mapping[str, Any]], str]] = None,
+    tier_of: Optional[Callable[[Mapping[str, Any]], str]] = None,
+    limit: int = 2,
+) -> Dict[str, Any]:
+    """给"当天跑超预算"的那天，从候选池里挑**同类、离当天其它点更近**的替代点。
+
+    **只提议，不改方案**（用户口径 2026-10-05：远的一天"可以接受，但是需要标明"；
+    真要去掉得等用户说一句）。但"说一句就换"要能兑现 —— 所以这里把**换哪个**先算出来，
+    免得用户说了之后系统还要现场猜（猜出来的往往还是同类远点）。
+
+    规则（都写在返回值里，用户能看见依据）：
+    - 只对**超当天预算**的天给建议（没超的不打扰）；
+    - 替代点必须是**同一类**（用 `category_of` 判；不传就不分类、只看距离）；
+    - 替代点要**离市中心更近**（< `FAR_NODE_KM`），并且**离当天其它点不远**（按最近距离排序）；
+    - **档次不能降**（`tier_of`）：实测（2026-10-05）第一版拿"北湖公园"去替换
+      "英吉沙国家湿地公园" —— 都是 scenic，但一个是城市公园、一个是真景区，
+      用户明确说过"城市公园不算自然景观"。同类里没有同档次的，就如实说没有；
+    - 已经在方案里出现过的点不提议（不拿"换个名字的同一个地方"糊弄）；
+    - 候选池里没有合适的就是没有（`options` 为空，如实说）。
+    """
+    budget = daily_budget_km(distance_tolerance)
+    grouped = _days_of(route)
+    in_plan = {str(node.get("name") or "").strip() for node in route if isinstance(node, Mapping)}
+
+    def _category(node: Mapping[str, Any]) -> str:
+        if category_of is None:
+            return ""
+        try:
+            return str(category_of(node) or "")
+        except Exception:
+            return ""
+
+    def _tier(node: Mapping[str, Any]) -> str:
+        if tier_of is None:
+            return ""
+        try:
+            return str(tier_of(node) or "")
+        except Exception:
+            return ""
+
+    def _center_km(node: Mapping[str, Any]) -> float:
+        coord = node_lnglat(node)
+        if not coord or not city_center:
+            return float("nan")
+        return haversine_km(city_center, coord)
+
+    days_out: List[Dict[str, Any]] = []
+    for day in sorted(grouped):
+        nodes = [node for node in grouped[day] if isinstance(node, Mapping)]
+        km = day_travel_km(nodes, city_center)
+        if km <= budget:
+            continue
+        far_nodes = [
+            {"name": str(node.get("name") or ""), "distance_km": round(_center_km(node), 1)}
+            for node in nodes
+            if _center_km(node) == _center_km(node) and _center_km(node) >= FAR_NODE_KM
+        ]
+        if not far_nodes:
+            continue  # 超预算但不是"某个点特别远"（可能是点位太散），这一轮不给替代建议
+        others = [node for node in nodes if _center_km(node) == _center_km(node) and _center_km(node) < FAR_NODE_KM]
+
+        options: List[Dict[str, Any]] = []
+        for far_node in nodes:
+            far_km = _center_km(far_node)
+            if not (far_km == far_km) or far_km < FAR_NODE_KM:
+                continue
+            wanted = _category(far_node)
+            wanted_tier = _tier(far_node)
+            ranked: List[Tuple[float, Mapping[str, Any]]] = []
+            for candidate in candidates:
+                if not isinstance(candidate, Mapping):
+                    continue
+                name = str(candidate.get("name") or "").strip()
+                if not name or name in in_plan:
+                    continue
+                if any(item.get("name") == name for item in options):
+                    continue
+                candidate_km = _center_km(candidate)
+                if not (candidate_km == candidate_km) or candidate_km >= FAR_NODE_KM:
+                    continue  # 别拿另一个远点来"替代"远点
+                if wanted and _category(candidate) != wanted:
+                    continue
+                # 档次不能降：拿"城市公园"顶替"真景区"正是用户明确反对的那件事
+                if wanted_tier and _tier(candidate) != wanted_tier:
+                    continue
+                candidate_coord = node_lnglat(candidate)
+                if others and candidate_coord:
+                    nearest = min(haversine_km(candidate_coord, node_lnglat(node)) for node in others if node_lnglat(node))
+                else:
+                    nearest = candidate_km
+                ranked.append((nearest, candidate))
+            if not ranked:
+                continue
+            ranked.sort(key=lambda item: item[0])
+            best_km, best = ranked[0]
+            options.append(
+                {
+                    "for_node": str(far_node.get("name") or ""),
+                    "for_node_km": round(far_km, 1),
+                    "name": str(best.get("name") or ""),
+                    "category": wanted,
+                    "center_km": round(_center_km(best), 1),
+                    "nearest_day_km": round(float(best_km), 1),
+                    "price": best.get("price"),
+                    "price_source": str(best.get("price_source") or best.get("data_source") or ""),
+                    "why": f"替换「{far_node.get('name')}」（离市中心约 {round(far_km)}km）："
+                    f"这个点在市中心 {round(_center_km(best))}km 内、离当天其它点约 {round(float(best_km))}km",
+                }
+            )
+            if len(options) >= max(1, int(limit)):
+                break
+        # 超预算 + 有特别远的点 → 这一天一定要报出来（哪怕没有可换的近点，
+        # "这天跑得远、池子里没有同类近点可换"本身也是用户该知道的事实）
+        days_out.append(
+            {
+                "day": day,
+                "travel_km": km,
+                "budget_km": budget,
+                "far_nodes": far_nodes,
+                "options": options,
+            }
+        )
+    return {
+        "days": days_out,
+        "distance_tolerance": str(distance_tolerance or "normal"),
+        "note": "这些只是**可换的近点**（同类别、离当天其它点更近）；想换直接说一句就行，不说就不动。",
     }
 
 

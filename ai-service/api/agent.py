@@ -6686,6 +6686,43 @@ async def run_negotiate(msg: GatewayMessage):
                                 flush=True,
                             )
 
+                        # 👑 「这天跑得远，想换的话换哪个」—— 只提议、不改方案（用户口径：远的一天
+                        #    可以接受、但要标明；真去掉得等他说一句）。把**换哪个**先算出来，
+                        #    免得用户说了之后系统还要现场猜（猜出来的往往还是同类远点）。
+                        try:
+                            from core.travel_feasibility import suggest_near_alternatives
+
+                            _near_alternatives = suggest_near_alternatives(
+                                final_data.get("route") or [],
+                                list(unique_attractions or []) + list(unique_foods or []) + list(cleaned_hotels or []),
+                                city_center=_closeout_center if isinstance(_closeout_center, list) else [],
+                                distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
+                                category_of=lambda item: classify_poi_category(
+                                    str(item.get("name") or ""), str(item.get("type") or ""), bool(item.get("is_hotel"))
+                                ),
+                                # 档次也不能降：拿"城市公园"顶替"真景区"正是用户明确反对的
+                                tier_of=lambda item: scenic_tier(
+                                    str(item.get("name") or ""), str(item.get("type") or "")
+                                ),
+                            )
+                            if _near_alternatives.get("days"):
+                                final_data["travel_alternatives"] = _near_alternatives
+                                print(
+                                    "🔁 [远点替代] "
+                                    + "；".join(
+                                        f"第 {item.get('day')} 天 {item.get('travel_km')}km>{item.get('budget_km')}km"
+                                        + (
+                                            " → 可换 " + "、".join(option.get("name") or "" for option in item.get("options") or [])
+                                            if item.get("options")
+                                            else " → 候选池里没有同类近点可换"
+                                        )
+                                        for item in _near_alternatives["days"][:3]
+                                    ),
+                                    flush=True,
+                                )
+                        except Exception as _near_exc:  # 算不出替代点不影响出方案
+                            print(f"⚠️ [远点替代] 计算失败（不影响出方案）: {_near_exc}", flush=True)
+
                         # 👑 可选住宿的**通勤距离**：只按价格/星级排是不够的（`anchoring` 实测掉到 0.8），
                         #    价格可比、距离也要可比 —— 用户才知道"这家便宜 60 块，但离玩点多 30km"。
                         try:
