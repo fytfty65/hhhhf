@@ -828,12 +828,29 @@ def score_truthfulness(plan: Any) -> Dict[str, Any]:
             "unsourced_count": 0,
             "estimated_prices": 0,
             "disclosed_unknown": 0,
+            "unrelated_descriptions": [],
+            "unrelated_description_count": 0,
         }
 
     verified, unsourced, estimated_prices, disclosed_unknown = 0, [], 0, 0
+    # 简介也要查（2026-10-05 实测抓到）：并排读两份方案时才发现一份把
+    # `Official YouTube TV Help Center ...` 当成喀什某书院的简介渲染给用户，
+    # 而真实度维度当时给了 0.733 —— 尺子抓不到"用户可见的编造"，那就不是尺子。
+    # 判据与富化入口共用（`place_quality.desc_relevance_problem`），只在延迟导入
+    # （place_quality 反向依赖本模块，模块级导入会成环）。
+    from .place_quality import desc_relevance_problem, is_boilerplate_desc
+
+    unrelated_desc: List[Dict[str, str]] = []
     for node in nodes:
         sources = node.get("data_sources") if isinstance(node.get("data_sources"), Mapping) else {}
         claimed = [f for f in SOURCED_FIELDS if _is_claim(node.get(f))]
+        desc_text = str(node.get("desc") or "").strip()
+        desc_is_claim = bool(desc_text) and "暂无简介" not in desc_text
+        if desc_is_claim and str(node.get("desc_source") or "").strip() != "provider":
+            why = "没出处的套话" if is_boilerplate_desc(desc_text) else desc_relevance_problem(desc_text, node_name(node))
+            if why:
+                unrelated_desc.append({"name": node_name(node), "why": why})
+                claimed = claimed + ["desc"]
         bad = [
             f
             for f in claimed
@@ -858,6 +875,8 @@ def score_truthfulness(plan: Any) -> Dict[str, Any]:
         "unsourced_count": len(unsourced),
         "estimated_prices": estimated_prices,
         "disclosed_unknown": disclosed_unknown,
+        "unrelated_descriptions": unrelated_desc[:10],
+        "unrelated_description_count": len(unrelated_desc),
     }
 
 
@@ -1059,6 +1078,20 @@ def plan_quality_snapshot(
                 key: value
                 for key, value in (report["dimensions"].get("anchoring") or {}).items()
                 if key != "value"
+            },
+            # 真实度明细：掉分必须能看见是**哪几个地点**的简介/断言没出处
+            # （2026-10-05 实测：一份方案把 YouTube 帮助中心文字当地点简介，分数掉了却看不出为什么）
+            "truthfulness": {
+                "unrelated_descriptions": (report["dimensions"].get("truthfulness") or {}).get(
+                    "unrelated_descriptions"
+                )
+                or [],
+                "unrelated_description_count": (report["dimensions"].get("truthfulness") or {}).get(
+                    "unrelated_description_count"
+                )
+                or 0,
+                "unsourced_count": (report["dimensions"].get("truthfulness") or {}).get("unsourced_count") or 0,
+                "disclosed_unknown": (report["dimensions"].get("truthfulness") or {}).get("disclosed_unknown") or 0,
             },
         },
         "budget": report["budget"],

@@ -38,6 +38,11 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "高德请求闸门",
         "impact": "被限流时候选会变少（不是这座城市没有景点），闸门已自动放慢间隔",
     },
+    # 地点简介：联网富化可能抓错页面（实测把 YouTube 帮助中心当成了喀什的书院简介）
+    "place_description": {
+        "label": "地点简介",
+        "impact": "对不上号或没出处的简介已撤下，改成「暂无简介」——不再拿搜到的网页文字顶上",
+    },
     "price_web": {
         "label": "价格检索",
         "impact": "没查到价格的花费只能标「估算/未核实」，不计入已核实合计",
@@ -444,6 +449,25 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                 f"（基准 {gate.get('base_interval_seconds')}s）"
                 + (f"：{str(gate.get('last_info'))[:60]}" if gate.get("last_info") else "")
                 + "。候选可能因此变少 —— 这不是「这城市没什么景点」",
+            )
+        )
+
+    # 3.10) 地点简介抓错页面 / 是无出处的套话（2026-10-05 实测）：
+    #       并排读两份方案才发现，一份把 `Official YouTube TV Help Center ...` 当成喀什某书院的简介、
+    #       另一份把"中医认为酸奶有助于健康"当成某个餐馆的简介。用户看到的是**假介绍**，
+    #       必须进"遗留问题"，而且要说清是哪几个点。
+    desc_problems = (quality.get("truthfulness") or {}).get("unrelated_descriptions") or []
+    if desc_problems:
+        names = _unique_names(desc_problems, limit=4)
+        first = desc_problems[0] if isinstance(desc_problems[0], Mapping) else {}
+        first_why = str(first.get("why") or "")
+        items.append(
+            _entry(
+                "place_description",
+                STATUS_DEGRADED,
+                f"{len(desc_problems)} 个地点的简介与地点对不上或没有出处（{'、'.join(names)}）"
+                + (f"：{first_why[:50]}" if first_why else "")
+                + "。这些简介已在方案里改成「暂无简介」，不再拿搜到的网页文字顶上",
             )
         )
 

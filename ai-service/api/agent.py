@@ -35,6 +35,7 @@ from core.events import new_event  # 统一事件协议信封（correlation_id /
 # 候选池相关工具统一在模块级导入：实测教训（2026-10-04）—— 把它们各自写在函数内部局部导入，
 # 结果外层代码用了 `needs_widening` 却只在内层函数里导过 → NameError 让整条推演流中断，
 # 而单测全绿（因为没有任何单测覆盖这条长生成器路径）。放在顶层，缺名字在导入时就暴露。
+from core.place_quality import clean_web_knowledge, description_of  # 简介口径：能核实就用，不能就如实说没有
 from core.poi_pool import (
     FOOD_WIDENING_KEYWORDS,
     LODGING_WIDENING_KEYWORDS,
@@ -1594,6 +1595,15 @@ class ExpertToolbox:
         self.amap_url = "https://restapi.amap.com/v3"
 
     async def enrich_poi_with_web_search(self, city: str, poi_name: str) -> str:
+        """联网搜一条地点简介（DuckDuckGo）。
+
+        ⚠️ 必须**校验相关性**（2026-10-05 实测抓到用户可见的编造）：探针跑出来的喀什方案里，
+        「胡杨书院」的简介是一段 `Official YouTube TV Help Center where you can find tips and
+        tutorials ...` —— 搜索引擎为这条 query 回了一条毫不相干的英文帮助页，而这里**照单全收**。
+        取不到 / 不相关就返回**空串**，由调用方如实写「暂无简介」——
+        原来这里返回的是"本地高人气热门目的地，融汇了独特的地域人文与招牌风味体验。"
+        （一句**没有出处**的赞美，与 (0,0) 坐标同类：看着像事实，其实是编的）。
+        """
         def sync_search():
             try:
                 query = f"{city} {poi_name} 招牌特色 历史背景 游玩攻略"
@@ -1607,10 +1617,10 @@ class ExpertToolbox:
         try:
             info = await asyncio.wait_for(asyncio.to_thread(sync_search), timeout=1.2)
             if info:
-                return info
+                return clean_web_knowledge(info, poi_name, city)
         except Exception:
             pass
-        return "本地高人气热门目的地，融汇了独特的地域人文与招牌风味体验。"
+        return ""
 
     async def get_real_time_web_price(self, city: str, target: str) -> str:
         """联网搜一条价格（DuckDuckGo）。失败如实回"未抓取到"，绝不编数字。
@@ -2346,7 +2356,10 @@ class SemanticItineraryCache:
         #    而这两块刚修了两个"结论早于最终路线"的错（缺坐标住宿补的坐标没写回路线、
         #    质量分在收口前就算完了）。旧条目里的这两项**已知是错的**，继续命中就是拿
         #    错数据骗人（实测：同样的诉求秒回 394ms，日志里没有「📐 [质量重算]」）。
-        raw = f"v7|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
+        # v8：`desc`（地点简介）口径改了 —— 联网抓错页面的文字不再顶上，没出处就写「暂无简介」。
+        #    旧条目里存着 YouTube 帮助中心、"中医认为酸奶有益健康"这类**假简介**，
+        #    命中它们就是继续把编造当介绍渲染给用户。
+        raw = f"v8|{MODEL_NAME}|{city}|{days}|{''.join(str(profile_text or '').split())}"
         if self.debug:
             # 缓存命中率低时，第一件要知道的事就是"键为什么不一样"：
             # 把参与哈希的原文打出来（只在本进程日志里），两次同样的请求一比就知道。
@@ -3890,7 +3903,8 @@ async def run_negotiate(msg: GatewayMessage):
                     timeout=3.5
                 )
             except Exception:
-                web_knowledge_list = ["本地高人气打卡目的地，融入独特文化特色与地道风味体验。"] * len(search_candidates)
+                # 富化失败 → 一律**空串**：让下面如实写「暂无简介」，不要编一句"高人气"顶上
+                web_knowledge_list = [""] * len(search_candidates)
             _stage("候选池与增强")
 
             poi_pool_data = []
@@ -3912,7 +3926,9 @@ async def run_negotiate(msg: GatewayMessage):
                     except Exception:
                         pass
 
-                web_info = web_knowledge_list[i] if i < len(web_knowledge_list) and isinstance(web_knowledge_list[i], str) else "本地特色文旅目的地。"
+                web_info = web_knowledge_list[i] if i < len(web_knowledge_list) and isinstance(web_knowledge_list[i], str) else ""
+                # 校验过的联网简介才算；取不到就留空（下面 `description_of` 会写成"暂无简介"）
+                web_info = clean_web_knowledge(web_info, str(p.get('name') or ''), target_city)
                 p_cost_num = p.get('cost')
                 p_type = str(p.get('type') or '')
                 p_name = str(p.get('name') or '特色地标')
@@ -4163,6 +4179,12 @@ async def run_negotiate(msg: GatewayMessage):
                         _c_lnglat = chosen.get("lnglat") or [0.0, 0.0]
                         _c_photos = chosen.get("photos") if isinstance(chosen.get("photos"), list) else []
                         _c_map = chosen.get("map_image") or _make_static_map(_c_lnglat)
+                        # 简介口径：能核实的（校验过的联网简介 / 供应商原文）才用，否则如实说"暂无简介"
+                        _c_desc, _c_desc_src = description_of(
+                            str(chosen.get("name") or ""),
+                            web_knowledge=chosen.get("web_knowledge"),
+                            city=target_city,
+                        )
                         day_nodes.append({
                             "day": d,
                             "time": f"Day {d} | {slot_label} (建议游玩 1.5 小时)",
@@ -4170,7 +4192,8 @@ async def run_negotiate(msg: GatewayMessage):
                             "name": chosen.get("name"),
                             "lnglat": _c_lnglat,
                             "type": chosen.get("type") or "风景",
-                            "desc": chosen.get("web_knowledge") or f"{target_city}本地特色文旅目的地。",
+                            "desc": _c_desc,
+                            "desc_source": _c_desc_src,
                             "transport": "自驾/打车",
                             "tags": slot_tags[min(slot_i, len(slot_tags)-2)],
                             "cost_estimate": chosen.get("cost_estimate") or "暂无供应商数据",
@@ -4195,6 +4218,12 @@ async def run_negotiate(msg: GatewayMessage):
                         _h_lnglat = hotel.get("lnglat") or [0.0, 0.0]
                         _h_photos = hotel.get("photos") if isinstance(hotel.get("photos"), list) else []
                         _h_map = hotel.get("map_image") or _make_static_map(_h_lnglat)
+                        # 「交通便利」是**断言**，我们并没有算过这家酒店的通勤 —— 没出处就别写
+                        _hotel_desc, _hotel_desc_src = description_of(
+                            str(hotel.get("name") or ""),
+                            web_knowledge=hotel.get("web_knowledge"),
+                            city=target_city,
+                        )
                         day_nodes.append({
                             "day": d,
                             "time": f"Day {d} | 21:30 入住",
@@ -4202,7 +4231,8 @@ async def run_negotiate(msg: GatewayMessage):
                             "name": hotel.get("name"),
                             "lnglat": _h_lnglat,
                             "type": "酒店住宿",
-                            "desc": f"{target_city}精选住宿，交通便利。",
+                            "desc": _hotel_desc,
+                            "desc_source": _hotel_desc_src,
                             "transport": "自驾/打车",
                             "tags": ["住宿"],
                             "cost_estimate": hotel.get("cost_estimate") or "暂无供应商数据",
@@ -4551,7 +4581,13 @@ async def run_negotiate(msg: GatewayMessage):
                             r["location"] = fallback.get("name")
                             r["name"] = fallback.get("name")
                             r["type"] = fallback.get("type") or r.get("type")
-                            r["desc"] = fallback.get("web_knowledge") or r.get("desc") or "本地高人气文旅目的地。"
+                            # 置换之后简介也得**跟着换**，并且只能换成有出处的（否则如实说"暂无简介"）
+                            r["desc"], r["desc_source"] = description_of(
+                                str(fallback.get("name") or ""),
+                                web_knowledge=fallback.get("web_knowledge"),
+                                provider_desc=r.get("desc"),
+                                city=target_city,
+                            )
                             r["cost_estimate"] = fallback.get("cost_estimate") or r.get("cost_estimate") or "暂无供应商数据"
                             r["is_hotel"] = bool(fallback.get("is_hotel", False))
                             r["trust_reason"] = "匹配度校验：未识别地点已置换为候选池真实 POI（100% 匹配）"
@@ -4588,13 +4624,17 @@ async def run_negotiate(msg: GatewayMessage):
 
                     def _make_node(_p, _d, _time):
                         _used.add(_norm_name(str(_p.get("name"))))
+                        _n_desc, _n_desc_src = description_of(
+                            str(_p.get("name") or ""), web_knowledge=_p.get("web_knowledge"), city=target_city
+                        )
                         return {
                             "day": _d,
                             "name": _p.get("name") or "特色地标",
                             "location": _p.get("name") or "特色地标",
                             "lnglat": _p.get("lnglat") or [0.0, 0.0],
                             "type": _p.get("type") or "风景",
-                            "desc": _p.get("web_knowledge") or "本地高人气文旅目的地。",
+                            "desc": _n_desc,
+                            "desc_source": _n_desc_src,
                             "time": _time,
                             "transport": "自驾/打车",
                             "tags": ["智能补全"] + (["住宿"] if _p.get("is_hotel") else []),
@@ -4768,13 +4808,17 @@ async def run_negotiate(msg: GatewayMessage):
                                 if not pool_left:
                                     break
                                 p = pool_left.pop(0)
+                                _s_desc, _s_desc_src = description_of(
+                                    str(p.get("name") or ""), web_knowledge=p.get("web_knowledge"), city=target_city
+                                )
                                 synth_nodes.append({
                                     "day": d,
                                     "name": p.get("name") or "特色地标",
                                     "location": p.get("name") or "特色地标",
                                     "lnglat": p.get("lnglat") or [0.0, 0.0],
                                     "type": p.get("type") or "风景",
-                                    "desc": p.get("web_knowledge") or "本地高人气文旅目的地。",
+                                    "desc": _s_desc,
+                                    "desc_source": _s_desc_src,
                                     "time": time_slots[min(slot, len(time_slots) - 1)],
                                     "transport": "自驾/打车",
                                     "tags": ["智能补全"] + (["住宿"] if p.get("is_hotel") else []),
@@ -4800,13 +4844,17 @@ async def run_negotiate(msg: GatewayMessage):
                     def _pool_node(p, day, time_label, is_hotel, tags):
                         _hotel = bool(is_hotel)
                         _lnglat = p.get("lnglat") or [0.0, 0.0]
+                        _h_desc, _h_desc_src = description_of(
+                            str(p.get("name") or ""), web_knowledge=p.get("web_knowledge"), city=target_city
+                        )
                         return {
                             "day": day,
                             "name": p.get("name") or "特色地标",
                             "location": p.get("name") or "特色地标",
                             "lnglat": _lnglat,
                             "type": p.get("type") or ("酒店住宿" if _hotel else "风景"),
-                            "desc": p.get("web_knowledge") or (f"{target_city}精选住宿，交通便利。" if _hotel else "本地高人气文旅目的地。"),
+                            "desc": _h_desc,
+                            "desc_source": _h_desc_src,
                             "time": time_label,
                             "transport": "自驾/打车",
                             "tags": (tags or []) + (["住宿"] if _hotel else []),

@@ -94,6 +94,141 @@ def _source_values(node: Mapping[str, Any]) -> List[str]:
     return []
 
 
+# --------------------------------------------------------------------------
+# 地点简介（desc）：宁可"暂无简介"，也不要编
+# --------------------------------------------------------------------------
+# 简介缺失时的**如实说法**（不是套话，也不夸这个地点）
+NO_DESC = "暂无简介（未检索到可核实的来源）"
+
+# 我们历史上自己编过的"万金油简介"（离线/缓存的老方案里还留着）：
+# 它们都在**断言**（"高人气""独特文化特色""交通便利"）却没有任何出处 —— 与 (0,0) 坐标同类。
+DESC_BOILERPLATE_MARKERS = (
+    "本地特色文旅目的地",
+    "本地高人气文旅目的地",
+    "本地高人气打卡目的地",
+    "本地高人气热门目的地",
+    "融入独特文化特色",
+    "融汇了独特的地域人文",
+    "精选住宿，交通便利",
+)
+
+# 明显"抓错页面"的痕迹（实测抓到过 YouTube 帮助中心被当成喀什某个书院的简介）
+DESC_JUNK_MARKERS = (
+    "help center",
+    "youtube",
+    "tutorial",
+    "cookie",
+    "sign in",
+    "privacy policy",
+    "terms of service",
+    "subscribe",
+    "download the app",
+)
+
+
+def _cjk_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    return sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff") / len(text)
+
+
+def desc_relevance_problem(text: Any, poi_name: str, city: str = "") -> str:
+    """简介**与地点对不上**就返回原因，正常返回空串（供富化入口与评分共用一套判据）。
+
+    判据（2026-10-05 实测抓到用户可见的编造：「胡杨书院」的 desc 是一段
+    `Official YouTube TV Help Center ...` 的英文帮助页文字）：
+      ① 命中"抓错页面"痕迹（youtube/help center/cookie…）→ 拒；
+      ② 中文地点名却几乎没有中文 → 拒；
+      ③ 既没提到地点名（或去掉括号的核心名）也没提到城市 → 拒（宁可没有简介）。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return "空"
+    if raw == NO_DESC:
+        return ""
+    lowered = raw.lower()
+    for marker in DESC_JUNK_MARKERS:
+        if marker in lowered:
+            return f"内容像是抓错了页面（含「{marker}」）"
+    name = str(poi_name or "").strip()
+    if name and _cjk_ratio(name) > 0.5 and _cjk_ratio(raw) < 0.3:
+        return "中文地点配了一段几乎不含中文的简介"
+    core = name
+    for opener, closer in (("(", ")"), ("（", "）")):
+        if opener in core and closer in core:
+            core = core.split(opener)[0].strip()
+    mentions_name = bool(core) and core in raw
+    mentions_city = bool(str(city or "").strip()) and str(city).strip() in raw
+    if not (mentions_name or mentions_city):
+        return "简介里没提到这个地点，也没提到城市"
+    return ""
+
+
+def is_boilerplate_desc(text: Any) -> bool:
+    """是不是我们（或上游）自己那套**没有出处的万金油简介**。"""
+    raw = str(text or "").strip()
+    return any(marker in raw for marker in DESC_BOILERPLATE_MARKERS)
+
+
+def clean_web_knowledge(text: Any, poi_name: str, city: str = "", *, max_chars: int = 160) -> str:
+    """校验联网取回的简介；不合格返回**空串**（调用方据此如实说"暂无简介"）。
+
+    绝不返回"编一句好听的话"当兜底 —— 那正是这次要修的东西。
+    """
+    raw = str(text or "").strip()
+    if not raw or desc_relevance_problem(raw, poi_name, city):
+        return ""
+    if is_boilerplate_desc(raw):
+        return ""
+    collapsed = " ".join(raw.split())
+    return collapsed[:max_chars]
+
+
+def description_of(
+    poi_name: str,
+    *,
+    web_knowledge: Any = "",
+    provider_desc: Any = "",
+    city: str = "",
+) -> Tuple[str, str]:
+    """给一个地点的简介：能用**可核实**的就用，不能就如实说没有。返回 `(简介, 来源)`。
+
+    `来源` ∈ {`web`, `provider`, `missing`} —— 随节点下发（`desc_source`），
+    界面与审计才能回答"这句话是哪来的"。
+    """
+    cleaned = clean_web_knowledge(web_knowledge, poi_name, city)
+    if cleaned:
+        return cleaned, "web"
+    provider_text = str(provider_desc or "").strip()
+    if provider_text and provider_text != NO_DESC and not is_boilerplate_desc(provider_text):
+        if not desc_relevance_problem(provider_text, poi_name, city):
+            return " ".join(provider_text.split())[:160], "provider"
+    return NO_DESC, "missing"
+
+
+def unrelated_descriptions(plan: Any) -> List[Dict[str, str]]:
+    """列出**简介与地点对不上 / 是无出处的套话**的节点（用户可见的编造）。
+
+    尺子必须能自己抓到这类错 —— 这次是"人并排读两份方案"才发现的：
+    一份把 YouTube 帮助中心文字当成了喀什某书院的简介，而真实度维度当时给了它 0.733。
+    """
+    problems: List[Dict[str, str]] = []
+    for node in nodes_of(plan):
+        text = str(node.get("desc") or "").strip()
+        if not text or text == NO_DESC:
+            continue
+        if str(node.get("desc_source") or "").strip() == "provider":
+            # 供应商（高德）给的简介：有出处，按可信处理
+            continue
+        if is_boilerplate_desc(text):
+            problems.append({"name": node_name(node), "why": "简介是没出处的套话（在断言「高人气/独特」却查不到来源）"})
+            continue
+        why = desc_relevance_problem(text, node_name(node))
+        if why:
+            problems.append({"name": node_name(node), "why": f"简介与地点对不上：{why}"})
+    return problems
+
+
 def is_real_retrieval(node: Mapping[str, Any], known_names: Optional[set] = None) -> bool:
     """这个节点是不是**真实检索到的**（而不是模型凭记忆写的）。
 
