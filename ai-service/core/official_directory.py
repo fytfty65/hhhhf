@@ -83,32 +83,116 @@ def parse_directory_list(html: str, base_url: str) -> List[Dict[str, str]]:
 
 
 def _normalize(text: str) -> str:
-    """去掉行政前缀/通词，留可比对的核心字（"伊宁县天鹅泉湿地公园" → "天鹅泉"）。"""
-    value = str(text or "")
+    """去掉行政前缀/通用景点词，留可比对的核心字（"伊宁县天鹅泉湿地公园" → "天鹅泉"）。
+
+    ⚠️ 顺序很关键（2026-10-07 实测抓到的错配）：第一版把「区」当行政区后缀直接替换，
+    于是「喀什古城**景区**」被啃成「喀什古城**景**」、再和「金湖杨景」比 ——
+    `"喀什古城景区"` 竟然匹配到了「喀什地区**金湖杨**景区」。现在：
+      ① 先去掉**长**的行政区名（自治区/自治州/地区/州）；
+      ② 行政区后缀（县/市/区）**只在末尾**去，绝不动"景区"里的"区"；
+      ③ 再去通用景点词（景区/公园/博物馆…），最后再收一次末尾的县/市/区。
+    """
+    import re
+
+    value = str(text or "").strip()
     for word in (
-        "新疆维吾尔自治区", "自治区", "自治州", "地区", "伊宁县", "伊宁市", "伊犁哈萨克", "伊犁州", "伊犁",
-        "喀什市", "喀什地区", "喀什", "库尔勒市", "巴音郭楞", "巴州", "县", "市", "区",
+        "新疆维吾尔自治区",
+        "巴音郭楞蒙古自治州",
+        "伊犁哈萨克自治州",
+        "伊犁哈萨克",
+        "自治区",
+        "自治州",
+        "喀什地区",
+        "地区",
+        "州",
     ):
         value = value.replace(word, "")
-    for word in ("国家", "旅游景区", "风景区", "景区", "湿地公园", "森林公园", "公园", "乐园", "博物馆", "古城"):
+    for word in (
+        "国家",
+        "旅游景区",
+        "旅游度假区",
+        "旅游区",
+        "风景区",
+        "景区",
+        "湿地公园",
+        "森林公园",
+        "公园",
+        "乐园",
+        "博物馆",
+        "古城",
+    ):
         value = value.replace(word, "")
+    # 末尾的行政区后缀**最后**再去（顺序反了会出真错："喀什古城景区"先被啃成"喀什古城景"，
+    # "景区"就再也匹配不上，结果 `喀什古城景区` 匹配到了「喀什地区**金湖杨**景区」）
+    value = re.sub(r"(?:县|市|区)$", "", value)
     return value.strip()
 
 
+# "多出来的都是通用词"的白名单（用于判断"名录名是节点名的子串"这种可疑匹配）
+_GENERIC_CHARS = set("馆园城街寺塔湖山林泉宫府楼阁院庙桥村乡镇区市县古镇景区公园")
+
+
+def _type_group(token: str) -> str:
+    """类别词的分组：**场馆类**（博物馆/纪念馆）与**户外景区类**（景区/公园/古城…）。
+
+    为什么分组而不是逐字相等：我们的节点常写简称「喀什古城」，官方名录写全称
+    「喀什地区喀什古城**景区**」—— 逐字比会把这种**正确**的匹配挡掉；
+    而「喀什**博物馆**」匹配到「喀什古城**景区**」是**错误**的。分组刚好分开这两种情况。
+    """
+    value = str(token or "")
+    if not value:
+        return ""
+    if value in ("博物馆", "纪念馆", "博物院", "陈列馆"):
+        return "venue"
+    return "outdoor"
+
+
+def _type_token(text: str) -> str:
+    """这个名字的**类别词**（景区/博物馆/公园/古城/湿地…）——用来挡住"同类不同物"的错配。"""
+    value = str(text or "")
+    for word in ("旅游景区", "旅游度假区", "旅游区", "风景区", "景区", "博物馆", "纪念馆", "湿地公园", "森林公园", "公园", "乐园", "古城", "古镇", "胡杨林", "草原", "沙漠"):
+        if word in value:
+            return word
+    return ""
+
+
 def match_entry(name: str, entries: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, str]]:
-    """在名录里找这个名字：核心字互相包含即算命中（官方名录常带县名/全称，我们只有简称）。"""
+    """在名录里找这个名字：核心字互相包含即算命中（官方名录常带县名/全称，我们只有简称）。
+
+    三条硬规矩（都是实测踩出来的）：
+      · 核心字 <2 字 → 不参与包含匹配（只认完全相等）；
+      · **类别词必须一致**：`喀什博物馆` 归一化后只剩「喀什」，曾因此匹配到
+        「喀什地区**喀什古城景区**」——一个博物馆被安上了古城的官方简介；
+        现在「博物馆」≠「景区」直接判不匹配；
+      · 命中多个时取**最具体**的（核心字最长）。
+    """
     core = _normalize(name)
-    if not core:
+    name_type = _type_token(name)
+    if len(core) < 2:
         return None
     best: Optional[Dict[str, str]] = None
+    best_len = -1
     for entry in entries or []:
         entry_name = str(entry.get("name") or "")
         entry_core = _normalize(entry_name)
-        if not entry_core:
+        if len(entry_core) < 2:
             continue
-        if core == entry_core or core in entry_core or entry_core in core:
-            # 更长的包含关系更具体（"天鹅泉" vs "天鹅泉湿地公园"），命中即返回第一个
-            if best is None or len(entry_core) > len(_normalize(best.get("name") or "")):
+        entry_type = _type_token(entry_name)
+        if name_type and entry_type and _type_group(name_type) != _type_group(entry_type):
+            continue
+        if core == entry_core:
+            matched = True
+        elif core in entry_core:
+            # 我们的名字更短、更具体（"天鹅泉" ⊂ "伊宁县天鹅泉湿地公园"）—— 安全
+            matched = True
+        else:
+            # 名录名是我们的子串（"喀什" ⊂ "百年喀什馆"）—— **危险**，只认"多出来的都是通用词"
+            # 实测：`百年喀什馆` 因此被安上了「喀什地区喀什古城景区」的官方简介。
+            leftover = core.replace(entry_core, "")
+            matched = len(leftover) <= 2 and all(char in _GENERIC_CHARS for char in leftover)
+        if matched:
+            if len(entry_core) > best_len:
+                best_len = len(entry_core)
                 best = {"name": entry_name, "url": str(entry.get("url") or "")}
     return best
 

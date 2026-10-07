@@ -6080,6 +6080,36 @@ async def run_negotiate(msg: GatewayMessage):
                                                     f"{type(_official_exc).__name__}: {str(_official_exc)[:60]}",
                                                     flush=True,
                                                 )
+                                            # 👑 第二条定向通道：**文旅部全国 A 级景区名录**
+                                            #    （2026-10-07 接的）。它只覆盖 5A，但字段很合用：
+                                            #    官方名称/地址/简介 + **景区官网 + 官方预约平台**。
+                                            #    有官网/预约页就去那一页取票价（`official` = 可核实）；
+                                            #    没有就把它登记的官方信息留下（用户能看到官方购票入口）。
+                                            try:
+                                                from core.mct_channel import (
+                                                    lookup_mct_price as _mct_price,
+                                                )
+                                                from core.mct_channel import (
+                                                    mct_lookup as _mct_lookup,
+                                                )
+                                                from core.mct_channel import (
+                                                    profile_of as _mct_profile,
+                                                )
+
+                                                _marker = await _mct_lookup(_name, city=target_city)
+                                                if _marker:
+                                                    final_data.setdefault("official_profiles", {})[
+                                                        _name
+                                                    ] = _mct_profile(_marker)
+                                                _mct = await _mct_price(_name, city=target_city)
+                                                if _mct.get("value") is not None:
+                                                    return _mct
+                                            except Exception as _mct_exc:
+                                                print(
+                                                    f"⚠️ [文旅部名录] {_name} 这条通道失败: "
+                                                    f"{type(_mct_exc).__name__}: {str(_mct_exc)[:60]}",
+                                                    flush=True,
+                                                )
                                         try:
                                             return await lookup_price(
                                                 _name,

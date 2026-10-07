@@ -410,14 +410,25 @@ def extract_price_candidates(text: str) -> List[Dict[str, Any]]:
     return found
 
 
-async def fetch_page_text(url: str, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+async def fetch_page_text(
+    url: str, *, timeout: Optional[float] = None, allow_hosts: Sequence[str] = ()
+) -> Dict[str, Any]:
     """直接打开一个**允许抓取**的官方页面并取正文（用户问的"直接抵达官方页面"）。
 
     安全与礼貌：带 UA、限体积（512KB）、限时；域名不在允许清单直接拒绝并说明原因。
+
+    `allow_hosts`（2026-10-07 加）：**另外**允许的主机名。用于文旅部名录登记的
+    景区官网/官方预约平台 —— 那些域名不在我们的白名单里（白名单是政府站 + 用户配置域名），
+    但它们由**部级官方名录**背书，属于"官方页面"。不放开这个参数，
+    MCT 通道即使命中了 5A 景区也永远抓不到它的官方页（实测 `host_is_allowed` 直接拒绝）。
     """
     import httpx
 
     allowed, reason = host_is_allowed(url)
+    if not allowed:
+        host = str(url or "").split("/")[2] if "//" in str(url or "") else ""
+        if host and host in {str(item).strip().lower() for item in allow_hosts if str(item).strip()}:
+            allowed, reason = True, "文旅部名录登记的景区官网"
     if not allowed:
         return {"ok": False, "url": str(url), "error": reason}
     limit = float(timeout or price_timeout_seconds())
@@ -484,7 +495,9 @@ async def fetch_page_html_stable(url: str, *, attempts: int = 2, timeout: Option
     return last
 
 
-async def fetch_page_text_stable(url: str, *, attempts: int = 2, timeout: Optional[float] = None) -> Dict[str, Any]:
+async def fetch_page_text_stable(
+    url: str, *, attempts: int = 2, timeout: Optional[float] = None, allow_hosts: Sequence[str] = ()
+) -> Dict[str, Any]:
     """抓官方页面正文：失败**重试一次**（默认最多 2 次）。
 
     为什么值得重试（2026-10-05 实测）：伊宁方案里「伊宁县文化艺术中心」拿到了
@@ -496,7 +509,7 @@ async def fetch_page_text_stable(url: str, *, attempts: int = 2, timeout: Option
     """
     last: Dict[str, Any] = {"ok": False, "url": str(url), "error": "未尝试"}
     for _ in range(max(1, int(attempts))):
-        last = await fetch_page_text(url, timeout=timeout)
+        last = await fetch_page_text(url, timeout=timeout, allow_hosts=allow_hosts)
         if last.get("ok"):
             return last
     return last
