@@ -63,11 +63,22 @@ def _name_key(text: Any) -> str:
     return _normalize(text)
 
 
-def pick_sight(entries: Sequence[Mapping[str, Any]], name: str, *, key: str = "sightName") -> Optional[Dict[str, Any]]:
-    """在一批平台条目里挑**就是这个名字**的那条（归一化后相等优先，其次包含）。"""
+def pick_sight(
+    entries: Sequence[Mapping[str, Any]], name: str, *, key: str = "sightName", city: str = ""
+) -> Optional[Dict[str, Any]]:
+    """在一批平台条目里挑**就是这个名字**的那条（归一化后相等优先，其次包含）。
+
+    ⚠️ `city` 必须传（2026-10-07 实测抓到的错配）：归一化会把通词（公园/景区/博物馆…）去掉，
+    于是一个名字有可能**退化成都市名** —— 「库尔勒市湿地公园」→「库尔勒」，
+    而「库尔勒体育公园」→「库尔勒体育」，前者是后者的子串 → **湿地公园被安上了体育公园的票价**
+    （实跑里两个节点拿到了同一个 qunar sightId 与同一条票）。
+    传入 `city` 后要求：名字里**除了城市名以外**还得有可比对的内容。
+    """
     target = _name_key(name)
     if not target:
         return None
+    city_core = _name_key(city) if city else ""
+    target_specific = target.replace(city_core, "") if city_core else target
     exact: Optional[Dict[str, Any]] = None
     loose: Optional[Dict[str, Any]] = None
     for entry in entries or []:
@@ -79,7 +90,10 @@ def pick_sight(entries: Sequence[Mapping[str, Any]], name: str, *, key: str = "s
         if entry_key == target:
             exact = dict(entry)
             break
-        if loose is None and (target in entry_key or entry_key in target):
+        entry_specific = entry_key.replace(city_core, "") if city_core else entry_key
+        if not target_specific or not entry_specific:
+            continue  # 去掉城市名之后什么都不剩 → 不够具体，不匹配
+        if loose is None and (target_specific in entry_specific or entry_specific in target_specific):
             loose = dict(entry)
     return exact or loose
 
@@ -182,24 +196,106 @@ def qunar_detail_url(sight_id: Any) -> str:
     return f"https://piao.qunar.com/ticket/detail_{sight_id}.html" if sight_id else ""
 
 
-async def lookup_qunar_price(name: str, *, fetch_json: Any = None) -> Dict[str, Any]:
+# —— 城市级"名字解析器"（进程内缓存）——
+# 为什么需要（2026-10-07 实测）：方案节点的名字常常对不上平台的标准名
+# （伊宁 7 个景点里，严格挑名只命中 1 个；用宽容匹配对上是 7 个）。
+# 列表接口按"城市"能一次返回 15~30 个景区，把它当**标准名日录**用：
+# 先用它把我们的名字换成平台的名字，再用平台的名字去查价。
+# ⚠️ 诚实起见：日录条目本身**常常没有 price 块**（价要按景点名直接查才有），
+#    所以这一步只是"换个名字再查一次"，能不能拿到价仍取决于平台。
+_CITY_DIRECTORY: Dict[str, Dict[str, str]] = {}
+
+
+async def qunar_city_directory(city: str, *, fetch_json: Any = None, refresh: bool = False) -> Dict[str, str]:
+    """`{平台标准名: sightId}`：按城市拉一次景区列表并缓存（同一次运行里只拉一次）。"""
+    key = str(city or "").strip()
+    if not key:
+        return {}
+    if not refresh and key in _CITY_DIRECTORY:
+        return _CITY_DIRECTORY[key]
+    fetch = fetch_json or (lambda url, params: _get_json(url, params))
+    directory: Dict[str, str] = {}
+    for keyword in (f"{key} 景点", f"{key} 门票", key):
+        try:
+            payload = await fetch(QUNAR_TICKET_API, {"keyword": keyword, "page": "1"})
+        except Exception:
+            continue
+        data = payload.get("data") if isinstance(payload, Mapping) else {}
+        for row in (data or {}).get("list") or (data or {}).get("sightList") or []:
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("sightName") or "").strip()
+            if name and name not in directory:
+                directory[name] = str(row.get("sightId") or "")
+    _CITY_DIRECTORY[key] = directory
+    return directory
+
+
+def reset_city_directory() -> None:
+    _CITY_DIRECTORY.clear()
+
+
+async def lookup_qunar_price(name: str, *, city: str = "", fetch_json: Any = None) -> Dict[str, Any]:
     """去哪儿门票：景区名 → 结构化票种与价格。
 
-    返回观测：命中 → `value` 有数、`source="platform"`、`provider="qunar"`、`excerpt` 是票种名；
-    没命中/没价 → `value=None` + `note`（如实说明，绝不猜）。
+    两步（2026-10-07）：
+      ① 直接按方案里的名字查；
+      ② 查不到（或查到的条目没有门票价）时，用**城市日录**把名字换成平台标准名再查一次 ——
+         实测方案名与平台名常常不一致（伊宁 7 个景点严格挑名只中 1 个，宽容匹配中 7 个）。
+         换名后仍拿不到价就如实说明，绝不猜。
     """
     from .web_price_tool import build_observation
 
     fetch = fetch_json or (lambda url, params: _get_json(url, params))
-    try:
-        payload = await fetch(QUNAR_TICKET_API, {"keyword": name, "page": "1"})
-    except Exception as exc:
+
+    async def _query(keyword: str) -> tuple:
+        try:
+            payload = await fetch(QUNAR_TICKET_API, {"keyword": keyword, "page": "1"})
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {str(exc)[:60]}"
+        data = payload.get("data") if isinstance(payload, Mapping) else {}
+        items = (data or {}).get("list") or (data or {}).get("sightList") or []
+        return items, ""
+
+    items, error = await _query(name)
+    if error:
         return build_observation(name=name, value=None, source="platform", provider="qunar") | {
-            "note": f"去哪儿接口失败（{type(exc).__name__}）",
+            "note": f"去哪儿接口失败（{error}）",
         }
-    data = payload.get("data") if isinstance(payload, Mapping) else {}
-    items = (data or {}).get("list") or (data or {}).get("sightList") or []
-    entry = pick_sight(items, name)
+    entry = pick_sight(items, name, city=city)
+    via = "direct"
+    if not adult_ticket_price(entry) if entry else True:
+        # 换名再查一次：用城市日录里的标准名
+        try:
+            from .official_directory import _normalize
+
+            city_core = _normalize(city)
+            name_core = _normalize(name)
+            name_specific = name_core.replace(city_core, "") if city_core else name_core
+            directory = await qunar_city_directory(city, fetch_json=fetch_json)
+            standard = ""
+            for entry_name in directory:
+                entry_core = _normalize(entry_name)
+                if not entry_core or not name_specific:
+                    continue
+                entry_specific = entry_core.replace(city_core, "") if city_core else entry_core
+                if not entry_specific:
+                    continue
+                if (
+                    name_core == entry_core
+                    or name_specific in entry_specific
+                    or entry_specific in name_specific
+                ):
+                    standard = entry_name
+                    break
+            if standard and standard != name:
+                renamed_items, renamed_error = await _query(standard)
+                renamed = pick_sight(renamed_items or [], standard, city=city) if not renamed_error else None
+                if renamed:
+                    entry = renamed
+                    via = f"city_directory:{standard}"
+        except Exception:
+            pass
     if not entry:
         return build_observation(name=name, value=None, source="platform", provider="qunar") | {
             "note": f"去哪儿没有「{name}」这个景区（返回 {len(items)} 条近似结果，都不匹配）",
@@ -237,6 +333,8 @@ async def lookup_qunar_price(name: str, *, fetch_json: Any = None) -> Dict[str, 
         "ticket_name": ticket_name,
         "price_kind": "from" if is_from else "adult",
         "ticket_scope": scope,
+        # 这条价是"按方案里的名字直接查到的"，还是"用城市日录换成平台标准名后查到的"
+        "matched_via": via,
     }
 
 
@@ -301,9 +399,11 @@ async def lookup_ctrip_price(name: str, *, fetch_json: Any = None, fetch_page: A
     ) | {"platform": "携程", "platform_sight_name": str(entry.get("word") or "")}
 
 
-async def lookup_platform_price(name: str, *, fetch_json: Any = None, fetch_page: Any = None) -> Dict[str, Any]:
+async def lookup_platform_price(
+    name: str, *, city: str = "", fetch_json: Any = None, fetch_page: Any = None
+) -> Dict[str, Any]:
     """票务平台通道入口：**去哪儿优先**（它有结构化票种），其次携程（详情页抽价）。"""
-    qunar = await lookup_qunar_price(name, fetch_json=fetch_json)
+    qunar = await lookup_qunar_price(name, city=city, fetch_json=fetch_json)
     if qunar.get("value") is not None:
         return qunar
     ctrip = await lookup_ctrip_price(name, fetch_json=fetch_json, fetch_page=fetch_page)

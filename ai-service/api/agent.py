@@ -6120,7 +6120,7 @@ async def run_negotiate(msg: GatewayMessage):
                                                     lookup_platform_price as _platform_price,
                                                 )
 
-                                                _platform = await _platform_price(_name)
+                                                _platform = await _platform_price(_name, city=target_city)
                                                 if _platform.get("value") is not None:
                                                     return _platform
                                                 # 👑 平台**已经给过结论**（有景区、但只有跟团游/没有门票；
