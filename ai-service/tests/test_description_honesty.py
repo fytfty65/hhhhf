@@ -186,6 +186,55 @@ class AmapFactLineTests(unittest.TestCase):
         self.assertEqual(len(unrelated_descriptions(plan)), 1)
 
 
+class OfficialPageDescriptionTests(unittest.TestCase):
+    """真简介：只在**白名单官方页面**的正文里挑一段（用户裁决 2026-10-07「抓取官网页面」）。"""
+
+    PAGE = (
+        "首页 政务公开 通知公告 关于喀什市景区门票价格调整的通知 "
+        "喀什市香妃园景区门票价格由30元/人·次调整为40元/人·次。"
+        "阳光公园位于喀什市东城区，占地约300亩，是市民休闲健身的城市公园，园内设有环湖步道与儿童活动区。"
+        "联系电话：0998-1234567。"
+    )
+
+    def test_picks_the_sentence_about_the_place(self):
+        from core.web_price_tool import extract_description
+
+        text = extract_description(self.PAGE, "阳光公园", "喀什")
+        self.assertIn("阳光公园位于喀什市东城区", text)
+        self.assertNotIn("联系电话", text, "噪声句不该被拼进简介")
+        self.assertNotIn("首页", text, "导航词不该出现在简介里")
+
+    def test_place_not_on_the_page_gets_nothing(self):
+        from core.web_price_tool import extract_description
+
+        self.assertEqual(extract_description(self.PAGE, "帕米尔旅游景区", "喀什"), "")
+        self.assertEqual(extract_description("", "阳光公园", "喀什"), "")
+
+    def test_scrambled_page_is_still_rejected_by_the_shared_validator(self):
+        """简介和价格共用同一套"抓错页面"判据 —— 英文帮助页不该被当成简介。"""
+        from core.web_price_tool import extract_description
+
+        junk = f"Official YouTube TV Help Center {YOUTUBE_JUNK} 阳光公园 阳光公园"
+        self.assertEqual(extract_description(junk, "阳光公园", "喀什"), "")
+
+    def test_only_whitelisted_pages_are_used(self):
+        """`lookup_description` 只抓白名单页面：票务平台的页面不给简介（口径：简介要有出处）。"""
+        import asyncio
+        from unittest import mock
+
+        from core import web_price_tool
+
+        async def fake_search(query, max_results=3, **_kwargs):
+            return [
+                {"title": "阳光公园门票", "url": "https://gs.ctrip.com/html5/you/sight/x.html", "body": "阳光公园门票30元"},
+            ]
+
+        with mock.patch("core.web_price_tool.search_texts", fake_search):
+            result = asyncio.run(web_price_tool.lookup_description("阳光公园", "喀什"))
+        self.assertEqual(result["text"], "")
+        self.assertEqual(result["source_url"], "")
+
+
 class PipelineWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

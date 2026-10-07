@@ -6154,6 +6154,58 @@ async def run_negotiate(msg: GatewayMessage):
                                         + (f"；失败原因：{_attempt_error}" if _attempt_error else ""),
                                         flush=True,
                                     )
+
+                                    # 👑 真简介：**只在白名单官方页面**上找（用户裁决 2026-10-07「抓取官网页面」）。
+                                    #    之前简介要么是编的（YouTube 帮助页/套话，已撤下），要么是
+                                    #    「高德资料：类别｜评分｜地址」这种事实行 —— 都不是"介绍这个地方"。
+                                    #    现在搜索链路恢复了（ddgs + Bing，Bing 会带出 .gov.cn），
+                                    #    就能把官方页正文里的那一段挑出来。挑不到就保持原样，绝不凑。
+                                    #    预算：只用取价**剩余**的时间，最多 4 个点 —— 不额外拉长一次推演。
+                                    try:
+                                        from core.web_price_tool import lookup_description as _lookup_description
+
+                                        _desc_targets = [
+                                            _node
+                                            for _node in (final_data.get("route") or [])
+                                            if isinstance(_node, dict)
+                                            and str(_node.get("desc_source") or "") in {"amap_fact", "missing", ""}
+                                            and str(_node.get("name") or "").strip()
+                                            and not bool(_node.get("is_hotel"))
+                                        ][:2]
+                                        # ⚠️ 用**自己的**小预算，不挂在取价 deadline 上（2026-10-07 实测）：
+                                        #    取价经常把 90s 用完，挂上去就永远"剩不到 8s → 直接跳过"，
+                                        #    等于这一步从没跑过。这里最多 2 个点、20s。
+                                        _desc_deadline = _time.monotonic() + 20.0
+                                        _desc_found: List[str] = []
+                                        _desc_tried = 0
+                                        for _node in _desc_targets:
+                                            if _desc_deadline - _time.monotonic() < 6.0:
+                                                break
+                                            _desc_tried += 1
+                                            try:
+                                                _found = await asyncio.wait_for(
+                                                    _lookup_description(str(_node.get("name") or ""), target_city),
+                                                    timeout=max(6.0, _desc_deadline - _time.monotonic()),
+                                                )
+                                            except Exception:
+                                                continue
+                                            if not str(_found.get("text") or "").strip():
+                                                continue
+                                            _node["desc"] = str(_found["text"])
+                                            _node["desc_source"] = "web_page"
+                                            _node["desc_source_url"] = str(_found.get("source_url") or "")
+                                            _node["desc_retrieved_at"] = float(_found.get("retrieved_at") or 0)
+                                            _desc_found.append(str(_node.get("name") or ""))
+                                        # 试过就要说（"试了但没取到"也是事实，不能只在成功时打日志）
+                                        if _desc_tried:
+                                            print(
+                                                f"📖 [地点简介] 官方页面：试了 {_desc_tried} 个，取到 "
+                                                f"{len(_desc_found)} 段"
+                                                + (f"（{'、'.join(_desc_found)}）" if _desc_found else "（没取到就保持高德资料/暂无）"),
+                                                flush=True,
+                                            )
+                                    except Exception as _desc_exc:  # 取简介失败不影响出方案
+                                        print(f"⚠️ [地点简介] 取简介失败（不影响出方案）: {_desc_exc}", flush=True)
                                 else:
                                     _coverage = price_coverage(final_data)
                                     _report = pending_price_report(final_data)

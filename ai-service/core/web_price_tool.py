@@ -1548,6 +1548,92 @@ async def lookup_price(
     )
 
 
+def extract_description(text: Any, name: str, city: str = "", *, max_chars: int = 160) -> str:
+    """从页面正文里挑一段**在讲这个地点**的简介；挑不到返回空串（纯函数）。
+
+    用户 2026-10-07 的裁决：「简介…要真简介就得有能抓的官方页面 → 那就抓取官网页面」。
+    这里只做"从已抓到的正文里选句子"，校验一律复用 `place_quality.clean_web_knowledge`
+    （必须提到这个地点、不能是抓错页面的英文帮助页）。**挑不到就返回空串**，
+    调用方保持"高德资料"或"暂无简介"，绝不为了好看凑一句。
+    """
+    from .place_quality import clean_web_knowledge, desc_relevance_problem
+
+    raw = " ".join(str(text or "").split())
+    core = str(name or "").strip()
+    for opener, closer in (("(", ")"), ("（", "）")):
+        if opener in core and closer in core:
+            core = core.split(opener)[0].strip()
+    if not raw or not core or core not in raw:
+        return ""
+    # 先判**整页**：抓错页面（英文帮助中心、验证页之类）时，页里任何一句都别用 ——
+    # 只判候选句是不够的（实测：英文帮助页里恰好也出现了"阳光公园"三个字）。
+    if desc_relevance_problem(raw[:4000], name, city):
+        return ""
+    sentences = [item.strip() for item in re.split(r"(?<=[。！？!?；;])", raw) if item.strip()]
+    # 拼接下一句时要挡住的"噪声句"（实测政府页正文里紧跟着联系电话/编辑信息）
+    noise = ("联系电话", "电话：", "邮编", "来源：", "编辑：", "上一篇", "下一篇", "版权所有", "扫一扫")
+    for index, sentence in enumerate(sentences):
+        name_pos = sentence.find(core)
+        if name_pos < 0 or len(sentence) < 12:
+            continue
+        candidate = sentence
+        # 地名前面还挂着一串空格分隔的导航（"首页 政务公开 通知公告 …"）→ 从**最后一个空格**处截，
+        # 不能按固定字数截（会截出半句话）；"喀什市香妃园景区…" 这种就干净了。
+        if name_pos > 12:
+            cut = sentence.rfind(" ", 0, name_pos)
+            if cut > 0:
+                candidate = sentence[cut + 1:].strip()
+        if len(candidate) < max_chars // 2 and index + 1 < len(sentences):
+            nxt = sentences[index + 1]
+            if (
+                core not in nxt
+                and not any(marker in nxt for marker in noise)
+                and len(candidate) + len(nxt) <= max_chars
+            ):
+                candidate = f"{candidate}{nxt}"
+        cleaned = clean_web_knowledge(candidate[: max_chars + 40], name, city, max_chars=max_chars)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+async def lookup_description(name: str, city: str, *, max_pages: int = 2) -> Dict[str, Any]:
+    """给一个地点找一段**可核实**的简介：只在白名单（gov/景区官网）页面上找。
+
+    返回 `{text, source, source_url, retrieved_at}`；没找到就是 `text=""`（如实为空）。
+    为什么不从任意网页摘要里凑：简介是**要对用户断言"这个地方是什么"**，比价格更该有出处；
+    用户口径也明确是"抓取官网页面"。
+    """
+    result: Dict[str, Any] = {"text": "", "source": "web_page", "source_url": "", "retrieved_at": time.time()}
+    query = f"{city} {name} 简介 介绍 官网"
+    try:
+        rows = await search_texts(query, max_results=6, merge=True, max_providers=2)
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
+        return result
+    urls: List[str] = []
+    for row in rows or []:
+        url = str(row.get("url") or row.get("href") or "")
+        if not url or url in urls:
+            continue
+        try:
+            if host_is_allowed(url)[0]:
+                urls.append(url)
+        except Exception:
+            continue
+    for url in urls[: max(1, max_pages)]:
+        page = await fetch_page_text_stable(url)
+        if not page.get("ok"):
+            continue
+        text = extract_description(str(page.get("text") or ""), name, city)
+        if text:
+            result["text"] = text
+            result["source_url"] = url
+            result["retrieved_at"] = float(page.get("retrieved_at") or time.time())
+            return result
+    return result
+
+
 def build_observation(
     *,
     name: str,
