@@ -3201,6 +3201,8 @@ async def run_negotiate(msg: GatewayMessage):
                         "address": str(item.get("address") or ""),
                         "booking_url": str(item.get("booking_url") or ""),
                         "message": str(item.get("message") or ""),
+                        # 坐标留着：定稿后要算"这家离方案里的玩点多远"（价格可比、距离也要可比）
+                        "lnglat": list(item.get("lnglat") or []),
                     }
                     for item in (_supplier_hotels.get("hotels") or [])
                 ]
@@ -6683,6 +6685,34 @@ async def run_negotiate(msg: GatewayMessage):
                                 f"⚠️ [酒店实时价] 查询失败（不影响出方案）: {_lodging_price_exc}",
                                 flush=True,
                             )
+
+                        # 👑 可选住宿的**通勤距离**：只按价格/星级排是不够的（`anchoring` 实测掉到 0.8），
+                        #    价格可比、距离也要可比 —— 用户才知道"这家便宜 60 块，但离玩点多 30km"。
+                        try:
+                            _supply_options = (final_data.get("lodging_supply") or {}).get("hotels") or []
+                            if _supply_options:
+                                from core.plan_quality import annotate_lodging_options
+
+                                _annotated = annotate_lodging_options(final_data, _supply_options)
+                                final_data["lodging_supply"] = {
+                                    **(final_data.get("lodging_supply") or {}),
+                                    "hotels": _annotated,
+                                }
+                                _far_options = [
+                                    item for item in _annotated if item.get("far_from_plays") is True
+                                ]
+                                if _far_options:
+                                    print(
+                                        "🚶 [住宿通勤] "
+                                        f"{len(_far_options)}/{len(_annotated)} 家离方案里的玩点超过 15km："
+                                        + "、".join(
+                                            f"{item.get('name')}（约 {item.get('nearest_play_km')}km）"
+                                            for item in _far_options[:3]
+                                        ),
+                                        flush=True,
+                                    )
+                        except Exception as _anchor_exc:  # 通勤距离算不出来不影响出方案
+                            print(f"⚠️ [住宿通勤] 距离标注失败（不影响出方案）: {_anchor_exc}", flush=True)
                         _final_fairness = fairness_report(final_data["route"], fairness_members or room_members)
                         _fairness_meta = final_data.get("fairness") or {}
                         _threshold = float(_fairness_meta.get("threshold", 0.15) or 0.15)

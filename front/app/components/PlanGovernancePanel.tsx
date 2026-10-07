@@ -177,7 +177,18 @@ export type PlanGovernance = {
     added?: number;
     nightly_cap?: number | null;
     min_star?: number | null;
-    hotels?: { name?: string; price?: number | null; star?: number | null; address?: string; booking_url?: string; message?: string }[];
+    hotels?: {
+      name?: string;
+      price?: number | null;
+      star?: number | null;
+      address?: string;
+      booking_url?: string;
+      message?: string;
+      /** 离方案里最近的一个玩点多远（价格可比、距离也要可比） */
+      nearest_play_km?: number | null;
+      nearest_play_name?: string;
+      far_from_plays?: boolean | null;
+    }[];
   };
   /** 数据降级登记：哪个数据源没取到、用户损失了什么（文案由后端注册表给出） */
   degradations?: {
@@ -560,6 +571,15 @@ export default function PlanGovernancePanel({ data }: { data?: PlanGovernance | 
                     <span className="font-bold text-slate-700">{hotel.name}</span>
                     {hotel.price != null ? `：¥${hotel.price}/晚` : '：暂无报价'}
                     {hotel.star != null ? `（${hotel.star} 星）` : ''}
+                    {hotel.nearest_play_km != null ? (
+                      <span className={hotel.far_from_plays ? 'font-bold text-amber-700' : 'text-slate-500'}>
+                        {` · 离最近的玩点约 ${hotel.nearest_play_km}km`}
+                        {hotel.nearest_play_name ? `（${hotel.nearest_play_name}）` : ''}
+                        {hotel.far_from_plays ? '，通勤偏久' : ''}
+                      </span>
+                    ) : (
+                      <span className="text-slate-400"> · 供应商未给坐标，通勤距离算不出来</span>
+                    )}
                     {hotel.address ? ` · ${hotel.address}` : ''}
                     {hotel.booking_url ? (
                       <>

@@ -359,6 +359,101 @@ class TestDimensions(unittest.TestCase):
         self.assertGreater(score_diversity(diverse)["value"], score_diversity(duplicated)["value"])
         self.assertGreaterEqual(score_diversity(duplicated)["duplicate_names"], 1)
 
+    def test_anchoring_details_are_kept_in_the_snapshot(self):
+        """吃住离玩点多远要能看见明细（只给一个 0.8 的分数，用户只会觉得"说不清哪里怪"）。"""
+        from core.plan_quality import plan_quality_snapshot
+
+        plan = {"route": [
+            node("某景区", 1, "09:00", (108.94, 34.26), "文化"),
+            node("钟楼酒店", 1, "20:00", (110.20, 34.30), "住宿", "¥300"),
+        ]}
+        snapshot = plan_quality_snapshot({"days": 1}, plan)
+        anchoring = snapshot["quality"]["anchoring"]
+        self.assertIn("far_nodes", anchoring)
+        self.assertEqual([item["name"] for item in anchoring["far_nodes"]], ["钟楼酒店"])
+        self.assertEqual(anchoring["threshold_km"], 15.0)
+
+    def test_lodging_options_get_a_commute_distance(self):
+        """"有实价的住宿可选"要标出离方案里的玩点多远（价格可比、距离也要可比）。"""
+        from core.plan_quality import annotate_lodging_options
+
+        plan = {"route": [node("某景区", 1, "09:00", (108.94, 34.26), "文化")]}
+        options = [
+            {"name": "近的酒店", "price": 300, "lnglat": [108.95, 34.26]},
+            {"name": "远的酒店", "price": 240, "lnglat": [109.30, 34.26]},
+            {"name": "没坐标的酒店", "price": 200},
+        ]
+        annotated = annotate_lodging_options(plan, options)
+        self.assertLess(annotated[0]["nearest_play_km"], 5)
+        self.assertFalse(annotated[0]["far_from_plays"])
+        self.assertEqual(annotated[0]["nearest_play_name"], "某景区")
+        self.assertGreater(annotated[1]["nearest_play_km"], 30)
+        self.assertTrue(annotated[1]["far_from_plays"], "远的那家要标出来")
+        self.assertIsNone(annotated[2]["nearest_play_km"], "没坐标就是判不了，不是 0")
+        self.assertIsNone(annotated[2]["far_from_plays"])
+
+    def test_lodging_option_annotation_without_play_nodes(self):
+        from core.plan_quality import annotate_lodging_options
+
+        plan = {"route": [node("某酒店", 1, "20:00", (108.95, 34.26), "住宿", "¥300")]}
+        annotated = annotate_lodging_options(plan, [{"name": "甲", "lnglat": [108.95, 34.26]}])
+        self.assertIsNone(annotated[0]["nearest_play_km"])
+        self.assertEqual(annotate_lodging_options(plan, []), [])
+
+    def test_anchoring_far_nodes_become_a_disclosure(self):
+        """`anchoring` 掉分时方案里必须写明"是哪几个点离得远"（原来只打分、不解释）。"""
+        from core.degradation import collect_degradations
+
+        payload = {
+            "quality": {
+                "anchoring": {
+                    "value": 0.8,
+                    "threshold_km": 15.0,
+                    "far_nodes": [{"day": 2, "name": "信泰达民宿", "distance_km": 42.5}],
+                }
+            },
+            "route": [{"day": 2, "name": "信泰达民宿", "type": "住宿服务"}],
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if item.get("source") == "anchoring"), None)
+        self.assertIsNotNone(entry, items)
+        self.assertIn("信泰达民宿", str(entry.get("reason")))
+        self.assertIn("42.5km", str(entry.get("reason")))
+        self.assertIn("直接说一句", str(entry.get("reason")))
+
+    def test_no_far_anchor_means_no_disclosure(self):
+        from core.degradation import collect_degradations
+
+        payload = {"quality": {"anchoring": {"value": 1.0, "threshold_km": 15.0, "far_nodes": []}}}
+        items = collect_degradations(payload).get("items", [])
+        self.assertFalse([item for item in items if item.get("source") == "anchoring"])
+
+    def test_missing_coordinates_are_disclosed_as_the_reason_for_a_lower_score(self):
+        """`anchoring` 掉分的另一个真实原因：吃住节点没坐标、通勤距离算不出来。
+
+        实测（2026-10-05 喀什）：`anchoring=0.8` 但 `far_nodes` 是空的 ——
+        分数掉在"可核实坐标覆盖 83%"上，而方案里一个字都没说（用户只看到一个没解释的 0.8）。
+        """
+        from core.degradation import collect_degradations
+
+        payload = {
+            "quality": {
+                "anchoring": {
+                    "value": 0.8,
+                    "threshold_km": 15.0,
+                    "far_nodes": [],
+                    "coordinate_coverage": 0.833,
+                }
+            },
+            "invalid_coordinates": {"names": ["喀什古城步行街亚朵酒店"], "note": "…"},
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if item.get("source") == "anchoring"), None)
+        self.assertIsNotNone(entry, items)
+        self.assertIn("喀什古城步行街亚朵酒店", str(entry.get("reason")))
+        self.assertIn("83%", str(entry.get("reason")))
+        self.assertIn("请在导航里确认", str(entry.get("reason")))
+
     def test_stability(self):
         self.assertIsNone(stability_score([good_plan()])["value"])
         self.assertEqual(stability_score([good_plan(), good_plan()])["value"], 1.0)

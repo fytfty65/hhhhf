@@ -58,6 +58,11 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "日内里程",
         "impact": "同一天里的移动里程或远景区数量偏多，实际跑起来会赶",
     },
+    # 吃住离当天的玩点偏远：不是"没排"，是"来回通勤会吃掉游玩时间"（2026-10-05 实测 anchoring 掉分）
+    "anchoring": {
+        "label": "吃住与玩点的距离",
+        "impact": "吃住离当天的玩点偏远，来回通勤会吃掉游玩时间；换到玩点附近可以直接说一句",
+    },
     "transport_options": {
         "label": "跨城出行方式",
         "impact": "只能比时长，班次与票价按「未核实」标注",
@@ -406,6 +411,43 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                     STATUS_DEGRADED,
                     "收口后第 " + "、".join(deficient) + " 天节点偏少：一天跑不了那么多远的地方，"
                     "优先保证不赶路；想更满一点可以说「愿意多留一天」或「放宽每天节点数」",
+                )
+            )
+
+    # 4.6) 吃住离当天的玩点偏远（2026-10-05）：`anchoring` 一直是"只打分不解释"的维度 ——
+    #      实测伊宁掉到 0.8（有吃住离玩点 40km+），但方案里一个字都没说。
+    #      距离是用户最在意的事之一（"住得远不远"），必须列出来并给出可行动作。
+    quality_detail = _as_mapping(_as_mapping(data.get("quality")).get("anchoring"))
+    far_anchors = [item for item in (quality_detail.get("far_nodes") or []) if isinstance(item, Mapping)]
+    if far_anchors:
+        examples = "、".join(
+            f"第 {item.get('day')} 天 {item.get('name')}（约 {item.get('distance_km')}km）"
+            for item in far_anchors[:3]
+        )
+        items.append(
+            _entry(
+                "anchoring",
+                STATUS_DEGRADED,
+                f"{len(far_anchors)} 处吃住离当天的玩点超过 {quality_detail.get('threshold_km')}km：{examples}"
+                "。想住近一点、或者把玩点换到住处附近，直接说一句就行",
+            )
+        )
+    else:
+        # 分数掉下来的另一个真实原因（2026-10-05 喀什实测 anchoring=0.8 但 far_nodes 是空的）：
+        # **有吃住节点没有坐标**，通勤距离根本算不出来 —— 缺数据同样要如实说，
+        # 否则用户只看到一个没解释的 0.8（这次是刚被清掉的 0,0 坐标）。
+        coverage = quality_detail.get("coordinate_coverage")
+        if isinstance(coverage, (int, float)) and coverage < 1.0:
+            invalid = _as_mapping(data.get("invalid_coordinates"))
+            names = [str(item) for item in (invalid.get("names") or []) if str(item).strip()]
+            who = "（" + "、".join(names[:3]) + "）" if names else ""
+            items.append(
+                _entry(
+                    "anchoring",
+                    STATUS_DEGRADED,
+                    f"有一批吃住节点没有可信坐标{who}，"
+                    f"「离玩点多远」算不出来（可核实坐标覆盖 {round(float(coverage) * 100)}%）；"
+                    "这些点的通勤距离请在导航里确认",
                 )
             )
 

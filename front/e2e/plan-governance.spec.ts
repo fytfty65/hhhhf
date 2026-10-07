@@ -237,8 +237,8 @@ const GOVERNANCE_PAYLOAD = {
     nightly_cap: 1080,
     min_star: 4,
     hotels: [
-      { name: '库尔勒福润德·万达锦华酒店', price: 285, star: 5, address: '圣果路2号福润德大厦C座', booking_url: 'https://rollinggo.cn/pages/hotel/detail/index?id=1' },
-      { name: '维也纳国际酒店(库尔勒天鹅河店)', price: 694, star: 4, address: '民心路5号', booking_url: 'https://rollinggo.cn/pages/hotel/detail/index?id=2' },
+      { name: '库尔勒福润德·万达锦华酒店', price: 285, star: 5, address: '圣果路2号福润德大厦C座', booking_url: 'https://rollinggo.cn/pages/hotel/detail/index?id=1', nearest_play_km: 3.4, nearest_play_name: '孔雀河景观带', far_from_plays: false },
+      { name: '维也纳国际酒店(库尔勒天鹅河店)', price: 694, star: 4, address: '民心路5号', booking_url: 'https://rollinggo.cn/pages/hotel/detail/index?id=2', nearest_play_km: 41.2, nearest_play_name: '博斯腾湖风景名胜区', far_from_plays: true },
     ],
   },
   // 数据降级登记（core/degradation.collect_degradations）：文案与"用户损失"都由后端注册表给出
@@ -909,6 +909,9 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(lodgingSupply).toContainText('6 家有报价');
     await expect(panel.getByTestId('lodging-supply-list')).toContainText('库尔勒福润德·万达锦华酒店：¥285/晚（5 星）');
     await expect(panel.getByTestId('lodging-supply-list')).toContainText('维也纳国际酒店(库尔勒天鹅河店)：¥694/晚（4 星）');
+    // 价格可比、距离也要可比：每家标出"离最近的玩点多远"，偏远的要显式提示通勤久
+    await expect(panel.getByTestId('lodging-supply-list')).toContainText('离最近的玩点约 3.4km（孔雀河景观带）');
+    await expect(panel.getByTestId('lodging-supply-list')).toContainText('离最近的玩点约 41.2km（博斯腾湖风景名胜区），通勤偏久');
     await expect(lodgingSupply).toContainText('供应商返回的可核实报价（不是估算）');
     await expect(lodgingSupply).toContainText('每晚上限 ¥1080');
     await expect(

@@ -191,6 +191,52 @@ def haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return 2 * radius * math.asin(min(1.0, math.sqrt(h)))
 
 
+def annotate_lodging_options(
+    plan: Any,
+    options: Sequence[Any],
+    *,
+    threshold_km: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """给"有实价的住宿可选"清单标上**离方案里最近的玩点多远**（纯函数）。
+
+    为什么要有它（2026-10-05 实测）：住宿候选只按价格与星级排，`anchoring` 掉到 0.8 ——
+    有吃住离当天玩点 40km+，来回通勤把游玩时间吃掉，但界面上完全看不出来。
+    价格可比、距离也要可比，用户才谈得上"选哪家"。
+
+    `threshold_km` 默认用 `ANCHOR_KM`（15km，与 `score_anchoring` 同一把尺子）。
+    返回每项为原字典的副本 + `nearest_play_km` / `nearest_play_name` / `far_from_plays`。
+    """
+    limit = float(threshold_km if threshold_km is not None else ANCHOR_KM)
+    plays: List[tuple] = []
+    for node in nodes_of(plan):
+        if _is_anchor_side(node):
+            continue  # 吃住一侧不算"玩点"
+        position = node_lnglat(node)
+        if position is None:
+            continue
+        plays.append((node_name(node), position))
+
+    annotated: List[Dict[str, Any]] = []
+    for option in options or []:
+        entry = dict(option) if isinstance(option, Mapping) else {}
+        position = node_lnglat(entry)
+        if position is None or not plays:
+            entry["nearest_play_km"] = None
+            entry["nearest_play_name"] = ""
+            entry["far_from_plays"] = None
+            annotated.append(entry)
+            continue
+        name, distance = min(
+            ((play_name, haversine_km(position, play_pos)) for play_name, play_pos in plays),
+            key=lambda item: item[1],
+        )
+        entry["nearest_play_km"] = round(float(distance), 1)
+        entry["nearest_play_name"] = name
+        entry["far_from_plays"] = bool(float(distance) > limit)
+        annotated.append(entry)
+    return annotated
+
+
 def _normalize(text: str) -> str:
     return "".join(ch for ch in str(text).lower() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
@@ -957,6 +1003,13 @@ def plan_quality_snapshot(
             "completeness": {
                 key: value
                 for key, value in (report["dimensions"].get("completeness") or {}).items()
+                if key != "value"
+            },
+            # 吃住与玩点的距离明细：分数之外要能看见"是哪几个点离得远"
+            # （`anchoring` 掉分但界面上没有任何解释时，用户只会觉得"说不清哪里怪"）
+            "anchoring": {
+                key: value
+                for key, value in (report["dimensions"].get("anchoring") or {}).items()
                 if key != "value"
             },
         },
