@@ -215,5 +215,39 @@ class TravelDegradationTests(unittest.TestCase):
         self.assertFalse([item for item in items if item["source"] == "travel_feasibility"])
 
 
+class BudgetGraceTests(unittest.TestCase):
+    """预算的**容差**：我们算的是直线距离，真实路网比直线长 20–40%。
+
+    实测（2026-10-05 喀什）：第 1 天 161.8km 被判"超当天预算 160km"并写进披露 ——
+    用户看到的是"这个系统连 1.8 公里都要报一次"，噪声把真问题（445km 那天）淹了。
+    """
+
+    def test_small_overage_within_the_grace_is_not_a_violation(self):
+        from core.travel_feasibility import effective_daily_budget_km
+
+        route = [node(1, "市区点", CENTER), node(1, "刚过线", (88.25, 41.73))]
+        report = evaluate_travel_feasibility(route, city_center=CENTER, distance_tolerance="normal", days=1)
+        self.assertGreater(report["days"][0]["travel_km"], report["budget_km"])
+        self.assertLess(report["days"][0]["travel_km"], report["effective_budget_km"])
+        self.assertTrue(report["ok"], report["violations"])
+        self.assertEqual(report["budget_km"], 160.0, "报告里仍如实写原预算，不美化口径")
+        self.assertEqual(report["effective_budget_km"], effective_daily_budget_km("normal"))
+        self.assertEqual(report["grace_ratio"], 0.10)
+
+    def test_real_overage_above_the_grace_still_fails(self):
+        route = [node(1, "市区点", CENTER), node(1, "真超了", BAYINBULAK)]
+        report = evaluate_travel_feasibility(route, city_center=CENTER, distance_tolerance="normal", days=1)
+        self.assertFalse(report["ok"], report)
+        self.assertIn("daily_travel_budget_exceeded", report["days"][0]["violations"])
+
+    def test_grace_follows_the_tolerance_band(self):
+        """low 档也要有同样的容差（80km → 88km），否则"差一点点"在小预算下更容易误报。"""
+        from core.travel_feasibility import effective_daily_budget_km
+
+        self.assertAlmostEqual(effective_daily_budget_km("low"), 88.0, places=1)
+        self.assertAlmostEqual(effective_daily_budget_km("high"), 352.0, places=1)
+        self.assertAlmostEqual(effective_daily_budget_km("不存在"), 176.0, places=1)
+
+
 if __name__ == "__main__":
     unittest.main()

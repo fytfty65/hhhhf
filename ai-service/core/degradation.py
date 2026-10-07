@@ -63,6 +63,11 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "远点的可换选项",
         "impact": "跑得远的那天有同类近点可换；说一句就换，不说就不动",
     },
+    # 用户明确说了"不想跑远"时是**执行**而不是提议（口径 2026-10-05）
+    "travel_substitution": {
+        "label": "按你的意思换的近点",
+        "impact": "你说过不想跑那么远，远点已就地换成同类的近点",
+    },
     # 吃住离当天的玩点偏远：不是"没排"，是"来回通勤会吃掉游玩时间"（2026-10-05 实测 anchoring 掉分）
     "anchoring": {
         "label": "吃住与玩点的距离",
@@ -478,6 +483,22 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                 "travel_alternatives",
                 STATUS_DEGRADED,
                 "；".join(parts) + "。想换直接说一句就行，不说就不动",
+            )
+        )
+
+    # 4.8) 用户说了"不想跑远"→ 真的换了（不是提议）：换成了谁、原先多远，都要写清楚
+    substitution = _as_mapping(data.get("travel_substitution"))
+    swap_actions = [item for item in (substitution.get("actions") or []) if isinstance(item, Mapping)]
+    if swap_actions:
+        items.append(
+            _entry(
+                "travel_substitution",
+                STATUS_DEGRADED,
+                "；".join(
+                    f"第 {item.get('day')} 天 {item.get('from')}（离市中心约 {item.get('from_km')}km）→ {item.get('to')}"
+                    for item in swap_actions[:3]
+                )
+                + "。这是按你「不想跑那么远」的意思换的，想反悔直接说一句换回来",
             )
         )
 

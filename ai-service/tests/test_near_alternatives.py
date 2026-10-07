@@ -91,8 +91,8 @@ class SuggestNearAlternativesTests(unittest.TestCase):
         """说"不介意跑远"的人，超预算的门槛跟着放宽（同一份路线不再被判超）。"""
         route = [
             node("近点", 1, [75.99, 39.47], "culture"),
-            # 约 171km（经度 2 度 @39.47°N）：normal 预算 160km 会超，high 的 320km 不会
-            node("171km 外的点", 1, [77.99, 39.47], "culture"),
+            # 约 257km（经度 3 度 @39.47°N）：normal 含容差 176km 会超，high 的 352km 不会
+            node("257km 外的点", 1, [78.99, 39.47], "culture"),
         ]
         normal = suggest_near_alternatives(
             route, self._candidates(), city_center=CENTER, distance_tolerance="normal", category_of=category_of
@@ -111,7 +111,7 @@ class SuggestNearAlternativesTests(unittest.TestCase):
         """
         route = [
             node("市区点", 2, [75.99, 39.47], "nature", tier="city_park"),
-            node("湿地景区", 2, [77.99, 39.47], "nature", tier="landmark"),  # 约 171km 外
+            node("湿地景区", 2, [78.99, 39.47], "nature", tier="landmark"),  # 约 257km 外
         ]
         candidates = [
             {**node("北湖公园", 0, [76.00, 39.47], "nature"), "tier": "city_park"},
@@ -132,7 +132,7 @@ class SuggestNearAlternativesTests(unittest.TestCase):
     def test_no_same_tier_candidate_means_no_option(self):
         route = [
             node("市区点", 2, [75.99, 39.47], "nature", tier="city_park"),
-            node("湿地景区", 2, [77.99, 39.47], "nature", tier="landmark"),
+            node("湿地景区", 2, [78.99, 39.47], "nature", tier="landmark"),
         ]
         result = suggest_near_alternatives(
             route,
@@ -168,6 +168,158 @@ class SuggestNearAlternativesTests(unittest.TestCase):
         )
         self.assertTrue(result["days"][0]["options"], result)
         self.assertEqual(result["days"][0]["options"][0]["category"], "")
+
+
+class ApplySubstitutionTests(unittest.TestCase):
+    """用户说了"不想跑远"时是**执行**：就地换成算好的近点（同一天同一时段）。"""
+
+    def _alternatives(self):
+        return {
+            "days": [
+                {
+                    "day": 2,
+                    "options": [
+                        {
+                            "for_node": "胡杨书院",
+                            "for_node_km": 221.4,
+                            "name": "疏附县博物馆",
+                            "nearest_day_km": 11.1,
+                            "candidate": {
+                                "name": "疏附县博物馆",
+                                "lnglat": [75.86, 39.38],
+                                "type": "科教文化服务",
+                                "price": 0,
+                                "price_source": "amap",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def _route(self):
+        return [
+            {"day": 2, "name": "喀什博物馆", "lnglat": [75.98, 39.46], "time": "10:00"},
+            {"day": 2, "name": "胡杨书院", "lnglat": [78.542, 39.791], "time": "14:00"},
+        ]
+
+    def test_far_node_is_swapped_in_place(self):
+        from core.travel_feasibility import apply_near_substitutions
+
+        route, actions = apply_near_substitutions(self._route(), self._alternatives())
+        self.assertEqual([node["name"] for node in route], ["喀什博物馆", "疏附县博物馆"])
+        self.assertEqual(route[1]["time"], "14:00", "就地换：同一时段不该被打乱")
+        self.assertEqual(route[1]["lnglat"], [75.86, 39.38])
+        self.assertEqual(route[1]["replaced_from"], "胡杨书院")
+        self.assertIn("不想跑", str(route[1].get("replaced_reason")))
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["from"], "胡杨书院")
+        self.assertEqual(actions[0]["to"], "疏附县博物馆")
+        self.assertEqual(actions[0]["from_km"], 221.4)
+
+    def test_price_and_source_follow_the_candidate(self):
+        from core.travel_feasibility import apply_near_substitutions
+
+        route, _ = apply_near_substitutions(self._route(), self._alternatives())
+        self.assertEqual(route[1]["cost_estimate"], "¥0")
+        self.assertEqual(route[1]["data_sources"]["cost_estimate"], "amap")
+
+    def test_original_route_is_not_mutated(self):
+        from core.travel_feasibility import apply_near_substitutions
+
+        original = self._route()
+        apply_near_substitutions(original, self._alternatives())
+        self.assertEqual(original[1]["name"], "胡杨书院")
+
+    def test_no_candidate_means_no_change(self):
+        from core.travel_feasibility import apply_near_substitutions
+
+        route, actions = apply_near_substitutions(
+            self._route(), {"days": [{"day": 2, "options": [{"for_node": "胡杨书院", "name": "某近点"}]}]}
+        )
+        self.assertEqual(actions, [])
+        self.assertEqual([node["name"] for node in route], ["喀什博物馆", "胡杨书院"], "没有完整候选就不动")
+
+    def test_empty_alternatives_is_a_noop(self):
+        from core.travel_feasibility import apply_near_substitutions
+
+        route, actions = apply_near_substitutions(self._route(), {})
+        self.assertEqual(actions, [])
+        self.assertEqual(len(route), 2)
+
+    def test_substitution_is_disclosed(self):
+        from core.degradation import collect_degradations
+
+        payload = {
+            "travel_substitution": {
+                "actions": [{"day": 2, "from": "胡杨书院", "to": "疏附县博物馆", "from_km": 221.4, "nearest_day_km": 11.1}],
+                "reason": "你说过不想跑那么远",
+            }
+        }
+        items = collect_degradations(payload).get("items", [])
+        entry = next((item for item in items if item.get("source") == "travel_substitution"), None)
+        self.assertIsNotNone(entry, items)
+        self.assertIn("胡杨书院", str(entry.get("reason")))
+        self.assertIn("疏附县博物馆", str(entry.get("reason")))
+        self.assertIn("换回来", str(entry.get("reason")))
+
+
+class SubstituteNearPreferenceTests(unittest.TestCase):
+    """`substitute(..., prefer_near_to=…)`：用户说了"不想跑远"，替代点优先选近的。
+
+    实测（2026-10-05）：原来的替代是按**档位/价格**排的，跟距离无关 ——
+    于是"换掉一个远点"很可能换来**另一个远点**（法理上照着用户的话做了，实际没照做）。
+    """
+
+    def _index(self):
+        from core.candidate_index import index_candidates
+
+        # 注意：`index_candidates` 会按**价格**重算 `tier_level`，显式写 tier_level 是没用的 ——
+        # 所以这里用价格拉开档位差（便宜的近点 vs 贵的远点）。
+        return index_candidates(
+            [
+                {"name": "近的文化点", "lnglat": [75.99, 39.47], "type": "科教文化服务", "price": 50},
+                {"name": "远的文化点", "lnglat": [78.99, 39.47], "type": "科教文化服务", "price": 900},
+            ]
+        )
+
+    def _node(self):
+        return {"day": 2, "name": "胡杨书院", "lnglat": [78.542, 39.791], "type": "科教文化服务"}
+
+    def test_near_candidate_wins_when_the_user_asked_for_near(self):
+        from core.candidate_index import substitute
+
+        picked = substitute(
+            self._node(), self._index(), prefer_near_to=[75.99, 39.47], max_near_km=40
+        )
+        self.assertEqual(picked["name"], "近的文化点")
+
+    def test_without_the_preference_the_old_rule_still_applies(self):
+        """没说要近的时候维持原口径（挑档位最高的），不偷偷改行为。"""
+        from core.candidate_index import substitute
+
+        picked = substitute(self._node(), self._index())
+        self.assertEqual(picked["name"], "远的文化点", "默认仍按档位最高挑")
+
+    def test_falls_back_to_the_pool_when_nothing_is_near(self):
+        """近的一个都没有时退回原池（宁可换远点，也不假装"没有替代"）。"""
+        from core.candidate_index import substitute
+
+        picked = substitute(self._node(), self._index(), prefer_near_to=[100.0, 30.0], max_near_km=5)
+        self.assertIsNotNone(picked, "不该因为「没有近的」就返回 None")
+
+    def test_exclusions_replaced_by_a_near_point_and_disclosed(self):
+        from core.candidate_index import apply_exclusions
+
+        plan = {"route": [self._node()]}
+        result = apply_exclusions(
+            plan, ["胡杨书院"], index=self._index(), prefer_near_to=[75.99, 39.47], max_near_km=40
+        )
+        self.assertEqual([item["name"] for item in result["plan"]["route"]], ["近的文化点"])
+        self.assertIn("不想跑远", result["disclosure"])
+        self.assertEqual(result["replaced"][0]["to"], "近的文化点")
+        self.assertIsNotNone(result["replaced"][0]["center_km"])
+        self.assertIn("不想跑那么远", result["replaced"][0]["reason"])
 
 
 if __name__ == "__main__":

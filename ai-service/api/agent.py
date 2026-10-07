@@ -5297,6 +5297,16 @@ async def run_negotiate(msg: GatewayMessage):
                             from core.planning_governance import prepare_governance
 
                             _quality_signals = pref_signals if isinstance(pref_signals, dict) else None
+                            # 用户说过"不想跑远"时，替换点要按"离市中心多远"来挑 —— 市中心坐标
+                            # 来自 geocode（拿不到就传空，退回原行为：不按距离偏好挑，但也不会编）
+                            _preferred_near_center: List[float] = []
+                            _center_text_for_near = str(geo_info.get("center") or coord or "")
+                            if "," in _center_text_for_near:
+                                try:
+                                    _near_lng, _, _near_lat = _center_text_for_near.partition(",")
+                                    _preferred_near_center = [float(_near_lng), float(_near_lat)]
+                                except ValueError:
+                                    _preferred_near_center = []
                             _quality_context = {
                                 "days": trip_days,
                                 "budget": total_calc_budget,
@@ -5441,6 +5451,15 @@ async def run_negotiate(msg: GatewayMessage):
                                 # 点过"不喜欢"的地点走这里：剔除 + 从候选池补同类，并在
                                 # `constraints` 里如实报"已按你的反馈移除/换成谁"。
                                 exclude_terms=feedback_exclude_names,
+                                # 👑 用户说了"不想跑远"（含点了不喜欢并写"太远"）时，替换点
+                                #    **优先选近的** —— 否则"换掉一个远点"很可能换来另一个远点
+                                #    （实测：原来按档位/价格排，跟距离无关）。
+                                prefer_near_to=(
+                                    _preferred_near_center
+                                    if str((own_signals or {}).get("distance_tolerance") or "normal") == "low"
+                                    else None
+                                ),
+                                max_near_km=40.0,
                             )
                             _snapshot = _governance["snapshot"]
                             # 增量真的改了方案：用调整后的路线替换（前端以 final_route 为准）
@@ -6408,6 +6427,61 @@ async def run_negotiate(msg: GatewayMessage):
                             _closeout_tolerance = str(own_signals.get("distance_tolerance") or "normal")
                             _closeout_summary: List[str] = []
 
+                            # 0) 👑 用户说了"不想跑远"（含点「不喜欢」写"太远"）时，
+                            #    **先把远点就地换成算好的近点，再去做日内现实性检查** ——
+                            #    顺序反了就等于"先把远点删掉、再想换什么"（那时已经没得换了）。
+                            #    实测（2026-10-05 反馈闭环第 2 轮）：修复先移出胡杨书院，
+                            #    后面算出的"可换疏附县博物馆"就落不了地，那天白少一个点。
+                            if _closeout_tolerance == "low":
+                                try:
+                                    from core.travel_feasibility import (
+                                        apply_near_substitutions as _apply_near,
+                                        suggest_near_alternatives as _suggest_near,
+                                    )
+
+                                    _low_alternatives = _suggest_near(
+                                        final_data.get("route") or [],
+                                        _closeout_pool,
+                                        city_center=_closeout_center,
+                                        distance_tolerance=_closeout_tolerance,
+                                        category_of=lambda item: classify_poi_category(
+                                            str(item.get("name") or ""),
+                                            str(item.get("type") or ""),
+                                            bool(item.get("is_hotel")),
+                                        ),
+                                        tier_of=lambda item: scenic_tier(
+                                            str(item.get("name") or ""), str(item.get("type") or "")
+                                        ),
+                                    )
+                                    _swapped_route, _swap_actions = _apply_near(
+                                        final_data.get("route") or [], _low_alternatives
+                                    )
+                                    if _swap_actions:
+                                        final_data["route"] = _swapped_route
+                                        _existing_swap = final_data.get("travel_substitution") or {}
+                                        final_data["travel_substitution"] = {
+                                            "actions": list(_existing_swap.get("actions") or []) + _swap_actions,
+                                            "reason": "你说过不想跑那么远，已按你的意思就地换成同类的近点",
+                                        }
+                                        _closeout_summary.append(f"按你的意思换近点 {len(_swap_actions)} 处")
+                                        print(
+                                            "🔀 [按你的意思换近点] "
+                                            + "；".join(
+                                                f"第 {item['day']} 天 {item['from']}（约 {item.get('from_km')}km）→ {item['to']}"
+                                                for item in _swap_actions[:3]
+                                            ),
+                                            flush=True,
+                                        )
+                                    elif _low_alternatives.get("days"):
+                                        # 说得出远、但池子里没有同类同档次的近点：如实记下（不硬凑）
+                                        print(
+                                            "🔀 [按你的意思换近点] 候选池里没有同类同档次的近点，"
+                                            "这一天会按「不跑那么远」把远点移出",
+                                            flush=True,
+                                        )
+                                except Exception as _swap_exc:  # 换不动不影响出方案
+                                    print(f"⚠️ [按你的意思换近点] 失败（不影响出方案）: {_swap_exc}", flush=True)
+
                             # 1) 用户禁令：门禁补分类时可能又把人文塞回来
                             if own_signals.get("exclude_cultural"):
                                 _co_kept, _co_actions = repair_forbidden_categories(
@@ -6720,6 +6794,31 @@ async def run_negotiate(msg: GatewayMessage):
                                     ),
                                     flush=True,
                                 )
+                                # 👑 用户**明确说了"不想跑远"**时，就不是"提议"而是**执行**：
+                                #    用户口径（2026-10-05）："如果用户点击不喜欢或者二次增量不想去
+                                #    这么远的地方，就按照用户的意图来"。就地换（同一天同一时段），
+                                #    没同类同档次近点的不动（如实留给披露）。
+                                if str(own_signals.get("distance_tolerance") or "normal") == "low":
+                                    from core.travel_feasibility import apply_near_substitutions
+
+                                    _swapped, _swap_actions = apply_near_substitutions(
+                                        final_data.get("route") or [], _near_alternatives
+                                    )
+                                    if _swap_actions:
+                                        final_data["route"] = _swapped
+                                        _existing_swap = final_data.get("travel_substitution") or {}
+                                        final_data["travel_substitution"] = {
+                                            "actions": list(_existing_swap.get("actions") or []) + _swap_actions,
+                                            "reason": "你说过不想跑那么远，已按你的意思就地换成同类的近点",
+                                        }
+                                        print(
+                                            "🔀 [按你的意思换近点] "
+                                            + "；".join(
+                                                f"第 {item['day']} 天 {item['from']}（约 {item.get('from_km')}km）→ {item['to']}"
+                                                for item in _swap_actions[:3]
+                                            ),
+                                            flush=True,
+                                        )
                         except Exception as _near_exc:  # 算不出替代点不影响出方案
                             print(f"⚠️ [远点替代] 计算失败（不影响出方案）: {_near_exc}", flush=True)
 

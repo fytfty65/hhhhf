@@ -123,16 +123,32 @@ def _is_excluded(candidate: Mapping[str, Any], exclude_terms: Sequence[str]) -> 
     return False
 
 
+def _distance_km(a: Any, b: Any) -> float:
+    """两点直线距离（km）；取不到坐标返回 `inf`（"不知道多远"不能当成"很近"）。"""
+    from .travel_feasibility import haversine_km, node_lnglat
+
+    first, second = node_lnglat({"lnglat": a}), node_lnglat({"lnglat": b})
+    if not first or not second:
+        return float("inf")
+    value = haversine_km(first, second)
+    return float(value) if value == value else float("inf")
+
+
 def substitute(
     node: Mapping[str, Any],
     index: Mapping[str, Sequence[Mapping[str, Any]]],
     exclude_terms: Sequence[str] = (),
     max_price: Optional[float] = None,
     prefer_cheaper: bool = False,
+    prefer_near_to: Optional[Sequence[float]] = None,
+    max_near_km: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """给一个节点找同类替代：默认挑"价格可接受里档位最高"的；`prefer_cheaper` 时挑最便宜的。
 
     - 被 `exclude_terms` 点名的候选**永不返回**；
+    - `prefer_near_to`（用户说了"不想跑远"）时：先剔掉离该点超过 `max_near_km` 的候选，
+      再按**离它最近**排序 —— 否则"换掉一个远点"很可能换来**另一个远点**
+      （2026-10-05 实测：原来是按档位/价格排的，跟距离无关）；
     - 候选池里没有合适的就返回 None（不编造）。
     """
     intent = intent_of(node)
@@ -147,8 +163,31 @@ def substitute(
     ]
     if max_price is not None:
         filtered = [item for item in filtered if float(item.get("price") or 0) <= max_price]
+
+    if prefer_near_to:
+        near = [item for item in filtered if _distance_km(item.get("lnglat"), prefer_near_to) <= float(max_near_km or 40.0)]
+        # 有近的就只在近的里挑；一个都没有则退回原池（宁可换远点，也不假装"没有替代"）
+        if near:
+            filtered = near
+    near_only = False
+    if prefer_near_to:
+        near = [item for item in filtered if _distance_km(item.get("lnglat"), prefer_near_to) <= float(max_near_km or 40.0)]
+        # 有近的就只在近的里挑；一个都没有则退回原池（宁可换远点，也不假装"没有替代"）
+        if near:
+            filtered = near
+            near_only = True
     if not filtered:
         return None
+    if near_only:
+        # 用户说了"不想跑远"：**先看离得近**，同样近再看档位/价格
+        return min(
+            filtered,
+            key=lambda item: (
+                _distance_km(item.get("lnglat"), prefer_near_to),
+                -int(item.get("tier_level") or 0),
+                float(item.get("price") or 0),
+            ),
+        )
     if prefer_cheaper:
         return min(filtered, key=lambda item: float(item.get("price") or 0))
     return max(filtered, key=lambda item: (int(item.get("tier_level") or 0), -float(item.get("price") or 0)))
@@ -158,8 +197,14 @@ def apply_exclusions(
     plan: Any,
     exclude_terms: Sequence[str],
     index: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
+    *,
+    prefer_near_to: Optional[Sequence[float]] = None,
+    max_near_km: Optional[float] = None,
 ) -> Dict[str, Any]:
     """把用户点名"不想去"的地点剔除，并尽量从候选池补同类（保持一体化骨架）。
+
+    `prefer_near_to`：用户说过"不想跑远"时传市中心坐标 —— 替代点**优先选近的**
+    （否则"换掉一个远点"很可能换来另一个远点，2026-10-05 实测）。
 
     返回：`{plan, removed, replaced, not_found, unreplaced, disclosure}`
     - `plan`：剔除/替换后的**新**方案（不修改传入 plan）；
@@ -190,7 +235,13 @@ def apply_exclusions(
         removed.append(name)
         seen_terms.append(hit)
         # 已用过的替代不再复用（否则两个点会被换成同一个地方）
-        replacement = substitute(node, pool, exclude_terms=list(terms) + used_replacements)
+        replacement = substitute(
+            node,
+            pool,
+            exclude_terms=list(terms) + used_replacements,
+            prefer_near_to=prefer_near_to,
+            max_near_km=max_near_km,
+        )
         if replacement is None:
             unreplaced.append(name)
             continue
@@ -207,7 +258,18 @@ def apply_exclusions(
             new_node["data_sources"]["cost_estimate"] = str(replacement.get("source") or replacement["price_tier"])
         new_node["replaced_from"] = name
         kept.append(new_node)
-        replaced.append({"from": name, "to": new_node["name"], "intent": intent_of(node)})
+        replaced.append(
+            {
+                "from": name,
+                "to": new_node["name"],
+                "intent": intent_of(node),
+                # 用户说过"不想跑远"时，把"换来的这个离市中心多远"一并记下来 —— 换点必须可核对
+                "center_km": (
+                    round(_distance_km(new_node.get("lnglat"), prefer_near_to), 1) if prefer_near_to else None
+                ),
+                "reason": "你说过不想跑那么远，换成同类的近点" if prefer_near_to else "",
+            }
+        )
 
     not_found = [term for term in terms if normalize_text(term) not in {normalize_text(t) for t in seen_terms}]
 
@@ -222,7 +284,8 @@ def apply_exclusions(
     if removed:
         parts.append("已按你的要求移除：" + "、".join(removed))
     if replaced:
-        parts.append("并换成同类替代：" + "、".join(f"{item['from']} → {item['to']}" for item in replaced))
+        _suffix = "（按你说的「不想跑远」，选的是同类里离得最近的）" if prefer_near_to else ""
+        parts.append("并换成同类替代：" + "、".join(f"{item['from']} → {item['to']}" for item in replaced) + _suffix)
     if unreplaced:
         parts.append("这些点没有找到合适的同类替代（不会硬凑）：" + "、".join(unreplaced))
     if not_found:

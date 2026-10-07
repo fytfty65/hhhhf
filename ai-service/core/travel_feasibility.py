@@ -27,6 +27,17 @@ FAR_NODE_KM = 40.0  # 离市中心多远算"远景区"（库尔勒市区景点�
 DAILY_BUDGET_KM = {"low": 80.0, "normal": 160.0, "high": 320.0}
 DAILY_FAR_LIMIT = {"low": 0, "normal": 1, "high": 1}
 
+# 预算的**容差**：我们算的是**直线距离**（haversine），而真实路网通常比直线长 20–40%，
+# 也就是说"超 1.8km"完全在估算误差里。2026-10-05 实测：喀什第 1 天 161.8km 被判"超当天预算
+# 160km"并写进披露，用户看到的是"这个系统连 1.8 公里都要报一次"——噪声把真问题淹了。
+# 10% 的容差只用来**判定**，报告的 `budget_km` 仍然如实写原值（不美化口径）。
+DAILY_BUDGET_GRACE_RATIO = 0.10
+
+
+def effective_daily_budget_km(distance_tolerance: str = "normal") -> float:
+    """判定用的当天预算（含直线距离估算容差）。"""
+    return daily_budget_km(distance_tolerance) * (1.0 + DAILY_BUDGET_GRACE_RATIO)
+
 
 def node_lnglat(node: Any) -> List[float]:
     """节点坐标 → [lng, lat]；取不到就返回空列表（**不当成 0,0**）。
@@ -126,6 +137,7 @@ def evaluate_travel_feasibility(
 ) -> Dict[str, Any]:
     """按天检查：总移动里程是否超预算、远景区是否超过每天 1 个。"""
     budget = daily_budget_km(distance_tolerance)
+    effective_budget = effective_daily_budget_km(distance_tolerance)
     far_limit = daily_far_limit(distance_tolerance)
     grouped = _days_of(route)
     report_days: List[Dict[str, Any]] = []
@@ -144,7 +156,7 @@ def evaluate_travel_feasibility(
                     "distance_km": round(float(distance), 1),
                 })
         day_violations: List[str] = []
-        if nodes and km > budget:
+        if nodes and km > effective_budget:
             day_violations.append("daily_travel_budget_exceeded")
             violations.append({
                 "code": "daily_travel_budget_exceeded",
@@ -175,6 +187,9 @@ def evaluate_travel_feasibility(
         "ok": not violations,
         "distance_tolerance": str(distance_tolerance or "normal"),
         "budget_km": budget,
+        # 判定用的是含容差的预算（直线距离估算误差），如实一并给出来 —— 两个数都摆着，不藏
+        "effective_budget_km": round(effective_budget, 1),
+        "grace_ratio": DAILY_BUDGET_GRACE_RATIO,
         "far_limit": far_limit,
         "days": report_days,
         "violations": violations,
@@ -209,6 +224,7 @@ def suggest_near_alternatives(
     - 候选池里没有合适的就是没有（`options` 为空，如实说）。
     """
     budget = daily_budget_km(distance_tolerance)
+    effective_budget = effective_daily_budget_km(distance_tolerance)
     grouped = _days_of(route)
     in_plan = {str(node.get("name") or "").strip() for node in route if isinstance(node, Mapping)}
 
@@ -238,7 +254,7 @@ def suggest_near_alternatives(
     for day in sorted(grouped):
         nodes = [node for node in grouped[day] if isinstance(node, Mapping)]
         km = day_travel_km(nodes, city_center)
-        if km <= budget:
+        if km <= effective_budget:
             continue
         far_nodes = [
             {"name": str(node.get("name") or ""), "distance_km": round(_center_km(node), 1)}
@@ -293,6 +309,9 @@ def suggest_near_alternatives(
                     "nearest_day_km": round(float(best_km), 1),
                     "price": best.get("price"),
                     "price_source": str(best.get("price_source") or best.get("data_source") or ""),
+                    # 完整候选带一份：用户真说"换"时要能**就地替换**，不必再猜一遍
+                    # （`apply_near_substitutions` 用的就是它）
+                    "candidate": dict(best),
                     "why": f"替换「{far_node.get('name')}」（离市中心约 {round(far_km)}km）："
                     f"这个点在市中心 {round(_center_km(best))}km 内、离当天其它点约 {round(float(best_km))}km",
                 }
@@ -315,6 +334,84 @@ def suggest_near_alternatives(
         "distance_tolerance": str(distance_tolerance or "normal"),
         "note": "这些只是**可换的近点**（同类别、离当天其它点更近）；想换直接说一句就行，不说就不动。",
     }
+
+
+def apply_near_substitutions(
+    route: Sequence[Mapping[str, Any]],
+    alternatives: Mapping[str, Any],
+    *,
+    city_center: Optional[Sequence[float]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """**用户说了"不想跑远"**时，把远点就地换成算好的近点（返回 `(新路线, 动作)`）。
+
+    与 `suggest_near_alternatives` 的分工：那个只提议（默认口径：远的一天可以接受、但要标明），
+    这个**执行** —— 只在用户明确表达"嫌远"时才调用（`distance_tolerance=low`，
+    来自他亲口说"太远/换近点"或点「不喜欢」写的原因）。
+    用户口径（2026-10-05）："如果用户点击不喜欢或者二次增量不想去这么远的地方，
+    就按照用户的意图来"。
+
+    做法保守：**同一天、同一时段就地换**（保留 `time`/`day`，只换地点与坐标），
+    这样一天的形状不被改动，也不需要重排；没有同类同档次近点时**不动**（如实留给上层披露）。
+    """
+    if not isinstance(alternatives, Mapping):
+        return [dict(node) for node in route], []
+    options_by_day: Dict[int, List[Mapping[str, Any]]] = {}
+    for day_item in alternatives.get("days") or []:
+        if not isinstance(day_item, Mapping):
+            continue
+        try:
+            day_number = int(day_item.get("day") or 0)
+        except (TypeError, ValueError):
+            continue
+        options_by_day[day_number] = [item for item in (day_item.get("options") or []) if isinstance(item, Mapping)]
+
+    nodes = [dict(node) for node in route if isinstance(node, Mapping)]
+    actions: List[Dict[str, Any]] = []
+    for day_number, options in options_by_day.items():
+        for option in options:
+            target = str(option.get("for_node") or "")
+            candidate = option.get("candidate") if isinstance(option.get("candidate"), Mapping) else {}
+            if not target or not candidate:
+                continue
+            for index, node in enumerate(nodes):
+                if _day_of_node(node) != day_number or str(node.get("name") or "") != target:
+                    continue
+                if any(action.get("from") == target for action in actions):
+                    break
+                replaced = dict(node)
+                replaced["name"] = str(candidate.get("name") or "")
+                replaced["location"] = str(candidate.get("name") or "")
+                if node_lnglat(candidate):
+                    replaced["lnglat"] = list(node_lnglat(candidate))
+                if str(candidate.get("type") or "").strip():
+                    replaced["type"] = str(candidate.get("type"))
+                replaced["replaced_from"] = target
+                replaced["replaced_reason"] = "你说过不想跑那么远"
+                if candidate.get("price") is not None:
+                    replaced["cost_estimate"] = f"¥{float(candidate['price']):g}"
+                    sources = dict(replaced.get("data_sources") or {})
+                    sources["cost_estimate"] = str(candidate.get("price_source") or candidate.get("data_source") or "candidate_pool")
+                    replaced["data_sources"] = sources
+                nodes[index] = replaced
+                actions.append(
+                    {
+                        "day": day_number,
+                        "from": target,
+                        "to": replaced["name"],
+                        "from_km": option.get("for_node_km"),
+                        "nearest_day_km": option.get("nearest_day_km"),
+                        "reason": "你说过不想跑那么远，已就地换成同类的近点",
+                    }
+                )
+                break
+    return nodes, actions
+
+
+def _day_of_node(node: Mapping[str, Any]) -> int:
+    try:
+        return int(node.get("day") or 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 def repair_day_overload(

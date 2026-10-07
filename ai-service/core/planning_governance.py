@@ -48,6 +48,8 @@ async def prepare_governance(
     request_text: str = "",
     increment: Optional[Mapping[str, Any]] = None,
     pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
+    prefer_near_to: Optional[Sequence[float]] = None,
+    max_near_km: Optional[float] = None,
 ) -> Dict[str, Any]:
     """返回 `{snapshot, pool_sizes, exclusions, quota, increment, plan, used_pool}`；任何数据源失败都不抛异常。
 
@@ -58,6 +60,9 @@ async def prepare_governance(
 
     `pool` 是**调用方已经取好的候选池**（例如方案复核为了补结构缺口先取过一次）：
     给了就直接复用，不再重复打数据源。
+
+    `prefer_near_to`（用户说了"不想跑远"时传市中心坐标）：替换点**优先选近的**，
+    否则"换掉一个远点"很可能换来另一个远点（2026-10-05 实测）。
     """
     increment = increment or {}
     exclude_terms = list(exclude_terms) + list(increment.get("exclude") or [])
@@ -90,7 +95,13 @@ async def prepare_governance(
     working_plan: Any = plan
     exclusions: Optional[Dict[str, Any]] = None
     if exclude_terms:
-        exclusions = apply_exclusions(working_plan, list(exclude_terms), index=pool)
+        exclusions = apply_exclusions(
+            working_plan,
+            list(exclude_terms),
+            index=pool,
+            prefer_near_to=prefer_near_to,
+            max_near_km=max_near_km,
+        )
         working_plan = exclusions["plan"]
 
     quota_result: Optional[Dict[str, Any]] = None
