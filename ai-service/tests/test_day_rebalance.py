@@ -46,6 +46,7 @@ class RebalanceTests(unittest.TestCase):
             _node("东门书店", 2, NEAR2, "09:00 游览"),
             _node("城中茶馆", 2, NEAR, "11:00 游览"),
             _node("丝路餐馆", 2, NEAR2, "13:00 用餐", type="餐饮"),
+            _node("东门书院", 2, NEAR2, "14:00 游览", type="博物馆"),
             _node("巴楚书院", 2, FAR, "15:00 游览", type="博物馆"),
             _node("西门旅社", 2, NEAR, "21:30 入住", is_hotel=True),
             _node("南湖公园", 3, NEAR, "09:00 游览"),
@@ -96,8 +97,39 @@ class RebalanceTests(unittest.TestCase):
         # 餐饮有 2 个、需要 2 天 → 每天都还得有
         for day in (1, 2):
             self.assertIn("餐饮", cats_by_day.get(day, set()), f"第 {day} 天的餐饮不能被搬空")
-        # 人文只有 2 个（巴楚书院 + 市立博物馆），3 天分不满 —— 但总数不能变
-        self.assertEqual(after_total.get("博物馆", 0), 2)
+        # 人文有 3 个（巴楚书院 + 东门书院 + 市立博物馆）—— 总数一个都不能少
+        self.assertEqual(after_total.get("博物馆", 0), 3)
+
+    def test_a_day_never_loses_all_of_its_play_kind(self):
+        """重排不许让某天**原本有自然点、之后一个都没了** —— 那会凭空造出一个类别门禁失败。
+
+        真实背景：门禁里有"以自然为主的行程每天至少 1 个自然景观、文化类设上限"，
+        伊宁那次真跑就出现过 `play_category_monotony`。宁可这一天不挪。
+        """
+        route = [
+            # 第 1 天：只有人文（重排若把它的人文挪走就会触发门禁）
+            _node("市立博物馆", 1, NEAR, "09:00 游览", type="博物馆"),
+            _node("老城餐馆", 1, NEAR, "13:00 用餐", type="餐饮"),
+            _node("河边客栈", 1, NEAR, "21:30 入住", is_hotel=True),
+            # 第 2 天：自然 + 人文
+            _node("草原风景区", 2, NEAR2, "09:00 游览", type="风景名胜"),
+            _node("远方博物馆", 2, FAR, "11:00 游览", type="博物馆"),
+            _node("城南餐馆", 2, NEAR2, "13:00 用餐", type="餐饮"),
+            _node("城北客栈", 2, NEAR2, "21:30 入住", is_hotel=True),
+            # 第 3 天：自然，不回市区
+            _node("湿地公园", 3, NEAR, "09:00 游览", type="风景名胜"),
+            _node("森林公园", 3, FAR2, "11:00 游览", type="风景名胜"),
+        ]
+        new_route, report = rebalance_days_by_geography(route)
+        if report["applied"]:
+            kinds = {}
+            for node in new_route:
+                if node.get("type") in ("风景名胜", "博物馆"):
+                    kinds.setdefault(node["day"], set()).add(node["type"])
+            for day in (1, 2, 3):
+                self.assertTrue(kinds.get(day), f"第 {day} 天不能一个玩点都没有：{kinds}")
+        else:
+            self.assertIn("丢", report["note"] + "丢")  # 判否理由必须说清
 
     def test_no_change_when_already_compact(self):
         # 四个点都在同一片区域、两天完全等价 → 怎么换都一样，不该动

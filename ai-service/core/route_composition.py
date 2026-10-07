@@ -741,6 +741,23 @@ def rebalance_days_by_geography(
     report["after_max_km"] = round(max(_day_leg_km(v) for v in new_by_day.values()), 1)
     report["after_total_km"] = round(sum(_day_leg_km(v) for v in new_by_day.values()), 1)
     report["moved"] = moved_names
+    report["before_days"] = {str(node.get("name") or ""): _node_day(node) for node in items}
+    # 👑 每天的"玩点性质"不能丢（2026-10-07 自测抓到）：门禁里有一条"以自然为主的行程
+    #    每天至少 1 个自然景观、文化类设上限"。重排如果让某天**原本有自然点、重排后一个都没了**，
+    #    就会凭空调出一个新的门禁失败 —— 宁可这一天的远点不挪。
+    play_kinds = ("scenic", "cultural")
+
+    def _play_kinds(nodes: Sequence[Mapping[str, Any]]) -> set:
+        return {category(node) for node in nodes if category(node) in play_kinds}
+
+    for day in days:
+        lost = _play_kinds(fixed[day] + movable[day]) - _play_kinds(fixed[day] + assigned[day])
+        if lost:
+            report["note"] = (
+                f"重排会让第 {day} 天丢掉「{'、'.join(sorted(lost))}」这一类玩点（可能触发每日类别门禁），"
+                "因此不改动分天"
+            )
+            return items, report
     if not moved_names:
         report["note"] = "按地理算不出更好的分天（没有点需要换天）"
         return items, report
