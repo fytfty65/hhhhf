@@ -442,6 +442,48 @@ async def fetch_page_text(url: str, *, timeout: Optional[float] = None) -> Dict[
     return {"ok": True, "url": str(url), "text": text, "retrieved_at": time.time()}
 
 
+async def fetch_page_html(url: str, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+    """抓官方页面的**原始 HTML**（给"名录/列表页解析"用）。
+
+    为什么需要它（2026-10-07 实测）：`fetch_page_text` 会把 HTML 剥成纯文本
+    （伊犁文旅名录页 40146 字符 → 5401 字符），而名录的条目结构
+    （`<a href="/show/scenicspot/detail?id=581&nodeId=2465">` + `<h2>名字</h2>`）只在 HTML 里 ——
+    第一版拿纯文本去解析，得到"0 条"，差点误判成"名录是 JS 渲染的、抓不到"。
+    安全与礼貌同 `fetch_page_text`：白名单域名、512KB 上限、限时、明确 UA。
+    """
+    import httpx
+
+    allowed, reason = host_is_allowed(url)
+    if not allowed:
+        return {"ok": False, "url": str(url), "error": reason}
+    limit = float(timeout or price_timeout_seconds())
+    try:
+        async with httpx.AsyncClient(
+            timeout=limit,
+            follow_redirects=True,
+            headers={"User-Agent": "OmniRoute/1.0 (+travel planning; contact: local)"},
+            proxy=search_proxy() or None,
+            **_ssl_verify_kwargs(),
+        ) as client:
+            response = await client.get(url)
+            if response.status_code >= 400:
+                return {"ok": False, "url": str(url), "error": f"HTTP {response.status_code}"}
+            html = response.text[: 512 * 1024]
+    except Exception as exc:
+        return {"ok": False, "url": str(url), "error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    return {"ok": True, "url": str(url), "html": html, "retrieved_at": time.time()}
+
+
+async def fetch_page_html_stable(url: str, *, attempts: int = 2, timeout: Optional[float] = None) -> Dict[str, Any]:
+    """`fetch_page_html` 的重试版（与 `fetch_page_text_stable` 同口径）。"""
+    last: Dict[str, Any] = {"ok": False, "url": str(url), "error": "未尝试"}
+    for _ in range(max(1, int(attempts))):
+        last = await fetch_page_html(url, timeout=timeout)
+        if last.get("ok") and last.get("html"):
+            return last
+    return last
+
+
 async def fetch_page_text_stable(url: str, *, attempts: int = 2, timeout: Optional[float] = None) -> Dict[str, Any]:
     """抓官方页面正文：失败**重试一次**（默认最多 2 次）。
 
@@ -863,7 +905,9 @@ _TICKET_PRICE_RANGE = re.compile(r"\d+\s*(?:元)?\s*(?:至|到|-|~|—)\s*\d+")
 _TICKET_PRICE_VAGUE = ("不等", "常见", "区间", "大约", "左右", "起价", "数十", "几百", "以现场")
 
 
-def extract_ticket_price(text: Any, *, require_name: str = "") -> Optional[Dict[str, Any]]:
+def extract_ticket_price(
+    text: Any, *, require_name: str = "", name_window: int = 30
+) -> Optional[Dict[str, Any]]:
     """从一段文字里抽**确定的门票价**；抽不到就返回 None（纯函数）。
 
     与 `extract_price_candidates` 的区别（为什么不能直接复用）：
@@ -878,17 +922,30 @@ def extract_ticket_price(text: Any, *, require_name: str = "") -> Optional[Dict[
     于是阳光公园被安上了一个别人的价、而且是调价前的旧价。
     两道新闸门：① 数字 ±30 字窗口里必须出现地点名；② 出现"调整为"时取**调整后**的价格
     （旧价不是现价），取不到就放弃。
+
+    `name_window`（2026-10-07 加）：窗口大小。摘要里用默认 30 字；
+    **官方名录详情页**用 120 —— 那种页面是"一页一个景区"的结构化页面
+    （伊犁文旅：「… 门票价格 门票30元/人 地点 … 著名景点 伊宁县天鹅泉湿地公园木栈道观景台 …」），
+    地点名离价格常常 40 字开外，30 字窗口会把它误杀（实测 30 字窗口 → None，120 字 → ¥30）。
+    放宽的代价可控：调用方是**按名字匹配到的官方页**（不是搜索摘要），页面本身就是这个景区的。
     """
     raw = str(text or "")
-    if not raw or _TICKET_PRICE_RANGE.search(raw):
+    if not raw:
         return None
     name = str(require_name or "").strip()
+    span = max(10, int(name_window or 30))
     for pattern in _TICKET_PRICE_PATTERNS:
         for match in pattern.finditer(raw):
-            window = raw[max(0, match.start() - 30): match.end() + 30]
-            if not any(marker in window for marker in _TICKET_CONTEXT_MARKERS):
+            window = raw[max(0, match.start() - span): match.end() + span]
+            # 区间/模糊表述只看**数字紧邻的 ±12 字**（2026-10-07 收紧）：
+            # 官方整页里别处常出现"40元至100元是常见区间"这类描述，用大窗口会把整页的价全误杀
+            # （实测天鹅泉官方页因此什么都抽不出）。而"门票40元至100元"这种**贴着的**区间照样挡得住。
+            near = raw[max(0, match.start() - 12): match.end() + 12]
+            if _TICKET_PRICE_RANGE.search(near):
                 continue
-            if any(marker in window for marker in _TICKET_PRICE_VAGUE):
+            if any(marker in near for marker in _TICKET_PRICE_VAGUE):
+                continue
+            if not any(marker in window for marker in _TICKET_CONTEXT_MARKERS):
                 continue
             if name and name not in window:
                 continue

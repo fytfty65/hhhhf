@@ -6058,6 +6058,28 @@ async def run_negotiate(msg: GatewayMessage):
                                         from core.web_price_tool import lookup_price
 
                                         _name = str(_item.get("name") or "")
+                                        # 👑 **先走官方名录定向通道**（2026-10-07 加的）：
+                                        #    景区名 → 官方文旅名录 → 官方详情页 → 页面写的门票价。
+                                        #    为什么放在通用搜索**之前**：这条路既准（命中即"可核实"，
+                                        #    实测天鹅泉 ¥30、六星街 免费、薰衣草园 ¥35）又便宜
+                                        #    （名录有缓存，命中只多抓 1 个页面）；而通用搜索对这些
+                                        #    小众景点已经拿不到东西了（Bing 返回随机热门页）。
+                                        _intent = str(_item.get("intent") or "")
+                                        if _intent in {"scenic", "cultural"}:
+                                            try:
+                                                from core.official_directory import lookup_official_price
+
+                                                _official = await lookup_official_price(
+                                                    _name, city=target_city
+                                                )
+                                                if _official.get("value") is not None:
+                                                    return _official
+                                            except Exception as _official_exc:
+                                                print(
+                                                    f"⚠️ [官方名录] {_name} 这条通道失败，改用通用搜索: "
+                                                    f"{type(_official_exc).__name__}: {str(_official_exc)[:60]}",
+                                                    flush=True,
+                                                )
                                         try:
                                             return await lookup_price(
                                                 _name,
