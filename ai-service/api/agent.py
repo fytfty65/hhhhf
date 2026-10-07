@@ -5338,10 +5338,25 @@ async def run_negotiate(msg: GatewayMessage):
                                             ]
                                     except Exception:
                                         _known_names = []
+                                # ⚠️`known_names` 必须**同时包含候选池的名字**（2026-10-05 实测）：
+                                #   用户点「换住这家」时点名的是**候选池里那一家**（还不在方案里），
+                                #   只喂方案节点名 → 解析器认不出这个名字 → `swap_to` 为空 →
+                                #   点了按钮却什么都没换（真跑验证时才发现的）。
+                                _pool_names: List[str] = []
+                                for _pool_item in (
+                                    list(cleaned_hotels or [])
+                                    + list(unique_attractions or [])
+                                    + list(unique_foods or [])
+                                ):
+                                    if isinstance(_pool_item, Mapping):
+                                        _pool_name = str(_pool_item.get("name") or "").strip()
+                                        if _pool_name and _pool_name not in _pool_names:
+                                            _pool_names.append(_pool_name)
                                 _refinement_delta = parse_increment(
                                     intent_str,
                                     previous_plan=final_data,
-                                    known_names=_known_names,
+                                    known_names=_known_names + _pool_names,
+                                    city=target_city,
                                 )
                                 # 二次增量直接影响"该看什么"的构成策略（例如"想多打卡自然景观"
                                 # 会抬高每天自然景观目标、压低文化类上限），所以要带进质量上下文。
@@ -5498,6 +5513,63 @@ async def run_negotiate(msg: GatewayMessage):
                                 final_data["tier_policy"] = _governance["tier_policy"]
                             if _governance.get("ranking_preferences"):
                                 final_data["ranking_preferences"] = _governance["ranking_preferences"]
+
+                            # 👑 用户**点名**要换成哪一家（点了「换住这家」/ 说"住 XX 酒店"）：
+                            #    这是明确的选择，优先于自动替换 —— 就地换（保留原时段），
+                            #    并打上 user_choice（后续的自动优化不许把它移走）。
+                            if (_refinement_delta or {}).get("swap_to"):
+                                try:
+                                    from core.increment import apply_swap_to
+                                    from core.candidate_index import normalize_text as _norm
+
+                                    # ⚠️ 模型可能**已经**按用户点的那家排好了（他的原话里就带着名字）——
+                                    #    那就直接给它打上 user_choice，别让后面的收口又换掉
+                                    #    （实测：`apply_swap_to` 报"已经是这一家了"、没有动作，
+                                    #    而收口随后按"有价优先"把住宿换成了池子里的另一家）。
+                                    _swap_target = str(_refinement_delta.get("swap_to") or "")
+                                    _already_chosen: List[str] = []
+                                    for _node in final_data.get("route") or []:
+                                        if isinstance(_node, dict) and _norm(str(_node.get("name") or "")) == _norm(_swap_target):
+                                            _node["user_choice"] = True
+                                            _node["replaced_reason"] = "你点名要这一家"
+                                            _already_chosen.append(str(_node.get("name") or ""))
+                                    _swap_pool = (
+                                        list(cleaned_hotels or [])
+                                        + list(unique_attractions or [])
+                                        + list(unique_foods or [])
+                                    )
+                                    _swap_result = apply_swap_to(
+                                        {"route": final_data.get("route") or []},
+                                        _swap_target,
+                                        pool=_swap_pool,
+                                        kind=str(_refinement_delta.get("swap_kind") or ""),
+                                    )
+                                    if _swap_result.get("action"):
+                                        final_data["route"] = _swap_result["plan"]["route"]
+                                        final_data["node_swap"] = {
+                                            "actions": [_swap_result["action"]],
+                                            "reason": "你点名要换成这一家，已就地换好（时段不变）",
+                                        }
+                                        print(
+                                            "🔁 [按你指定的换] "
+                                            f"第 {_swap_result['action'].get('day')} 天 "
+                                            f"{_swap_result['action'].get('from')} → {_swap_result['action'].get('to')}",
+                                            flush=True,
+                                        )
+                                    elif _already_chosen:
+                                        final_data["node_swap"] = {
+                                            "actions": [],
+                                            "already_planned": _already_chosen,
+                                            "reason": f"方案里已经是「{_already_chosen[0]}」了（已标为你的选择，收口不会再换掉它）",
+                                        }
+                                        print(f"✅ [按你指定的换] 方案里已经是「{_already_chosen[0]}」，标记为你的选择", flush=True)
+                                    elif _swap_result.get("reason"):
+                                        # 找不到那一家的名字：如实说，不编一个替换
+                                        final_data["node_swap"] = {"actions": [], "error": str(_swap_result["reason"])}
+                                        print(f"⚠️ [按你指定的换] {_swap_result['reason']}", flush=True)
+                                except Exception as _swap_to_exc:  # 指定替换失败不影响出方案
+                                    final_data["node_swap"] = {"actions": [], "error": f"{type(_swap_to_exc).__name__}: {str(_swap_to_exc)[:140]}"}
+                                    print(f"⚠️ [按你指定的换] 失败（不影响出方案）: {_swap_to_exc}", flush=True)
 
                             # 👑 用户诉求逐条核对（后端真值字段）：每条诉求一个稳定 id + 状态
                             # （已落实 / 部分落实 / 未核实 / 仅建议 / 没做到），前端逐条渲染。

@@ -975,8 +975,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   const [dynamicRoutes, setDynamicRoutes] = useState<any[]>([]);
   const [replanProposal, setReplanProposal] = useState<any | null>(null);
   const [replanBusy, setReplanBusy] = useState(false);
-  // 一键换近点：记住用户点了哪一天（用于给个"正在按你的要求重排"的即时反馈）
-  const [swappingDay, setSwappingDay] = useState<number | null>(null);
+  // 一键换近点 / 换住这家：记住用户点了哪一处（数字=第几天、字符串='住宿'），用于即时反馈
+  const [swappingDay, setSwappingDay] = useState<number | string | null>(null);
   const [realPath, setRealPath] = useState<[number, number][]>([]);
   const [targetCityInfo, setTargetCityInfo] = useState<{name: string, lnglat: [number, number]} | null>(null);
 
@@ -1643,11 +1643,27 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
    *   ① 排除/替换点**优先选近的**；② 收口时把远点**就地换成算好的近点**（同一时段）。
    */
   const handleSwapNear = (day: number, from: string, to: string) => {
+    sendIncrementInstruction(`第 ${day} 天太远了，不想跑那么远，换近一点的`, `第 ${day} 天的远点`);
+  };
+
+  /** 点「换住这家」：把"住宿换成 X"作为一句增量发回去。 */
+  const handleSwapHotel = (name: string) => {
+    sendIncrementInstruction(`住宿换成 ${name}`, '住宿');
+  };
+
+  /**
+   * 把一句**用户意图**作为增量发回去重排（一键换近点 / 换住这家共用）。
+   *
+   * 为什么统一走"一句话"而不是结构化指令：后端的增量解析与距离口径都按自然语言设计
+   * （`parse_increment` + `extract_preference_signals`），一句话能同时被两侧正确读到；
+   * 而且**回传的是意图**，实际换成了谁由后端如实报回来（找不到那一家就如实说没换成）。
+   */
+  const sendIncrementInstruction = (instruction: string, what: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setApiError("连接正在恢复中，请 2 秒后再点一次");
       return;
     }
-    setSwappingDay(day);
+    setSwappingDay(what);
     setDeductionError(null);
     setStreamedText("");
     lastTokenTimeRef.current = Date.now();
@@ -1659,9 +1675,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           user_preferences: {
             mode: activeMode,
             role: activeRole,
-            // 用户点的是"就换成它"，但回传的是**意图**（第几天太远、要近一点的）——
-            // 后端按意图重排，并会把实际换成了谁如实报回来。
-            intent: `${userIntent}（第 ${day} 天太远了，不想跑那么远，换近一点的）`,
+            intent: `${userIntent}（${instruction}）`,
             history_sequence: incrementalHistory,
             current_existing_route: dynamicRoutes,
             room_members: roomMembers.map((m: any) => ({
@@ -1671,7 +1685,6 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
         }
       }),
     );
-    setPlanGovernance((prev) => (prev ? { ...prev } : prev));
   };
 
   // 推演失败/超时后重试：重置状态并重新发送 agent_negotiate
@@ -2214,13 +2227,13 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           {swappingDay != null && (
             <div className="px-5 pt-2 sm:px-8">
               <p className="text-[12px] font-bold text-orange-700" data-testid="swap-near-pending">
-                已按你的要求把第 {swappingDay} 天的远点换成近点，正在重排…
+                已按你的要求换{typeof swappingDay === 'string' ? swappingDay : `第 ${swappingDay} 天的远点`}，正在重排…
               </p>
             </div>
           )}
           {phase === 'decision' && workspaceLayer === 'evidence' && (
             <div className="px-5 pt-2 sm:px-8">
-              <PlanGovernancePanel data={planGovernance} onSwapNear={handleSwapNear} />
+              <PlanGovernancePanel data={planGovernance} onSwapNear={handleSwapNear} onSwapHotel={handleSwapHotel} />
             </div>
           )}
           <AnimatePresence mode="wait">

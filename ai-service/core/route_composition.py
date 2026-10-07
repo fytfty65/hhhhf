@@ -409,6 +409,11 @@ def trim_lodging_over_cap(
         day for day in all_days if day > total_nights
     ]
     keep_ids = set()
+    # ⚠️ 用户**点名选的那一家**优先保留（2026-10-05 实测）：他挑了一家酒店，限量逻辑却按
+    #    第 1..nights 天顺序保留、把用户选的那家当"多余的"移出 —— 那是把明确选择当噪声。
+    for node in lodging:
+        if bool(node.get("user_choice")):
+            keep_ids.add(id(node))
     for day in day_order[:total_nights]:
         same_day = [node for node in lodging if _day_of(node) == day]
         same_day.sort(key=lambda node: (-_has_price(node), str(node.get("name") or "")))

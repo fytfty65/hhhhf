@@ -437,7 +437,18 @@ def repair_day_overload(
             coord = node_lnglat(node)
             distance = haversine_km(city_center, coord) if (coord and city_center) else float("nan")
             decorated.append((distance if distance == distance else -1.0, index, node))
-        far_items = sorted([item for item in decorated if item[0] >= FAR_NODE_KM], key=lambda item: item[0])
+        # ⚠️ 用户**点名选的那一家**不能被自动优化悄悄移出（2026-10-05：他挑了那家酒店，
+        #    系统却因为"离市中心 40km 以上"把它移走 —— 那是把用户的选择当噪声）。
+        #    保留它，超预算的部分照常披露（`evaluate_travel_feasibility` 仍然会报）。
+        far_items = sorted(
+            [
+                item
+                for item in decorated
+                if item[0] >= FAR_NODE_KM
+                and not (isinstance(item[2], Mapping) and item[2].get("user_choice"))
+            ],
+            key=lambda item: item[0],
+        )
 
         if not city_center or len(far_items) <= far_limit:
             # 没有可比坐标，或远景区数量本来就没超 → 这一天不动

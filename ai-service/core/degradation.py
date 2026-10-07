@@ -68,6 +68,11 @@ DATA_SOURCES: Dict[str, Dict[str, str]] = {
         "label": "按你的意思换的近点",
         "impact": "你说过不想跑那么远，远点已就地换成同类的近点",
     },
+    # 用户**点名**要换成哪一家（点了「换住这家」）
+    "node_swap": {
+        "label": "按你指定的换",
+        "impact": "你点名要换的那一家已就地换好（时段不变，不会被自动优化改掉）",
+    },
     # 吃住离当天的玩点偏远：不是"没排"，是"来回通勤会吃掉游玩时间"（2026-10-05 实测 anchoring 掉分）
     "anchoring": {
         "label": "吃住与玩点的距离",
@@ -519,6 +524,24 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
                 + "。这是按你「不想跑那么远」的意思换的，想反悔直接说一句换回来",
             )
         )
+
+    # 4.9) 用户点名要换的那一家（点了「换住这家」）：换了谁、换成了谁，都要写清楚
+    node_swap = _as_mapping(data.get("node_swap"))
+    if node_swap.get("error"):
+        items.append(_entry("node_swap", STATUS_MISSING, f"你想换的那一家没能换上：{str(node_swap.get('error'))[:120]}"))
+    else:
+        swap_actions = [item for item in (node_swap.get("actions") or []) if isinstance(item, Mapping)]
+        if swap_actions:
+            items.append(
+                _entry(
+                    "node_swap",
+                    STATUS_DEGRADED,
+                    "；".join(
+                        f"第 {item.get('day')} 天 {item.get('from')} → {item.get('to')}" for item in swap_actions[:3]
+                    )
+                    + "。这是你点名要的那一家，已就地换好（时段不变）；想改回来说一句就行",
+                )
+            )
 
     # 5) 跨城出行方式
     transport = _as_mapping(data.get("transport_audit"))

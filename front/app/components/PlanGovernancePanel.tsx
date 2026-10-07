@@ -440,6 +440,7 @@ function Row({ label, value, tone, hint }: { label: string; value: React.ReactNo
 export default function PlanGovernancePanel({
   data,
   onSwapNear,
+  onSwapHotel,
 }: {
   data?: PlanGovernance | null;
   /**
@@ -448,6 +449,12 @@ export default function PlanGovernancePanel({
    * 用户还得自己打字复述一遍，等于把闭环又交回给了他。
    */
   onSwapNear?: (day: number, from: string, to: string) => void;
+  /**
+   * 点「换住这家」时回调：把"住宿换成 X"作为一句增量发回去。
+   * 为什么要有它：后端把"有实价的住宿可选"摆出来了，但清单是**只读**的 ——
+   * 用户看得到、挑不了，等于给了选择权却不兑现。
+   */
+  onSwapHotel?: (name: string) => void;
 }) {
   if (!data) return null;
   const { quality, budget, fallback, horizon, dailyBalance, increment, priceAudit, transportAudit, longTrip, review, constraints, degradations, lodgingJoint, referenceProfile, candidateSupply, composition, negotiation, feedbackApplied, lodgingSupply, travelAlternatives } = data;
@@ -658,6 +665,19 @@ export default function PlanGovernancePanel({
                       <span className="text-slate-400"> · 供应商未给坐标，通勤距离算不出来</span>
                     )}
                     {hotel.address ? ` · ${hotel.address}` : ''}
+                    {onSwapHotel && hotel.name ? (
+                      <>
+                        {' '}
+                        <button
+                          type="button"
+                          data-testid={`swap-hotel-${index}`}
+                          onClick={() => onSwapHotel(hotel.name as string)}
+                          className="rounded-md bg-orange-50 px-2 py-0.5 text-[11px] font-bold text-orange-700 hover:bg-orange-100"
+                        >
+                          换住这家
+                        </button>
+                      </>
+                    ) : null}
                     {hotel.booking_url ? (
                       <>
                         {' '}

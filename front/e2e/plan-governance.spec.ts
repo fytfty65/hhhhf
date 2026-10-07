@@ -944,7 +944,7 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // 一键换近点：后端已经把"换成哪个近点"算好了，界面要能让用户**点一下**就换 ——
     // 只写一句"你说一声就行"等于把闭环又交回给用户。
     await page.getByTestId('swap-near-2-0').click();
-    await expect(page.getByTestId('swap-near-pending')).toContainText('已按你的要求把第 2 天的远点换成近点');
+    await expect(page.getByTestId('swap-near-pending')).toContainText('已按你的要求换第 2 天的远点，正在重排');
     await expect
       .poll(async () => page.evaluate(() => ((window as unknown as { __wsSends?: any[] }).__wsSends || []).length))
       .toBeGreaterThan(1);
@@ -973,6 +973,18 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(
       panel.getByTestId('lodging-supply-list').locator('a[href="https://rollinggo.cn/pages/hotel/detail/index?id=1"]'),
     ).toHaveCount(1);
+
+    // 换住这家：清单是**只读**的话等于给了选择权却不兑现 —— 点一下要能真的换
+    await page.getByTestId('swap-hotel-0').click();
+    await expect(page.getByTestId('swap-near-pending')).toContainText('已按你的要求换住宿');
+    const hotelSwapSend = await page.evaluate(() => {
+      const sends = (window as unknown as { __wsSends?: any[] }).__wsSends || [];
+      return sends[sends.length - 1];
+    });
+    const hotelSwapIntent = String(hotelSwapSend?.payload?.user_preferences?.intent || '');
+    expect(hotelSwapIntent, `换住宿请求应点名要换的那一家，实际：${hotelSwapIntent}`).toContain(
+      '住宿换成 库尔勒福润德·万达锦华酒店',
+    );
     // "需要你确认"要逐条说清原因，并给可点开的核价入口（酒店房价尤其要写明高德不提供）
     await expect(page.getByTestId('price-pending')).toBeVisible();
     await expect(panel.getByText('高德不提供房价，需要你确认')).toBeVisible();

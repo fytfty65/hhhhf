@@ -23,6 +23,11 @@ from .plan_quality import PREFERENCE_TAXONOMY, node_day, node_name, nodes_of, pa
 
 # 触发词
 EXCLUDE_HINTS = ("不想去", "不要去", "不去", "别安排", "不要安排", "换掉", "换成别的", "去掉", "删除", "去过", "不感兴趣", "不喜欢")
+# 「指定换成某一家」的说法（2026-10-05）：用户点了"有实价的住宿可选"里的某一家，
+# 或者直接说"住 XX 酒店" —— 这时他要的是**那一家**，不是"随便换个同类"。
+# ⚠️ 顺序要紧：`SWAP_HINTS` 必须比 `EXCLUDE_HINTS` 先判，否则"换成 X"里的"换掉/换成别的"会先命中，
+# 变成"把 X 排除掉"（正好反了）。
+SWAP_HINTS = ("换成", "换住", "改住", "住进", "就住", "住", "订", "选择", "改成")
 # 增减的说法要覆盖用户真实口语：实测"我想多打卡自然景观"这类说法一个都没命中，
 # 结果二次增量完全没被识别（策略层因此拿不到"该多加自然景观"的信号）。
 INCREASE_HINTS = (
@@ -102,16 +107,66 @@ def _mentions_place(name: str, normalized_text: str) -> bool:
     return False
 
 
+# 通用类别词：用户说"换成某家酒店"时，光有「酒店」二字**不足以定位是哪一个** ——
+# 用它做匹配会让"换成火星酒店"命中池子里任意一家酒店（实测踩过）。
+_GENERIC_PLACE_WORDS = (
+    "酒店", "宾馆", "旅馆", "民宿", "客栈", "青旅", "公寓",
+    "餐厅", "饭店", "酒楼", "食堂", "小吃", "美食",
+    "公园", "景区", "风景名胜", "博物馆", "博物院", "展馆", "广场", "中心", "火车站", "机场",
+)
+
+
+def _mentions_specific_place(name: str, normalized_text: str, *, city: str = "") -> bool:
+    """**点名**要换成哪一家时的匹配：比 `_mentions_place` 严，不允许只靠类别词命中。
+
+    允许三种说法：① 说全名；② 说"去掉通用类别词之后的核心词"；
+    ③ 说核心词的**前缀**（用户常说前半段："换成瑞德假日" 指 "瑞德假日酒店(巴州博物馆市政府店)"）。
+
+    ⚠️ **城市名要先从两边都去掉**（2026-10-05 实测踩坑）：池子里的名字多半以城市开头
+    （"库尔勒民俗文化博物馆"、"库尔勒福润德·万达锦华酒店"），而用户这句话里本来就带着城市
+    （"去库尔勒玩2天…住宿换成 库尔勒福润德·万达锦华酒店"）—— 于是任何以城市名开头的前缀
+    都会命中任意一句提到该城市的请求：实测把"住宿换成 X 酒店"读成了"把**库尔勒民俗文化博物馆**
+    当成想换的那一家"。去掉城市之后，剩下的核心词才有区分度。
+
+    光说"酒店/餐厅"这种类别词**不算点名**（那只是类别偏好，不是"就要这一家"）。
+    """
+    key = normalize_text(name)
+    text = normalized_text
+    city_key = normalize_text(city)
+    if city_key:
+        key = key.replace(city_key, "")
+        text = text.replace(city_key, "")
+    if len(key) < 2:
+        return False
+    if key in text:
+        return True
+    core = key
+    for word in _GENERIC_PLACE_WORDS:
+        core = core.replace(normalize_text(word), "")
+    if len(core) < 2:
+        return False
+    if core in text:
+        return True
+    # 前缀匹配：从最长往短试，≥3 字才算"说得出是哪一家"
+    for size in range(len(core), 2, -1):
+        if core[:size] in text:
+            return True
+    return False
+
+
 def parse_increment(
     text: str,
     previous_plan: Any = None,
     known_names: Optional[Iterable[str]] = None,
+    city: str = "",
 ) -> Dict[str, Any]:
     """把一句话解析成结构化 delta（**只解析，不执行**）。
 
-    返回：`{text, exclude[], quota{}, upgrade{}, downgrade{}, days?, budget?, matched[]}`
+    返回：`{text, exclude[], quota{}, upgrade{}, downgrade{}, days?, budget?, swap_to?, matched[]}`
     - `exclude` 尽量用**方案里真实存在的节点名**（比正则抓词可靠得多）；
-    - `quota` 是"相对变化量"（+2 表示再加两个餐饮节点）。
+    - `quota` 是"相对变化量"（+2 表示再加两个餐饮节点）；
+    - `swap_to` 是用户**点名要换成的那一家**（候选池/方案里的名字），空表示没点名；
+    - `city` 只用于"点名匹配"时去掉城市名（否则任何以城市开头的地点名都会误命中）。
     """
     raw = str(text or "")
     plan_names: List[str] = []
@@ -122,6 +177,23 @@ def parse_increment(
     normalized = normalize_text(raw)
     matched: List[str] = []
 
+    # ---- 指定换成哪一家（**必须先于排他判定**）----
+    # 用户点了「换住这家」/ 说"住 XX 酒店"时，要的是**那一家**（候选池里的），
+    # 而"换成 X"里的"换成"同时也在 EXCLUDE_HINTS 的语感里（"换成别的"）——
+    # 先判排他就会把用户**想要**的那家当成"不想要的"排掉，正好反了。
+    swap_to: Optional[str] = None
+    swap_kind: str = ""
+    if any(hint in raw for hint in SWAP_HINTS):
+        for name in plan_names:
+            label = str(name or "").strip()
+            if not label:
+                continue
+            if _mentions_specific_place(label, normalized, city=city):
+                swap_to = label
+                swap_kind = str(intent_of(label) or "other")
+                matched.append(f"swap_to:{label}")
+                break
+
     # ---- 排他：出现排除类说法时，收集"方案里被点到的地点" ----
     exclude: List[str] = []
     has_exclude_hint = any(hint in raw for hint in EXCLUDE_HINTS)
@@ -131,6 +203,9 @@ def parse_increment(
         for name in plan_names:
             key = normalize_text(name)
             if len(key) < 2 or key in seen:
+                continue
+            # 已经被当成"想换成的那一家"的名字，不能再当成"要排除的"
+            if swap_to and key == normalize_text(swap_to):
                 continue
             if _mentions_place(name, normalized):
                 seen.add(key)
@@ -208,8 +283,11 @@ def parse_increment(
         "downgrade": downgrade,
         "days": days,
         "budget": budget,
+        # 用户**点名要换成哪一家**（候选池里的名字）；空表示没点名
+        "swap_to": swap_to,
+        "swap_kind": swap_kind,
         "matched": matched,
-        "is_noop": not (exclude or quota or upgrade or downgrade or days or budget),
+        "is_noop": not (exclude or quota or upgrade or downgrade or days or budget or swap_to),
     }
 
 
@@ -411,6 +489,92 @@ def enforce_quota(
     if unmet:
         parts.append("这些没能补上（候选不足或当天已排满）：" + "、".join(f"{k} 还差 {v} 个" for k, v in unmet.items()))
     return {"plan": new_plan, "added": added, "removed": removed, "unmet": unmet, "disclosure": "；".join(parts)}
+
+
+def apply_swap_to(
+    plan: Any,
+    swap_to: str,
+    *,
+    pool: Optional[Sequence[Mapping[str, Any]]] = None,
+    kind: str = "",
+) -> Dict[str, Any]:
+    """把方案里**同一天的那一类节点**就地换成用户点名的那一家（`swap_to`）。
+
+    为什么放在 core（2026-10-05）：用户在「有实价的住宿可选」里挑了一家，
+    如果只是把清单摆出来、点不动，等于"给了选择权但兑现不了"。
+    规则保守：
+    - 只在**候选池/方案里能找到同名条目**时才换（找不到如实说没换成，不编一个酒店）；
+    - 优先换**住宿**（`kind == "hotel"` 时只动住宿节点），且**保留原来的 day/time**
+      （一天的形状不变，不需要重排）；
+    - 已经是同一家就什么都不做（避免"换成它自己"的无意义动作）。
+
+    返回 `{plan, action}`（`action` 为空表示没换）。
+    """
+    target_name = str(swap_to or "").strip()
+    if not target_name:
+        return {"plan": plan, "action": None}
+
+    nodes = [dict(node) for node in nodes_of(plan)]
+    desired: Optional[Mapping[str, Any]] = None
+    for item in pool or []:
+        if isinstance(item, Mapping) and normalize_text(item.get("name")) == normalize_text(target_name):
+            desired = item
+            break
+    if desired is None:
+        # 不在传入的池子里，但方案里可能已经有这个名字（那也算"找到了"）
+        for node in nodes:
+            if normalize_text(node_name(node)) == normalize_text(target_name):
+                desired = node
+                break
+    if desired is None:
+        return {"plan": plan, "action": None, "reason": f"候选池里没有「{target_name}」，没有可换的那一家"}
+
+    wanted_kind = str(kind or "").strip().lower()
+    replacement_index: Optional[int] = None
+    for index, node in enumerate(nodes):
+        if normalize_text(node_name(node)) == normalize_text(target_name):
+            return {"plan": plan, "action": None, "reason": "方案里已经是这一家了"}
+        if wanted_kind and intent_of(node) != wanted_kind:
+            continue
+        if not wanted_kind and intent_of(node) not in {"hotel", "food", "scenic", "cultural"}:
+            continue
+        replacement_index = index
+        break
+    if replacement_index is None:
+        return {"plan": plan, "action": None, "reason": f"方案里没有可替换的{kind or '节点'}"}
+
+    old = nodes[replacement_index]
+    new_node = dict(old)
+    new_node["name"] = str(desired.get("name"))
+    new_node["location"] = str(desired.get("name"))
+    if isinstance(desired.get("lnglat"), (list, tuple)) and len(desired["lnglat"]) >= 2:
+        new_node["lnglat"] = [float(desired["lnglat"][0]), float(desired["lnglat"][1])]
+    if str(desired.get("type") or "").strip():
+        new_node["type"] = str(desired["type"])
+    if desired.get("price") is not None:
+        new_node["cost_estimate"] = f"¥{float(desired['price']):g}"
+        sources = dict(new_node.get("data_sources") or {})
+        sources["cost_estimate"] = str(desired.get("price_source") or desired.get("data_source") or "candidate_pool")
+        new_node["data_sources"] = sources
+        new_node["estimated"] = False if sources["cost_estimate"] in {"rollinggo", "amap", "provider", "vendor", "official"} else new_node.get("estimated", True)
+    new_node["replaced_from"] = node_name(old)
+    new_node["replaced_reason"] = "你点名要换成这一家"
+    # 用户点名的选择不能被后面的自动优化悄悄改掉（例如"一天跑不了两个远景区"把它移出）
+    new_node["user_choice"] = True
+    nodes[replacement_index] = new_node
+    new_plan: Any = dict(plan) if isinstance(plan, Mapping) else {"route": nodes}
+    new_plan["route"] = nodes
+    return {
+        "plan": new_plan,
+        "action": {
+            "day": old.get("day"),
+            "from": node_name(old),
+            "to": str(desired.get("name")),
+            "kind": intent_of(old),
+            "reason": "你点名要换成这一家",
+        },
+        "reason": "",
+    }
 
 
 def measure_increment(before: Any, after: Any, delta: Mapping[str, Any]) -> Dict[str, Any]:
