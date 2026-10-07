@@ -54,14 +54,22 @@ def intent_of(value: Any) -> str:
         poi_type = str(value.get("type") or "")
         if value.get("is_hotel") is True or any(marker in poi_type for marker in LODGING_TYPE_MARKERS):
             return "hotel"
-        text = f"{node_name(value)} {poi_type} {value.get('desc') or ''}"
-        if isinstance(tags, list):
-            text += " " + " ".join(str(tag) for tag in tags)
+        name_type = f"{node_name(value)} {poi_type}"
+        tags_text = " ".join(str(tag) for tag in tags) if isinstance(tags, list) else ""
+        desc_text = str(value.get("desc") or "")
     else:
-        text = str(value or "")
+        name_type = str(value or "")
+        tags_text = desc_text = ""
+    # ⚠️ **单字关键词不许匹配 `desc`**（2026-10-07 实测抓到的错判）：餐饮词表里有「面」「饭」「茶」
+    #    这类单字，而 desc 是自由文本 —— 喀什的「胡杨书院」(type=科教文化服务) 的 desc 里写着
+    #    "巴楚博物馆后**面**"，于是被判成 **food**：后果是"第 3 天其实没有饭点"这件事被它掩盖
+    #    （门禁假通过、补餐逻辑也以为那天有饭）。名字/类别/标签才是可靠字段。
     for label, keywords in PREFERENCE_TAXONOMY.items():
-        if any(keyword in text for keyword in keywords):
-            return label
+        for keyword in keywords:
+            if keyword in name_type or keyword in tags_text:
+                return label
+            if len(keyword) >= 2 and keyword in desc_text:
+                return label
     return "other"
 
 

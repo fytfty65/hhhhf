@@ -46,7 +46,16 @@ def _is_hotel(node: Mapping[str, Any]) -> bool:
 
 
 def _is_food(node: Mapping[str, Any]) -> bool:
-    text = f"{node_name(node)} {node.get('type') or ''} {node.get('desc') or ''}"
+    """这个节点是不是**餐饮**。
+
+    ⚠️ 只匹配**名字 + 类别 + 标签**，**不看 `desc`**（2026-10-07 实测抓到的假阳性）：
+    餐饮关键词里有单字「面」「饭」「茶」这类，而 `desc` 是自由文本 ——
+    喀什的「胡杨书院」desc 里写着"巴楚博物馆后**面**"，于是被判成餐饮节点：
+    ① 那天其实**没有饭点**，门禁却因此判"通过"（该说的没说）；
+    ② 节点类别被污染（它明明是科教文化服务）。
+    名字/类别才是判餐饮的可靠字段（"餐饮服务"、"…馄饨王"、"…拌面王"、"…蹄花"）。
+    """
+    text = f"{node_name(node)} {node.get('type') or ''}"
     tags = node.get("tags") or []
     if isinstance(tags, list):
         text += " " + " ".join(str(tag) for tag in tags)

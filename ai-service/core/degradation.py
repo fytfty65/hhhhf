@@ -474,6 +474,24 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.65) 补餐的结果与"宁可不塞"（2026-10-07 实测）：某天没有饭点时，收口后会从候选池 /
+    #       富余的那天补一个；但**太远的饭点不塞**（实测喀什第 3 天最近的候选在 82.6km 外的市区，
+    #       塞进去只是把门禁"做"通过，用户不可能为一顿晚饭开 82km，anchoring 也会掉）。
+    #       这件事必须说出来，否则用户只看到"这天没有饭点"，不知道我们试过、也不知道为什么。
+    meal_topup = _as_mapping(data.get("meal_topup"))
+    skipped_meals = [item for item in (meal_topup.get("skipped") or []) if isinstance(item, Mapping)]
+    if skipped_meals:
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                "；".join(
+                    f"第 {item.get('day')} 天没有安排餐饮：{item.get('reason')}" for item in skipped_meals[:2]
+                )
+                + "。想吃的话说一声就补（也可以让它换成近一点的玩点）",
+            )
+        )
+
     # 3.9) 高德被限流（2026-10-05）：限流会**静默让候选变少** —— 看起来像"这城市没什么景点"，
     #      必须说出来，否则用户会把"供应商限流"读成"这里没得玩"。
     gate = _as_mapping(data.get("amap_gate"))

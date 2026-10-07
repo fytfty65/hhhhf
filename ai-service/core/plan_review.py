@@ -274,6 +274,205 @@ def _pool_pick(
     return None
 
 
+def top_up_missing_meals(
+    context: Mapping[str, Any],
+    plan: Any,
+    pool: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
+    expectations: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """给**没有餐饮节点的那一天**补一个饭点，候选**优先取离当天玩点最近的**（2026-10-07）。
+
+    为什么要单独做（真实缺口）：喀什/伊宁都出现过 `skeleton_meal_missing`（某天没饭点）——
+    门禁判失败，而这一条是**可以从候选池补**的。之前 `fill_structural_gaps` 里的补餐跑在
+    收口**之前**，收口/分天重排之后又可能把饭点挪走，于是最终方案里又缺了。
+
+    取候选的两条硬规矩：
+      · 只用候选池里真实存在的餐饮候选，**同名不重复**（绝不编造）；
+      · 按"离当天玩点聚簇最近"排序 —— 否则会给远点那天塞一家市区餐馆（实测喀什
+        那样会平白多出 city→far→city 两趟 200+km）。
+    返回 `{plan, actions, changed}`；没池子/没候选就如实不动。
+    """
+    from .increment import build_node_from_candidate
+    from .plan_quality import haversine_km, node_day, node_lnglat, nodes_of
+
+    expectations = expectations or {}
+    cap = expectations.get("max_nodes_per_day")
+    cap = int(cap) if isinstance(cap, (int, float)) and cap > 0 else None
+    # 多远之外的饭点**宁可不塞**（2026-10-07 实测）：喀什第 3 天在英吉沙/巴楚方向，
+    # 最近的候选饭点在 82.6km 外的市区 —— 塞进去只是把"门禁通过"做出来，
+    # 用户不可能为一顿晚饭开 82km，`anchoring` 也从 0.833 掉到 0.667。
+    # 距离上限跟着用户的距离口径走（"不介意跑远"的人才放宽）。
+    max_km = expectations.get("meal_max_km")
+    try:
+        max_km = float(max_km) if max_km is not None else 30.0
+    except (TypeError, ValueError):
+        max_km = 30.0
+
+    nodes = [dict(node) for node in nodes_of(plan)]
+    used = {str(node.get("name") or "").strip() for node in nodes}
+    days = sorted({node_day(node, 1) for node in nodes})
+    actions: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    additions: List[Dict[str, Any]] = []
+    current: List[Dict[str, Any]] = list(nodes)
+
+    def _centroid(day: int, source: Sequence[Mapping[str, Any]]) -> List[float]:
+        coords = []
+        for node in source:
+            if node_day(node, 1) != day:
+                continue
+            if _intent_of_node(node) in {"food", "hotel"}:
+                continue
+            coord = node_lnglat(node)
+            if coord:
+                coords.append(coord)
+        if not coords:
+            return []
+        return [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+
+    def _distance_to(center: Sequence[float], item: Mapping[str, Any]) -> float:
+        coord = node_lnglat(item)
+        if not center or not coord:
+            return float("inf")
+        return haversine_km(list(center), list(coord))
+
+    # ① 先做一次**全局分配**：把所有"缺餐的天 × 候选池餐饮"按距离排序，近的优先配
+    #    （逐天各取最近会把离 A 天最近的那家配给先轮到、其实更远的 B 天 —— 实测踩到过）。
+    hungry = [
+        day for day in days if not any(_intent_of_node(node) == "food" for node in current if node_day(node, 1) == day)
+    ]
+    if pool and hungry:
+        centers = {day: _centroid(day, current) for day in hungry}
+        candidates = [
+            dict(item)
+            for item in (pool.get("food") or [])
+            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() not in used
+        ]
+        pairs = sorted(
+            (
+                (_distance_to(centers[day], item), day, item)
+                for day in hungry
+                for item in candidates
+                if str(item.get("name") or "").strip() not in used
+            ),
+            key=lambda row: row[0],
+        )
+        assigned_days: set = set()
+        assigned_names: set = set()
+        for distance, day, item in pairs:
+            name = str(item.get("name") or "").strip()
+            if day in assigned_days or name in assigned_names:
+                continue
+            if distance != float("inf") and distance > max_km:
+                # 太远就不塞（见上面 max_km 的说明），但**如实记下来**
+                assigned_days.add(day)
+                skipped.append(
+                    {
+                        "day": day,
+                        "nearest_km": round(distance, 1),
+                        "reason": f"最近的候选饭点在 {round(distance, 1)}km 外（超过 {round(max_km)}km 上限），宁可不塞",
+                    }
+                )
+                continue
+            day_nodes = [node for node in current if node_day(node, 1) == day]
+            room = None if cap is None else max(0, cap - len(day_nodes))
+            if room is not None and room < 1:
+                assigned_days.add(day)  # 这天满了，别再给它配
+                continue
+            assigned_days.add(day)
+            assigned_names.add(name)
+            used.add(name)
+            additions.append(build_node_from_candidate(item, day, "13:00", "food"))
+            actions.append(
+                {
+                    "code": "add_meal",
+                    "day": day,
+                    "node": name,
+                    "intent": "food",
+                    "distance_km": round(distance, 1) if distance != float("inf") else None,
+                    "detail": "这一天没有餐饮节点，从候选池取了离当天玩点最近的一家",
+                }
+            )
+
+    # ② 还缺餐的天：从**有富余饭点（≥2 个）**的那天挪一个过来（选离这天玩点最近的）
+    for day in days:
+        day_nodes = [node for node in current if node_day(node, 1) == day]
+        if any(_intent_of_node(node) == "food" for node in day_nodes):
+            continue
+        if any(item.get("code") == "add_meal" and item.get("day") == day for item in actions):
+            continue
+        # 挪过来也要看这天还装不装得下（每天节点上限）
+        room = None if cap is None else max(0, cap - len(day_nodes))
+        if room is not None and room < 1:
+            continue
+        center = _centroid(day, current)
+        donors = [
+            node
+            for node in current
+            if _intent_of_node(node) == "food"
+            and sum(
+                1
+                for other in current
+                if node_day(other, 1) == node_day(node, 1) and _intent_of_node(other) == "food"
+            )
+            >= 2
+        ]
+        if not donors:
+            continue
+        move = min(donors, key=lambda node: _distance_to(center, node))
+        move_km = _distance_to(center, move) if center else float("inf")
+        if move_km > max_km:
+            skipped.append(
+                {
+                    "day": day,
+                    "nearest_km": round(move_km, 1) if move_km != float("inf") else None,
+                    "reason": f"最近的饭点在 {round(move_km, 1)}km 外（超过 {round(max_km)}km 上限），宁可不塞",
+                }
+            )
+            continue
+        from_day = node_day(move, 1)
+        updated = {**move, "day": day, "time": f"Day {day} | 13:00 用餐", "moved_from_day": from_day}
+        current = [updated if node is move else node for node in current]
+        actions.append(
+            {
+                "code": "move_meal",
+                "day": day,
+                "node": move.get("name"),
+                "intent": "food",
+                "from_day": from_day,
+                "distance_km": round(move_km, 1) if move_km != float("inf") else None,
+                "detail": "这一天没有餐饮节点，从富余的那天挪了一个过来（候选池里没有更近的）",
+            }
+        )
+    if not additions and not any(item.get("code") == "move_meal" for item in actions):
+        return {"plan": plan, "actions": [], "skipped": skipped, "changed": False}
+
+    # 👑 组装时必须**按天+时刻**排好（2026-10-07 实测）：补/挪进来的节点原来是"追加到数组末尾"
+    #    或"留在原位"，于是第 3 天的时刻会是 13:00 → 08:30 → 10:00，门禁
+    #    `day_out_of_order`（时间倒流）直接判失败。这里按天分组、天内按时刻稳定排序。
+    def _clock_of(node: Mapping[str, Any]) -> Optional[int]:
+        raw = str(node.get("time") or "")
+        tail = raw.split("|")[-1].strip()
+        parts = tail.replace("：", ":").split(":", 1)
+        if len(parts) != 2:
+            return None
+        hour, minute = parts[0].strip(), parts[1].strip()[:2]
+        if not hour.isdigit() or not minute.isdigit():
+            return None
+        return int(hour) * 60 + int(minute)
+
+    route: List[Dict[str, Any]] = list(current) + list(additions)
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for node in route:
+        grouped.setdefault(node_day(node, 1), []).append(node)
+    ordered: List[Dict[str, Any]] = []
+    for day in sorted(grouped):
+        indexed = list(enumerate(grouped[day]))
+        indexed.sort(key=lambda pair: (_clock_of(pair[1]) if _clock_of(pair[1]) is not None else 10**6, pair[0]))
+        ordered.extend(node for _, node in indexed)
+    return {"plan": {"route": ordered}, "actions": actions, "skipped": skipped, "changed": True}
+
+
 def fill_structural_gaps(
     context: Mapping[str, Any],
     plan: Any,

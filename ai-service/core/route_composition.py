@@ -461,6 +461,11 @@ def _node_day(node: Mapping[str, Any]) -> int:
         return 1
 
 
+# "玩点"类别（判"某天还有没有得看"、算当天玩点聚簇都用它）：
+# 分类器给的是 scenic/cultural/landmark/city_park，缺一档就会把"只有公园/地标的一天"误判成没有玩点。
+PLAY_CATEGORIES = {"scenic", "cultural", "landmark", "city_park", "park", "nature"}
+
+
 def _coords_of(node: Mapping[str, Any]) -> List[float]:
     value = node.get("lnglat")
     if isinstance(value, (list, tuple)) and len(value) >= 2:
@@ -588,6 +593,24 @@ def rebalance_days_by_geography(
         except Exception:
             return _default_category(node)
 
+    def _play_centroid(day: int) -> List[float]:
+        plays = [_coords_of(node) for node in by_day[day] if category(node) in PLAY_CATEGORIES]
+        plays = [coord for coord in plays if coord]
+        if not plays:
+            plays = [_coords_of(node) for node in by_day[day] if _coords_of(node)]
+        if not plays:
+            return []
+        return [sum(c[0] for c in plays) / len(plays), sum(c[1] for c in plays) / len(plays)]
+
+    # 👑 **每天的餐饮下限**先记下来，但**不钉死节点**（钉死会把地理重排的收益吃掉：实测喀什
+    #    449km → 461km，因为钉住的两个饭点占住了本该腾给远点的位置）。
+    #    做法改成"先自由重排、再修餐饮覆盖"：下面算完之后，某天原本有饭点却没了，
+    #    就用"有富余饭点的那天"跟它换一个（换法取最不伤里程的那种）；换不动就整单不改。
+    days_with_meal_before = {
+        day: any(category(node) == "food" for node in fixed[day] + movable[day]) for day in days
+    }
+    floating_meals = sum(1 for day in days for node in movable[day] if category(node) == "food")
+
     # 每天要**至少**保留哪些类别（不是"数量完全照旧"—— 那会把远点死死锁在原天：
     # 实测喀什第 2 天有 2 个人文点，「胡杨书院」(巴楚 216km) 就被这条硬约束留在了市区那天）。
     # 保留"每天至少各一个"是因为每日密度/节奏门禁关心的是"这天有没有得看、有没有得吃"。
@@ -599,6 +622,11 @@ def rebalance_days_by_geography(
             if key != "other":
                 counts[key] = 1  # 下限 1
         need[day] = counts
+    hungry_days = [day for day in days if not days_with_meal_before[day]]
+    # ⚠️ 这里**不**给"原本没饭点的那天"加下限（2026-10-07 实测）：餐饮候选都在市区时，
+    #    硬把它塞给"远点那天"会凭空加出 city→far→city 两趟（喀什 449km → 460km），
+    #    于是整个重排被收益门槛否掉。缺餐该由**收口后的补餐**解决（就近取候选池的餐饮），
+    #    不是靠把别的天的饭点搬过去。这里只保证"原本有饭点的那天不许丢"（见下面的修复段）。
 
     unused = [node for day in days for node in movable[day]]
     target_counts = {day: len(movable[day]) for day in days}
@@ -692,6 +720,56 @@ def rebalance_days_by_geography(
         if not improved:
             break
 
+    # 👑 餐饮覆盖修复（2026-10-07 实测回归：重排把伊宁第 3 天的饭点搬走 → 门禁判失败）：
+    #    某天原本有饭点、重排后没有 → 从"有富余饭点（≥2）"的那天换一个过来，
+    #    换法取**最不伤里程**的那种；换不动就整单不改（宁可不动，也不能让用户没饭吃）。
+    def _day_has_meal(nodes: Sequence[Mapping[str, Any]]) -> bool:
+        return any(category(node) == "food" for node in nodes)
+
+    for _ in range(len(days) * 2):
+        starving = [
+            day for day in days
+            if days_with_meal_before[day] and not _day_has_meal(fixed[day] + assigned[day])
+        ]
+        if not starving:
+            break
+        fixed_this_round = False
+        for hungry in starving:
+            donors = [
+                day for day in days
+                if day != hungry and sum(1 for node in assigned[day] if category(node) == "food") >= 2
+            ]
+            best_swap = None
+            best_max = _max_km_of(assigned)
+            for donor in donors:
+                for meal in [node for node in assigned[donor] if category(node) == "food"]:
+                    for other in list(assigned[hungry]):
+                        assigned[donor].remove(meal)
+                        assigned[donor].append(other)
+                        assigned[hungry].remove(other)
+                        assigned[hungry].append(meal)
+                        candidate_max = _max_km_of(assigned)
+                        if candidate_max < best_max - 1e-6:
+                            best_max = candidate_max
+                            best_swap = (donor, hungry, meal, other)
+                        # 撤销
+                        assigned[hungry].remove(meal)
+                        assigned[hungry].append(other)
+                        assigned[donor].remove(other)
+                        assigned[donor].append(meal)
+            if best_swap:
+                donor, hungry_day, meal, other = best_swap
+                assigned[donor].remove(meal)
+                assigned[donor].append(other)
+                assigned[hungry_day].remove(other)
+                assigned[hungry_day].append(meal)
+                fixed_this_round = True
+        if not fixed_this_round:
+            report["after_max_km"] = round(_max_km_of(assigned), 1)
+            report["after_total_km"] = round(sum(_day_leg_km(fixed[day] + assigned[day]) for day in days), 1)
+            report["note"] = "重排会让某一天没有餐饮节点、又换不动，因此不改动分天"
+            return items, report
+
     # 组装：每天 = 固定节点 + 新分配的可动节点，按**时刻**排好（时间语义不变）
     def _clock_and_suffix(node: Mapping[str, Any]) -> Tuple[int, str]:
         raw = str(node.get("time") or "")
@@ -754,9 +832,11 @@ def rebalance_days_by_geography(
     #    每天至少 1 个自然景观、文化类设上限"。重排如果让某天**原本有自然点、重排后一个都没了**，
     #    就会凭空调出一个新的门禁失败 —— 宁可这一天的远点不挪。
     play_kinds = ("scenic", "cultural")
+    # 判"某天还有没有得看"用更全的玩点集合（公园/地标也算玩点）
+    PLAYS_FOR_GUARD = PLAY_CATEGORIES
 
     def _play_kinds(nodes: Sequence[Mapping[str, Any]]) -> set:
-        return {category(node) for node in nodes if category(node) in play_kinds}
+        return {category(node) for node in nodes if category(node) in PLAYS_FOR_GUARD}
 
     for day in days:
         before_kinds = _play_kinds(fixed[day] + movable[day])
@@ -770,6 +850,13 @@ def rebalance_days_by_geography(
                 f"重排会让第 {day} 天丢掉「{'、'.join(sorted(lost_required))}」"
                 "（这趟的诉求要求每天都有这一类），因此不改动分天"
             )
+            return items, report
+        # 👑 餐饮覆盖也不能破（2026-10-07 实测抓到的回归）：某天原本有饭点、重排后没有 → 不改。
+        #    伊宁真跑就是这样丢掉第 3 天的餐饮，门禁 `skeleton_meal_missing` 直接判失败。
+        before_meal = any(category(node) == "food" for node in fixed[day] + movable[day])
+        after_meal = any(category(node) == "food" for node in fixed[day] + assigned[day])
+        if before_meal and not after_meal:
+            report["note"] = f"重排会让第 {day} 天没有餐饮节点，因此不改动分天"
             return items, report
     if not moved_names:
         report["note"] = "按地理算不出更好的分天（没有点需要换天）"

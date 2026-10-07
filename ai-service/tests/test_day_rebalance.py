@@ -152,6 +152,51 @@ class RebalanceTests(unittest.TestCase):
             for day in kinds:
                 self.assertTrue(kinds[day], f"第 {day} 天不能没有玩点")
 
+    def test_every_day_keeps_a_meal(self):
+        """餐饮覆盖不许被重排破坏（2026-10-07 实测回归：伊宁第 3 天的饭点被搬走 → 门禁判失败）。"""
+        route = [
+            _node("市集广场", 1, NEAR, "09:00 游览"),
+            _node("老城餐馆", 1, NEAR, "13:00 用餐", type="餐饮服务"),
+            _node("河边客栈", 1, NEAR, "21:30 入住", is_hotel=True),
+            _node("巴楚书院", 2, FAR, "11:00 游览", type="博物馆"),
+            _node("城东饭庄", 2, NEAR2, "13:00 用餐", type="餐饮服务"),
+            _node("丝路餐厅", 2, NEAR2, "18:00 用餐", type="餐饮服务"),
+            _node("西门旅社", 2, NEAR2, "21:30 入住", is_hotel=True),
+            _node("草原风景区", 3, FAR2, "09:00 游览"),
+            _node("沙漠公园", 3, FAR2, "11:00 游览"),
+        ]
+        new_route, report = rebalance_days_by_geography(route)
+        meals_by_day = {}
+        for node in new_route:
+            if node.get("type") == "餐饮服务":
+                meals_by_day[node["day"]] = meals_by_day.get(node["day"], 0) + 1
+        self.assertEqual(meals_by_day.get(1), 1, f"第 1 天的饭点不能被搬走：{meals_by_day}")
+        self.assertEqual(meals_by_day.get(2), 2, f"第 2 天的饭点原样保留：{meals_by_day}")
+
+    def test_a_hungry_day_is_not_fed_by_stealing(self):
+        """缺餐的那天**不许靠抢别人唯一的饭点**来补（会变成"修一天饿一天"）。
+
+        缺餐的修法在收口后的"就近补餐"（`plan_review.top_up_missing_meals`）——
+        实测餐饮候选都在市区时，硬塞给远点那天会加出 city→far→city 两趟（喀什 449 → 460km）。
+        """
+        route = [
+            _node("市集广场", 1, NEAR, "09:00 游览"),
+            _node("老城餐馆", 1, NEAR, "13:00 用餐", type="餐饮服务"),
+            _node("二号餐馆", 1, NEAR, "18:00 用餐", type="餐饮服务"),
+            _node("河边客栈", 1, NEAR, "21:30 入住", is_hotel=True),
+            _node("草原风景区", 2, NEAR2, "09:00 游览"),
+            _node("西门旅社", 2, NEAR2, "21:30 入住", is_hotel=True),
+            _node("沙漠公园", 3, FAR2, "09:00 游览"),
+            _node("戈壁公园", 3, FAR2, "11:00 游览"),
+        ]
+        new_route, _ = rebalance_days_by_geography(route)
+        meals_by_day = {}
+        for node in new_route:
+            if node.get("type") == "餐饮服务":
+                meals_by_day[node["day"]] = meals_by_day.get(node["day"], 0) + 1
+        self.assertEqual(meals_by_day.get(1), 2, f"第 1 天的两个饭点都不该被抢走：{meals_by_day}")
+        self.assertNotIn(2, meals_by_day, f"第 2 天原本就没饭点，不许靠抢第 1 天的来补：{meals_by_day}")
+
     def test_no_change_when_already_compact(self):
         # 四个点都在同一片区域、两天完全等价 → 怎么换都一样，不该动
         route = [

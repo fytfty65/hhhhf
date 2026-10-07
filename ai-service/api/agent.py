@@ -7062,6 +7062,72 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _rebalance_exc:  # 重排失败不影响出方案
                             print(f"⚠️ [按地理分天] 失败（不影响出方案）: {_rebalance_exc}", flush=True)
 
+                        # 👑 缺餐的那天补一个饭点（2026-10-07：喀什/伊宁都出现过 `skeleton_meal_missing`，
+                        #    而这一条**能从候选池补**）。必须放在分天重排**之后**：
+                        #    重排会把饭点挪到别的天，早补的等于白补。
+                        #    候选优先取"离当天玩点最近"的 —— 否则会给远点那天塞一家市区餐馆
+                        #    （实测那样会平白多出 city→far→city 两趟）。池子取不到就如实不动。
+                        try:
+                            from core.plan_review import top_up_missing_meals as _top_up_meals
+
+                            _meal_pool = _quality_pool_for_final if isinstance(_quality_pool_for_final, dict) else None
+                            # 池子空的常见情况：这次规划不需要候选池（没有排他/配额/超预算），
+                            # 于是 `_pool` 是 {}。缺餐要补就得**按需取一次餐饮候选**（只取这一类，便宜），
+                            # 取不到就退回"从富余那天挪一个"（`top_up_missing_meals` 内部处理）。
+                            if not _meal_pool:
+                                from core.poi_pool import build_candidate_pool as _build_meal_pool
+
+                                _meal_fetch = getattr(toolbox, "get_dynamic_pois", None)
+                                if _meal_fetch and target_city:
+                                    try:
+                                        _meal_pool = await asyncio.wait_for(
+                                            _build_meal_pool(
+                                                target_city, ["food"], _meal_fetch, limit_per_intent=8
+                                            ),
+                                            timeout=POOL_FETCH_TIMEOUT_SECONDS,
+                                        )
+                                    except Exception as _meal_pool_exc:
+                                        print(f"⚠️ [补餐] 餐饮候选取用失败，改用挪动已有饭点: {_meal_pool_exc}", flush=True)
+                                        _meal_pool = None
+                            _meal_fix = _top_up_meals(
+                                {"days": trip_days},
+                                final_data,
+                                _meal_pool,
+                                {
+                                    "max_nodes_per_day": _final_target + 1,
+                                    # 太远的饭点宁可不塞（跟用户的距离口径走）
+                                    "meal_max_km": 60.0
+                                    if str((own_signals or {}).get("distance_tolerance") or "normal") == "high"
+                                    else 30.0,
+                                },
+                            )
+                            if _meal_fix.get("changed"):
+                                final_data["route"] = _meal_fix["plan"]["route"]
+                                final_data["route"] = order_route_by_day(final_data["route"])
+                                final_data["meal_topup"] = {
+                                    "actions": _meal_fix["actions"],
+                                    "skipped": _meal_fix.get("skipped") or [],
+                                }
+                                print(
+                                    "🍽️ [补餐] 给缺餐的那天补了 "
+                                    + "、".join(
+                                        f"第 {item['day']} 天 {item['node']}"
+                                        + (f"（距当天玩点 {item['distance_km']}km）" if item.get("distance_km") is not None else "")
+                                        for item in _meal_fix["actions"][:3]
+                                    ),
+                                    flush=True,
+                                )
+                            elif _meal_fix.get("skipped"):
+                                # 算过但没塞也要留痕（"为什么这天没有饭点"事后要能回答）
+                                final_data["meal_topup"] = {"actions": [], "skipped": _meal_fix["skipped"]}
+                                print(
+                                    "🍽️ [补餐] 没补："
+                                    + "；".join(str(item.get("reason")) for item in _meal_fix["skipped"][:2]),
+                                    flush=True,
+                                )
+                        except Exception as _meal_exc:  # 补餐失败不影响出方案
+                            print(f"⚠️ [补餐] 失败（不影响出方案）: {_meal_exc}", flush=True)
+
                         # 👑 无效坐标清洗：`(0,0)` 是"海面上"，不是地点。数据源没给坐标时很容易被写成
                         #    0/0（实测 2026-10-05：供应商候选没坐标 → 规划写 [0,0] → "第 2 天 9438km"，
                         #    地图上还会把这个点画到几内亚湾）。这里把它**清成缺失**并如实登记：
