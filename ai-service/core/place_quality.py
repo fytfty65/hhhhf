@@ -433,11 +433,19 @@ def score_completeness(
     # ③ 日内里程（用与硬约束同一套预算，避免两套口径）
     tolerance = str((context or {}).get("distance_tolerance") or "normal")
     try:
-        from .travel_feasibility import daily_budget_km
+        from .travel_feasibility import daily_budget_km, effective_daily_budget_km
 
         budget_km = float(daily_budget_km(tolerance))
+        # ⚠️ 硬约束用的是**含 10% 宽限**的有效预算（`effective_daily_budget_km`），
+        #    这里如果只跟基准预算比，就会出现"周全里说超了、硬约束说没事"的两套口径
+        #    （2026-10-07 实测：喀什第 3 天 232.7km，基准 160 超、宽限 176 也超，
+        #    所以两边其实一致；但 165~176 这段里程以前会两边不一致）。现在：
+        #    · ≤ 基准 → 通过；
+        #    · 基准 < km ≤ 宽限 → 通过，但**详情里写明"在 10% 宽限内"**（不隐瞒）；
+        #    · > 宽限 → 不通过。
+        grace_km = float(effective_daily_budget_km(tolerance))
     except Exception:
-        budget_km = 160.0
+        budget_km, grace_km = 160.0, 176.0
     worst_day, worst_km = 0, 0.0
     for day in range(1, days + 1):
         points = [node_lnglat(item) for item in by_day.get(day, [])]
@@ -449,11 +457,16 @@ def score_completeness(
                 distance += step
         if distance > worst_km:
             worst_day, worst_km = day, distance
+    within_grace = worst_km <= grace_km
     checks["daily_travel"] = {
-        "ok": None if worst_km == 0.0 else worst_km <= budget_km,
+        "ok": None if worst_km == 0.0 else within_grace,
         "detail": (
             "节点没有坐标，算不出日内里程" if worst_km == 0.0
-            else f"最赶的一天是第 {worst_day} 天约 {worst_km:.0f}km（预算 {budget_km:.0f}km）"
+            else (
+                f"最赶的一天是第 {worst_day} 天约 {worst_km:.0f}km（预算 {budget_km:.0f}km"
+                + (f"，在 10% 宽限 {grace_km:.0f}km 之内" if worst_km > budget_km else "")
+                + "）"
+            )
         ),
         "weight": 1.0,
     }

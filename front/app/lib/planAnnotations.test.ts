@@ -91,6 +91,61 @@ test('官方登记资料（文旅部名录）能取到简介/地址/官网/预�
   assert.equal(officialDetailFor({}, '喀什古城'), null);
 });
 
+test('超预算的那天要标出来（"长途可以接受，但需要标明"）', () => {
+  const plan = {
+    travel_feasibility: {
+      budget_km: 160,
+      effective_budget_km: 176,
+      days: [
+        { day: 1, travel_km: 20.8, budget_km: 160, violations: [], far_nodes: [] },
+        {
+          day: 3,
+          travel_km: 232.7,
+          budget_km: 160,
+          effective_budget_km: 176,
+          violations: ['daily_travel_budget_exceeded'],
+          far_nodes: [{ name: '胡杨书院', distance_km: 221.4 }],
+        },
+      ],
+    },
+  };
+  const notices = dayNotices(plan);
+  assert.equal(notices[1], undefined, '没超预算、也没有远郊点的那天不加提醒');
+  assert.equal(notices[3]?.length, 1);
+  assert.equal(notices[3][0].kind, 'long_day');
+  assert.ok(notices[3][0].text.includes('约 233km'));
+  assert.ok(notices[3][0].text.includes('预算 176km'), '用"有效预算"（含宽限）比，才是判定超没超的同一个口径');
+  assert.ok(notices[3][0].text.includes('胡杨书院'));
+});
+
+test('没超预算但有远郊点的那天，只报里程与远点，不说"超预算"', () => {
+  const plan = {
+    travel_feasibility: {
+      effective_budget_km: 176,
+      days: [{ day: 1, travel_km: 161.8, violations: [], far_nodes: [{ name: '英吉沙国家湿地公园', distance_km: 66.8 }] }],
+    },
+  };
+  const notice = dayNotices(plan)[1][0];
+  assert.equal(notice.kind, 'long_day');
+  assert.ok(notice.text.includes('约 162km'));
+  assert.ok(notice.text.includes('英吉沙国家湿地公园'));
+  assert.ok(!notice.text.includes('超过当天预算'));
+});
+
+test('重排后的里程是**重算过**的那份（旧快照要留在 stale_before_recompute 里备查）', () => {
+  const plan = {
+    travel_feasibility: {
+      effective_budget_km: 176,
+      recomputed_after_closeout: true,
+      stale_before_recompute: { worst_day_km: 445.2, days: [{ day: 2, travel_km: 445.2 }] },
+      days: [{ day: 3, travel_km: 232.7, violations: ['daily_travel_budget_exceeded'], far_nodes: [] }],
+    },
+  };
+  const notices = dayNotices(plan);
+  assert.equal(notices[2], undefined, '陈旧的"第 2 天 445km"不能再冒出来提示用户');
+  assert.ok(notices[3][0].text.includes('233km'));
+});
+
 test('没有台账时一切为空（不编造提醒）', () => {
   assert.deepEqual(nodeAnnotations({}, '任意'), []);
   assert.deepEqual(dayNotices({}), {});

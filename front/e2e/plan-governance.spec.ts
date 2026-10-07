@@ -570,6 +570,17 @@ async function installMocks(page: Page) {
                       skipped: [],
                     },
                     day_rebalance: { applied: true, before_max_km: 444.5, after_max_km: 231.4, moved: ['永兴坊美食'] },
+                    // 每天跑多少公里（后端**按最终路线重算**过）：超预算的那天要在正文里标明
+                    travel_feasibility: {
+                      budget_km: 160,
+                      effective_budget_km: 176,
+                      recomputed_after_closeout: true,
+                      stale_before_recompute: { worst_day_km: 445.2, days: [{ day: 2, travel_km: 445.2 }] },
+                      days: [
+                        { day: 1, travel_km: 161.8, budget_km: 160, violations: [], far_nodes: [{ name: '陕西历史博物馆', distance_km: 66.8 }] },
+                        { day: 2, travel_km: 232.7, budget_km: 160, effective_budget_km: 176, violations: ['daily_travel_budget_exceeded'], far_nodes: [] },
+                      ],
+                    },
                     // 文旅部名录登记的官方预约入口（按节点名索引）→ 前端要把它渲染成可点链接
                     official_profiles: {
                       陕西历史博物馆: {
@@ -630,6 +641,17 @@ async function installMocks(page: Page) {
                     skipped: [],
                   },
                   day_rebalance: { applied: true, before_max_km: 444.5, after_max_km: 231.4, moved: ['永兴坊美食'] },
+                  // 每天跑多少公里（后端**按最终路线重算**过）：超预算的那天要在正文里标明
+                  travel_feasibility: {
+                    budget_km: 160,
+                    effective_budget_km: 176,
+                    recomputed_after_closeout: true,
+                    stale_before_recompute: { worst_day_km: 445.2, days: [{ day: 2, travel_km: 445.2 }] },
+                    days: [
+                      { day: 1, travel_km: 161.8, budget_km: 160, violations: [], far_nodes: [{ name: '陕西历史博物馆', distance_km: 66.8 }] },
+                      { day: 2, travel_km: 232.7, budget_km: 160, effective_budget_km: 176, violations: ['daily_travel_budget_exceeded'], far_nodes: [] },
+                    ],
+                  },
                   official_profiles: {
                     陕西历史博物馆: {
                       official_name: '陕西历史博物馆',
@@ -1280,6 +1302,21 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(dayNotice).toBeVisible({ timeout: 15_000 });
     await expect(dayNotice).toContainText('这天没有安排餐饮');
     await expect(dayNotice).toContainText('82.6km');
+
+    // ①' 每天跑多少公里：超预算的那天必须标明（"长途可以接受，但需要标明"）
+    //    第 1 天只是"有远郊点"，第 2 天才是"超预算"，两种文案都要能对上
+    const day1Notice = page.locator('[data-notice-kind="long_day"]').first();
+    await expect(day1Notice).toBeVisible({ timeout: 10_000 });
+    await expect(day1Notice).toContainText('约 162km');
+    await expect(day1Notice).toContainText('远郊点');
+
+    await page.getByRole('button', { name: 'Day 2', exact: true }).first().click();
+    const day2Notice = page.locator('[data-notice-kind="long_day"]').first();
+    await expect(day2Notice).toContainText('约 233km');
+    await expect(day2Notice).toContainText('预算 176km');
+    // 陈旧快照里的"第 2 天 445km"不许冒出来提示用户（后端已按最终路线重算）
+    await expect(page.getByTestId('day-notices').filter({ hasText: '445km' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Day 1', exact: true }).first().click();
 
     // ② 换过酒店/餐馆的节点要标出来，且带"从多远换到多远"
     const hotelAnnotation = page.locator('[data-annotation-kind="lodging_swap"]').first();

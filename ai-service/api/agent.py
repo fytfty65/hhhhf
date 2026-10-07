@@ -8005,6 +8005,51 @@ async def run_negotiate(msg: GatewayMessage):
                     except Exception as _quality_recheck_exc:
                         print(f"⚠️ [质量重算] 收口后重算失败: {_quality_recheck_exc}", flush=True)
 
+                    # 👑 **按最终路线重算"每天跑多少公里"**（2026-10-07 实测抓到陈旧快照）：
+                    #    上面那次评估跑在**分天重排之前**，于是 payload 里写着"第 2 天 445km"，
+                    #    而最终路线实际是"第 3 天 233km" —— 前端要拿它做"这天很赶"的提醒，
+                    #    拿旧数字就是在骗用户；尺子的 `daily_travel` 又是按最终路线算的，
+                    #    两个数不一样还会再演一次"两把尺子"。
+                    #    这里按最终路线重算，并把上一次的旧数字留在 `before_*` 里便于核对。
+                    try:
+                        from core.travel_feasibility import evaluate_travel_feasibility as _travel_again
+
+                        _travel_ctx = _quality_context_for_final if isinstance(_quality_context_for_final, dict) else {}
+                        _travel_center = None
+                        _facts_center = (((final_data.get("facts") or {}).get("destination") or {}).get("center") or {})
+                        if isinstance(_facts_center, dict):
+                            _travel_center = _facts_center.get("value") or None
+                        _travel_prev = final_data.get("travel_feasibility") if isinstance(final_data.get("travel_feasibility"), dict) else {}
+                        _travel_fresh = _travel_again(
+                            final_data.get("route") or [],
+                            city_center=_travel_center,
+                            distance_tolerance=str(
+                                _travel_ctx.get("distance_tolerance")
+                                or _travel_prev.get("distance_tolerance")
+                                or "normal"
+                            ),
+                            days=max(1, int(_travel_ctx.get("days") or 0) or max(1, len({int(n.get("day") or 1) for n in (final_data.get("route") or [])}))),
+                        )
+                        _prev_max = max((float(d.get("travel_km") or 0) for d in (_travel_prev.get("days") or [])), default=0.0)
+                        _fresh_max = max((float(d.get("travel_km") or 0) for d in (_travel_fresh.get("days") or [])), default=0.0)
+                        _travel_fresh["recomputed_after_closeout"] = True
+                        _travel_fresh["stale_before_recompute"] = {
+                            "worst_day_km": round(_prev_max, 1),
+                            "days": [
+                                {"day": d.get("day"), "travel_km": d.get("travel_km")}
+                                for d in (_travel_prev.get("days") or [])
+                            ],
+                        }
+                        final_data["travel_feasibility"] = _travel_fresh
+                        if abs(_fresh_max - _prev_max) >= 1.0:
+                            print(
+                                f"🚗 [每日里程重算] 按最终路线重算：最赶的一天 {_prev_max:g}km → {_fresh_max:g}km"
+                                f"（旧数字是重排前的，不能再拿它提示用户）",
+                                flush=True,
+                            )
+                    except Exception as _travel_recheck_exc:
+                        print(f"⚠️ [每日里程重算] 失败（保留旧数字，但会标明）: {_travel_recheck_exc}", flush=True)
+
                     # 👑 高德闸门状态先登记（2026-10-05 实测抓到顺序错了）：这一轮被限流几次、
                     #    闸门退避到多少秒。限流会**静默让候选变少**（看起来像"这城市没什么景点"）——
                     #    用户与我们都需要知道"这次是不是因为被限流才薄"。

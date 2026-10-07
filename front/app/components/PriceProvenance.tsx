@@ -148,7 +148,9 @@ export function DayNoticeList({ plan, day }: { plan?: any; day?: number }) {
           className={`flex items-start gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-xl border ${
             notice.kind === 'meal_missing'
               ? 'bg-rose-50 text-rose-700 border-rose-200/80'
-              : 'bg-slate-50 text-slate-600 border-slate-200'
+              : notice.kind === 'long_day'
+                ? 'bg-amber-50 text-amber-800 border-amber-200/80'
+                : 'bg-slate-50 text-slate-600 border-slate-200'
           }`}
         >
           <TriangleAlert className="w-3.5 h-3.5 mt-0.5 shrink-0" />

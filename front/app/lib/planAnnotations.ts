@@ -16,7 +16,7 @@ export interface NodeAnnotation {
 }
 
 export interface DayNotice {
-  kind: 'meal_missing' | 'meal_added' | 'day_rebalanced';
+  kind: 'meal_missing' | 'meal_added' | 'day_rebalanced' | 'long_day';
   text: string;
 }
 
@@ -100,7 +100,39 @@ export function dayNotices(plan: any): Record<number, DayNotice[]> {
       push(action?.day, { kind: 'meal_added', text: `原本没有餐饮，已从第 ${action?.from_day ?? '?'} 天挪来：${node}` });
     }
   }
-  // ③ 地理重排动了分天：整条行程级提醒，挂在已经有提醒的那几天上（避免刷屏）
+  // ③ 这天路上要跑多远（后端**按最终路线**重算过的 `travel_feasibility`）——
+  //    用户早先的裁决是"喀什 447km 的一天可以接受，但需要标明"，所以这里就是那条"标明"：
+  //    超预算的日子必须写清"约多少公里 / 当天预算多少"，并说明为什么还是留下了。
+  for (const day of asArray(plan?.travel_feasibility?.days)) {
+    const km = Number(day?.travel_km);
+    if (!Number.isFinite(km) || km <= 0) continue;
+    const budget = Number(day?.effective_budget_km ?? plan?.travel_feasibility?.effective_budget_km ?? day?.budget_km);
+    const over = Array.isArray(day?.violations) && day.violations.includes('daily_travel_budget_exceeded');
+    const farNodes = asArray(day?.far_nodes);
+    if (over) {
+      const far = farNodes
+        .slice(0, 2)
+        .map((node) => `${node?.name ?? '远点'}（离市区约 ${Number(node?.distance_km) || '?'}km）`)
+        .join('、');
+      push(day?.day, {
+        kind: 'long_day',
+        text:
+          `这天路上约 ${Math.round(km)}km，超过当天预算 ${Number.isFinite(budget) ? Math.round(budget) : '?'}km` +
+          (far ? `：${far}` : '') +
+          '。长途本身你早先说过可以接受，但请按这个里程预留时间',
+      });
+    } else if (farNodes.length) {
+      push(day?.day, {
+        kind: 'long_day',
+        text: `这天路上约 ${Math.round(km)}km（当天预算 ${Number.isFinite(budget) ? Math.round(budget) : '?'}km），含远郊点：${farNodes
+          .slice(0, 2)
+          .map((node) => String(node?.name ?? ''))
+          .join('、')}`,
+      });
+    }
+  }
+
+  // ④ 地理重排动了分天：整条行程级提醒，挂在已经有提醒的那几天上（避免刷屏）
   if (plan?.day_rebalance?.applied) {
     const before = Number(plan?.day_rebalance?.before_total_km ?? plan?.day_rebalance?.before_max_km);
     const after = Number(plan?.day_rebalance?.after_total_km ?? plan?.day_rebalance?.after_max_km);

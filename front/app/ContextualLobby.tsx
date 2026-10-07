@@ -1332,6 +1332,8 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                     lodging_geo_adjust: finalData.lodging_geo_adjust || null,
                     meal_geo_adjust: finalData.meal_geo_adjust || null,
                     day_rebalance: finalData.day_rebalance || null,
+                    // 每天跑多少公里（后端按最终路线重算过）→ "超预算的那天"要标明
+                    travel_feasibility: finalData.travel_feasibility || null,
                     official_profiles: finalData.official_profiles || null,
                   });
                   // 👑 多方案：主方案 + 后端差异化方案。
@@ -1464,6 +1466,7 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                   lodging_geo_adjust: fd.lodging_geo_adjust || null,
                   meal_geo_adjust: fd.meal_geo_adjust || null,
                   day_rebalance: fd.day_rebalance || null,
+                  travel_feasibility: fd.travel_feasibility || null,
                   official_profiles: fd.official_profiles || null,
                 });
                 setSelectedPoiIndex(0);
