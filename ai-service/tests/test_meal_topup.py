@@ -374,5 +374,96 @@ class LodgingGeographyTests(unittest.TestCase):
         self.assertTrue(result["skipped"][0].get("error"))
 
 
+class MealGeographyTests(unittest.TestCase):
+    """排得太远的饭点换成附近的（2026-10-07：伊宁第 1 天三家餐馆都在 30km 外的县城）。
+
+    与"补餐"分工：补餐治"某天没有饭点"，这里治"有饭点但太远"。一对一替换 → 每天至少一餐不变。
+    """
+
+    def _route(self):
+        return [
+            {"day": 1, "name": "天鹅泉湿地公园", "type": "风景名胜", "lnglat": [81.66, 43.71]},
+            {
+                "day": 1,
+                "name": "县城大餐馆",
+                "type": "餐饮服务",
+                "lnglat": [81.49, 43.97],
+                "time": "Day 1 | 13:30 用餐",
+            },
+            {"day": 2, "name": "伊犁河景区", "type": "风景名胜", "lnglat": [81.29, 43.89]},
+            {
+                "day": 2,
+                "name": "河边拌面王",
+                "type": "餐饮服务",
+                "lnglat": [81.30, 43.88],
+                "time": "Day 2 | 13:30 用餐",
+            },
+        ]
+
+    def test_a_far_meal_is_replaced_by_a_nearby_one(self):
+        import asyncio
+
+        from core.plan_review import adjust_meals_by_geography
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [{"name": "英塔木镇饭馆", "type": "餐饮服务", "lnglat": [81.67, 43.72]}]
+
+        result = asyncio.run(adjust_meals_by_geography(self._route(), days=2, fetch_nearby=fake_nearby))
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["actions"][0]["to"], "英塔木镇饭馆")
+        names = [node["name"] for node in result["plan"]["route"]]
+        self.assertNotIn("县城大餐馆", names)
+        self.assertIn("河边拌面王", names, "本来就近的那天不许动")
+        # 每天仍然有饭点（一对一替换）
+        for day in (1, 2):
+            meals = [
+                node
+                for node in result["plan"]["route"]
+                if node["day"] == day and "餐" in str(node.get("type"))
+            ]
+            self.assertTrue(meals, f"第 {day} 天不能没有饭点")
+
+    def test_swaps_are_capped_per_day_and_in_total(self):
+        """一天最多换 2 个、总共最多 4 个：不能为了"完美"把时间全花在检索上，
+        也不能把某一天的餐饮一次性全洗掉。"""
+        import asyncio
+
+        from core.plan_review import adjust_meals_by_geography
+
+        route = [
+            {"day": 1, "name": "天鹅泉湿地公园", "type": "风景名胜", "lnglat": [81.66, 43.71]},
+            {"day": 1, "name": "远餐馆甲", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+            {"day": 1, "name": "远餐馆乙", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+            {"day": 1, "name": "远餐馆丙", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+        ]
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [
+                {"name": "近饭馆一", "type": "餐饮服务", "lnglat": [81.67, 43.72]},
+                {"name": "近饭馆二", "type": "餐饮服务", "lnglat": [81.67, 43.72]},
+                {"name": "近饭馆三", "type": "餐饮服务", "lnglat": [81.67, 43.72]},
+            ]
+
+        result = asyncio.run(adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby))
+        self.assertEqual(len(result["actions"]), 2, result["actions"])
+        one = asyncio.run(
+            adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby, max_per_day=1)
+        )
+        self.assertEqual(len(one["actions"]), 1, one["actions"])
+
+    def test_a_failing_search_leaves_meals_alone(self):
+        import asyncio
+
+        from core.plan_review import adjust_meals_by_geography
+
+        async def fake_nearby(center, keywords, **kwargs):
+            raise RuntimeError("高德限流")
+
+        result = asyncio.run(adjust_meals_by_geography(self._route(), days=2, fetch_nearby=fake_nearby))
+        self.assertFalse(result["changed"])
+        self.assertTrue(result["skipped"][0].get("error"))
+        self.assertEqual([node["name"] for node in result["plan"]["route"]][1], "县城大餐馆")
+
+
 if __name__ == "__main__":
     unittest.main()

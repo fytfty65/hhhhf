@@ -637,6 +637,134 @@ async def adjust_lodging_by_geography(
     return {"plan": {"route": nodes}, "actions": actions, "skipped": skipped, "measured": measured, "changed": changed}
 
 
+async def adjust_meals_by_geography(
+    route: Any,
+    *,
+    days: int,
+    fetch_nearby: Any,
+    threshold_km: float = 15.0,
+    radius_km: float = 25.0,
+    keywords: str = "餐厅|美食|小吃",
+    limit: int = 8,
+    min_gain_ratio: float = 0.4,
+    max_per_day: int = 2,
+    max_total: int = 4,
+) -> Dict[str, Any]:
+    """把**排得太远**的饭点换成当天玩点附近的真实餐馆（2026-10-07）。
+
+    与"补餐"（`top_up_missing_meals`）的分工：那边治"某天没有饭点"，这边治"有饭点但排得太远"。
+    真实数据（伊宁 `anchoring` 卡在 0.429）：第 1 天玩点在英塔木镇，三家餐馆都在 **30km** 外的
+    县城；第 2 天那家 17.8km。它们不是缺口，但用户要为一顿饭来回开 60km。
+
+    规则（与住宿就近同一套谨慎口径）：
+      · 只换**明显更近**的（新 ≤ 老 × (1 - min_gain_ratio) 且 ≤ 阈值）；
+      · **一对一替换**，所以"每天至少一餐"不会被破坏；
+      · 同名不重复、只从真实周边检索里取、绝不编造；查不到更好的 → 记 `skipped`（含现在多远）。
+
+    返回 `{plan, actions, skipped, measured, changed}`。
+    """
+    from .increment import build_node_from_candidate
+    from .plan_quality import haversine_km, node_day, node_lnglat
+
+    nodes = [dict(node) for node in (nodes_of(route) if isinstance(route, Mapping) else (route or []))]
+    if not nodes:
+        return {"plan": {"route": nodes}, "actions": [], "skipped": [], "measured": [], "changed": False}
+    used = {str(node.get("name") or "").strip() for node in nodes}
+    actions: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    measured: List[Dict[str, Any]] = []
+    changed = False
+
+    for day in range(1, max(1, int(days or 1)) + 1):
+        day_nodes = [node for node in nodes if node_day(node, 1) == day]
+        if not day_nodes:
+            continue
+        plays = [
+            node
+            for node in day_nodes
+            if _intent_of_node(node) not in {"food", "hotel"} and node_lnglat(node)
+        ]
+        if not plays:
+            continue
+        coords = [node_lnglat(node) for node in plays]
+        center = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        meals = [node for node in day_nodes if _intent_of_node(node) == "food" and node_lnglat(node)]
+        # 一天最多换 `max_per_day` 个（伊宁第 1 天三家餐馆都在 30km 外，一次只换一个的话
+        # 剩下的要等下一次运行才轮到）；总数也封顶，避免为了"完美"把时间全花在检索上。
+        swapped_today = 0
+        for meal in meals:
+            if swapped_today >= max(1, int(max_per_day)) or len(actions) >= max(1, int(max_total)):
+                break
+            if not any(node is meal for node in nodes):
+                continue  # 这个饭点刚被换掉了（旧对象已不在路线里），别再重复处理
+            current_km = float(haversine_km(center, node_lnglat(meal)))
+            if current_km <= float(threshold_km):
+                continue
+            measured.append({"day": day, "meal": str(meal.get("name") or ""), "km": round(current_km, 1)})
+            try:
+                rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "day": day,
+                        "meal": str(meal.get("name") or ""),
+                        "current_km": round(current_km, 1),
+                        "error": f"{type(exc).__name__}: {str(exc)[:80]}",
+                    }
+                )
+                break
+            best = None
+            best_km = None
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                name = str(row.get("name") or "").strip()
+                coord = node_lnglat(row)
+                if not name or not coord or name in used:
+                    continue
+                km = float(haversine_km(center, coord))
+                if km > float(threshold_km):
+                    continue
+                if best_km is None or km < best_km:
+                    best, best_km = dict(row), km
+            if best is None or best_km is None or best_km > current_km * (1 - float(min_gain_ratio)):
+                skipped.append(
+                    {
+                        "day": day,
+                        "meal": str(meal.get("name") or ""),
+                        "current_km": round(current_km, 1),
+                        "nearest_km": round(best_km, 1) if best_km is not None else None,
+                        "reason": "周边没有明显更近的真实餐馆，保持原样",
+                    }
+                )
+                break
+            replacement = build_node_from_candidate(best, day, "13:00", "food")
+            replacement["time"] = str(meal.get("time") or f"Day {day} | 13:00 用餐")
+            replacement["replaced_meal"] = str(meal.get("name") or "")
+            nodes = [replacement if node is meal else node for node in nodes]
+            used.add(str(best.get("name") or "").strip())
+            used.discard(str(meal.get("name") or "").strip())
+            changed = True
+            swapped_today += 1
+            actions.append(
+                {
+                    "day": day,
+                    "from": str(meal.get("name") or ""),
+                    "to": str(best.get("name") or ""),
+                    "from_km": round(current_km, 1),
+                    "to_km": round(best_km, 1),
+                }
+            )
+            continue  # 继续看这一天下一个太远的饭点（受 max_per_day 限制）
+    return {
+        "plan": {"route": nodes},
+        "actions": actions,
+        "skipped": skipped,
+        "measured": measured,
+        "changed": changed,
+    }
+
+
 def fill_structural_gaps(
     context: Mapping[str, Any],
     plan: Any,

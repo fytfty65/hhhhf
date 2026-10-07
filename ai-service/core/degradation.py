@@ -518,6 +518,20 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.67) 餐饮就近换店（2026-10-07 实测）：伊宁第 1 天玩点在英塔木镇，三家餐馆都在 30km 外的县城。
+    meal_geo = _as_mapping(data.get("meal_geo_adjust"))
+    for item in (meal_geo.get("actions") or [])[:2]:
+        if not isinstance(item, Mapping):
+            continue
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                f"第 {item.get('day')} 天的餐饮换成了离当天玩点更近的："
+                f"{item.get('from')}（{item.get('from_km')}km）→ {item.get('to')}（{item.get('to_km')}km）",
+            )
+        )
+
     # 3.9) 高德被限流（2026-10-05）：限流会**静默让候选变少** —— 看起来像"这城市没什么景点"，
     #      必须说出来，否则用户会把"供应商限流"读成"这里没得玩"。
     gate = _as_mapping(data.get("amap_gate"))

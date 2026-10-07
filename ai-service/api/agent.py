@@ -7701,6 +7701,57 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _lodging_exc:  # 住宿就近失败不影响出方案
                             print(f"⚠️ [住宿就近] 失败（不影响出方案）: {_lodging_exc}", flush=True)
 
+                        # 👑 **排得太远**的饭点换成附近的（2026-10-07：伊宁第 1 天三家餐馆都在
+                        #    30km 外的县城，玩点在英塔木镇）。与"补餐"分工不同：
+                        #    补餐治"没有饭点"，这里治"有饭点但太远"。一对一替换，
+                        #    所以"每天至少一餐"不会被破坏。
+                        try:
+                            from core.plan_review import adjust_meals_by_geography as _adjust_meals
+
+                            _meal_fetch2 = getattr(toolbox, "get_nearby_pois", None)
+                            if _meal_fetch2:
+                                _meal_geo = await asyncio.wait_for(
+                                    _adjust_meals(
+                                        final_data.get("route") or [],
+                                        days=trip_days,
+                                        fetch_nearby=_meal_fetch2,
+                                        threshold_km=15.0,
+                                        radius_km=25.0,
+                                    ),
+                                    timeout=POOL_FETCH_TIMEOUT_SECONDS,
+                                )
+                                if _meal_geo.get("measured"):
+                                    print(
+                                        "🍜 [餐饮就近] 离当天玩点超过 15km 的饭点："
+                                        + "、".join(
+                                            f"第 {item['day']} 天 {item['meal'][:12]}（{item['km']}km）"
+                                            for item in _meal_geo["measured"]
+                                        ),
+                                        flush=True,
+                                    )
+                                if _meal_geo.get("changed"):
+                                    final_data["route"] = order_route_by_day(_meal_geo["plan"]["route"])
+                                    final_data["meal_geo_adjust"] = {
+                                        "actions": _meal_geo["actions"],
+                                        "skipped": _meal_geo.get("skipped") or [],
+                                    }
+                                    print(
+                                        "🍜 [餐饮就近] 换掉太远的饭点："
+                                        + "、".join(
+                                            f"第 {item['day']} 天 {item['from']}（{item['from_km']}km）→ "
+                                            f"{item['to']}（{item['to_km']}km）"
+                                            for item in _meal_geo["actions"][:2]
+                                        ),
+                                        flush=True,
+                                    )
+                                elif _meal_geo.get("skipped"):
+                                    final_data["meal_geo_adjust"] = {
+                                        "actions": [],
+                                        "skipped": _meal_geo["skipped"],
+                                    }
+                        except Exception as _meal_geo_exc:  # 餐饮就近失败不影响出方案
+                            print(f"⚠️ [餐饮就近] 失败（不影响出方案）: {_meal_geo_exc}", flush=True)
+
                         # 👑 可选住宿的**通勤距离**：只按价格/星级排是不够的（`anchoring` 实测掉到 0.8），
                         #    价格可比、距离也要可比 —— 用户才知道"这家便宜 60 块，但离玩点多 30km"。
                         try:
