@@ -461,6 +461,304 @@ def _node_day(node: Mapping[str, Any]) -> int:
         return 1
 
 
+def _coords_of(node: Mapping[str, Any]) -> List[float]:
+    value = node.get("lnglat")
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            lon, lat = float(value[0]), float(value[1])
+        except (TypeError, ValueError):
+            return []
+        if lon == 0.0 and lat == 0.0:
+            return []
+        return [lon, lat]
+    return []
+
+
+def _km(a: Sequence[float], b: Sequence[float]) -> float:
+    if not a or not b:
+        return float("inf")
+    lon1, lat1, lon2, lat2 = float(a[0]), float(a[1]), float(b[0]), float(b[1])
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    h = math.sin(d_lat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(d_lon / 2) ** 2
+    return 2 * 6371.0 * math.asin(math.sqrt(h))
+
+
+def _day_leg_km(nodes: Sequence[Mapping[str, Any]]) -> float:
+    total = 0.0
+    previous: List[float] = []
+    for node in nodes:
+        coord = _coords_of(node)
+        if coord and previous:
+            km = _km(previous, coord)
+            if km == km and km != float("inf"):
+                total += km
+        if coord:
+            previous = coord
+    return total
+
+
+def _default_category(node: Mapping[str, Any]) -> str:
+    """粗分类的**兜底实现**（与 `api.agent.classify_poi_category` 同口径；不可用时用关键词）。
+
+    为什么要兜底：本模块是纯函数层，不能反向依赖 `api.agent`；而"每天类别构成不变"
+    这条约束必须有分类才能算。关键词判据与 `poi_pool` 的那套一致（自然/人文/美食/住宿）。
+    """
+    name = str(node.get("name") or node.get("location") or "")
+    poi_type = str(node.get("type") or "")
+    text = f"{name} {poi_type}"
+    if bool(node.get("is_hotel")) or is_lodging_node(node):
+        return "hotel"
+    if any(word in text for word in ("餐", "美食", "小吃", "馄饨", "火锅", "烧烤", "面馆", "饭店", "蹄花", "馆子")):
+        return "food"
+    if any(word in text for word in ("博物馆", "博物院", "纪念馆", "展馆", "文化馆", "书院", "故居", "寺", "古城", "遗址")):
+        return "cultural"
+    if any(word in text for word in ("景区", "风景", "公园", "湿地", "草原", "湖", "山", "沙漠", "峡谷", "森林公园")):
+        return "scenic"
+    return "other"
+
+
+def rebalance_days_by_geography(
+    route: Any,
+    *,
+    min_gain_ratio: float = 0.15,
+    classify=None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """按地理就近**重排天与天之间的点**，专治"远点被塞进市区那一天"（2026-10-07 实测）。
+
+    为什么要做（真实方案的诊断，`work/diag_day_distance.py`）：
+      喀什 3 天，第 2 天 = 九龙泉(市区) → 喀什博物馆(市区) → 川味馆子(市区) → **胡杨书院(巴楚, 216km)**
+      → 阳光公园(市区) → 亚朵酒店(市区)，当天 449km。而按地理就近重排后：
+      第 1 天 17km、第 2 天 12km、第 3 天 233km（英吉沙 66km + 巴楚 216km 放同一天）。
+      也就是说：**不是候选池只有远点，是"天"这一层没看地理。**
+    约束（一条都不能破）：
+      · **住宿不动**：它绑在"第几晚"，换天等于换行程结构；
+      · **用户点名的点不动**（`user_choice`）；
+      · **每天的类别构成不变**（自然/人文/美食/其它 各几个照旧）—— 只换"哪个点去哪天"；
+      · **每天节点数不变**（每日密度门禁不动）；
+      · 没坐标的点按原地不动处理（判不了就别乱搬）；
+      · **只有在最赶的一天真的明显变短时才动**（默认要短 15% 以上），否则原样返回。
+    返回 `(新路线, 报告)`；`报告["applied"]=False` 时路线与传入的等价。
+    """
+    items = [dict(node) for node in (route or []) if isinstance(node, Mapping)]
+    report: Dict[str, Any] = {
+        "applied": False,
+        "before_max_km": 0.0,
+        "after_max_km": 0.0,
+        "before_total_km": 0.0,
+        "after_total_km": 0.0,
+        "moved": [],
+        "note": "",
+    }
+    if len(items) < 4:
+        report["note"] = "节点太少，不做地理重排"
+        return items, report
+
+    days = sorted({_node_day(node) for node in items})
+    if len(days) < 2:
+        report["note"] = "只有一天，不做地理重排"
+        return items, report
+
+    by_day: Dict[int, List[Dict[str, Any]]] = {day: [n for n in items if _node_day(n) == day] for day in days}
+    report["before_max_km"] = round(max(_day_leg_km(v) for v in by_day.values()), 1)
+    report["before_total_km"] = round(sum(_day_leg_km(v) for v in by_day.values()), 1)
+
+    # 不可动的节点：住宿（绑夜）、用户点名的、以及没有坐标的
+    fixed: Dict[int, List[Dict[str, Any]]] = {day: [] for day in days}
+    movable: Dict[int, List[Dict[str, Any]]] = {day: [] for day in days}
+    for day in days:
+        for node in by_day[day]:
+            reasons = bool(node.get("user_choice")) or is_lodging_node(node, classify) or not _coords_of(node)
+            (fixed[day] if reasons else movable[day]).append(node)
+
+    def category(node: Mapping[str, Any]) -> str:
+        if classify is None:
+            return _default_category(node)
+        name = str(node.get("name") or node.get("location") or "")
+        try:
+            return str(classify(name, str(node.get("type") or ""), bool(node.get("is_hotel"))) or "other")
+        except Exception:
+            return _default_category(node)
+
+    # 每天要**至少**保留哪些类别（不是"数量完全照旧"—— 那会把远点死死锁在原天：
+    # 实测喀什第 2 天有 2 个人文点，「胡杨书院」(巴楚 216km) 就被这条硬约束留在了市区那天）。
+    # 保留"每天至少各一个"是因为每日密度/节奏门禁关心的是"这天有没有得看、有没有得吃"。
+    need: Dict[int, Dict[str, int]] = {}
+    for day in days:
+        counts: Dict[str, int] = {}
+        for node in movable[day]:
+            key = category(node)
+            if key != "other":
+                counts[key] = 1  # 下限 1
+        need[day] = counts
+
+    unused = [node for day in days for node in movable[day]]
+    target_counts = {day: len(movable[day]) for day in days}
+    assigned: Dict[int, List[Dict[str, Any]]] = {day: [] for day in days}
+
+    # 起点：全体质心（无坐标点已被排除在 movable 之外）
+    coords = [_coords_of(node) for node in items if _coords_of(node)]
+    if not coords:
+        report["note"] = "没有任何可信坐标，不做地理重排"
+        return items, report
+    centroid = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+    position = list(centroid)
+
+    def _take(day: int, pool: List[Dict[str, Any]], *, farthest: bool = False) -> None:
+        nonlocal position
+        key = (lambda node: -_km(centroid, _coords_of(node))) if farthest else (
+            lambda node: _km(position, _coords_of(node))
+        )
+        chosen = min(pool, key=key)
+        unused.remove(chosen)
+        assigned[day].append(chosen)
+        position = _coords_of(chosen) or position
+
+    # 👑 关键一步：**不用回市区的那一天**（最后一天通常没酒店）先拿"最偏的点"。
+    #    为什么要这样（真实诊断）：喀什第 2 天有个 216km 的巴楚书院，而当晚还要回市区住 ——
+    #    一个远点花掉"出去 + 回来"两趟。把它挪到不需要返程的那天，一个远点只花一趟。
+    hotel_free_days = [
+        day for day in days if not any(is_lodging_node(node, classify) for node in fixed[day])
+    ]
+    outlier_days = hotel_free_days or [days[-1]]
+    other_days = [day for day in days if day not in outlier_days]
+
+    for day in outlier_days:
+        for key, minimum in need[day].items():
+            pool = [node for node in unused if category(node) == key]
+            if pool:
+                _take(day, pool, farthest=True)
+        while len(assigned[day]) < target_counts[day] and unused:
+            _take(day, unused, farthest=True)
+
+    # 其余天：先满足"每天每类至少一个"（就近取），再按最近填满
+    for day in other_days:
+        for key, minimum in need[day].items():
+            already = sum(1 for node in assigned[day] if category(node) == key)
+            for _ in range(max(0, minimum - already)):
+                pool = [node for node in unused if category(node) == key]
+                if not pool:
+                    break
+                _take(day, pool)
+    for day in other_days:
+        while len(assigned[day]) < target_counts[day] and unused:
+            _take(day, unused)
+
+    # 第三轮：**同类互换**爬山（2026-10-07 实测需要）：贪心可能把"那一天唯一的人文点"
+    # 先分给了近的一天，于是远的人文点（巴楚书院）被迫留在要回市区的天里、最赶的一天没降下来。
+    # 只换**同类**节点 → 每天的类别构成与数量都不变，纯粹用地理换。
+    def _max_km_of(candidate: Dict[int, List[Dict[str, Any]]]) -> float:
+        return max(_day_leg_km(fixed[day] + candidate[day]) for day in days)
+
+    for _ in range(3):
+        improved = False
+        current_max = _max_km_of(assigned)
+        for left_day in days:
+            for right_day in days:
+                if left_day >= right_day:
+                    continue
+                for left_node in list(assigned[left_day]):
+                    for right_node in list(assigned[right_day]):
+                        if category(left_node) != category(right_node):
+                            continue
+                        assigned[left_day].remove(left_node)
+                        assigned[left_day].append(right_node)
+                        assigned[right_day].remove(right_node)
+                        assigned[right_day].append(left_node)
+                        new_max = _max_km_of(assigned)
+                        if new_max < current_max - 1e-6:
+                            current_max = new_max
+                            improved = True
+                            break
+                        # 换回来
+                        assigned[left_day].remove(right_node)
+                        assigned[left_day].append(left_node)
+                        assigned[right_day].remove(left_node)
+                        assigned[right_day].append(right_node)
+                    if improved:
+                        break
+                if improved:
+                    break
+            if improved:
+                break
+        if not improved:
+            break
+
+    # 组装：每天 = 固定节点 + 新分配的可动节点，按**时刻**排好（时间语义不变）
+    def _clock_and_suffix(node: Mapping[str, Any]) -> Tuple[int, str]:
+        raw = str(node.get("time") or "")
+        tail = raw.split("|")[-1].strip()
+        parts = tail.replace("：", ":").split(":", 1)
+        if len(parts) == 2:
+            hour = parts[0].strip()
+            minute = parts[1].strip()[:2]
+            suffix = parts[1].strip()[2:].strip()
+            if hour.isdigit() and minute.isdigit():
+                return int(hour) * 60 + int(minute), suffix
+        return -1, tail
+
+    # 时刻用**标准梯队**重排（沿用规划自己那套 08:30/10:00/11:30/13:30/15:00/17:00），
+    # 只保留原来的语义后缀（游览/用餐/入住）—— 按原时刻排序能让"上午看的点仍在上午"。
+    # 为什么不用原时刻直接写：重排后同一天可能有两个点都是 10:00（实测），时间就成了摆设。
+    ladder = ["08:30", "10:00", "11:30", "13:30", "15:00", "17:00", "18:30", "19:30"]
+    new_by_day: Dict[int, List[Dict[str, Any]]] = {}
+    moved_names: List[str] = []
+    for day in days:
+        original_index = {id(node): index for index, node in enumerate(by_day[day])}
+        merged = fixed[day] + assigned[day]
+        merged.sort(
+            key=lambda node: (
+                _clock_and_suffix(node)[0] if _clock_and_suffix(node)[0] >= 0 else 10**6,
+                original_index.get(id(node), 10_000),
+            )
+        )
+        slot_index = 0
+        updated: List[Dict[str, Any]] = []
+        for node in merged:
+            clock, suffix = _clock_and_suffix(node)
+            if is_lodging_node(node, classify) and clock >= 0:
+                clock_text = f"{clock // 60:02d}:{clock % 60:02d}"  # 入住时间保持方案原样
+            else:
+                clock_text = ladder[min(slot_index, len(ladder) - 1)]
+                slot_index += 1
+            # ⚠️ 必须产出**新字典**：不能就地改传进来的节点 —— 否则"判定不值得重排"
+            #    返回原路线时，原路线的 day/time 已经被改过（实测 bug：applied=False 但时间被打乱）
+            updated.append(
+                {
+                    **node,
+                    "day": day,
+                    "time": f"Day {day} | {clock_text}" + (f" {suffix}" if suffix else ""),
+                }
+            )
+            if id(node) not in original_index:
+                moved_names.append(str(node.get("name") or ""))
+        new_by_day[day] = updated
+
+    new_items: List[Dict[str, Any]] = []
+    for day in days:
+        new_items.extend(new_by_day[day])
+
+    report["after_max_km"] = round(max(_day_leg_km(v) for v in new_by_day.values()), 1)
+    report["after_total_km"] = round(sum(_day_leg_km(v) for v in new_by_day.values()), 1)
+    report["moved"] = moved_names
+    if not moved_names:
+        report["note"] = "按地理算不出更好的分天（没有点需要换天）"
+        return items, report
+    if report["after_max_km"] >= report["before_max_km"] * (1.0 - max(0.0, min_gain_ratio)):
+        report["note"] = (
+            f"重排后最赶的一天没有明显变短（{report['before_max_km']:.0f}km → {report['after_max_km']:.0f}km），"
+            "保持原样"
+        )
+        return items, report
+    report["applied"] = True
+    report["note"] = (
+        f"按地理就近重排：最赶的一天 {report['before_max_km']:.0f}km → {report['after_max_km']:.0f}km"
+        f"（全程 {report['before_total_km']:.0f}km → {report['after_total_km']:.0f}km），"
+        f"换天的点：{'、'.join(moved_names[:6])}"
+    )
+    return new_items, report
+
+
 def settle_lodging(
     route: Sequence[Mapping[str, Any]],
     *,

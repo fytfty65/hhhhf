@@ -75,6 +75,7 @@ from core.route_composition import (
     ensure_lodging_per_night,
     numeric_targets,
     order_route_by_day,
+    rebalance_days_by_geography,
     repair_forbidden_categories,
     scenic_tier,
     settle_lodging,
@@ -7008,6 +7009,22 @@ async def run_negotiate(msg: GatewayMessage):
                             final_data["route"] = order_route_by_day(final_data.get("route") or [])
                         except Exception as _order_exc:  # 排序失败不影响出方案
                             print(f"⚠️ [路线排序] 按天排序失败（不影响出方案）: {_order_exc}", flush=True)
+
+                        # 👑 按地理就近重排"天与天之间"的点（2026-10-07 真实诊断后加的）：
+                        #    实测喀什第 2 天是"市区点 → 巴楚的胡杨书院(216km) → 回市区住"，一个远点
+                        #    花掉出去+回来两趟 = 449km。重排后最赶的一天 449 → 231km、全程 610 → 299km，
+                        #    `space_efficiency` 0.0 → 0.35、总分 +3.9。约束都写在
+                        #    `core/route_composition.rebalance_days_by_geography` 的文档里
+                        #    （住宿/用户点名的点/没坐标的点不动、每天节点数与类别尽量不变、只在真的
+                        #    明显变短时才动）。
+                        try:
+                            _rebalanced, _rebalance_report = rebalance_days_by_geography(final_data.get("route") or [])
+                            if _rebalance_report.get("applied"):
+                                final_data["route"] = _rebalanced
+                                final_data["day_rebalance"] = _rebalance_report
+                                print(f"🧭 [按地理分天] {_rebalance_report['note']}", flush=True)
+                        except Exception as _rebalance_exc:  # 重排失败不影响出方案
+                            print(f"⚠️ [按地理分天] 失败（不影响出方案）: {_rebalance_exc}", flush=True)
 
                         # 👑 无效坐标清洗：`(0,0)` 是"海面上"，不是地点。数据源没给坐标时很容易被写成
                         #    0/0（实测 2026-10-05：供应商候选没坐标 → 规划写 [0,0] → "第 2 天 9438km"，

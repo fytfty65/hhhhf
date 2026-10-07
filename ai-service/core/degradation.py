@@ -457,6 +457,23 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
             )
         )
 
+    # 3.6) 按地理就近重排过分天（2026-10-07 实测加的）：把远点挪到**不需要当天回市区**的那一天，
+    #      最赶的一天从 449km 降到 231km。这是"我们改动了行程结构"，必须说出来 ——
+    #      用户看到"第 3 天怎么和上次不一样"时有据可查；同时把前后里程摆出来。
+    rebalance = _as_mapping(data.get("day_rebalance"))
+    if rebalance and rebalance.get("applied"):
+        items.append(
+            _entry(
+                "route_composition",
+                STATUS_DEGRADED,
+                f"按地理就近重排了分天：最赶的一天 {rebalance.get('before_max_km')}km → "
+                f"{rebalance.get('after_max_km')}km（全程 {rebalance.get('before_total_km')}km → "
+                f"{rebalance.get('after_total_km')}km）；换天的点："
+                + "、".join(_unique_names([{"name": name} for name in (rebalance.get("moved") or [])], limit=4))
+                + "。住宿、你点名的点、缺坐标的点都没动",
+            )
+        )
+
     # 3.9) 高德被限流（2026-10-05）：限流会**静默让候选变少** —— 看起来像"这城市没什么景点"，
     #      必须说出来，否则用户会把"供应商限流"读成"这里没得玩"。
     gate = _as_mapping(data.get("amap_gate"))
