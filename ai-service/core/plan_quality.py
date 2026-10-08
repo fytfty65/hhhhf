@@ -747,15 +747,45 @@ def score_space_efficiency(context: Mapping[str, Any], plan: Any) -> Dict[str, A
 ANCHOR_KM = 15.0
 
 
+# "吃住侧"判定的**结构化**信号：名称/类型/标签/意图。
+# ⚠️ 2026-10-08 实测修正：以前把 `desc`（含**地址**）也拼进来做子串匹配，
+#    而 food 关键词里有「面/饭/茶/食/餐/串/粥/馍」这类**单字**，
+#    于是地址里的「东南**面**」「玫瑰庒园**对面**」把风景名胜判成了饭点 ——
+#    尺子接着按"饭点离玩点 45.2km"扣 anchoring（库尔勒博斯腾湖就是这样掉了 0.25 分）。
+#    实测 562 个玩点节点里 24 个被这么误判。现在：desc 不参与判定，且要求关键词 ≥2 字。
+_ANCHOR_SINGLE_CHAR_MIN = 2
+
+
+def _anchor_keywords() -> list:
+    """可用的吃住关键词：**单字一律不用**（"面"会命中"东南面"）。"""
+    keywords = []
+    for group in ("hotel", "food"):
+        for keyword in PREFERENCE_TAXONOMY[group]:
+            text = str(keyword)
+            if len(text) >= _ANCHOR_SINGLE_CHAR_MIN:
+                keywords.append(text)
+    return keywords
+
+
 def _is_anchor_side(node: Mapping[str, Any]) -> bool:
-    """"吃住一侧"的节点（餐饮/住宿）——它们应当贴着当天的玩点。"""
-    text = f"{node_name(node)} {node.get('type') or ''} {node.get('desc') or ''}"
+    """"吃住一侧"的节点（餐饮/住宿）——它们应当贴着当天的玩点。
+
+    只看**结构化字段**（名称/类型/标签/意图），不看 `desc`（那里有地址，会误判）。
+    """
+    intent = str(node.get("intent") or "").strip().lower()
+    if intent in {"food", "hotel"}:
+        return True
+    if node.get("is_hotel"):
+        return True
+    node_type = str(node.get("type") or "")
+    # 类型字段是**结构化**的，用前缀匹配即可（真实链路写「餐饮服务/住宿服务」，
+    # 测试与历史数据里也有简称「餐饮/住宿」）。
+    if node_type.startswith("住宿") or node_type.startswith("餐饮"):
+        return True
     tags = node.get("tags") or []
-    if isinstance(tags, list):
-        text += " " + " ".join(str(tag) for tag in tags)
-    return any(keyword in text for keyword in PREFERENCE_TAXONOMY["hotel"]) or any(
-        keyword in text for keyword in PREFERENCE_TAXONOMY["food"]
-    )
+    tag_text = " ".join(str(tag) for tag in tags) if isinstance(tags, list) else ""
+    text = f"{node_name(node)} {node_type} {tag_text}"
+    return any(keyword in text for keyword in _anchor_keywords())
 
 
 def score_anchoring(context: Mapping[str, Any], plan: Any) -> Dict[str, Any]:

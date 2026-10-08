@@ -584,14 +584,21 @@ async def adjust_lodging_by_geography(
         if not hotel_coord:
             measured.append({"day": day, "status": "no_hotel_coord", "hotel": str(hotel.get("name") or "")})
             continue
-        current_km = float(haversine_km(center, hotel_coord))
+        # ⚠️ 同 `adjust_meals_by_geography`：**判定距离要与尺子一致**（到当天任一玩点的最近距离），
+        #    质心只当检索中心用。否则出现"最近玩点 24.9km（尺子扣分）／质心 1.2km（这里不管）"的死角
+        #    —— 伊宁 yn25 第 1 天 信泰达民宿 就是这个形态。
+        def _nearest_play_km(position):
+            return min(float(haversine_km(position, play_pos)) for play_pos in coords)
+
+        current_km = _nearest_play_km(hotel_coord)
         measured.append(
             {"day": day, "hotel": str(hotel.get("name") or ""), "km": round(current_km, 1), "plays": len(plays)}
         )
         if current_km <= float(threshold_km):
             continue
+        search_center = min(coords, key=lambda play_pos: float(haversine_km(hotel_coord, play_pos)))
         try:
-            rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
+            rows = await fetch_nearby(search_center, keywords, radius_km=radius_km, limit=limit) or []
         except Exception as exc:
             skipped.append({"day": day, "current_km": round(current_km, 1), "error": f"{type(exc).__name__}: {str(exc)[:80]}"})
             continue
@@ -604,7 +611,7 @@ async def adjust_lodging_by_geography(
             coord = node_lnglat(row)
             if not name or not coord or name in used:
                 continue
-            km = float(haversine_km(center, coord))
+            km = _nearest_play_km(coord)
             if km > float(threshold_km):
                 continue
             if best_km is None or km < best_km:
@@ -647,8 +654,8 @@ async def adjust_meals_by_geography(
     keywords: str = "餐厅|美食|小吃",
     limit: int = 8,
     min_gain_ratio: float = 0.4,
-    max_per_day: int = 2,
-    max_total: int = 4,
+    max_per_day: int = 3,
+    max_total: int = 6,
 ) -> Dict[str, Any]:
     """把**排得太远**的饭点换成当天玩点附近的真实餐馆（2026-10-07）。
 
@@ -688,21 +695,40 @@ async def adjust_meals_by_geography(
             continue
         coords = [node_lnglat(node) for node in plays]
         center = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        # ⚠️ **判定用的距离必须和尺子一致**（2026-10-08 实测修，这是伊宁 anchoring 卡在 0.714 的真因）：
+        #    尺子 `score_anchoring` 看的是"到当天**任一玩点的最近距离**"，
+        #    而这里原来用"到当天玩点**质心**的距离" —— 两个数在一日多点时差得很远，
+        #    于是出现"改的人觉得没问题、尺子仍在扣分"的死角：
+        #      · 伊宁 yn24 第 2 天 老字号回民拌面王：最近玩点 17.8km（尺子扣分）／质心 9.8km（这里不管）；
+        #      · 伊宁 yn25 第 1 天 信泰达民宿：最近玩点 24.9km／质心 1.2km —— 完全看不见。
+        #    反向也错：库尔勒 馍夹肉 最近玩点 3.8km（尺子通过）却被质心 13.7km 判为"需要换"。
+        #    质心仍留作**检索中心**（问周边餐馆时用），但**判定**改用最近玩点距离。
+        def _nearest_play_km(position):
+            return min(float(haversine_km(position, play_pos)) for play_pos in coords)
+
         meals = [node for node in day_nodes if _intent_of_node(node) == "food" and node_lnglat(node)]
-        # 一天最多换 `max_per_day` 个（伊宁第 1 天三家餐馆都在 30km 外，一次只换一个的话
-        # 剩下的要等下一次运行才轮到）；总数也封顶，避免为了"完美"把时间全花在检索上。
+        # 一天最多换 `max_per_day` 个、总数封顶 `max_total`。
+        # ⚠️ 限额是按**实测耗时**定的，不是拍的（2026-10-08 复测）：
+        #    一次周边检索 `0.32~0.40s`（同中心点第二次 0.00s，走缓存），
+        #    原来定 2/4 是按"每次要好几秒"的**假设**来的 —— 实测差了约 50 倍，
+        #    结果伊宁第 1 天三个 30km 外的饭点永远只换得掉两个（anchoring 卡在 0.714 八次运行）。
+        #    实测同中心点有 8 个 ≤4.7km 且没用过的真实餐馆，所以放宽到 3/6。
         swapped_today = 0
         for meal in meals:
             if swapped_today >= max(1, int(max_per_day)) or len(actions) >= max(1, int(max_total)):
                 break
             if not any(node is meal for node in nodes):
                 continue  # 这个饭点刚被换掉了（旧对象已不在路线里），别再重复处理
-            current_km = float(haversine_km(center, node_lnglat(meal)))
+            current_km = _nearest_play_km(node_lnglat(meal))
             if current_km <= float(threshold_km):
                 continue
             measured.append({"day": day, "meal": str(meal.get("name") or ""), "km": round(current_km, 1)})
+            # 检索中心用**离这个饭点最近的玩点**（比质心更贴：质心可能落在几个玩点中间的空地上，
+            # 周边餐馆既不属于任何一个玩点）。
+            nearest_play_pos = min(coords, key=lambda play_pos: float(haversine_km(node_lnglat(meal), play_pos)))
+            search_center = nearest_play_pos
             try:
-                rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
+                rows = await fetch_nearby(search_center, keywords, radius_km=radius_km, limit=limit) or []
             except Exception as exc:
                 skipped.append(
                     {
@@ -722,7 +748,7 @@ async def adjust_meals_by_geography(
                 coord = node_lnglat(row)
                 if not name or not coord or name in used:
                     continue
-                km = float(haversine_km(center, coord))
+                km = _nearest_play_km(coord)
                 if km > float(threshold_km):
                     continue
                 if best_km is None or km < best_km:
@@ -737,7 +763,12 @@ async def adjust_meals_by_geography(
                         "reason": "周边没有明显更近的真实餐馆，保持原样",
                     }
                 )
-                break
+                # ⚠️ 这里必须是 `continue` 而不是 `break`（2026-10-08 实测修）：
+                #    `break` 会**跳过同一天剩下的饭点**，让结果取决于饭点的排列顺序 ——
+                #    伊宁第 1 天三个 30km 外的饭点，检索第一个时周边没有更近的，
+                #    后面两个**根本没被问过**，看上去却像"每天最多换 2 个"的限额造成的。
+                #    检索**报错**（限流）才停整天，那种情况在 except 分支里 `break`。
+                continue
             replacement = build_node_from_candidate(best, day, "13:00", "food")
             replacement["time"] = str(meal.get("time") or f"Day {day} | 13:00 用餐")
             replacement["replaced_meal"] = str(meal.get("name") or "")

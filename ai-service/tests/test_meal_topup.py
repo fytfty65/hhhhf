@@ -400,6 +400,49 @@ class MealGeographyTests(unittest.TestCase):
             },
         ]
 
+    def test_lodging_mover_uses_the_same_distance_as_the_ruler(self):
+        """住宿侧同一把尺子问题（2026-10-08）：判定要用"到当天任一玩点的最近距离"。
+
+        实测形态（伊宁 yn25 第 1 天 信泰达民宿）：最近玩点 24.9km（尺子扣分）／质心 1.2km（旧口径不管）。
+        """
+        import asyncio
+
+        from core.plan_quality import ANCHOR_KM, score_anchoring
+        from core.plan_review import adjust_lodging_by_geography
+
+        route = [
+            {"day": 1, "name": "玩点甲", "type": "风景名胜", "lnglat": [81.90, 43.71]},
+            {"day": 1, "name": "玩点乙", "type": "风景名胜", "lnglat": [81.30, 43.71]},
+            {
+                "day": 1,
+                "name": "中间民宿",
+                "type": "住宿服务",
+                "is_hotel": True,
+                "lnglat": [81.60, 43.71],
+                "time": "Day 1 | 21:00 入住",
+            },
+        ]
+        before = score_anchoring({}, {"route": route})
+        self.assertTrue(before["far_nodes"], "构造要让尺子扣分")
+        self.assertGreater(before["far_nodes"][0]["distance_km"], ANCHOR_KM)
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [
+                {
+                    "name": "玩点甲旁边客栈",
+                    "type": "住宿服务",
+                    "lnglat": [81.901, 43.711],
+                    "is_hotel": True,
+                }
+            ]
+
+        result = asyncio.run(
+            adjust_lodging_by_geography(route, days=1, fetch_nearby=fake_nearby, threshold_km=15.0)
+        )
+        self.assertTrue(result["changed"], "离质心很近但离玩点很远 → 必须换掉（旧口径漏掉）")
+        after = score_anchoring({}, result["plan"])
+        self.assertEqual(after["far_nodes"], [], "换完尺子不该再扣分")
+
     def test_a_far_meal_is_replaced_by_a_nearby_one(self):
         import asyncio
 
@@ -424,8 +467,8 @@ class MealGeographyTests(unittest.TestCase):
             self.assertTrue(meals, f"第 {day} 天不能没有饭点")
 
     def test_swaps_are_capped_per_day_and_in_total(self):
-        """一天最多换 2 个、总共最多 4 个：不能为了"完美"把时间全花在检索上，
-        也不能把某一天的餐饮一次性全洗掉。"""
+        """一天最多换 3 个、总共最多 6 个：限额是按**实测耗时**定的（一次检索 0.32~0.40s），
+        不是为了"完美"无限检索，但也不能因为假设的耗时把明明能换的都留下。"""
         import asyncio
 
         from core.plan_review import adjust_meals_by_geography
@@ -435,6 +478,7 @@ class MealGeographyTests(unittest.TestCase):
             {"day": 1, "name": "远餐馆甲", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
             {"day": 1, "name": "远餐馆乙", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
             {"day": 1, "name": "远餐馆丙", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+            {"day": 1, "name": "远餐馆丁", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
         ]
 
         async def fake_nearby(center, keywords, **kwargs):
@@ -442,14 +486,19 @@ class MealGeographyTests(unittest.TestCase):
                 {"name": "近饭馆一", "type": "餐饮服务", "lnglat": [81.67, 43.72]},
                 {"name": "近饭馆二", "type": "餐饮服务", "lnglat": [81.67, 43.72]},
                 {"name": "近饭馆三", "type": "餐饮服务", "lnglat": [81.67, 43.72]},
+                {"name": "近饭馆四", "type": "餐饮服务", "lnglat": [81.67, 43.72]},
             ]
 
         result = asyncio.run(adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby))
-        self.assertEqual(len(result["actions"]), 2, result["actions"])
+        self.assertEqual(len(result["actions"]), 3, result["actions"])
         one = asyncio.run(
             adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby, max_per_day=1)
         )
         self.assertEqual(len(one["actions"]), 1, one["actions"])
+        total = asyncio.run(
+            adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby, max_total=2)
+        )
+        self.assertEqual(len(total["actions"]), 2, total["actions"])
 
     def test_a_failing_search_leaves_meals_alone(self):
         import asyncio
@@ -463,6 +512,120 @@ class MealGeographyTests(unittest.TestCase):
         self.assertFalse(result["changed"])
         self.assertTrue(result["skipped"][0].get("error"))
         self.assertEqual([node["name"] for node in result["plan"]["route"]][1], "县城大餐馆")
+
+    def test_one_unimprovable_meal_does_not_block_the_others(self):
+        """一个饭点"周边没有更近的"不能把**同一天剩下的饭点**一起跳过（2026-10-08 实测）。
+
+        症状：伊宁第 1 天有三个 30km 外的饭点，检索第 1 个时周边没有更近的餐馆，
+        代码直接 `break` 出整天的循环 —— 后面两个饭点**根本没被问过**，
+        结果"还剩一个 30km 的饭点"看起来像"每天最多换 2 个"的限制造成的，其实是这个 break。
+        正确行为：这个饭点记 `skipped`，继续看下一个。
+        """
+        import asyncio
+
+        from core.plan_review import adjust_meals_by_geography
+
+        route = [
+            {"day": 1, "name": "天鹅泉湿地公园", "type": "风景名胜", "lnglat": [81.66, 43.71]},
+            {"day": 1, "name": "远餐馆甲", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+            {"day": 1, "name": "远餐馆乙", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+        ]
+        calls = []
+
+        async def fake_nearby(center, keywords, **kwargs):
+            calls.append(len(calls))
+            # 第一次查"没有更近的"，第二次查给一个很近的 —— 两个饭点都要被问到
+            if len(calls) == 1:
+                return []
+            return [{"name": "镇口小馆", "type": "餐饮服务", "lnglat": [81.67, 43.72]}]
+
+        result = asyncio.run(adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby))
+        self.assertEqual(len(calls), 2, f"两个饭点都要被问到，实际只问了 {len(calls)} 次")
+        self.assertEqual(len(result["skipped"]), 1, "第一个记 skipped")
+        self.assertEqual(result["actions"][0]["to"], "镇口小馆", "第二个照样换掉")
+        names = [node["name"] for node in result["plan"]["route"]]
+        self.assertIn("镇口小馆", names)
+        self.assertIn("远餐馆甲", names, "没找到替代的那个保持原样")
+
+    def test_mover_uses_the_same_distance_as_the_ruler(self):
+        """**判定距离必须与尺子一致**（2026-10-08 实测修，伊宁 anchoring 卡在 0.714 的真因）。
+
+        尺子 `score_anchoring` 看"到当天**任一玩点的最近距离**"；
+        改的人原来用"到当天玩点**质心**的距离"。一日多点时两者差很远，于是出现死角：
+          · 饭点离最近的玩点 17.8km（尺子扣分），离质心只有 9.8km（改的人不管）→ 永远不修；
+          · 反过来，最近玩点 3.8km（尺子通过）却被质心 13.7km 判成"太远"要换。
+        这个用例构造的就是第一种：质心很近、但离每个玩点都远。
+        """
+        import asyncio
+
+        from core.plan_quality import ANCHOR_KM, score_anchoring
+        from core.plan_review import adjust_meals_by_geography
+
+        # 两个玩点拉得很开（48km），饭点正好在它们中间的质心上：
+        # 离质心 0.0km（老口径认为"就在旁边"），离每个玩点却都 24km（尺子扣分）。
+        # 这正是伊宁真实的死角形态。
+        route = [
+            {"day": 1, "name": "玩点甲", "type": "风景名胜", "lnglat": [81.90, 43.71]},
+            {"day": 1, "name": "玩点乙", "type": "风景名胜", "lnglat": [81.30, 43.71]},
+            {"day": 1, "name": "中间饭馆", "type": "餐饮服务", "lnglat": [81.60, 43.71]},
+        ]
+        before = score_anchoring({}, {"route": route})
+        self.assertTrue(
+            before["far_nodes"], f"这个构造要让尺子扣分，实际 far_nodes={before['far_nodes']}"
+        )
+        self.assertGreater(before["far_nodes"][0]["distance_km"], ANCHOR_KM)
+
+        async def fake_nearby(center, keywords, **kwargs):
+            # 挨着"玩点甲"给一家真实餐馆（离玩点 ≤15km ⇒ 尺子也会满意）
+            return [{"name": "玩点甲旁边的小馆", "type": "餐饮服务", "lnglat": [81.901, 43.711]}]
+
+        result = asyncio.run(adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby))
+        self.assertTrue(result["changed"], "质心很近但离玩点很远 → 必须换掉（原来这里被漏掉）")
+        self.assertIn("玩点甲旁边的小馆", [node["name"] for node in result["plan"]["route"]])
+        after = score_anchoring({}, result["plan"])
+        self.assertEqual(after["far_nodes"], [], "换完之后尺子不该再扣分")
+        self.assertGreater(after["value"], before["value"])
+
+    def test_a_meal_near_a_play_node_is_left_alone(self):
+        """反向：离某个玩点很近就该放过，不能因为质心远就换掉（库尔勒实测的误判）。"""
+        import asyncio
+
+        from core.plan_review import adjust_meals_by_geography
+
+        route = [
+            {"day": 1, "name": "玩点甲", "type": "风景名胜", "lnglat": [81.90, 43.71]},
+            {"day": 1, "name": "玩点乙", "type": "风景名胜", "lnglat": [81.30, 43.71]},
+            {"day": 1, "name": "贴甲饭馆", "type": "餐饮服务", "lnglat": [81.901, 43.711]},
+        ]
+
+        async def fake_nearby(center, keywords, **kwargs):
+            return [{"name": "别处小馆", "type": "餐饮服务", "lnglat": [81.60, 43.71]}]
+
+        result = asyncio.run(adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby))
+        self.assertFalse(result["changed"], "贴着一个玩点就是合格的，不许换")
+        self.assertEqual(result["measured"], [])
+
+    def test_a_failing_search_still_stops_that_day(self):
+        """检索**报错**时当天不再继续问（限流时逐点重试只是白等），与"没找到更近的"区分开。"""
+        import asyncio
+
+        from core.plan_review import adjust_meals_by_geography
+
+        route = [
+            {"day": 1, "name": "天鹅泉湿地公园", "type": "风景名胜", "lnglat": [81.66, 43.71]},
+            {"day": 1, "name": "远餐馆甲", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+            {"day": 1, "name": "远餐馆乙", "type": "餐饮服务", "lnglat": [81.49, 43.97]},
+        ]
+        calls = []
+
+        async def fake_nearby(center, keywords, **kwargs):
+            calls.append(len(calls))
+            raise RuntimeError("高德限流")
+
+        result = asyncio.run(adjust_meals_by_geography(route, days=1, fetch_nearby=fake_nearby))
+        self.assertEqual(len(calls), 1, "报错就停，不要对着同一个失败源重试")
+        self.assertFalse(result["changed"])
+        self.assertTrue(result["skipped"][0].get("error"))
 
 
 if __name__ == "__main__":

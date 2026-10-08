@@ -641,6 +641,49 @@ class TestCompoundIntentAndAnchoring(unittest.TestCase):
         ]}
         self.assertEqual(score_anchoring({}, no_coords)["value"], 0.0)
 
+    def test_a_scenic_node_is_not_mistaken_for_a_meal_by_its_address(self):
+        """**地址里的字不能把风景名胜判成饭点**（2026-10-08 实测修）。
+
+        真实数据：库尔勒「博斯腾湖风景名胜区」的 desc 是
+        「高德资料：风景名胜｜评分 4.6｜巴音郭楞焉耆盆地东南**面**博湖县境内」，
+        food 关键词里的单字「面」命中"东南面" → 它被当成饭点，
+        尺子接着按"饭点离玩点 45.2km"扣分（anchoring 白掉 0.25）。
+        实测 562 个玩点节点里有 24 个被这样误判。
+        """
+        plan = {"route": [
+            {
+                "day": 1,
+                "name": "博斯腾湖风景名胜区",
+                "type": "风景名胜",
+                "tags": ["风景"],
+                "desc": "高德资料：风景名胜｜评分 4.6｜巴音郭楞焉耆盆地东南面博湖县境内",
+                "lnglat": [86.70, 41.90],
+                "time": "Day 1 | 10:00 游览",
+            },
+            {
+                "day": 1,
+                "name": "莲花湖宾馆",
+                "type": "住宿服务",
+                "is_hotel": True,
+                "lnglat": [86.71, 41.91],
+                "time": "Day 1 | 20:00 入住",
+            },
+        ]}
+        report = score_anchoring({}, plan)
+        far_names = [item["name"] for item in report["far_nodes"]]
+        self.assertNotIn("博斯腾湖风景名胜区", far_names, "玩点不该被当成'饭点太远'")
+        self.assertEqual(report["checked"], 1, "只有宾馆算吃住侧节点")
+
+    def test_a_real_meal_with_a_single_char_keyword_is_still_an_anchor(self):
+        """反过来：真正的饭点（类型/标签明确）不能被漏掉。"""
+        plan = {"route": [
+            {"day": 1, "name": "雪山景区", "type": "山景", "lnglat": [100.10, 25.10]},
+            {"day": 1, "name": "兰州牛肉面", "type": "餐饮服务", "lnglat": [102.00, 27.00]},
+        ]}
+        report = score_anchoring({}, plan)
+        self.assertEqual(report["checked"], 1)
+        self.assertEqual([item["name"] for item in report["far_nodes"]], ["兰州牛肉面"])
+
 
 class TestHorizon(unittest.TestCase):
     """用户场景：一个月（30 天）的行程。"""
