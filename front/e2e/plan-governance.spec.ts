@@ -558,6 +558,61 @@ async function installMocks(page: Page) {
                     negotiation_summary: '已按预算与偏好完成协商',
                     route,
                     team_satisfaction: { 'E2E 旅行者': 62 },
+                    // P1 文化与无障碍提案：正文上必须看得见（此前只发给审计接口）
+                    specialist_runtime: {
+                      proposals: [
+                        {
+                          agent_id: 'culture-agent',
+                          domain: 'culture',
+                          status: 'ok',
+                          confidence: 0.6,
+                          candidates: [
+                            {
+                              name: '陕西历史博物馆',
+                              background: '中国第一座大型现代化国家级博物馆，馆藏以周秦汉唐文物著称。',
+                              etiquette: '馆内禁止使用闪光灯；讲解器需在服务台租借。',
+                              recommended_stay: '3~4 小时',
+                              sources: [{ label: '陕西历史博物馆官网', url: 'https://www.sxhm.com/' }],
+                              source_type: 'knowledge_base',
+                              reviewed_at: '2026-10-08',
+                            },
+                            {
+                              // 查不到条目的节点也要**列出来**，但如实说"没有来源"
+                              name: '某冷门遗址',
+                              background: '',
+                              sources: [],
+                              note: '项目内可信知识库里没有这个地点的文化条目，未提供背景说明（不编造）',
+                            },
+                          ],
+                        },
+                        {
+                          agent_id: 'accessibility-agent',
+                          domain: 'accessibility',
+                          status: 'ok',
+                          confidence: 0,
+                          candidates: [
+                            {
+                              name: '陕西历史博物馆',
+                              verified: false,
+                              status_text: '无障碍信息：未核实',
+                              facilities: {
+                                入口坡度: 'unknown',
+                                电梯: 'unknown',
+                                无障碍卫生间: 'unknown',
+                                接驳车: 'unknown',
+                              },
+                              checklist: [
+                                '入口坡度与台阶（有无坡道/无障碍通道）',
+                                '电梯（是否有、是否可用、轿厢尺寸）',
+                                '无障碍卫生间（位置与开放情况）',
+                                '接驳车/区间车（能否放轮椅、是否需预约）',
+                              ],
+                              note: '本机没有该点的官方无障碍资料，**不判断**是否无障碍；请按清单向景区确认',
+                            },
+                          ],
+                        },
+                      ],
+                    },
                     // ai-service 在 final_route 里回填的关联键：前端必须随行程一起存下去，
                     // 否则网关侧的"采纳/到访/重规划"事件只能退回 trip_id，跨服务轨迹串不起来
                     correlation_id: 'plan-e2e-1',
@@ -1372,6 +1427,36 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(page.locator('[data-testid="trust-badge"][data-trust="stale"]').first()).toContainText('信息较旧');
     // 可信度总览：这一天里四态各有多少条
     await expect(page.getByTestId('trust-summary').first()).toBeVisible();
+
+    // ③'''' P1 文化与无障碍提案要**渲染出来**（此前只发给审计接口，用户看不到）
+    // 注意：若这里报 "element(s) not found"，先确认没有**自己手工起的** next start
+    // 占着 3001 —— Playwright 配置是 reuseExistingServer，会复用一个旧构建的服务，
+    // 于是整页都渲染不出来（2026-10-08 被这个坑掉一次，误以为是组件问题）。
+    const culturePanel = page.getByTestId('culture-panel');
+    await expect(culturePanel).toBeVisible();
+    // 命中的条目：背景 + 出处链接 + 复核日期
+    await expect(culturePanel).toContainText('中国第一座大型现代化国家级博物馆');
+    await expect(culturePanel).toContainText('当地礼仪');
+    await expect(culturePanel).toContainText('2026-10-08');
+    await expect(culturePanel.locator('a[href="https://www.sxhm.com/"]')).toBeVisible();
+    // 来源性质要写清是项目内知识库（不是官方发布）
+    await expect(culturePanel).toContainText('项目内可信知识库');
+    // 查不到条目的节点**照样列出来**，并如实说明没有来源 —— 不许悄悄消失
+    const unsourced = culturePanel.locator('[data-testid="culture-entry"][data-has-background="false"]');
+    await expect(unsourced).toHaveCount(1);
+    await expect(unsourced).toContainText('不编造');
+
+    const accessPanel = page.getByTestId('accessibility-panel');
+    await expect(accessPanel).toBeVisible();
+    // 没有数据时必须说"未核实"，**不许**判断"完全无障碍"
+    await expect(accessPanel.getByTestId('accessibility-summary')).toContainText('未核实');
+    await expect(accessPanel).toContainText('入口坡度');
+    await expect(accessPanel).toContainText('电梯');
+    await expect(accessPanel).toContainText('卫生间');
+    await expect(accessPanel).toContainText('接驳车');
+    for (const forbidden of ['完全无障碍', '无障碍设施齐全', '无需担心']) {
+      await expect(accessPanel).not.toContainText(forbidden);
+    }
 
     await page.getByTestId('day-notices').first().screenshot({ path: '../work/plan-ledgers.png', animations: 'disabled' });
     // 换店标记也留一张（人工审阅：两行标签 + 官方简介在卡片里会不会太挤）

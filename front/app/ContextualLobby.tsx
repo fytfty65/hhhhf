@@ -33,6 +33,7 @@ import DraftingPanel from './components/DraftingPanel';
 
 // 马蜂窝风行程面板（自 ContextualLobby 拆分出来的展示型组件）
 import MafengwoStylePanel from './components/MafengwoStylePanel';
+import SpecialistInsightsPanel from './components/SpecialistInsightsPanel';
 
 // 预算核对 / 已作调整 / 行程规模 说明面板（字段来自 final_route.payload）。
 // 按需加载：只在决策阶段出现，没必要进首屏包（实测直接 import 会让首屏 JS +6.5KB）。
@@ -2569,6 +2570,11 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
                     {planSwitchNotice && <span role="status" className="basis-full text-[11px] font-bold text-emerald-700">{planSwitchNotice}</span>}
                   </div>
                 )}
+                {workspaceLayer === 'plan' && <SpecialistInsightsPanel
+                  // P1 渲染端：文化背景与无障碍信息。后端早就放进了 payload，
+                  // 但此前只发给审计接口、用户一个字段都看不到（等于没做）。
+                  proposals={specialistRuntime?.proposals}
+                />}
                 {workspaceLayer === 'plan' && <MafengwoStylePanel
                   routes={currentDayRoutes} 
                   totalDays={totalDays}
