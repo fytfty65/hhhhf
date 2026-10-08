@@ -47,6 +47,26 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual([item["value"] for item in entry.get("reference_prices") or []], [35, 15])
         self.assertIn("用户提供", str(entry.get("reference_source")))
 
+    def test_price_status_is_recorded_per_source(self):
+        """三个源"票价能不能取到"的结论要写进登记表，别让后面的人重复试。"""
+        bayin = official_site_for("巴音布鲁克", "库尔勒") or {}
+        self.assertEqual(bayin.get("price_status"), "verified_official_price")
+        self.assertIn("140元", str(bayin.get("price_status_note")))
+
+        loburen = official_site_for("罗布人村寨", "库尔勒") or {}
+        self.assertEqual(loburen.get("price_status"), "miniprogram_only")
+        self.assertIn("小程序", str(loburen.get("price_status_note")))
+
+        honghai = official_site_for("红海景区", "喀什") or {}
+        self.assertEqual(honghai.get("price_status"), "no_full_price_found")
+        self.assertIn("只用它的名称/等级/优惠政策", str(honghai.get("price_status_note")))
+        self.assertEqual(honghai.get("reference_prices"), [], "没找到全价票就不许登记参考价")
+
+    def test_channel_summary_carries_price_status(self):
+        summary = channel_summary(official_site_for("罗布人村寨", "库尔勒") or {})
+        self.assertEqual(summary.get("price_status"), "miniprogram_only")
+        self.assertIn("小程序", str(summary.get("price_status_note")))
+
 
 class LookupTests(unittest.TestCase):
     def test_js_rendered_price_page_says_so_and_gives_the_channel(self):

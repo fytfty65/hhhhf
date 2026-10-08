@@ -34,10 +34,15 @@ OFFICIAL_SITES: List[Dict[str, Any]] = [
         "city_hints": ["喀什", "巴楚", "麦盖提"],
         "site": "https://www.bachu.gov.cn/",
         "miniprogram": "",
-        "note": "政府网公示的是**门票优惠政策**（半票群体条件），全价票需另行确认票务子页",
+        "note": "政府网公示的是**门票优惠政策**（半票群体条件）；**全价票未在该域名下找到**",
         "price_page_rendered": False,
+        # 2026-10-07 实测（front/scripts/probe-bachu-honghai.mjs）：首页 247 个链接里**没有**"红海"；
+        # 站内搜索 URL 一律回 19 字符（不可用）；文旅栏目页无任何票价行。
+        # 所以这条源**只用于非票价字段**（名称/等级/优惠政策），与用户给的建议一致。
+        "price_status": "no_full_price_found",
+        "price_status_note": "首页未链接红海景区页、站内搜索不可用 → 按用户建议只用它的名称/等级/优惠政策，不取价",
         "reference_prices": [],
-        "verified": "2026-10-07 用户提供域名；本机实测可达（https 200）",
+        "verified": "2026-10-07 用户提供域名；本机实测可达（https 200），但未找到含全价票的页面",
     },
     {
         "key": "loburen_village",
@@ -48,12 +53,14 @@ OFFICIAL_SITES: List[Dict[str, Any]] = [
         "miniprogram": "罗布人村寨",
         "note": "官方声明：**未授权任何第三方机构或个人代理门票业务**，请通过官方小程序购票",
         "price_page_rendered": True,
+        "price_status": "miniprogram_only",
+        "price_status_note": "门票 35 / 观光车 15 **只在微信小程序内公布**；官网与官方公众号文章在本机（含无头浏览器）都读不到票价",
         "reference_prices": [
             {"label": "景区门票", "value": 35},
             {"label": "观光车票", "value": 15},
         ],
-        "reference_source": "用户提供的官方页数字（本机抓取不到：票价页为客户端渲染）",
-        "verified": "2026-10-07 用户提供域名与票价；本机实测域名可达、票价页 JS 渲染",
+        "reference_source": "用户提供的官方页数字（本机抓不到：票价只在微信小程序内）",
+        "verified": "2026-10-07 用户提供域名与票价；本机实测域名可达、票价页 JS 渲染、公众号文章匿名/无头渲染均只得 381~480 字符壳页",
     },
     {
         "key": "bayinbuluke",
@@ -68,6 +75,8 @@ OFFICIAL_SITES: List[Dict[str, Any]] = [
         "price_page_rendered": True,
         "price_pages": ["https://www.byblk.cn/goumaiyuding/"],
         "renderable": True,
+        "price_status": "verified_official_price",
+        "price_status_note": "本机用无头浏览器在官网票务页读到「票价：140元（包含门票+区间车票）」",
         "reference_prices": [{"label": "联票（门票+区间车）", "value": 140}],
         "reference_source": "用户提供的官方页数字（已用无头浏览器在本机核实到同值）",
         "verified": "2026-10-07 用户提供域名与票价；本机渲染实测页面写着「票价：140元（包含门票+区间车票）」",
@@ -166,6 +175,9 @@ def channel_summary(entry: Mapping[str, Any]) -> Dict[str, Any]:
         "official_site": str((entry or {}).get("site") or ""),
         "official_miniprogram": str((entry or {}).get("miniprogram") or ""),
         "official_channel_note": str((entry or {}).get("note") or ""),
+        # 票价可得性：让前端能如实区分"官方登记价"与"只在小程序里公布"
+        "price_status": str((entry or {}).get("price_status") or ""),
+        "price_status_note": str((entry or {}).get("price_status_note") or ""),
         "source": "official_site_registry",
         "verified": str((entry or {}).get("verified") or ""),
     }

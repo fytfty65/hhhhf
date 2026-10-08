@@ -163,6 +163,8 @@ export function officialDetailFor(
   booking: string;
   miniprogram: string;
   note: string;
+  priceStatus: string;
+  priceStatusNote: string;
 } | null {
   const profiles = plan && typeof plan === 'object' ? plan.official_profiles : null;
   if (!profiles || typeof profiles !== 'object') return null;
@@ -176,6 +178,8 @@ export function officialDetailFor(
     booking: String(entry.official_booking ?? '').trim(),
     miniprogram: String(entry.official_miniprogram ?? '').trim(),
     note: String(entry.official_channel_note ?? '').trim(),
+    priceStatus: String(entry.official_price_status ?? '').trim(),
+    priceStatusNote: String(entry.official_price_status_note ?? '').trim(),
   };
   return detail.name || detail.intro || detail.address || detail.site || detail.booking || detail.miniprogram || detail.note
     ? detail

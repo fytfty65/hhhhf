@@ -6131,6 +6131,9 @@ async def run_negotiate(msg: GatewayMessage):
                                                         "official_site": _channel.get("official_site") or "",
                                                         "official_miniprogram": _channel.get("official_miniprogram") or "",
                                                         "official_channel_note": _channel.get("official_channel_note") or "",
+                                                        # 票价可得性：本机拿不到价时必须说清"为什么"（小程序内/政府页只有优惠政策）
+                                                        "official_price_status": _channel.get("price_status") or "",
+                                                        "official_price_status_note": _channel.get("price_status_note") or "",
                                                         "source": _channel.get("source") or "official_site_registry",
                                                     }
                                                 if _site.get("value") is not None:

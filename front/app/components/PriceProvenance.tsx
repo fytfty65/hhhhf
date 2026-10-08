@@ -131,6 +131,13 @@ export function OfficialDetailBlock({ plan, nodeName }: { plan?: any; nodeName?:
           </span>
         </div>
       )}
+      {/* 票价可得性：本机拿不到官方价时必须说清"为什么"（只在小程序内 / 该源只有优惠政策） */}
+      {detail.priceStatus && detail.priceStatus !== 'verified_official_price' && (
+        <div className="text-amber-700 mt-1 flex items-start gap-1.5" data-testid="official-price-status">
+          <TriangleAlert className="w-3 h-3 mt-0.5 shrink-0" />
+          <span>{detail.priceStatusNote || '官方票价本机未取到（详见官方渠道）'}</span>
+        </div>
+      )}
     </div>
   );
 }
