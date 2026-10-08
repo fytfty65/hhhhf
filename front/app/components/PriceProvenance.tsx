@@ -112,7 +112,7 @@ export function OfficialDetailBlock({ plan, nodeName }: { plan?: any; nodeName?:
     >
       <div className="font-bold text-indigo-800 mb-1 flex items-center gap-1.5">
         <ShieldCheck className="w-3.5 h-3.5" />
-        官方登记（文旅部 A 级景区名录）
+        {detail.intro || detail.address ? '官方登记（文旅部 A 级景区名录）' : '官方渠道'}
         {detail.name && detail.name !== String(nodeName ?? '') ? <span className="font-medium opacity-80">· {detail.name}</span> : null}
       </div>
       {detail.address && (
@@ -122,6 +122,15 @@ export function OfficialDetailBlock({ plan, nodeName }: { plan?: any; nodeName?:
         </div>
       )}
       {detail.intro && <p className="text-slate-700 mt-1">{detail.intro}</p>}
+      {detail.miniprogram && (
+        <div className="text-slate-600 mt-1 flex items-start gap-1.5" data-testid="official-miniprogram">
+          <Ticket className="w-3 h-3 mt-0.5 shrink-0 text-indigo-500" />
+          <span>
+            官方购票：微信小程序「<span className="font-bold">{detail.miniprogram}</span>」
+            {detail.note ? <span className="opacity-80"> · {detail.note}</span> : null}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

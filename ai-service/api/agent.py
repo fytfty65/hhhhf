@@ -6110,7 +6110,38 @@ async def run_negotiate(msg: GatewayMessage):
                                                     f"{type(_mct_exc).__name__}: {str(_mct_exc)[:60]}",
                                                     flush=True,
                                                 )
-                                            # 👑 第三条：**票务平台的结构化接口**
+                                            # 👑 第三条：**景区自己的官方站点/官方购票渠道**
+                                            #    （2026-10-07 用户直接给了域名：巴楚红海 bachu.gov.cn、
+                                            #    罗布人村寨 xjlbr.com、巴音布鲁克 byblk.cn）。
+                                            #    实测这三家的票价页是**客户端渲染**，服务端抓不到价 ——
+                                            #    所以这条通道的产出是"官方渠道信息"（官网/官方小程序 + 备注），
+                                            #    读得到票价时按 `official`（可核实）采，读不到就如实说明。
+                                            try:
+                                                from core.official_sites import (
+                                                    lookup_official_site_price as _site_price,
+                                                )
+
+                                                _site = await _site_price(_name, city=target_city)
+                                                _channel = _site.get("official_channel") or {}
+                                                if _channel:
+                                                    _profiles = final_data.setdefault("official_profiles", {})
+                                                    _profiles[_name] = {
+                                                        **(_profiles.get(_name) or {}),
+                                                        "official_name": _channel.get("official_name") or _name,
+                                                        "official_site": _channel.get("official_site") or "",
+                                                        "official_miniprogram": _channel.get("official_miniprogram") or "",
+                                                        "official_channel_note": _channel.get("official_channel_note") or "",
+                                                        "source": _channel.get("source") or "official_site_registry",
+                                                    }
+                                                if _site.get("value") is not None:
+                                                    return _site
+                                            except Exception as _site_exc:
+                                                print(
+                                                    f"⚠️ [官方站点] {_name} 这条通道失败: "
+                                                    f"{type(_site_exc).__name__}: {str(_site_exc)[:60]}",
+                                                    flush=True,
+                                                )
+                                            # 👑 第四条：**票务平台的结构化接口**
                                             #    （2026-10-07 用户："既然票务平台能用为什么不用票务系统"）。
                                             #    去哪儿 `ticket/list.json` 直接给票种与价格（成人票优先，
                                             #    跟团游/演艺票被过滤）；携程建议词接口拿到详情页再抽价。

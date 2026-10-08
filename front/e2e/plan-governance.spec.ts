@@ -589,6 +589,8 @@ async function installMocks(page: Page) {
                         official_booking: 'https://www.sxhm.com/visit',
                         official_address: '陕西省西安市雁塔区小寨东路91号',
                         official_intro: '中国第一座大型现代化国家级博物馆，馆藏文物 170 余万件。',
+                        official_miniprogram: '巴音布鲁克旅游',
+                        official_channel_note: '官方声明：景区未授权任何第三方代理门票业务，请通过官方渠道购票',
                       },
                     },
                     quality: payload.governance.quality,
@@ -659,6 +661,8 @@ async function installMocks(page: Page) {
                       official_booking: 'https://www.sxhm.com/visit',
                       official_address: '陕西省西安市雁塔区小寨东路91号',
                       official_intro: '中国第一座大型现代化国家级博物馆，馆藏文物 170 余万件。',
+                      official_miniprogram: '巴音布鲁克旅游',
+                      official_channel_note: '官方声明：景区未授权任何第三方代理门票业务，请通过官方渠道购票',
                     },
                   },
                 },
@@ -1331,6 +1335,13 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(officialDetail).toBeVisible();
     await expect(officialDetail).toContainText('小寨东路91号');
     await expect(officialDetail).toContainText('馆藏文物 170 余万件');
+
+    // ③' 官方购票渠道（用户给的三个官方源里有两个只走微信小程序）也要看得见
+    const miniprogram = page.getByTestId('official-miniprogram').first();
+    await expect(miniprogram).toBeVisible();
+    await expect(miniprogram).toContainText('微信小程序');
+    await expect(miniprogram).toContainText('巴音布鲁克旅游');
+    await expect(miniprogram).toContainText('未授权任何第三方');
 
     await page.getByTestId('day-notices').first().screenshot({ path: '../work/plan-ledgers.png', animations: 'disabled' });
     // 换店标记也留一张（人工审阅：两行标签 + 官方简介在卡片里会不会太挤）

@@ -151,11 +151,19 @@ export function dayNotices(plan: any): Record<number, DayNotice[]> {
   return out;
 }
 
-/** 官方登记资料（文旅部名录）：简介/地址/官网/预约入口 —— 用于"地点资料" */
+/** 官方登记资料（文旅部名录 + 景区官方站点）：简介/地址/官网/预约入口/官方小程序 */
 export function officialDetailFor(
   plan: any,
   nodeName: unknown,
-): { name: string; intro: string; address: string; site: string; booking: string } | null {
+): {
+  name: string;
+  intro: string;
+  address: string;
+  site: string;
+  booking: string;
+  miniprogram: string;
+  note: string;
+} | null {
   const profiles = plan && typeof plan === 'object' ? plan.official_profiles : null;
   if (!profiles || typeof profiles !== 'object') return null;
   const entry = (profiles as Record<string, any>)[String(nodeName ?? '').trim()];
@@ -166,6 +174,10 @@ export function officialDetailFor(
     address: String(entry.official_address ?? '').trim(),
     site: String(entry.official_site ?? '').trim(),
     booking: String(entry.official_booking ?? '').trim(),
+    miniprogram: String(entry.official_miniprogram ?? '').trim(),
+    note: String(entry.official_channel_note ?? '').trim(),
   };
-  return detail.name || detail.intro || detail.address || detail.site || detail.booking ? detail : null;
+  return detail.name || detail.intro || detail.address || detail.site || detail.booking || detail.miniprogram || detail.note
+    ? detail
+    : null;
 }
