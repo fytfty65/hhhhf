@@ -39,7 +39,6 @@ def run(coro):
 
 class RegistryWiringTests(unittest.TestCase):
     """两个智能体从"声明了没接线"变成"真的接线"。"""
-
     def test_both_agents_are_now_wired(self):
         self.assertIn(CULTURE_AGENT_ID, WIRED_AGENT_IDS)
         self.assertIn(ACCESSIBILITY_AGENT_ID, WIRED_AGENT_IDS)
@@ -60,6 +59,25 @@ class RegistryWiringTests(unittest.TestCase):
             ["accessibility.official.search", "amap.route.plan"],
         )
         self.assertEqual(declared_tools("不存在的智能体"), [])
+
+    def test_build_pool_runtime_gives_them_real_nodes(self):
+        """回归：调用方要**真的把节点传进来**，否则它们永远是"未参与"。
+
+        实测踩到（2026-10-08）：`api/agent.py` 里这段装配发生在**路线生成之前**，
+        传的是 `route=[]`；我最初让 handler 从 route 兜底取节点，结果两个智能体
+        虽然"接线了"，在真实推演里却什么都看不到、显示为"未参与"—— 等于没接。
+        所以由调用方显式把景点候选池传进来，这里钉住"传了就真的用上"。
+        """
+        from core.agent_runtime import build_pool_runtime
+
+        nodes = [{"name": "喀什古城", "type": "文化"}]
+        _, requests = build_pool_runtime(route=[], cultural_nodes=nodes, city="喀什")
+        culture = next(item for item in requests if item.agent_id == CULTURE_AGENT_ID)
+        access = next(item for item in requests if item.agent_id == ACCESSIBILITY_AGENT_ID)
+        self.assertEqual([n["name"] for n in culture.context["cultural_nodes"]], ["喀什古城"])
+        self.assertEqual(culture.context["city"], "喀什")
+        # 无障碍智能体也要拿到同一批节点（否则它只会返回 degraded）
+        self.assertEqual([n["name"] for n in access.context["accessibility_nodes"]], ["喀什古城"])
 
 
 class CultureKnowledgeBaseTests(unittest.TestCase):

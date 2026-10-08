@@ -95,6 +95,10 @@ class AgentProposal(BaseModel):
     applied_constraints: Dict[str, Any] = Field(default_factory=dict)
     evidence: List[EvidenceRef] = Field(default_factory=list)
     tool_calls: List[ToolCall] = Field(default_factory=list)
+    # P2 工具权限：越权的工具调用被运行时拦下来后**记在这里**。
+    # 必须有这个字段：模型是 extra="forbid"，没有它"被拒绝了什么"会被契约丢掉，
+    # 权限控制就变成内部静默拒绝 —— 外面看不见等于没有。
+    denied_tool_calls: List[Dict[str, Any]] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     latency_ms: int = Field(default=0, ge=0)
     degraded: bool = False

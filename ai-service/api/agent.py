@@ -3612,6 +3612,19 @@ async def run_negotiate(msg: GatewayMessage):
                 budget_total=float(total_calc_budget) if total_calc_budget else None,
                 route=[],
                 facts=request_facts,
+                # 文化与无障碍智能体（2026-10-08）：这条装配发生在**路线生成之前**，
+                # 所以不能从 route 取节点（这里 route 恒为空 —— 实测两个智能体因此
+                # 永远显示"未参与"，等于没接线）。改用此刻真实存在的景点候选池。
+                cultural_nodes=[
+                    item
+                    for item in unique_attractions
+                    if isinstance(item, dict)
+                    and any(
+                        keyword in str(item.get("type") or "") + str(item.get("tags") or "")
+                        for keyword in ("文化", "博物馆", "古迹", "遗址", "寺", "古城")
+                    )
+                ][:12],
+                city=target_city,
             )
             specialist_runtime_result = await _runtime.execute(_runtime_requests)
             # 提案是否基于**同一版事实**：不基于就如实点名（每个提案都从输入契约里带 facts_version）

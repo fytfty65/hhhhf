@@ -9,12 +9,16 @@ cannot silently turn malformed or unsourced output into a successful proposal.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
 from .agent_contracts import AgentInput, AgentProposal, capability_registry, validate_agent_proposal
 from .joint_optimization import rank_lodging_options  # 联合优化（P2）：住宿 ↔ 通勤/费用/体力/碳排/预算
+from .tool_permissions import audit_tool_calls, filter_tool_calls  # P2：工具权限真实校验
+
+logger = logging.getLogger(__name__)
 
 AgentHandler = Callable[[AgentInput], Awaitable[Mapping[str, Any] | AgentProposal]]
 
@@ -999,6 +1003,28 @@ class SpecialistRuntime:
                     merged = dict(request.hard_constraints)
                     merged.update({str(key): value for key, value in existing.items()})
                     payload["hard_constraint_results"] = merged
+            # 👑 P2 工具权限：在**出口**统一校验，不逐个 handler 改（新增的还会漏）。
+            #    注册表声明是能力上限，请求里的 allowed_tools 是本次实际授予，两者都要满足。
+            #    被拒的调用不许静默丢弃：记进 denied_tool_calls，让日志与诊断接口看得见。
+            raw_calls = payload.get("tool_calls") or []
+            if isinstance(raw_calls, Sequence) and not isinstance(raw_calls, (str, bytes)):
+                verdict = filter_tool_calls(
+                    agent_id=request.agent_id,
+                    tool_calls=[item for item in raw_calls if isinstance(item, Mapping)],
+                    declared_tools=declared_tools(request.agent_id),
+                    granted_tools=request.allowed_tools,
+                )
+                payload["tool_calls"] = verdict["allowed"]
+                if verdict["denied"]:
+                    payload["denied_tool_calls"] = verdict["denied"]
+                    logger.warning(
+                        "🚫 [工具权限] %s 的 %d 次调用被拒绝：%s",
+                        request.agent_id,
+                        len(verdict["denied"]),
+                        "; ".join(
+                            f"{item.get('tool')}({item.get('reason')})" for item in verdict["denied"]
+                        ),
+                    )
             return validate_agent_proposal(payload)
         except asyncio.TimeoutError:
             return AgentProposal(
@@ -1017,14 +1043,22 @@ class SpecialistRuntime:
     async def execute(self, requests: Sequence[AgentInput]) -> Dict[str, Any]:
         proposals = await asyncio.gather(*(self._run_one(request) for request in requests))
         rows = [proposal.model_dump(mode="json") for proposal in proposals]
-        return {
+        # P2：把被拒的工具调用汇总出来 —— 权限控制外面看不见等于没有
+        audit = audit_tool_calls(rows)
+        result = {
             "status": "ok" if all(item.status != "failed" for item in proposals) else "degraded",
             "proposals": rows,
             "completed": len(rows),
             "failed": sum(item.status == "failed" for item in proposals),
             "degraded": sum(item.status == "degraded" for item in proposals),
             "parallel": True,
+            "tool_permission_audit": audit,
         }
+        if audit["denied_count"]:
+            logger.warning(
+                "🚫 [工具权限] 本次执行有 %d 次越权调用被拒绝", audit["denied_count"]
+            )
+        return result
 
 
 def build_pool_runtime(
@@ -1098,7 +1132,8 @@ def build_pool_runtime(
             request_id=f"runtime-{agent_id}", agent_id=agent_id, domain=domain,
             context={"candidates": list(candidates)},
             hard_constraints=dict(hard_constraints),
-            soft_preferences=dict(soft_preferences), allowed_tools=[],
+            soft_preferences=dict(soft_preferences),
+            allowed_tools=declared_tools(agent_id),  # P2：按注册表授予，不再写死空列表
         ))
     # 绿色出行智能体：基于碳排方法学独立提案（此前只在注册表里声明，从未被调度）
     handlers[GREEN_AGENT_ID] = green_handler()
@@ -1106,7 +1141,7 @@ def build_pool_runtime(
         request_id=f"runtime-{GREEN_AGENT_ID}", agent_id=GREEN_AGENT_ID, domain="sustainability",
         context={"transport_options": list(transport_options or transport)},
         hard_constraints=dict(hard_constraints),
-        soft_preferences=dict(soft_preferences), allowed_tools=[],
+        soft_preferences=dict(soft_preferences), allowed_tools=declared_tools(GREEN_AGENT_ID),
     ))
     # 健康 / 体力智能体：按画像与天气给出保守强度建议
     handlers[HEALTH_AGENT_ID] = health_handler()
@@ -1117,14 +1152,16 @@ def build_pool_runtime(
             "weather": dict(weather or {}),
             "daily_nodes": daily_nodes,
         },
-        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences), allowed_tools=[],
+        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences),
+        allowed_tools=declared_tools(HEALTH_AGENT_ID),
     ))
     # 应急智能体：把风险事件转成最小扰动重规划动作提案（旅中闭环的入口）
     handlers[EMERGENCY_AGENT_ID] = emergency_handler()
     requests.append(AgentInput(
         request_id=f"runtime-{EMERGENCY_AGENT_ID}", agent_id=EMERGENCY_AGENT_ID, domain="emergency",
         context={"route": list(route), "risk_event": dict(risk_event or {})},
-        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences), allowed_tools=[],
+        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences),
+        allowed_tools=declared_tools(EMERGENCY_AGENT_ID),
     ))
     # 文化智能体（2026-10-08 接线）：只查项目内可信知识库，查不到就如实留白
     handlers[CULTURE_AGENT_ID] = culture_handler()
