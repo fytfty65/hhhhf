@@ -182,6 +182,8 @@ def pool_handler(agent_id: str, domain: str, *, provider: str, field: str) -> Ag
 GREEN_AGENT_ID = "green-agent"
 HEALTH_AGENT_ID = "health-agent"
 EMERGENCY_AGENT_ID = "emergency-agent"
+CULTURE_AGENT_ID = "culture-agent"
+ACCESSIBILITY_AGENT_ID = "accessibility-agent"
 
 WIRED_AGENT_IDS = (
     "route-planner",
@@ -193,13 +195,27 @@ WIRED_AGENT_IDS = (
     GREEN_AGENT_ID,
     HEALTH_AGENT_ID,
     EMERGENCY_AGENT_ID,
+    # 2026-10-08：文化智能体接线（数据源＝项目内可信知识库 core/culture_kb.py）
+    CULTURE_AGENT_ID,
+    # 2026-10-08：无障碍智能体接线（**没有数据时如实说"未核实"+ 待确认清单**，不判断无障碍）
+    ACCESSIBILITY_AGENT_ID,
 )
 
 # 已声明但**尚未接线**：必须写清原因（测试强制：注册表里出现的新 id 必须在此分类，不能默默漏掉）
-DECLARED_NOT_WIRED: Dict[str, str] = {
-    "culture-agent": "缺少可核实的知识来源；按注册表 fallback=omit_unsourced_fact，宁可不出提案也不编造",
-    "accessibility-agent": "缺少官方无障碍数据来源；fallback=mark_unverified",
-}
+DECLARED_NOT_WIRED: Dict[str, str] = {}
+
+
+def declared_tools(agent_id: str) -> List[str]:
+    """读注册表里这个智能体声明的 `allowed_tools`。
+
+    为什么要有它：`build_pool_runtime` 以前给**每个**请求都写死 `allowed_tools=[]`，
+    于是注册表里声明的工具权限形同虚设 —— 请求里是空的，"谁能调什么"根本无从校验。
+    现在从注册表取，新增智能体只要注册了就自动带上权限。
+    """
+    for item in capability_registry():
+        if item.agent_id == agent_id:
+            return list(item.allowed_tools or [])
+    return []
 
 
 def registry_coverage() -> Dict[str, Any]:
@@ -327,6 +343,252 @@ def green_handler() -> AgentHandler:
                 f"比较 {len(scored)} 种交通方式：最低 {best['mode']} {best['carbon_kg']}kg、"
                 f"最高 {worst['mode']} {worst['carbon_kg']}kg，最多可减 {int(reduction * 100)}%（方法学估算）。"
             ),
+        }
+
+    return handle
+
+
+def culture_handler() -> AgentHandler:
+    """文化智能体：为文化节点提供**有出处**的背景、礼仪与建议停留时间。
+
+    注册表定义：tools=[knowledge.official.search]，timeout=5000，
+    fallback=omit_unsourced_fact，metrics=[citation_coverage]。
+
+    数据源：**只**用项目内的人工维护知识库 `core/culture_kb.py`
+    （用户在路线图上确认过：先只用项目内知识库，不新增抓取）。
+    这么选的理由：文化背景错了比没有更糟，而这类内容没有可机读的官方结构化数据。
+
+    诚实口径：
+    - 查得到条目 → ok，候选带 background/etiquette/recommended_stay 与 sources；
+      来源类型是 `knowledge_base`（→ 前端显示"估算"，**不冒充已核实**）；
+    - **查不到条目 → degraded + omit_unsourced_fact**，明确说"知识库里没有，未提供背景说明"，
+      绝不拿模型的世界知识补一段"一般来说……"；
+    - 一个文化节点都没有 → 一样 degraded（没有可说的就不说）。
+    """
+
+    async def handle(request: AgentInput) -> Mapping[str, Any]:
+        from core.culture_kb import (
+            KB_REVIEWED_AT,
+            KB_VERSION,
+            culture_entry_for,
+            culture_fact,
+            unsourced_note,
+        )
+
+        context = request.context or {}
+        city = str(context.get("city") or "")
+        raw_nodes = context.get("cultural_nodes") or context.get("nodes") or []
+        nodes = (
+            [item for item in raw_nodes if isinstance(item, Mapping)]
+            if isinstance(raw_nodes, Sequence) and not isinstance(raw_nodes, (str, bytes))
+            else []
+        )
+        if not nodes:
+            return {
+                "agent_id": CULTURE_AGENT_ID,
+                "domain": "culture",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("culture-kb", "background", estimated=True)],
+                "confidence": 0.0,
+                "failure": {
+                    "code": "no_cultural_node",
+                    "message": "这份行程里没有可标注的文化节点",
+                    "retryable": False,
+                    "fallback": "omit_unsourced_fact",
+                },
+                "explanation": "没有文化节点，未编造文化背景。",
+            }
+
+        candidates: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        for node in nodes:
+            name = str(node.get("name") or node.get("location") or "").strip()
+            if not name:
+                continue
+            entry = culture_entry_for(name, city or node.get("city") or "")
+            if entry:
+                candidates.append(culture_fact(entry))
+            else:
+                # 查不到就**如实留白**（仍然作为候选返回，让协调器知道"这个点没有背景可讲"）
+                candidates.append(unsourced_note(name))
+                missing.append(name)
+
+        if not candidates:
+            return {
+                "agent_id": CULTURE_AGENT_ID,
+                "domain": "culture",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("culture-kb", "background", estimated=True)],
+                "confidence": 0.0,
+                "failure": {
+                    "code": "no_named_node",
+                    "message": "文化节点缺少名称，无法查知识库",
+                    "retryable": False,
+                    "fallback": "omit_unsourced_fact",
+                },
+                "explanation": "节点没有名字，未编造文化背景。",
+            }
+
+        sourced = [item for item in candidates if item.get("sources")]
+        coverage = round(len(sourced) / len(candidates), 3)
+        explanation = f"知识库命中 {len(sourced)}/{len(candidates)} 个文化节点（{KB_VERSION}，复核于 {KB_REVIEWED_AT}）"
+        if missing:
+            explanation += f"；未命中：{'、'.join(missing[:3])}（未提供背景说明）"
+
+        return {
+            "agent_id": CULTURE_AGENT_ID,
+            "domain": "culture",
+            "status": "ok",
+            "degraded": False,
+            "candidates": candidates,
+            "hard_constraint_results": request.hard_constraints,
+            # 知识库不是一手来源：证据标 estimated=True，不冒充"可核实"
+            "evidence": [_evidence("culture-kb", "background", estimated=True)],
+            "confidence": round(0.6 * coverage, 3) if coverage else 0.0,
+            "applied_constraints": {"kb_version": KB_VERSION, "kb_reviewed_at": KB_REVIEWED_AT},
+            "explanation": explanation,
+        }
+
+    return handle
+
+
+def accessibility_handler() -> AgentHandler:
+    """无障碍智能体：**核验**无障碍入口、电梯、坡度与缓冲时间。
+
+    注册表定义：tools=[accessibility.official.search, amap.route.plan]，timeout=5000，
+    fallback=mark_unverified，metrics=[verified_facility_coverage]。
+
+    ⚠️ 这个智能体的重点不是"给出无障碍结论"，而是**不给出没有依据的结论**。
+    用户明确要求（2026-10-08）：
+      · 没有真实数据时**不要**判断"完全无障碍"；
+      · 输出「无障碍信息：未核实」+ 一份**建议确认清单**
+        （入口坡度、电梯、卫生间、接驳车）；
+      · 这比直接删掉无障碍能力更好：保留了架构能力，同时不虚构事实。
+
+    诚实口径：
+    - 没有任何可核实的无障碍字段 → 候选仍带 `verified: False` +
+      `facilities: {坡度/电梯/卫生间/接驳车: unknown}` + `checklist`（该问什么）；
+    - 行程里有行动不便成员时，**额外**给出"需提前确认"的提醒（但不假装已经确认）；
+    - 将来接入官方无障碍数据时，只要把 `accessibility_facts` 传进来即可自动升级为已核实。
+    """
+
+    #: 现场/电话最该确认的四项（用户点名的）
+    CHECKLIST = (
+        "入口坡度与台阶（有无坡道/无障碍通道）",
+        "电梯（是否有、是否可用、轿厢尺寸）",
+        "无障碍卫生间（位置与开放情况）",
+        "接驳车/区间车（能否放轮椅、是否需预约）",
+    )
+
+    async def handle(request: AgentInput) -> Mapping[str, Any]:
+        context = request.context or {}
+        raw_nodes = context.get("accessibility_nodes") or context.get("nodes") or []
+        nodes = (
+            [item for item in raw_nodes if isinstance(item, Mapping)]
+            if isinstance(raw_nodes, Sequence) and not isinstance(raw_nodes, (str, bytes))
+            else []
+        )
+        facts = context.get("accessibility_facts")
+        facts = facts if isinstance(facts, Mapping) else {}
+        mobility = bool(context.get("mobility_need"))
+
+        if not nodes:
+            return {
+                "agent_id": ACCESSIBILITY_AGENT_ID,
+                "domain": "accessibility",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("accessibility-checklist", "facilities", estimated=False)],
+                "confidence": 0.0,
+                "failure": {
+                    "code": "no_accessibility_node",
+                    "message": "没有需要核验无障碍信息的节点",
+                    "retryable": False,
+                    "fallback": "mark_unverified",
+                },
+                "explanation": "没有可核验的节点，未做无障碍判断。",
+            }
+
+        candidates: List[Dict[str, Any]] = []
+        verified_count = 0
+        for node in nodes:
+            name = str(node.get("name") or node.get("location") or "").strip()
+            if not name:
+                continue
+            known = facts.get(name) if isinstance(facts.get(name), Mapping) else {}
+            facilities: Dict[str, str] = {}
+            for facility in ("入口坡度", "电梯", "无障碍卫生间", "接驳车"):
+                raw = known.get(facility) if known else None
+                text = str(raw).strip() if raw is not None else ""
+                # 只有真正拿到值才算 known，否则一律 unknown（**绝不默认"有"**）
+                facilities[facility] = text if text else "unknown"
+            verified = any(value != "unknown" for value in facilities.values())
+            if verified:
+                verified_count += 1
+            candidates.append(
+                {
+                    "name": name,
+                    "verified": verified,
+                    "facilities": facilities,
+                    "checklist": [] if verified else list(CHECKLIST),
+                    "status_text": "无障碍信息：已核实" if verified else "无障碍信息：未核实",
+                    "source_type": "official_page" if verified else "none",
+                    "note": (
+                        ""
+                        if verified
+                        else "本机没有该点的官方无障碍资料，**不判断是否无障碍**；"
+                        "请按清单向景区确认"
+                    ),
+                }
+            )
+
+        if not candidates:
+            return {
+                "agent_id": ACCESSIBILITY_AGENT_ID,
+                "domain": "accessibility",
+                "status": "degraded",
+                "degraded": True,
+                "candidates": [],
+                "evidence": [_evidence("accessibility-checklist", "facilities", estimated=False)],
+                "confidence": 0.0,
+                "failure": {
+                    "code": "no_named_node",
+                    "message": "节点缺少名称，无法核验无障碍信息",
+                    "retryable": False,
+                    "fallback": "mark_unverified",
+                },
+                "explanation": "节点没有名字，未做无障碍判断。",
+            }
+
+        coverage = round(verified_count / len(candidates), 3)
+        all_unverified = verified_count == 0
+        explanation = (
+            f"核验 {len(candidates)} 个节点：已核实 {verified_count} 个、"
+            f"未核实 {len(candidates) - verified_count} 个；未核实的不做无障碍结论"
+        )
+        if mobility:
+            explanation += "；本行程有行动不便成员，建议出发前按清单逐项确认"
+        return {
+            "agent_id": ACCESSIBILITY_AGENT_ID,
+            "domain": "accessibility",
+            # 全都没核实仍然是 ok 的提案（它**如实说了未核实**，不是失败），但降置信度
+            "status": "ok",
+            "degraded": bool(all_unverified),
+            "candidates": candidates,
+            "hard_constraint_results": request.hard_constraints,
+            "evidence": [_evidence("accessibility-checklist", "facilities", estimated=False)],
+            "confidence": round(coverage, 3),
+            "applied_constraints": {
+                "checklist": list(CHECKLIST),
+                "mobility_need": mobility,
+                "policy": "no_unverified_accessibility_claim",
+            },
+            "explanation": explanation,
         }
 
     return handle
@@ -782,6 +1044,10 @@ def build_pool_runtime(
     nights: int | None = None,
     budget_total: float | None = None,
     facts: Mapping[str, Any] | None = None,
+    cultural_nodes: Sequence[Mapping[str, Any]] = (),
+    city: str = "",
+    accessibility_facts: Mapping[str, Any] | None = None,
+    mobility_need: bool = False,
 ) -> tuple[SpecialistRuntime, list[AgentInput]]:
     """装配专业智能体运行时。
 
@@ -859,5 +1125,36 @@ def build_pool_runtime(
         request_id=f"runtime-{EMERGENCY_AGENT_ID}", agent_id=EMERGENCY_AGENT_ID, domain="emergency",
         context={"route": list(route), "risk_event": dict(risk_event or {})},
         hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences), allowed_tools=[],
+    ))
+    # 文化智能体（2026-10-08 接线）：只查项目内可信知识库，查不到就如实留白
+    handlers[CULTURE_AGENT_ID] = culture_handler()
+    _cultural_input = list(cultural_nodes) if cultural_nodes else [
+        node
+        for node in (route or [])
+        if isinstance(node, Mapping)
+        and (
+            str(node.get("category") or "").lower() == "cultural"
+            or str(node.get("planning_category") or "").lower() == "cultural"
+            or any(tag in ("文化", "博物馆", "古迹") for tag in (node.get("tags") or []))
+        )
+    ]
+    requests.append(AgentInput(
+        request_id=f"runtime-{CULTURE_AGENT_ID}", agent_id=CULTURE_AGENT_ID, domain="culture",
+        context={"cultural_nodes": _cultural_input, "city": str(city or "")},
+        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences),
+        allowed_tools=list(declared_tools(CULTURE_AGENT_ID)),
+    ))
+    # 无障碍智能体（2026-10-08 接线）：没有官方无障碍数据时**只输出"未核实 + 待确认清单"**
+    handlers[ACCESSIBILITY_AGENT_ID] = accessibility_handler()
+    requests.append(AgentInput(
+        request_id=f"runtime-{ACCESSIBILITY_AGENT_ID}", agent_id=ACCESSIBILITY_AGENT_ID,
+        domain="accessibility",
+        context={
+            "accessibility_nodes": _cultural_input or list(route or []),
+            "accessibility_facts": dict(accessibility_facts or {}),
+            "mobility_need": bool(mobility_need),
+        },
+        hard_constraints=dict(hard_constraints), soft_preferences=dict(soft_preferences),
+        allowed_tools=list(declared_tools(ACCESSIBILITY_AGENT_ID)),
     ))
     return SpecialistRuntime(handlers), requests
