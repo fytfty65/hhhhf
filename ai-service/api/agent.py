@@ -8090,6 +8090,57 @@ async def run_negotiate(msg: GatewayMessage):
                     except Exception as _quality_recheck_exc:
                         print(f"⚠️ [质量重算] 收口后重算失败: {_quality_recheck_exc}", flush=True)
 
+                    # 👑 **给最终路线的每个节点打"事实可信度"四态**（2026-10-08，P3）：
+                    #    后端各处早就有了 source / observed_at / estimated，
+                    #    但**没有一处把它们合成"这条信息可不可信"**，前端只能自己猜。
+                    #    这里在收口之后统一过一遍 `node_contract.normalize_node`：
+                    #    每条事实带上 trust（已核实/估算/信息较旧/尚未核实）、source_type、freshness，
+                    #    且 confidence **由来源分级推导**（不采信上游或模型自报的值）。
+                    #    纯确定性、零网络、不改路线内容，只加标注。
+                    try:
+                        from core.node_contract import normalize_node as _normalize_node
+
+                        _graded_route = []
+                        _trust_counts: Dict[str, int] = {}
+                        for _node in final_data.get("route") or []:
+                            if not isinstance(_node, Mapping):
+                                _graded_route.append(_node)
+                                continue
+                            _graded = _normalize_node(_node)
+                            _merged_node = dict(_node)
+                            # 只覆盖/新增可信度相关字段，**不动**原有业务字段
+                            for _field in (
+                                "trust",
+                                "trust_label",
+                                "trust_action",
+                                "trust_message",
+                                "source_type",
+                                "source_label",
+                                "freshness",
+                                "derived_confidence",
+                            ):
+                                _merged_node[_field] = _graded.get(_field)
+                            _graded_route.append(_merged_node)
+                            _key = str(_graded.get("trust") or "unknown")
+                            _trust_counts[_key] = _trust_counts.get(_key, 0) + 1
+                        if _graded_route:
+                            final_data["route"] = _graded_route
+                            final_data["trust_summary"] = {
+                                "counts": _trust_counts,
+                                "total": len(_graded_route),
+                            }
+                            print(
+                                "🔎 [可信度分级] "
+                                + "、".join(
+                                    f"{_key} {_trust_counts[_key]}"
+                                    for _key in ("verified", "estimated", "stale", "unknown")
+                                    if _trust_counts.get(_key)
+                                ),
+                                flush=True,
+                            )
+                    except Exception as _trust_exc:  # 分级失败不影响出方案
+                        print(f"⚠️ [可信度分级] 失败: {_trust_exc}", flush=True)
+
                     # 👑 **按最终路线重算"每天跑多少公里"**（2026-10-07 实测抓到陈旧快照）：
                     #    上面那次评估跑在**分天重排之前**，于是 payload 里写着"第 2 天 445km"，
                     #    而最终路线实际是"第 3 天 233km" —— 前端要拿它做"这天很赶"的提醒，

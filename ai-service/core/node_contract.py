@@ -22,6 +22,17 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Mapping, Optional
 
+from .fact_trust import (
+    TRUST_ESTIMATED,
+    TRUST_STALE,
+    TRUST_UNKNOWN,
+    TRUST_VERIFIED,
+    fact_trust,
+)
+
+# 可信度四态（与 fact_trust 一致，这里再导出一次方便校验）
+TRUST_STATES = {TRUST_VERIFIED, TRUST_ESTIMATED, TRUST_STALE, TRUST_UNKNOWN}
+
 # 权威节点字段（与目标架构里列出的 12 个字段一一对应）
 CANONICAL_FIELDS = (
     "day",
@@ -36,6 +47,10 @@ CANONICAL_FIELDS = (
     "open_time",
     "official_url",
     "estimated",
+    # P3：可信度分级（四态 + 来源类型 + 新鲜度）
+    "trust",
+    "source_type",
+    "freshness",
 )
 
 # cost_status 三态：只有拿到可核实来源才算 verified
@@ -199,6 +214,21 @@ def normalize_node(raw: Mapping[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         confidence = None
 
+    # ---- P3：可插拔的数据新鲜度（source_type / freshness / trust / confidence）----
+    # 为什么放在这里而不是让上游各自算：**同一个节点上的每条事实都该带同一套口径**，
+    # 而且 `confidence` **由来源分级推导、不采信上游/模型自报的值**
+    # （模型对自己的说法打高分没有校准价值，反而让"编造"看起来可信）。
+    observed_at = _first(raw, "observed_at", "observedAt", "data_time", "updated_at", "collected_at")
+    trust_item = fact_trust(
+        value=cost,
+        source=source,
+        source_type=_first(raw, "source_type", "sourceType"),
+        observed_at=observed_at,
+        fact_kind=str(_first(raw, "fact_kind") or "price"),
+        estimated=estimated_flag,
+        method=_first(raw, "method", "estimate_method") or "",
+    )
+
     node: Dict[str, Any] = {
         "day": raw.get("day"),
         "name": name,
@@ -207,11 +237,21 @@ def normalize_node(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "cost": cost,
         "cost_status": cost_status,
         "source": source or None,
-        "observed_at": _first(raw, "observed_at", "observedAt", "data_time", "updated_at", "collected_at"),
+        "observed_at": observed_at,
         "confidence": confidence,
         "open_time": _text(_first(raw, "open_time", "opening_hours", "openTime")) or None,
         "official_url": _text(_first(raw, "official_url", "amap_url", "booking_url", "url")) or None,
         "estimated": estimated_flag,
+        # P3：一条事实的"可不可信"（前端四态：已核实/估算/信息较旧/尚未核实）
+        "trust": trust_item["trust"],
+        "trust_label": trust_item["label"],
+        "trust_action": trust_item["action"],
+        "trust_message": trust_item["message"],
+        "source_type": trust_item["source_type"],
+        "source_label": trust_item["source_label"],
+        "freshness": trust_item["freshness"],
+        # 推导出来的置信度**覆盖**上游自报值（见上面的说明）
+        "derived_confidence": trust_item["confidence"],
     }
 
     missing: List[str] = []
@@ -250,6 +290,16 @@ def validate_node(node: Mapping[str, Any]) -> List[str]:
     # 【诚实口径】标成已核实就必须有来源
     if status == COST_VERIFIED and not _text(node.get("source")):
         problems.append("verified_cost_requires_source")
+    # 【P3 诚实口径】可信度四态必须与花费状态自洽，否则前端显示的标签会骗人
+    trust = _text(node.get("trust")).lower()
+    if trust not in TRUST_STATES:
+        problems.append(f"trust_invalid:{trust or 'empty'}")
+    if trust == TRUST_VERIFIED and status != COST_VERIFIED:
+        problems.append("trust_verified_requires_verified_cost")
+    if status == COST_UNKNOWN and trust != TRUST_UNKNOWN:
+        problems.append(f"unknown_cost_must_be_trust_unknown:{trust}")
+    if status == COST_VERIFIED and trust == TRUST_STALE:
+        problems.append("trust_stale_must_not_claim_verified_cost")
     return problems
 
 

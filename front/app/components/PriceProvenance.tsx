@@ -6,9 +6,10 @@
 // 方案里也确实带回了票种名与来源 URL，但前端只显示「预估花销：¥30」——
 // 用户看不出这是官方门票、票务平台的哪种票、还是网摘估算（"¥30"和"¥2999（其实是三日游）"看起来一样可信）。
 
-import { ExternalLink, ShieldCheck, Ticket, TriangleAlert, Info } from 'lucide-react';
+import { ExternalLink, ShieldCheck, Ticket, TriangleAlert, Info, Clock } from 'lucide-react';
 import { priceProvenance, officialProfileOf, type PriceProvenance } from '../lib/priceProvenance';
 import { nodeAnnotations, officialDetailFor, dayNotices } from '../lib/planAnnotations';
+import { trustOf, trustSummaryOf, TRUST_STYLES, type TrustState } from '../lib/factTrust';
 
 const KIND_STYLE: Record<string, string> = {
   official: 'bg-emerald-50 text-emerald-700 border-emerald-200/80',
@@ -81,9 +82,71 @@ export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
   );
 }
 
+/** 事实可信度徽章（P3）：已核实 / 估算 / 信息较旧 / 尚未核实
+ *
+ * 为什么要单独一个组件：后端已经给每条事实标了四态，但用户看到的仍然只是"¥30"。
+ * 这个徽章把"这条信息到底可不可信、该不该去官方渠道再确认"直接摆在数字旁边。
+ */
+export function TrustBadge({ node, factKind }: { node: any; factKind?: string }) {
+  const view = trustOf(node);
+  if (!view) return null;
+  const style = TRUST_STYLES[view.state as TrustState] || TRUST_STYLES.unknown;
+  return (
+    <span
+      data-testid="trust-badge"
+      data-trust={view.state}
+      title={[view.message, view.action].filter(Boolean).join('｜')}
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold border whitespace-nowrap ${style}`}
+    >
+      {view.state === 'verified' ? (
+        <ShieldCheck className="w-3 h-3" />
+      ) : view.state === 'stale' ? (
+        <Clock className="w-3 h-3" />
+      ) : (
+        <TriangleAlert className="w-3 h-3" />
+      )}
+      <span className="whitespace-nowrap">{view.label}</span>
+      <span className="font-medium opacity-80 whitespace-nowrap">· {view.sourceLabel}</span>
+    </span>
+  );
+}
+
+/** 一份方案的"信息可信度"总览：四态各有多少条，最差的一档是什么 */
+export function TrustSummaryBar({ plan }: { plan?: any }) {
+  const nodes = (plan && typeof plan === 'object' && Array.isArray(plan.route)) ? plan.route : [];
+  const summary = trustSummaryOf(nodes);
+  if (!summary.worst) return null;
+  const order: TrustState[] = ['verified', 'estimated', 'stale', 'unknown'];
+  const present = order.filter((state) => summary.counts[state] > 0);
+  return (
+    <div
+      data-testid="trust-summary"
+      data-worst={summary.worst}
+      className="flex items-center gap-2 flex-wrap text-[11px] font-bold"
+    >
+      <span className="text-slate-500">信息可信度</span>
+      {present.map((state) => (
+        <span
+          key={state}
+          data-trust-count={state}
+          className={`px-2 py-0.5 rounded-lg border whitespace-nowrap ${TRUST_STYLES[state]}`}
+        >
+          {state === 'verified'
+            ? '已核实'
+            : state === 'estimated'
+              ? '估算'
+              : state === 'stale'
+                ? '信息较旧'
+                : '尚未核实'}{' '}
+          {summary.counts[state]}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /** 节点上的**台账标记**：换过酒店/餐馆、被补进来、被挪过来、按地理重排换过天 */
-export function PlanAnnotationList({ plan, nodeName }: { plan?: any; nodeName?: unknown }) {
-  const annotations = nodeAnnotations(plan, nodeName);
+export function PlanAnnotationList({ plan, nodeName }: { plan?: any; nodeName?: unknown }) {  const annotations = nodeAnnotations(plan, nodeName);
   if (!annotations.length) return null;
   return (
     <div className="mb-3 flex flex-col gap-1.5" data-testid="plan-annotations">

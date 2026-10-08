@@ -12,7 +12,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, BrainCircuit, CheckCircle2, Clock, ExternalLink, Footprints, Hotel, MapPin, PiggyBank, RefreshCw, RotateCw, ShieldCheck, Split, Sun, ThumbsDown, ThumbsUp, Wand2 } from 'lucide-react';
 import { getCleanPhotoUrl } from '../lib/lobbyUtils';
 import PoiImage from './PoiImage';
-import PriceProvenanceChip, { PlanAnnotationList, OfficialDetailBlock, DayNoticeList } from './PriceProvenance';
+import PriceProvenanceChip, { PlanAnnotationList, OfficialDetailBlock, DayNoticeList, TrustBadge, TrustSummaryBar } from './PriceProvenance';
 import DynamicBudgetCard from './DynamicBudgetCard';
 import ExpandableConnectorNav from './ExpandableConnectorNav';
 import TeamPresenceBar from './TeamPresenceBar';
@@ -166,10 +166,14 @@ export default function MafengwoStylePanel({
           </div>
         )}
 
-        <h2 className="text-2xl font-black text-slate-800 mb-8 tracking-tight">第 {totalDays[activeDayIndex] || 1} 天 行程安排</h2>
+        <h2 className="text-2xl font-black text-slate-800 mb-4 tracking-tight">第 {totalDays[activeDayIndex] || 1} 天 行程安排</h2>
         {/* 当天提醒：缺餐（"宁可不塞"）/ 补过餐 / 分天被重排过 ——
             这些台账以前只在 JSON 里，正文上看不出来（2026-10-07） */}
         <DayNoticeList plan={planLedgers} day={totalDays[activeDayIndex] || 1} />
+        {/* 信息可信度总览（P3）：这一天里有几条已核实/估算/信息较旧/尚未核实 */}
+        <div className="mb-6">
+          <TrustSummaryBar plan={{ route: Array.isArray(routes) ? routes : [] }} />
+        </div>
 
         <div className="relative pl-6">
           <div className="absolute top-3 bottom-6 left-[11px] w-[2px] bg-slate-200/80"></div>
@@ -212,6 +216,10 @@ export default function MafengwoStylePanel({
                       {/* 价格出处：官方价 / 票务平台价（哪种票）/ 网摘估算 + 来源链接 + 官方预约入口
                           （2026-10-07：后端已带回这些字段，不渲染出来等于没做） */}
                       <PriceProvenanceChip node={pt} />
+
+                      {/* 事实可信度四态（P3）：已核实 / 估算 / 信息较旧 / 尚未核实
+                          —— 紧挨着花销显示，让用户知道"这个数字该不该信、要不要去官方再确认" */}
+                      <TrustBadge node={pt} />
                     </div>
 
                     <div className="flex items-center gap-1.5">

@@ -8,6 +8,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -122,7 +123,81 @@ class TestNodeNormalization(unittest.TestCase):
         node = normalize_node({"name": "只有名字的点"})
         self.assertIn("coordinates", node["facts_missing"])
         self.assertIn("source", node["facts_missing"])
-        self.assertIn("observed_at", node["facts_missing"])
+
+
+class TestTrustGrading(unittest.TestCase):
+    """P3：每条事实带可信度四态（已核实/估算/信息较旧/尚未核实）。"""
+
+    def test_official_and_fresh_price_is_verified(self):
+        node = normalize_node(
+            {
+                "day": 1,
+                "name": "天鹅泉湿地公园",
+                "location": "81.65,43.70",
+                "cost": "30",
+                "source": "official",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self.assertEqual(node["trust"], "verified")
+        self.assertEqual(node["trust_label"], "已核实")
+        self.assertEqual(node["source_type"], "official_page")
+        self.assertEqual(node["freshness"], "fresh")
+        self.assertEqual(validate_node(node), [])
+
+    def test_missing_price_is_trust_unknown(self):
+        node = normalize_node({"day": 1, "name": "某酒店", "type": "住宿", "cost_estimate": "暂无供应商数据"})
+        self.assertEqual(node["trust"], "unknown")
+        self.assertEqual(node["trust_label"], "尚未核实")
+        self.assertEqual(node["derived_confidence"], 0.0)
+        self.assertEqual(validate_node(node), [])
+
+    def test_model_confidence_is_not_trusted(self):
+        """上游/模型自报的 confidence 不采信 —— 由来源分级推导。"""
+        node = normalize_node(
+            {
+                "day": 1,
+                "name": "某点",
+                "location": "86.15,41.76",
+                "cost": "88",
+                "source": "llm",
+                "confidence": 0.99,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self.assertEqual(node["trust"], "unknown", "模型推断不能因为自报 0.99 就变可信")
+        self.assertEqual(node["derived_confidence"], 0.0)
+
+    def test_stale_fact_is_shown_but_flagged(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        node = normalize_node(
+            {
+                "day": 1,
+                "name": "某景区",
+                "location": "86.15,41.76",
+                "cost": "140",
+                "source": "official",
+                "observed_at": old,
+            }
+        )
+        self.assertEqual(node["trust"], "stale")
+        self.assertEqual(node["trust_label"], "信息较旧")
+        self.assertEqual(node["cost"], 140.0, "过期的事实仍然展示")
+
+    def test_validate_rejects_inconsistent_trust(self):
+        """四态与花费状态必须自洽，否则前端标签会骗人。"""
+        base = normalize_node({"name": "x", "location": "86.15,41.76"})
+        # 花费 unknown 却声称已核实
+        tampered = dict(base, cost=None, cost_status=COST_UNKNOWN, trust="verified")
+        self.assertIn("trust_verified_requires_verified_cost", validate_node(tampered))
+        # 花费 unknown 却标成估算
+        tampered = dict(base, cost=None, cost_status=COST_UNKNOWN, trust="estimated")
+        self.assertTrue(
+            any(item.startswith("unknown_cost_must_be_trust_unknown") for item in validate_node(tampered))
+        )
+        # 四态写了个不存在的值
+        tampered = dict(base, trust="totally-fine")
+        self.assertTrue(any(item.startswith("trust_invalid:") for item in validate_node(tampered)))
 
 
 if __name__ == "__main__":

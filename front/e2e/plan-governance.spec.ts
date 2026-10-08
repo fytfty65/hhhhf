@@ -503,7 +503,9 @@ async function installMocks(page: Page) {
           w.__wsSends = [...(w.__wsSends || []), request];
           if (request.type !== 'agent_negotiate') return;
           const route = [
-            { day: 1, location: '钟楼酒店', name: '钟楼酒店', time: '09:00', type: '住宿', cost_estimate: '¥300', tags: ['住宿'], data_sources: { cost_estimate: 'rollinggo' }, price_excerpt: '查价成功。1晚总价：300CNY' },
+            { day: 1, location: '钟楼酒店', name: '钟楼酒店', time: '09:00', type: '住宿', cost_estimate: '¥300', tags: ['住宿'], data_sources: { cost_estimate: 'rollinggo' }, price_excerpt: '查价成功。1晚总价：300CNY',
+              // P3 可信度四态之一：**已核实**（官方/供应商 + 新鲜）
+              trust: 'verified', trust_label: '已核实', source_type: 'rollinggo', freshness: 'fresh', derived_confidence: 0.75, trust_action: '可直接参考；出行前建议再确认一次' },
             {
               day: 1,
               location: '陕西历史博物馆',
@@ -516,7 +518,9 @@ async function installMocks(page: Page) {
               data_sources: { cost_estimate: 'web_page' },
               price_source_url: 'https://www.sxhm.com/ticket',
               price_excerpt: '门票价格 门票0元/人（免费预约）',
-            },
+              // P3：**信息较旧**（有官方出处，但观测于去年）→ 仍展示，但要说清"旧了"
+              trust: 'stale', trust_label: '信息较旧', source_type: 'official_page', freshness: 'stale', derived_confidence: 0.45,
+              trust_message: '观测于 2025-08-01，信息较旧，请以官方渠道为准', trust_action: '信息较旧，请以官方渠道为准' },
             {
               day: 1,
               location: '回民街小吃',
@@ -529,8 +533,13 @@ async function installMocks(page: Page) {
               data_sources: { cost_estimate: 'platform' },
               price_source_url: 'https://piao.qunar.com/ticket/detail_1.html',
               price_excerpt: '回民街美食通兑券成人票',
-            },
-            { day: 2, location: '城墙南门', name: '城墙南门', time: '09:30', type: '文化', cost_estimate: '¥54', tags: ['地标'] },
+              // P3：**估算**（票务平台价不是官方价）
+              trust: 'estimated', trust_label: '估算', source_type: 'platform', freshness: 'fresh', derived_confidence: 0.5,
+              trust_action: '按公开规则估算，仅供规划参考' },
+            { day: 2, location: '城墙南门', name: '城墙南门', time: '09:30', type: '文化', cost_estimate: '¥54', tags: ['地标'],
+              // P3：**尚未核实**（模型推断的说法绝不作为事实）
+              trust: 'unknown', trust_label: '尚未核实', source_type: 'model_inference', freshness: 'unknown', derived_confidence: 0,
+              trust_message: '该说法来自模型推断，不作为事实采用', trust_action: '当前无法确认，请以官方渠道为准' },
             { day: 2, location: '永兴坊美食', name: '永兴坊美食', time: '12:30', type: '餐饮', cost_estimate: '¥70', tags: ['美食'] },
           ];
           setTimeout(() => {
@@ -1295,7 +1304,8 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
   //    "第 3 天没有晚餐（最近候选 82.6km，宁可不塞）"、"酒店从 46.9km 换到 2.1km"这类事
   //    以前只躺在 JSON 台账/遗留问题里，行程正文上是隐形的 —— 用户最容易漏掉的就是这些。
   test('台账要落到正文：缺餐提醒 / 换店标记 / 官方简介', async ({ page }) => {
-    test.setTimeout(90_000);
+    // 这条用例现在还要验可信度四态（含切到第 2 天），截图步骤本身也要时间 → 放宽到 150s
+    test.setTimeout(150_000);
     await page.setViewportSize({ width: 1440, height: 900 });
     await installMocks(page);
     await page.goto('/');
@@ -1350,9 +1360,32 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // ③'' 官方价**取不到**时要说清原因（用户给的三个源里有两个只在小程序/只有优惠政策）
     await expect(page.getByTestId('official-price-status').first()).toBeVisible();
 
+    // ③''' P3 事实可信度四态：已核实 / 估算 / 信息较旧 / 尚未核实 都要看得见
+    //      （后端给了 trust 字段，前端不渲染出来等于没做）
+    //      面板一次只渲染**当天**的节点，所以"尚未核实"那一档（在第 2 天）要切过去看。
+    const badges = page.getByTestId('trust-badge');
+    await expect(badges.first()).toBeVisible();
+    await expect(page.locator('[data-testid="trust-badge"][data-trust="verified"]').first()).toBeVisible();
+    await expect(page.locator('[data-testid="trust-badge"][data-trust="stale"]').first()).toBeVisible();
+    await expect(page.locator('[data-testid="trust-badge"][data-trust="estimated"]').first()).toBeVisible();
+    // 中文标签必须渲染（用户看不懂 verified 这种内部值）
+    await expect(page.locator('[data-testid="trust-badge"][data-trust="stale"]').first()).toContainText('信息较旧');
+    // 可信度总览：这一天里四态各有多少条
+    await expect(page.getByTestId('trust-summary').first()).toBeVisible();
+
     await page.getByTestId('day-notices').first().screenshot({ path: '../work/plan-ledgers.png', animations: 'disabled' });
     // 换店标记也留一张（人工审阅：两行标签 + 官方简介在卡片里会不会太挤）
     await page.locator('[data-annotation-kind="lodging_swap"]').first().locator('xpath=..')
       .screenshot({ path: '../work/plan-annotations.png', animations: 'disabled' });
+
+    // 「尚未核实」那一档在第 2 天（模型推断的节点）→ 切过去验完再截图
+    // ⚠️ 必须放在上面几张截图**之后**：Day 1 才有 lodging_swap 标记，
+    //    先切天会让那个 locator 永不出现、screenshot() 一直等到超时（2026-10-08 踩过）。
+    await page.getByRole('button', { name: 'Day 2', exact: true }).first().click();
+    await expect(
+      page.locator('[data-testid="trust-badge"][data-trust="unknown"]').first(),
+    ).toContainText('尚未核实');
+    await page.locator('[data-testid="trust-badge"][data-trust="unknown"]').first()
+      .screenshot({ path: '../work/trust-badges.png', animations: 'disabled' });
   });
 });
