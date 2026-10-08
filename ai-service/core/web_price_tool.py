@@ -914,8 +914,29 @@ _TICKET_PRICE_PATTERNS = (
 _TICKET_CONTEXT_MARKERS = ("门票", "票价")
 _TICKET_FREE_PATTERN = re.compile(r"(?:门票|票价)[^。；;]{0,8}?(?:免费|免票|免门票|不收费)")
 # 区间/模糊表述一律不采（"40元至100元""数十元""几百元"都不是一个确定价）
-_TICKET_PRICE_RANGE = re.compile(r"\d+\s*(?:元)?\s*(?:至|到|-|~|—)\s*\d+")
-_TICKET_PRICE_VAGUE = ("不等", "常见", "区间", "大约", "左右", "起价", "数十", "几百", "以现场")
+# ⚠️ 必须要求**钱的标记**（元/块 或 ¥）：否则 "08:30-19:00"、"10:00至21:00" 这类**运营时段**
+#    会被当成"价格区间"，把紧跟在后面的真价一律否掉（2026-10-07 实测：
+#    巴音布鲁克渲染页里 "全年 08:30-19:00 票价：140元（包含门票+区间车票）" 就是这么被挡的）。
+_TICKET_PRICE_RANGE = re.compile(
+    r"(?:[¥￥]\s*)?\d+(?:\.\d+)?\s*(?:元|块)?\s*(?:至|到|-|~|—)\s*(?:[¥￥]\s*)?\d+(?:\.\d+)?\s*(?:元|块)"
+    r"|[¥￥]\s*\d+(?:\.\d+)?\s*(?:至|到|-|~|—)\s*(?:[¥￥]\s*)?\d+"
+)
+# ⚠️ 别用光秃秃的「区间」：新疆的「区间车票」是**正经票种**，用「区间」当模糊词会把
+#    巴音布鲁克「票价：140元（包含门票+区间车票）」这种真价一律否掉（2026-10-07 实测抓到）。
+#    模糊的是"对价格本身的限定"，所以只匹配带"价"的写法。
+_TICKET_PRICE_VAGUE = (
+    "不等",
+    "常见",
+    "价格区间",
+    "票价区间",
+    "区间价",
+    "大约",
+    "左右",
+    "起价",
+    "数十",
+    "几百",
+    "以现场",
+)
 
 
 def extract_ticket_price(
@@ -945,7 +966,16 @@ def extract_ticket_price(
     raw = str(text or "")
     if not raw:
         return None
-    name = str(require_name or "").strip()
+    # `require_name` 可以是**一组名字**（2026-10-07）：按别名匹配到的景区，
+    # 页面写的是它的**官方名**而不是我们方案里的节点名
+    # （实测：节点「天鹅湖公园」通过别名命中巴音布鲁克景区，页面写的是「巴音布鲁克景区联票」——
+    #  只认节点名就会把 140 元这条**真价**否掉）。给一组名字，命中任意一个即可。
+    if isinstance(require_name, (list, tuple, set)):
+        names = [str(item or "").strip() for item in require_name]
+        names = [item for item in names if item]
+    else:
+        single = str(require_name or "").strip()
+        names = [single] if single else []
     span = max(10, int(name_window or 30))
     for pattern in _TICKET_PRICE_PATTERNS:
         for match in pattern.finditer(raw):
@@ -960,7 +990,7 @@ def extract_ticket_price(
                 continue
             if not any(marker in window for marker in _TICKET_CONTEXT_MARKERS):
                 continue
-            if name and name not in window:
+            if names and not any(item in window for item in names):
                 continue
             try:
                 value = float(match.group(1))
@@ -983,7 +1013,8 @@ def extract_ticket_price(
     free_match = _TICKET_FREE_PATTERN.search(raw)
     if free_match:
         window = raw[max(0, free_match.start() - 30): free_match.end() + 30]
-        if name and name not in window:
+        # 名字可以是一组（别名命中的景区页面写的是官方名）
+        if names and not any(item in window for item in names):
             return None
         if not any(marker in window for marker in _TICKET_PRICE_VAGUE):
             return {"value": 0.0, "excerpt": window.strip()[:80], "context": "ticket"}

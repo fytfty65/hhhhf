@@ -63,12 +63,27 @@ OFFICIAL_SITES: List[Dict[str, Any]] = [
         "site": "https://www.byblk.cn/",
         "miniprogram": "巴音布鲁克旅游",
         "note": "官网票务页公示**联票 140 元（含门票+区间车）**；官方购票平台为微信小程序『巴音布鲁克旅游』",
+        # 👑 2026-10-07 实测：服务端只回 1432 字符壳页，用**无头浏览器渲染**后正文里明确写着
+        #    「票价：140元（包含门票+区间车票）」→ 这条能拿到**可核实**的官方价。
         "price_page_rendered": True,
+        "price_pages": ["https://www.byblk.cn/goumaiyuding/"],
+        "renderable": True,
         "reference_prices": [{"label": "联票（门票+区间车）", "value": 140}],
-        "reference_source": "用户提供的官方页数字（本机抓取不到：票价页为客户端渲染）",
-        "verified": "2026-10-07 用户提供域名与票价；本机实测域名可达、票价页 JS 渲染",
+        "reference_source": "用户提供的官方页数字（已用无头浏览器在本机核实到同值）",
+        "verified": "2026-10-07 用户提供域名与票价；本机渲染实测页面写着「票价：140元（包含门票+区间车票）」",
     },
 ]
+
+# 罗布人村寨的备注补充（渲染后仍无票价）：这一条是实测结论，写在数据里免得以后重复试。
+LOBUREN_RENDER_NOTE = (
+    "官网与渲染后的页面里都**没有票价文本**（票价只在微信小程序『罗布人村寨』里公布）——"
+    "本机拿不到一手价，只提供官方渠道"
+)
+for _entry in OFFICIAL_SITES:
+    if _entry["key"] == "loburen_village":
+        _entry["renderable"] = True
+        _entry["price_pages"] = ["https://www.xjlbr.com/ykdp", "https://www.xjlbr.com/ykdp.html"]
+        _entry["render_note"] = LOBUREN_RENDER_NOTE
 
 
 def registered_hosts() -> List[str]:
@@ -109,6 +124,41 @@ def official_site_for(name: str, city: str = "") -> Optional[Dict[str, Any]]:
     return None
 
 
+def _ticket_snippet(text: str, value: float) -> str:
+    """从整页正文里挑一句**带票价的短句**当摘要（别把整页开头塞给用户）。
+
+    实测：渲染后的巴音布鲁克票务页窗口摘要长这样「克 精彩攻略 旅游助手 党建园地 English…
+    游玩时段： 全年 08:30-19:00 票价： 140元（包含门票+区间车票）」——
+    用户要看的是「票价：140元（包含门票+区间车票）」这一句。
+    """
+    number = str(int(value)) if float(value).is_integer() else str(value)
+    lines = [raw.strip() for raw in str(text or "").splitlines()]
+    snippets = []
+    for index, line in enumerate(lines):
+        if not line or number not in line:
+            continue
+        position = line.find(number)
+        best = ""
+        for word in ("票价", "门票", "联票", "区间车", "观光车"):
+            at = line.rfind(word, 0, position + len(number))
+            if at < 0:
+                continue
+            segment = line[at: position + len(number) + 20].strip()
+            if segment and (not best or len(segment) < len(best)):
+                best = segment
+        if not best:
+            # 实测渲染后的官方票务页是**分行**的：「票价：」在上一行、「140元（包含门票+区间车票）」在下一行
+            previous = next((item for item in reversed(lines[:index]) if item), "")
+            if previous and any(word in previous for word in ("票价", "门票", "联票", "区间车", "观光车")):
+                best = f"{previous} {line}".strip()
+        if best:
+            snippets.append(best)
+    if not snippets:
+        return ""
+    # 最短的那句通常就是"票价：140元（包含门票+区间车票）"，比长段落更像摘要
+    return min(snippets, key=len)[:80]
+
+
 def channel_summary(entry: Mapping[str, Any]) -> Dict[str, Any]:
     """给方案/前端用的**官方渠道**信息（不含我们没抓到的价格）。"""
     return {
@@ -122,7 +172,7 @@ def channel_summary(entry: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 async def lookup_official_site_price(
-    name: str, *, city: str = "", fetch_text: Any = None
+    name: str, *, city: str = "", fetch_text: Any = None, render_text: Any = None
 ) -> Dict[str, Any]:
     """登记表通道取价：能读到官方页就抽价；读不到就**如实说明**并给出官方渠道。
 
@@ -143,6 +193,61 @@ async def lookup_official_site_price(
         "source_url": channel["official_site"],
         "official_channel": channel,
     }
+    # 👑 客户端渲染的票价页：先用**无头浏览器**渲染再抽价（2026-10-07 用户同意上浏览器）。
+    #    实测：巴音布鲁克渲染后正文写着「票价：140元（包含门票+区间车票）」→ 可核实；
+    #    罗布人村寨渲染后仍无票价（只在微信小程序里公布）→ 如实说。
+    if entry.get("price_page_rendered") and entry.get("renderable"):
+        from .rendered_page import render_page_text
+
+        renderer = render_text or render_page_text
+        for price_url in entry.get("price_pages") or []:
+            try:
+                rendered = await renderer(price_url)
+            except Exception as exc:
+                rendered = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:80]}"}
+            if not rendered.get("ok"):
+                continue
+            text = str(rendered.get("text") or "")
+            # 页面写的是**官方名**，我们方案里的节点名可能是别名（实测：节点「天鹅湖公园」
+            # 命中巴音布鲁克景区，而页面写「巴音布鲁克景区联票 票价：140元」）——
+            # 所以这里把登记表里的所有名字都当作"允许出现在价格附近"的名字。
+            acceptable = [str(entry.get("name") or "")] + [str(item) for item in entry.get("aliases") or []] + [name]
+            ticket = extract_ticket_price(text, require_name=acceptable, name_window=160) if text else None
+            if not ticket:
+                # 渲染成功但这页没有门票口径的价 → 试下一页；都试完落到下面的"如实说明"
+                continue
+            return build_observation(
+                name=name,
+                value=float(ticket["value"]),
+                source="official",
+                source_url=price_url,
+                excerpt=_ticket_snippet(text, float(ticket["value"])) or str(ticket.get("excerpt") or ""),
+                provider="official_site",
+                label="门票",
+            ) | {
+                "official_channel": channel,
+                "rendered": True,
+                "render_seconds": rendered.get("seconds"),
+                "matched_via": "rendered_official_page",
+            }
+        reference = "、".join(
+            f"{item.get('label')} {item.get('value')} 元" for item in entry.get("reference_prices") or []
+        )
+        render_note = str(entry.get("render_note") or "官方票价页是**客户端渲染**，渲染后也没读到票价")
+        return base | {
+            "note": (
+                render_note
+                + "；官方渠道："
+                + (
+                    f"微信小程序『{channel['official_miniprogram']}』"
+                    if channel["official_miniprogram"]
+                    else channel["official_site"]
+                )
+                + (f"；你提供的官方页参考：{reference}（{entry.get('reference_source')}）" if reference else "")
+            ),
+            "official_channel": channel | {"reference_prices": entry.get("reference_prices") or []},
+            "rendered": False,
+        }
     if entry.get("price_page_rendered"):
         # 实测：票价页是 JS 渲染，服务端抓不到 → 不猜价，只给官方渠道
         reference = "、".join(

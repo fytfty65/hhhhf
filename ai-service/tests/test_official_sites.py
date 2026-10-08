@@ -50,18 +50,95 @@ class RegistryTests(unittest.TestCase):
 
 class LookupTests(unittest.TestCase):
     def test_js_rendered_price_page_says_so_and_gives_the_channel(self):
-        """实测：罗布人村寨的票价页是客户端渲染（所有子页都返回同一份 2490 字符壳）。"""
-        observation = asyncio.run(lookup_official_site_price("罗布人村寨", city="库尔勒"))
+        """罗布人村寨：渲染后**仍然**没有票价（只在微信小程序里公布）→ 如实说，不猜价。"""
+
+        async def fake_render(url):
+            return {"ok": True, "url": url, "text": "罗布人村寨 在线预订 游客须知 交通指南 每日运营时段：10:00至21:00", "seconds": 5.4}
+
+        observation = asyncio.run(
+            lookup_official_site_price("罗布人村寨", city="库尔勒", render_text=fake_render)
+        )
         self.assertIsNone(observation["value"], "抓不到就不许编价")
         channel = observation.get("official_channel") or {}
         self.assertEqual(channel.get("official_miniprogram"), "罗布人村寨")
-        self.assertIn("客户端渲染", observation["note"])
+        self.assertIn("微信小程序", observation["note"])
         self.assertIn("35", observation["note"], "用户给的参考价要原样带出并标明出处")
         self.assertEqual(observation["source"], "official")
+        self.assertFalse(observation.get("rendered"))
         self.assertIn("未授权", str(channel.get("official_channel_note")))
 
+    def test_rendered_official_page_yields_a_verifiable_price(self):
+        """巴音布鲁克：渲染后正文写着「票价：140元（包含门票+区间车票）」→ 采为官方可核实价。"""
+
+        async def fake_render(url):
+            return {
+                "ok": True,
+                "url": url,
+                "text": "门票预定 景点门票： 巴音布鲁克景区联票 游玩时段： 全年 08:30-19:00 票价： 140元（包含门票+区间车票）",
+                "seconds": 3.8,
+            }
+
+        observation = asyncio.run(
+            lookup_official_site_price("巴音布鲁克", city="库尔勒", render_text=fake_render)
+        )
+        self.assertEqual(observation["value"], 140.0)
+        self.assertEqual(observation["source"], "official")
+        self.assertTrue(observation.get("rendered"))
+        self.assertEqual(observation.get("matched_via"), "rendered_official_page")
+        self.assertEqual(observation["excerpt"], "票价： 140元（包含门票+区间车票）", "摘要要是带票价的那句，不是整页开头")
+        self.assertEqual((observation.get("official_channel") or {}).get("official_miniprogram"), "巴音布鲁克旅游")
+
+    def test_rendered_page_with_price_on_its_own_line_gets_a_clean_excerpt(self):
+        """实测渲染后的官方票务页是**分行**的：「票价：」一行、金额一行 —— 摘要要把两句接起来。"""
+
+        async def fake_render(url):
+            return {
+                "ok": True,
+                "url": url,
+                "text": "门票预定\n景点门票：\n巴音布鲁克景区联票\n游玩时段：\n全年 08:30-19:00\n票价：\n140元（包含门票+区间车票）\n预定须知：",
+                "seconds": 3.8,
+            }
+
+        observation = asyncio.run(
+            lookup_official_site_price("巴音布鲁克", city="库尔勒", render_text=fake_render)
+        )
+        self.assertEqual(observation["value"], 140.0)
+        self.assertEqual(observation["excerpt"], "票价： 140元（包含门票+区间车票）")
+
+    def test_alias_matched_node_still_gets_the_official_price(self):
+        """节点名与官方名不同（别名命中的）也要拿到价。
+
+        实测：和静方案里节点是「天鹅湖公园」（巴音布鲁克景区里的天鹅湖），
+        页面写的是「巴音布鲁克景区联票 票价：140元」。只认节点名就会把这条真价否掉。
+        """
+
+        async def fake_render(url):
+            return {
+                "ok": True,
+                "url": url,
+                "text": "景点门票： 巴音布鲁克景区联票 票价： 140元（包含门票+区间车票）",
+                "seconds": 3.0,
+            }
+
+        observation = asyncio.run(
+            lookup_official_site_price("天鹅湖公园", city="和静", render_text=fake_render)
+        )
+        self.assertEqual(observation["value"], 140.0)
+        self.assertEqual(observation["excerpt"], "票价： 140元（包含门票+区间车票）", "摘要要截到带票价的那一句")
+
+    def test_render_failure_is_reported_honestly(self):
+        async def fake_render(url):
+            return {"ok": False, "url": url, "error": "TimeoutError: 渲染超时（25s）"}
+
+        observation = asyncio.run(
+            lookup_official_site_price("巴音布鲁克", city="库尔勒", render_text=fake_render)
+        )
+        self.assertIsNone(observation["value"])
+        self.assertIn("客户端渲染", observation["note"])
+        self.assertIn("微信小程序", observation["note"])
+
     def test_readable_official_page_still_yields_a_verifiable_price(self):
-        """页面读得到就照常抽价（这条路径给"将来页面改成服务端渲染"留好）。"""
+        """页面服务端读得到就照常抽价（巴楚红海这条路径留着）。"""
 
         async def fake_fetch(url, **kwargs):
             return {"ok": True, "text": FIXTURE_HTML}

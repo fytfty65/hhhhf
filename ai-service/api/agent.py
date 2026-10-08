@@ -6235,6 +6235,54 @@ async def run_negotiate(msg: GatewayMessage):
 
                                     _observations = []
                                     _early_stop_reason = ""
+                                    # 👑 **通道优先的前置一轮**（2026-10-07 实测抓到的问题）：
+                                    #    「官方站点」这条通道是**可靠**的（无头浏览器渲染一页 ≈3s，且有落盘缓存），
+                                    #    但如果它排在通用搜索后面，通用搜索的"早停"一触发，后面的节点
+                                    #    **根本不会被问到** —— 实测和静方案里「天鹅湖公园」能拿到官方 140 元，
+                                    #    却因为前 7 个节点搜索全失败而早停，一条都没取到。
+                                    #    所以先把**登记表里有的**节点查一遍（一次运行里每个站点只渲染一次），
+                                    #    再把剩下的交给搜索；已拿到价的节点不再进搜索队列。
+                                    _channel_first: List[Dict[str, Any]] = []
+                                    try:
+                                        from core.official_sites import official_site_for as _site_for
+
+                                        _matched_targets = [
+                                            _target
+                                            for _target in _web_targets
+                                            if _site_for(str(_target.get("name") or ""), target_city)
+                                        ]
+                                        for _target in _matched_targets:
+                                            try:
+                                                _channel_first.append(await _lookup_bounded(_target))
+                                            except Exception as _channel_exc:
+                                                print(
+                                                    f"⚠️ [通道优先] {_target.get('name')} 失败: "
+                                                    f"{type(_channel_exc).__name__}",
+                                                    flush=True,
+                                                )
+                                        if _channel_first:
+                                            _hit = [
+                                                str(item.get("name"))
+                                                for item in _channel_first
+                                                if isinstance(item, Mapping) and item.get("value") is not None
+                                            ]
+                                            print(
+                                                f"🏛️ [通道优先] 官方站点通道先查 {len(_channel_first)} 个节点，"
+                                                f"拿到价 {len(_hit)} 个{('：' + '、'.join(_hit)) if _hit else ''}",
+                                                flush=True,
+                                            )
+                                    except Exception as _channel_first_exc:
+                                        print(f"⚠️ [通道优先] 前置一轮失败: {_channel_first_exc}", flush=True)
+                                    _channel_names = {
+                                        str(item.get("name"))
+                                        for item in _channel_first
+                                        if isinstance(item, Mapping) and item.get("value") is not None
+                                    }
+                                    _web_targets = [
+                                        _target
+                                        for _target in _web_targets
+                                        if str(_target.get("name") or "") not in _channel_names
+                                    ]
                                     # 酒店已经由 RollingGo（可核实来源）查过，这里只跑**剩下的**缺价节点：
                                     # 否则"所有源连续失败"的早停会被酒店查询的结果干扰，白等一轮。
                                     for _index, _item in enumerate(_web_targets):
@@ -6265,6 +6313,7 @@ async def run_negotiate(msg: GatewayMessage):
                                             print(f"⏹️ [联网取价] {_early_stop_reason}", flush=True)
                                             break
                                         _observations.append(await _lookup_bounded(_item))
+                                    _observations = list(_channel_first) + list(_observations)
                                     _merged = merge_observations(final_data, list(_observations))
                                     if _merged["updated"]:
                                         final_data["route"] = _merged["plan"]["route"]
@@ -6446,7 +6495,9 @@ async def run_negotiate(msg: GatewayMessage):
                                         "not_looked_up": max(0, _pending_total - len(_targets)),
                                     }
                                     print(
-                                        f"🌐 [联网取价] 查了 {len(_web_targets)} 个缺价节点，补到 {len(_filled)} 条"
+                                        f"🌐 [联网取价] 查了 {len(_web_targets)} 个缺价节点"
+                                        + (f"（另有 {len(_channel_first)} 个走官方通道前置）" if _channel_first else "")
+                                        + f"，补到 {len(_filled)} 条"
                                         f"（预算 {_price_budget:.0f}s，来源可达={_reachable}"
                                         + (f"，超预算 {len(_timed_out)} 个" if _timed_out else "")
                                         + "）"
