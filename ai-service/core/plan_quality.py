@@ -935,8 +935,12 @@ def _coarse_category(node: Mapping[str, Any]) -> str:
        因为它的地址"焉耆盆地东南**面**博湖县境内"里有个单字「面」，
        而 `PREFERENCE_TAXONOMY` 的 food 组含「面」，且 dict 顺序上 food 在 scenic 之前。
        抽查表因此把风景名胜的类别写成"餐饮"，人工审阅时直接被带偏。
-    ② **desc 里带地址，不参与关键词匹配**；且**单字关键词一律不用**
-       （与 `_is_anchor_side` 同一口径：「面」会命中"东南面/后面"）。
+    ② **desc 里带地址，不参与关键词匹配**。
+       ⚠️ 注意与 `candidate_index` 的口径对齐（那里 2026-10-07 就修过同一个坑，
+       注释里点名的正是「胡杨书院」"巴楚博物馆后**面**"）：
+       **单字关键词只在 `desc` 上禁用，在名称/标签上是安全的** ——
+       因为名称与标签是结构化短字段，不含地址。所以这里**不**对名称/标签设 ≥2 字门槛
+       （否则「老面馆」这种没写 type 的真饭点会被漏成 other —— 我第一版就是这么错的）。
     """
     base = category_of(node)
     if base != "other":
@@ -944,13 +948,13 @@ def _coarse_category(node: Mapping[str, Any]) -> str:
     # ① 结构化 `type` 先行：它就是平台给的分类，比拿文本猜可靠得多。
     #    这里用 node_contract 的 CATEGORY_ALIASES（**唯一一把尺子**），
     #    不再自己另搞一套关键词 —— 「餐饮服务」这种平台类型名要能认出来
-    #    （`PREFERENCE_TAXONOMY.food` 里只有单字「餐」，我先前用 ≥2 字过滤会把它漏掉）。
+    #    （`PREFERENCE_TAXONOMY.food` 里只有单字「餐」，用 ≥2 字过滤会把它漏掉）。
     type_text = str(node.get("type") or "")
     if type_text:
         mapped = normalize_category(type_text)
         if mapped in COARSE_CATEGORY_LABELS:
             return mapped
-    # ② 再用 tags + 名称兜底（仍然**不带 desc**、**不用单字**）。
+    # ② 再用 名称 + 标签 兜底（**不带 desc**）。
     #    明确的文化场馆词优先于"山/湖/公园"等泛自然词，避免"天山博物院"被误判为 scenic。
     tags = node.get("tags") or []
     if isinstance(tags, str):
@@ -959,7 +963,7 @@ def _coarse_category(node: Mapping[str, Any]) -> str:
     if any(keyword in text for keyword in ("博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆")):
         return "cultural"
     for label, keywords in PREFERENCE_TAXONOMY.items():
-        if any(len(str(keyword)) >= 2 and str(keyword) in text for keyword in keywords):
+        if any(str(keyword) in text for keyword in keywords):
             return label
     return "other"
 

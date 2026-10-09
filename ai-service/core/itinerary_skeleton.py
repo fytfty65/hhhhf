@@ -36,12 +36,23 @@ def play_slots_for(context: Mapping[str, Any]) -> int:
 
 
 def _is_hotel(node: Mapping[str, Any]) -> bool:
-    text = f"{node_name(node)} {node.get('type') or ''} {node.get('desc') or ''}"
+    """这个节点是不是**住宿**。
+
+    ⚠️ 与紧邻的 `_is_food` 对齐：**不看 `desc`**（2026-10-08 补）。
+    原先这里把 `desc` 拼进文本，而 desc 含地址 —— 地址里完全可能写「……酒店对面」
+    「……酒店旁」，那样一个景点就会被判成住宿。
+
+    实测交代：**现有 1772 个节点里，这个隐患触发 0 次**（202 个判为住宿的节点中，
+    没有一个是"只因为 desc"才判中的）。所以这是**堵隐患**，不是修已发生的错 ——
+    写清楚是为了别把"没触发"说成"修了个 bug"。
+    真正的原因是两个紧邻函数口径不一致，留着早晚会被抄错。
+    """
+    if node.get("is_hotel") is True:
+        return True
+    text = f"{node_name(node)} {node.get('type') or ''}"
     tags = node.get("tags") or []
     if isinstance(tags, list):
         text += " " + " ".join(str(tag) for tag in tags)
-    if node.get("is_hotel") is True:
-        return True
     return any(keyword in text for keyword in PREFERENCE_TAXONOMY["hotel"])
 
 

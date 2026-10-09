@@ -778,6 +778,23 @@ class TestCoarseCategory(unittest.TestCase):
         """认不出来就老实说 other —— 不许硬塞（unknown ≠ 0 ≠ 估算）。"""
         self.assertEqual(_coarse_category({"name": "某地", "type": "体育休闲服务"}), "other")
 
+    def test_single_char_keywords_still_work_on_the_name(self):
+        """单字只对 `desc` 禁用，**名称/标签上必须照常生效**。
+
+        这条是我第一版修过头的地方：为了避开地址陷阱，我给关键词统一加了"≥2 字"门槛，
+        结果名称里只有单字线索的真饭点（「老面馆」，没有 type）被漏成 `other`。
+        名称与标签是**结构化短字段、不含地址**，所以单字是安全的。
+        口径与 `candidate_index`（2026-10-07 就修过同一个坑）保持一致。
+        """
+        for name in ("老面馆", "张记茶铺", "王婆粥店", "川味火锅"):
+            with self.subTest(name=name):
+                self.assertEqual(_coarse_category({"name": name}), "food")
+
+    def test_address_only_node_is_not_guessed(self):
+        """只剩一个带地址的 desc、别的什么都没有 → 老实说 other，不许猜。"""
+        node = {"name": "某无名节点", "desc": "地址：玫瑰庒园对面，往东200米"}
+        self.assertEqual(_coarse_category(node), "other")
+
 
 class TestHorizon(unittest.TestCase):
     """用户场景：一个月（30 天）的行程。"""
