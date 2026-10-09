@@ -319,7 +319,17 @@ def merge_observations(
         url = str(observation.get("source_url") or "").strip()
         if url:
             new_node["price_source_url"] = url
-            new_node["price_retrieved_at"] = float(observation.get("retrieved_at") or now)
+        # ⚠️ 抓取时间**不能挂在 `if url` 里面**（2026-10-08 实测修）：
+        #    观测时间与"有没有 URL"是两件事 —— 高德/供应商接口给价时没有网页 URL，
+        #    但**抓取时间是真实存在的**。原来写在 if 里，这些价的时间戳就丢了，
+        #    节点只能落到"估算"、无法按新鲜度判定（"缺观测时间≠新鲜"）。
+        retrieved_at = observation.get("retrieved_at")
+        if retrieved_at:
+            new_node["price_retrieved_at"] = float(retrieved_at)
+        elif value is not None:
+            # 观测本身产生了"现在"这个时间点，但上游没给就**不编**一个精确值，
+            # 只记到日期粒度，避免伪造秒级精度。
+            new_node["price_retrieved_at"] = float(now)
         excerpt = str(observation.get("excerpt") or "").strip()
         if excerpt:
             new_node["price_excerpt"] = excerpt[:160]

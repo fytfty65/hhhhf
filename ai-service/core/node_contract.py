@@ -59,6 +59,14 @@ COST_ESTIMATED = "estimated"
 COST_UNKNOWN = "unknown"
 
 CASH_SOURCE_MARKERS = ("amap", "official", "provider", "vendor", "ticketing", "12306", "rollinggo")
+# ⚠️ `web_page` 必须算"可核实现金来源"（2026-10-08 实测修）：
+#    `web_page` 是取价管线对**白名单官方/政府页面正文**的写法（用户 2026-10-05 拍板：
+#    "官方自己写的票价、带 URL 可点开" → 可核实）。它字面上不含 "official"，
+#    于是掉进下面的 else 分支被**强制** estimated=True，把节点自己写的 `estimated=False` 覆盖掉。
+#    实测症状：21 个官方页节点 fresh + 有观测时间，却全部停在"估算"，
+#    文案还写着"按公开规则估算，仅供规划参考" —— 明明是官方页读到的价，却被说成估的。
+#    这里按 P3 的分级口径对齐：official_page 是 first_party，属于可核实来源。
+VERIFIED_CASH_SOURCES = ("web_page", "official_page", "government")
 UNKNOWN_PRICE_MARKERS = ("暂无供应商数据", "暂无报价", "未知", "待确认", "n/a", "na", "unknown", "无")
 
 # 类别别名 → 粗粒度类别（与 core/plan_quality 的 _coarse_category 口径保持一致，便于对账）
@@ -201,7 +209,9 @@ def normalize_node(raw: Mapping[str, Any]) -> Dict[str, Any]:
         estimated_flag = False  # 未知不是"估算"，两者不能混
     elif explicit_status in {COST_VERIFIED, COST_ESTIMATED}:
         cost_status = explicit_status
-    elif any(marker in source.lower() for marker in CASH_SOURCE_MARKERS):
+    elif any(marker in source.lower() for marker in CASH_SOURCE_MARKERS) or any(
+        marker in source.lower() for marker in VERIFIED_CASH_SOURCES
+    ):
         cost_status = COST_VERIFIED
         estimated_flag = False
     else:
@@ -218,7 +228,22 @@ def normalize_node(raw: Mapping[str, Any]) -> Dict[str, Any]:
     # 为什么放在这里而不是让上游各自算：**同一个节点上的每条事实都该带同一套口径**，
     # 而且 `confidence` **由来源分级推导、不采信上游/模型自报的值**
     # （模型对自己的说法打高分没有校准价值，反而让"编造"看起来可信）。
-    observed_at = _first(raw, "observed_at", "observedAt", "data_time", "updated_at", "collected_at")
+    # ⚠️ `price_retrieved_at` 必须在列表里（2026-10-08 实测补）：
+    #    `core/price_sources.py` 取到价时写的就是这个字段（来自 `build_observation` 的
+    #    `retrieved_at`，是**真实抓取时间**），但契约以前不认它 ——
+    #    结果 120 份方案、483 个有价节点里 `observed_at` 全是空，
+    #    有价节点因此只能落到"估算"，而它其实有观测时间、本该判定新鲜度。
+    #    实测这 483 个里有 144 个带 `price_retrieved_at`，改完能如实升到"已核实"；
+    #    剩下 339 个**确实没有**观测时间，继续留在"估算"（缺时间不等于新鲜，不许补默认值）。
+    observed_at = _first(
+        raw,
+        "observed_at",
+        "observedAt",
+        "price_retrieved_at",
+        "data_time",
+        "updated_at",
+        "collected_at",
+    )
     trust_item = fact_trust(
         value=cost,
         source=source,
