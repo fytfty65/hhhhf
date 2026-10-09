@@ -983,7 +983,12 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
   // 一键换近点 / 换住这家：记住用户点了哪一处（数字=第几天、字符串='住宿'），用于即时反馈
   const [swappingDay, setSwappingDay] = useState<number | string | null>(null);
   const [realPath, setRealPath] = useState<[number, number][]>([]);
-  const [targetCityInfo, setTargetCityInfo] = useState<{name: string, lnglat: [number, number]} | null>(null);
+  // `resolution`：目的地是**怎么定下来的**（后端 2026-10-08 起下发）。
+  //   'matched'          = 从诉求里认出城市；
+  //   'fallback_default' = **没认出来**，用了兜底城市。
+  // 必须渲染出来：否则用户诉求没写清城市时，会拿到一份别处的行程却毫不知情
+  //（实测撞到过：诉求里提了喀什，最终产出武威）。这就是"没渲染出来的已做等于没做"。
+  const [targetCityInfo, setTargetCityInfo] = useState<{name: string, lnglat: [number, number], resolution?: string} | null>(null);
 
   const [weatherInfo, setWeatherInfo] = useState<any>(null);
   const [trafficInfo, setTrafficInfo] = useState<any>(null);
@@ -2097,6 +2102,17 @@ function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, init
           <div>
             <h2 className="text-2xl font-black text-slate-800 tracking-tight">{targetCityInfo ? targetCityInfo.name + '全景路线规划' : '规划您的行程'}</h2>
             <p className="text-xs text-slate-400 font-semibold mt-0.5">路线、预算与出行依据集中在这里</p>
+            {/* 目的地是兜底来的 → 必须如实说，不能让用户以为这是自己要的城市。
+                走克制的一行小字（不是大色块），与页面既有语气一致。 */}
+            {targetCityInfo?.resolution === 'fallback_default' && (
+              <p
+                data-testid="city-fallback-notice"
+                className="mt-1.5 text-xs leading-5 text-stone-500"
+              >
+                没从您的描述里认出目的地，以下按「{targetCityInfo.name}」生成。
+                <span className="text-stone-400"> 若不对，请在上方写明城市重新规划。</span>
+              </p>
+            )}
           </div>
           {phase === 'decision' && (
             // 工具栏折叠：常用的 4 个留在外面，其余收进「更多」。原来 10 个按钮挤成 3 列，又长又乱。

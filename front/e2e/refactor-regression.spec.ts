@@ -32,7 +32,13 @@ const user = {
 // `governance: true` 会额外下发 quality / budget_report 等核对字段 ——
 // 证据层的「行程核对说明」面板只有在有核对数据时才渲染（无数据按设计返回 null），
 // 所以需要断言该面板的用例必须显式打开这个开关，避免污染其余用例的渲染。
-async function installMocks(page: Page, options: { governance?: boolean } = {}) {
+// `cityResolution` 模拟后端 2026-10-08 起下发的目的地解析结果：
+//   'matched' 从诉求里认出了城市；'fallback_default' **没认出**、用了兜底城市。
+// 留空则完全不带该字段（模拟旧后端），用于验证"没有字段时不显示任何提示"。
+async function installMocks(
+  page: Page,
+  options: { governance?: boolean; cityResolution?: string } = {},
+) {
   await page.addInitScript((payload) => {
     const governanceJson = payload.governance
       ? '"quality":{"score":76.5,"verdict":"pass","gate_passed":true,"gate_failures":[],"unverifiable_count":0,' +
@@ -76,7 +82,14 @@ async function installMocks(page: Page, options: { governance?: boolean } = {}) 
         if (request.type !== 'agent_negotiate') return;
         setTimeout(() => {
           this.onmessage?.({
-            data: JSON.stringify({ type: 'target_city', payload: { name: '洛阳', lnglat: [112.45, 34.62] } }),
+            data: JSON.stringify({
+              type: 'target_city',
+              payload: {
+                name: '洛阳',
+                lnglat: [112.45, 34.62],
+                ...(payload.cityResolution ? { resolution: payload.cityResolution } : {}),
+              },
+            }),
           });
         }, 20);
         setTimeout(() => {
@@ -114,7 +127,7 @@ async function installMocks(page: Page, options: { governance?: boolean } = {}) 
       removeEventListener() {}
     }
     (window as unknown as { WebSocket: unknown }).WebSocket = MockWebSocket;
-  }, { user, governance: Boolean(options.governance) });
+  }, { user, governance: Boolean(options.governance), cityResolution: options.cityResolution ?? '' });
 
   await page.route('**/api/v1/**', (route) => {
     // Keep the professional diagnostics path deterministic without contacting
@@ -188,6 +201,39 @@ async function reachDecision(page: Page) {
 }
 
 test.describe('refactor regression', () => {
+  test('目的地是兜底来的就要如实说（不让用户以为是自己要的城市）', async ({ page }) => {
+    // 背景（2026-10-08 实测撞到）：诉求里没被认出城市时，后端会**静默**兜底到默认城市。
+    // 我那次诉求里写了喀什，最终产出的却是武威行程 —— 用户毫不知情。
+    // 后端已下发 `resolution=fallback_default`，前端**必须渲染出来**，
+    // 否则等于没做（本项目纪律：没渲染出来的"已做"等于没做）。
+    await installMocks(page, { cityResolution: 'fallback_default' });
+    await page.goto('/');
+    await reachDecision(page);
+
+    const notice = page.getByTestId('city-fallback-notice');
+    await expect(notice).toBeVisible();
+    // 要说清三件事：没认出、按哪个城市生成、怎么办
+    await expect(notice).toContainText('没从您的描述里认出目的地');
+    await expect(notice).toContainText('洛阳');
+    await expect(notice).toContainText('写明城市');
+  });
+
+  test('认出城市时不许出现兜底提示（负向对照）', async ({ page }) => {
+    // 只测"会显示"不够 —— 如果提示无条件常驻，用户会被误导成"系统总是没认出"。
+    await installMocks(page, { cityResolution: 'matched' });
+    await page.goto('/');
+    await reachDecision(page);
+    await expect(page.getByTestId('city-fallback-notice')).toHaveCount(0);
+  });
+
+  test('旧后端不带 resolution 字段时也不显示提示', async ({ page }) => {
+    // 兼容性：不能因为字段缺失就误报"没认出目的地"。
+    await installMocks(page);
+    await page.goto('/');
+    await reachDecision(page);
+    await expect(page.getByTestId('city-fallback-notice')).toHaveCount(0);
+  });
+
   test('lobby keeps every entry point', async ({ page }) => {
     await installMocks(page);
     await page.goto('/');
