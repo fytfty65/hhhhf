@@ -674,6 +674,39 @@ class TestCompoundIntentAndAnchoring(unittest.TestCase):
         self.assertNotIn("博斯腾湖风景名胜区", far_names, "玩点不该被当成'饭点太远'")
         self.assertEqual(report["checked"], 1, "只有宾馆算吃住侧节点")
 
+    def test_the_same_single_char_trap_in_a_museum_address(self):
+        """同一个「面」字的第二种写法：「博物馆后**面**」（2026-10-08 定量核到）。
+
+        ks20（喀什 17 节点）里「胡杨书院」的 desc 是
+        「…巴楚镇新村路(巴楚博物馆后面)…」，被同一个单字命中当饭点，
+        按 224.1km 扣分，anchoring 0.714 → 修好后 0.833。
+
+        两处误判是**同一个关键词的两种地址写法**，所以这里钉住第二种。
+        """
+        plan = {"route": [
+            {
+                "day": 1,
+                "name": "胡杨书院",
+                "type": "科教文化服务",
+                "tags": ["文化"],
+                "desc": "高德资料：科教文化服务｜评分 4.2｜巴楚镇新村路(巴楚博物馆后面)",
+                "lnglat": [78.55, 39.79],
+                "time": "Day 1 | 10:00 游览",
+            },
+            {
+                "day": 1,
+                "name": "巴楚县城宾馆",
+                "type": "住宿服务",
+                "is_hotel": True,
+                "lnglat": [78.56, 39.80],
+                "time": "Day 1 | 20:00 入住",
+            },
+        ]}
+        report = score_anchoring({}, plan)
+        far_names = [item["name"] for item in report["far_nodes"]]
+        self.assertNotIn("胡杨书院", far_names, "地址里的「后面」不该把它判成饭点")
+        self.assertEqual(report["checked"], 1, "只有宾馆算吃住侧节点")
+
     def test_a_real_meal_with_a_single_char_keyword_is_still_an_anchor(self):
         """反过来：真正的饭点（类型/标签明确）不能被漏掉。"""
         plan = {"route": [
