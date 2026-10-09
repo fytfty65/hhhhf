@@ -2836,6 +2836,10 @@ async def run_negotiate(msg: GatewayMessage):
         "成都", "北京", "上海", "广州", "深圳", "洛阳", "徐州", "海南", "海口", "三亚", "西安", "重庆", 
         "杭州", "南京", "武汉", "长沙", "拉萨", "青岛", "厦门", "哈尔滨", "大理", "丽江", "新疆", "西藏", "濮阳", "安阳"
     ]
+    # 识别不出城市时的兜底。**显式命名**，不再靠 `common_cities[0]` 的列表顺序 ——
+    # 否则以后有人调整数组顺序（比如把喀什提前）就会**悄悄改掉**默认城市。
+    DEFAULT_CITY = "武威"
+    city_resolution = "unresolved"
 
     # 👑 省份/自治区 -> 默认核心城市：避免将“新疆/西藏/甘肃”等省级行政区直接作为高德 city 参数查询，
     # 否则 POI 检索失败导致地点、图片、坐标全部失真
@@ -2886,8 +2890,17 @@ async def run_negotiate(msg: GatewayMessage):
         elif len(candidate_city) > 2 and candidate_city[-1] in ['州', '县', '区']:
             candidate_city = candidate_city[:-1]
         target_city = candidate_city
+        city_resolution = "matched"
     else:
-        target_city = "武威"
+        # ⚠️ 兜底城市（2026-10-08 查）：以前直接写 `target_city = "武威"`，
+        #    而"武威"只是 `common_cities` 数组的**第 0 个元素** —— 兜底值等于列表顺序的副作用。
+        #    危险在于它**静默**发生：诉求里没提城市时，系统会一本正经地规划武威，
+        #    用户完全不知道自己拿到的是个默认值（实测就撞上：诉求提了喀什但没进 intent_str，
+        #    最终产出武威行程）。
+        #    现在：保留这个默认（避免检索直接失败），但**记下这是兜底**，
+        #    由上层如实告知用户"没识别出目的地"，而不是假装这是用户要的城市。
+        target_city = DEFAULT_CITY
+        city_resolution = "fallback_default"
 
     # 👑 省级行政区自动收敛到省会/核心城市，保证高德检索能命中真实 POI
     target_city = province_default_city.get(target_city, target_city)
@@ -3072,7 +3085,15 @@ async def run_negotiate(msg: GatewayMessage):
             seed_payload = {
                 "final_data": seed_fd,
                 "budget_breakdown": budget_breakdown_payload,
-                "target_city": {"name": target_city, "lnglat": [float(x) for x in coord.split(",")] if coord and "," in coord else []},
+                "target_city": {
+                    "name": target_city,
+                    "lnglat": [float(x) for x in coord.split(",")] if coord and "," in coord else [],
+                    # 目的地是怎么定下来的：matched（从诉求里认出来）/
+                    # fallback_default（**没认出来**，用了兜底城市）。
+                    # 前端据此可以如实提示"没识别出目的地"，而不是让用户以为
+                    # 这份武威行程是自己要的（2026-10-08 实测撞到过）。
+                    "resolution": city_resolution,
+                },
             }
             print(f"🚀 [热门城市模板] {target_city} 命中预生成种子模板，首屏 < 1s", flush=True)
             return StreamingResponse(cached_stream(seed_payload), media_type="application/x-ndjson")
@@ -3107,18 +3128,29 @@ async def run_negotiate(msg: GatewayMessage):
 
         await asyncio.sleep(0.1)
 
+        # ⚠️ 以前整个是 `if coord and "," in coord:` 包着的，且 except 直接 pass ——
+        #    于是①没有坐标时**根本不发 target_city 事件**（前端拿不到目的地）；
+        #    ②坐标解析失败被静默吞掉，日志里什么都看不到（本项目记录过同类坑）。
+        #    现在：事件总是发（坐标能给就给），失败留下痕迹。
         if coord and "," in coord:
             try:
                 lon, lat = coord.split(",")
-                yield json.dumps({
-                    "type": "target_city", 
-                    "payload": {
-                        "name": target_city,
-                        "lnglat": [float(lon), float(lat)]
-                    }
-                }, ensure_ascii=False) + "\n"
-            except Exception:
-                pass
+                city_lnglat = [float(lon), float(lat)]
+            except Exception as exc:
+                print(f"⚠️ [目的地] 坐标解析失败（{coord!r}）：{exc}", flush=True)
+                city_lnglat = []
+        else:
+            city_lnglat = []
+        yield json.dumps({
+            "type": "target_city",
+            "payload": {
+                "name": target_city,
+                "lnglat": city_lnglat,
+                # 目的地是怎么定下来的（matched / fallback_default）：
+                # 没识别出城市时会静默用兜底城市出方案，前端需要能如实说出来。
+                "resolution": city_resolution,
+            }
+        }, ensure_ascii=False) + "\n"
 
         coord_task = toolbox.get_coordinates(target_city)
 
@@ -8311,7 +8343,11 @@ async def run_negotiate(msg: GatewayMessage):
                         asyncio.ensure_future(_semantic_cache.store(target_city, trip_days, profile_text, {
                             "final_data": final_data,
                             "budget_breakdown": budget_breakdown_payload,
-                            "target_city": {"name": target_city, "lnglat": [float(x) for x in coord.split(",")] if coord and "," in coord else []},
+                            "target_city": {
+                                "name": target_city,
+                                "lnglat": [float(x) for x in coord.split(",")] if coord and "," in coord else [],
+                                "resolution": city_resolution,
+                            },
                         }))
 
                     # P2P 精准导航计算（覆盖全部相邻节点，保证 5 天 25 个节点 24 对都有真实驾车/步行/公交导航）
