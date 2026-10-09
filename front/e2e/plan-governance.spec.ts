@@ -577,11 +577,13 @@ async function installMocks(page: Page) {
                               reviewed_at: '2026-10-08',
                             },
                             {
-                              // 查不到条目的节点也要**列出来**，但如实说"没有来源"
+                              // 查不到条目的节点也要**列出来**，但如实说"没有来源"。
+                              // 注意措辞要像人话：不要出现"不编造"这种自我辩护式的口吻
+                              //（那是说给开发者听的，不是给用户看的）。
                               name: '某冷门遗址',
                               background: '',
                               sources: [],
-                              note: '项目内可信知识库里没有这个地点的文化条目，未提供背景说明（不编造）',
+                              note: '暂无可靠来源，未提供背景说明。',
                             },
                           ],
                         },
@@ -1434,29 +1436,92 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     // 于是整页都渲染不出来（2026-10-08 被这个坑掉一次，误以为是组件问题）。
     const culturePanel = page.getByTestId('culture-panel');
     await expect(culturePanel).toBeVisible();
-    // 命中的条目：背景 + 出处链接 + 复核日期
+    // 命中的条目：背景 + 礼仪 + 出处链接（默认展开第一条）
     await expect(culturePanel).toContainText('中国第一座大型现代化国家级博物馆');
-    await expect(culturePanel).toContainText('当地礼仪');
-    await expect(culturePanel).toContainText('2026-10-08');
+    await expect(culturePanel).toContainText('入乡随俗');
     await expect(culturePanel.locator('a[href="https://www.sxhm.com/"]')).toBeVisible();
-    // 来源性质要写清是项目内知识库（不是官方发布）
-    await expect(culturePanel).toContainText('项目内可信知识库');
+
+    // 「去 AI 化」的两条硬要求（2026-10-08 用户点名）：界面上不许出现
+    //   ① 内部枚举值（knowledge_base / source_type / verified 这类）；
+    //   ② 字面 markdown 记号（** ** 是模型输出习惯，不是排版）。
+    const cultureText = (await culturePanel.innerText()) || '';
+    for (const jargon of ['knowledge_base', 'source_type', 'unknown', 'candidate']) {
+      expect(cultureText).not.toContain(jargon);
+    }
+    expect(cultureText).not.toContain('**');
+    // 日期要是给人看的写法，不是 ISO 字符串
+    expect(cultureText).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(cultureText).toContain('2026 年 10 月 8 日');
+
     // 查不到条目的节点**照样列出来**，并如实说明没有来源 —— 不许悄悄消失
     const unsourced = culturePanel.locator('[data-testid="culture-entry"][data-has-background="false"]');
     await expect(unsourced).toHaveCount(1);
-    await expect(unsourced).toContainText('不编造');
+    await expect(unsourced).toContainText('暂无可靠来源');
 
     const accessPanel = page.getByTestId('accessibility-panel');
     await expect(accessPanel).toBeVisible();
     // 没有数据时必须说"未核实"，**不许**判断"完全无障碍"
-    await expect(accessPanel.getByTestId('accessibility-summary')).toContainText('未核实');
+    //（摘要位置的措辞是"待确认"，正文里明说"不对能否顺利通行下结论"）
+    await expect(accessPanel.getByTestId('accessibility-summary')).toContainText('待确认');
+    await expect(accessPanel).toContainText('不对能否顺利通行下结论');
     await expect(accessPanel).toContainText('入口坡度');
     await expect(accessPanel).toContainText('电梯');
-    await expect(accessPanel).toContainText('卫生间');
+    await expect(accessPanel).toContainText('无障碍卫生间');
     await expect(accessPanel).toContainText('接驳车');
     for (const forbidden of ['完全无障碍', '无障碍设施齐全', '无需担心']) {
       await expect(accessPanel).not.toContainText(forbidden);
     }
+    // 去 AI 化同样适用：无障碍面板也不许露出内部枚举与 markdown 记号
+    const accessText = (await accessPanel.innerText()) || '';
+    expect(accessText).not.toContain('unknown');
+    expect(accessText).not.toContain('**');
+    // 未核实项要明确写出"未核实"，不能只留空白让人猜
+    await expect(
+      accessPanel.locator('[data-testid="accessibility-entry"][data-verified="false"]').first(),
+    ).toContainText('未核实');
+
+    // 排版要**用眼睛看**：E2E 只能断言文字在 DOM 里，看不出好不好看。
+    // 两块面板各留一张整图，供人工审阅（尤其"卡里字会不会太挤/太长"）。
+    await culturePanel.screenshot({ path: '../work/shot-culture-panel.png', animations: 'disabled' });
+    await accessPanel.screenshot({ path: '../work/shot-accessibility-panel.png', animations: 'disabled' });
+
+    // 自动化能替代一部分"用眼睛看"：把真正会毁掉版面的几种情况量出来。
+    // 这些都是可判定的，不必靠肉眼：
+    //   ① 正文行宽 —— 超过约 80 个中文字符/行会明显难读；
+    //   ② 横向溢出 —— 卡片被撑出容器，出现横向滚动条；
+    //   ③ 对比度过低 —— 说明文字淡到看不见。
+    const layout = await page.evaluate(() => {
+      const culture = document.querySelector('[data-testid="culture-panel"]') as HTMLElement | null;
+      const access = document.querySelector('[data-testid="accessibility-panel"]') as HTMLElement | null;
+      const widest = (root: HTMLElement | null) => {
+        if (!root) return { chars: 0, overflow: 0 };
+        let chars = 0;
+        let overflow = 0;
+        root.querySelectorAll('p').forEach((el) => {
+          const node = el as HTMLElement;
+          const style = window.getComputedStyle(node);
+          const fontSize = parseFloat(style.fontSize) || 14;
+          const width = node.getBoundingClientRect().width;
+          // 中文按一个字号宽估算每行可容纳的字数
+          chars = Math.max(chars, Math.round(width / fontSize));
+          overflow = Math.max(overflow, node.scrollWidth - node.clientWidth);
+        });
+        return { chars, overflow };
+      };
+      return {
+        culture: widest(culture),
+        access: widest(access),
+        bodyOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    // 行宽上限：留足余量（中文正文一行 ~60 字以内比较舒服）
+    console.log('排版实测:', JSON.stringify(layout));
+    expect(layout.culture.chars).toBeLessThanOrEqual(60);
+    expect(layout.access.chars).toBeLessThanOrEqual(60);
+    // 不许把页面撑出横向滚动条
+    expect(layout.culture.overflow).toBeLessThanOrEqual(1);
+    expect(layout.access.overflow).toBeLessThanOrEqual(1);
+    expect(layout.bodyOverflow).toBeLessThanOrEqual(1);
 
     await page.getByTestId('day-notices').first().screenshot({ path: '../work/plan-ledgers.png', animations: 'disabled' });
     // 换店标记也留一张（人工审阅：两行标签 + 官方简介在卡片里会不会太挤）
