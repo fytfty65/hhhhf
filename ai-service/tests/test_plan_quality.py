@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.itinerary_skeleton import build_skeleton, horizon_advisories, segment_days  # noqa: E402
 from core.plan_quality import (  # noqa: E402
     DEFAULT_WEIGHTS,
+    _coarse_category,
     check_hard_constraints,
     evaluate_plan,
     haversine_km,
@@ -716,6 +717,66 @@ class TestCompoundIntentAndAnchoring(unittest.TestCase):
         report = score_anchoring({}, plan)
         self.assertEqual(report["checked"], 1)
         self.assertEqual([item["name"] for item in report["far_nodes"]], ["兰州牛肉面"])
+
+
+class TestCoarseCategory(unittest.TestCase):
+    """类别判定：结构化 `type` 优先，`desc`（含地址）不参与，单字关键词不用。
+
+    2026-10-08 实测修。这两条与 anchoring 的误判是**同一个根**：「面」字在地址里
+    （"东南**面**"、"博物馆后**面**"）命中 food 关键词组。
+    这里更严重 —— 类别同时喂给抽查表的"类别"列，**人是照着那一列打分的**，
+    所以判错不只是内部数字错，会直接把人工审阅带偏。
+    """
+
+    def test_address_word_does_not_override_explicit_type(self):
+        """「风景名胜」不能因为地址里有「面」被判成 food。"""
+        node = {
+            "name": "博斯腾湖风景名胜区",
+            "type": "风景名胜",
+            "tags": ["风景"],
+            "desc": "高德资料：风景名胜｜评分 4.6｜巴音郭楞焉耆盆地东南面博湖县境内",
+        }
+        self.assertEqual(_coarse_category(node), "scenic")
+
+    def test_the_second_address_wording_is_also_safe(self):
+        """同源误判的第二种写法：「博物馆后面」。"""
+        node = {
+            "name": "胡杨书院",
+            "type": "科教文化服务",
+            "tags": ["文化"],
+            "desc": "高德资料：科教文化服务｜评分 4.2｜巴楚镇新村路(巴楚博物馆后面)",
+        }
+        self.assertEqual(_coarse_category(node), "cultural")
+
+    def test_amap_service_type_names_are_recognised(self):
+        """高德的结构化类型名要认出来（"餐饮服务"/"住宿服务" 这种）。
+
+        ⚠️ 这里有个我踩过的坑：第一次修的时候为了避开单字陷阱，
+        给关键词加了"≥2 字"过滤，结果 `food` 组里只有单字「餐」，
+        「餐饮服务」直接掉成 other —— **修一个错引出另一个错**。
+        所以要按 `CATEGORY_ALIASES`（唯一权威）来认类型名。
+        """
+        cases = {
+            "餐饮服务": "food",
+            "住宿服务": "hotel",
+            "风景名胜": "scenic",
+            "科教文化服务": "cultural",
+            "购物服务": "shopping",
+        }
+        for type_name, expected in cases.items():
+            with self.subTest(node_type=type_name):
+                self.assertEqual(
+                    _coarse_category({"name": "某地", "type": type_name}), expected
+                )
+
+    def test_real_meal_still_food(self):
+        """真正的饭点不能因为"desc 不参与"就判不出来（type 已经说明）。"""
+        node = {"name": "正宗河间驴肉火烧(新上海花园店)", "type": "餐饮服务", "desc": "高德资料：餐饮服务"}
+        self.assertEqual(_coarse_category(node), "food")
+
+    def test_unknown_type_is_not_forced_into_a_category(self):
+        """认不出来就老实说 other —— 不许硬塞（unknown ≠ 0 ≠ 估算）。"""
+        self.assertEqual(_coarse_category({"name": "某地", "type": "体育休闲服务"}), "other")
 
 
 class TestHorizon(unittest.TestCase):

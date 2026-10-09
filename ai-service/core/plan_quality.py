@@ -30,6 +30,15 @@ import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .simulation import category_of, cost_of, dwell_minutes_of, travel_minutes_of
+# 类别归一的**唯一权威**在 node_contract.CATEGORY_ALIASES。
+# 这里复用而不是自己再写一套关键词：`plan_quality` 与 `node_contract` 曾各有一套口径，
+# 结果同一份方案在两处得到不同类别（2026-10-08 抽查表上肉眼可见）。
+# 无循环依赖：node_contract 不 import 本模块。
+from .node_contract import CATEGORY_ALIASES as _CATEGORY_ALIASES  # noqa: E402
+from .node_contract import normalize_category  # noqa: E402
+
+#: `_coarse_category` 认得的粗粒度标签（= CATEGORY_ALIASES 的取值集合）
+COARSE_CATEGORY_LABELS = frozenset(_CATEGORY_ALIASES.values())
 
 # --------------------------------------------------------------------------
 # 默认参数（都可被 context / expectations 覆盖，禁止在代码里偷偷放宽）
@@ -918,21 +927,39 @@ def _coarse_category(node: Mapping[str, Any]) -> str:
 
     真实规划输出的 `type` 是中文（"餐饮"/"住宿"/"博物馆"…），而 CATEGORY_DWELL_SIGMA
     的键是英文，直接用它会让所有节点都落到 other、多样性失真。
+
+    ⚠️ 2026-10-08 实测修两处（抽查表上肉眼可见，影响人工打分的判读）：
+    ① **`type` 字段是结构化事实，要先于任何文本猜测**。以前完全不用它，
+       只把 name/type/desc 拼成一段文本去套关键词 —— 于是
+       「博斯腾湖风景名胜区」（type=风景名胜、tags=["风景"]）被判成 **food**，
+       因为它的地址"焉耆盆地东南**面**博湖县境内"里有个单字「面」，
+       而 `PREFERENCE_TAXONOMY` 的 food 组含「面」，且 dict 顺序上 food 在 scenic 之前。
+       抽查表因此把风景名胜的类别写成"餐饮"，人工审阅时直接被带偏。
+    ② **desc 里带地址，不参与关键词匹配**；且**单字关键词一律不用**
+       （与 `_is_anchor_side` 同一口径：「面」会命中"东南面/后面"）。
     """
     base = category_of(node)
     if base != "other":
         return base
-    text = f"{node_name(node)} {node.get('type') or ''} {node.get('desc') or ''}"
+    # ① 结构化 `type` 先行：它就是平台给的分类，比拿文本猜可靠得多。
+    #    这里用 node_contract 的 CATEGORY_ALIASES（**唯一一把尺子**），
+    #    不再自己另搞一套关键词 —— 「餐饮服务」这种平台类型名要能认出来
+    #    （`PREFERENCE_TAXONOMY.food` 里只有单字「餐」，我先前用 ≥2 字过滤会把它漏掉）。
+    type_text = str(node.get("type") or "")
+    if type_text:
+        mapped = normalize_category(type_text)
+        if mapped in COARSE_CATEGORY_LABELS:
+            return mapped
+    # ② 再用 tags + 名称兜底（仍然**不带 desc**、**不用单字**）。
+    #    明确的文化场馆词优先于"山/湖/公园"等泛自然词，避免"天山博物院"被误判为 scenic。
     tags = node.get("tags") or []
     if isinstance(tags, str):
         tags = [tags]
-    text = text + " " + " ".join(str(tag) for tag in tags)
-    # 明确的文化场馆词优先于“山/湖/公园”等泛自然词，避免“天山博物院”
-    # 被误判为 scenic，进而错误满足自然景观配额。
+    text = f"{node_name(node)} {' '.join(str(tag) for tag in tags)}"
     if any(keyword in text for keyword in ("博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆")):
         return "cultural"
     for label, keywords in PREFERENCE_TAXONOMY.items():
-        if any(keyword in text for keyword in keywords):
+        if any(len(str(keyword)) >= 2 and str(keyword) in text for keyword in keywords):
             return label
     return "other"
 
