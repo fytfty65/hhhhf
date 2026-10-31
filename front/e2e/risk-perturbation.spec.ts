@@ -133,6 +133,8 @@ async function installMocks(page: Page, perturbation: unknown) {
 
   await page.route('**/api/v1/**', (route) => route.fulfill({ json: { ok: true, success: true, data: {} } }));
   await page.route('**/api/auth/login', (route) => route.fulfill({ json: { message: '登录成功', token: user.token, user } }));
+  // WebSocket 使用一次性票据，不再把长期令牌放进 URL。
+  await page.route('**/api/auth/ws-ticket', (route) => route.fulfill({ json: { ticket: 'e2e-ws-ticket', expires_in: 60 } }));
   await page.route('**/api/user/**', (route) => route.fulfill({ json: { ok: true, user, trips: [] } }));
   await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
 }
@@ -142,8 +144,8 @@ async function reachExecutionLayer(page: Page) {
   await page.getByTestId('join-room-submit').click();
   await expect(page.getByTestId('room-code')).not.toBeEmpty();
   await page.getByTestId('begin-plan').click();
-  await expect(page.getByText('进入共识沙盘')).toBeVisible({ timeout: 10_000 });
-  await page.getByText('进入共识沙盘').click();
+  await expect(page.getByText('查看规划方案')).toBeVisible({ timeout: 10_000 });
+  await page.getByText('查看规划方案').click();
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
   await page.locator('textarea').first().fill('去西安 2 天，想看博物馆和吃小吃');
   await page.getByText('生成行程方案').click();

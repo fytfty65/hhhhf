@@ -19,11 +19,34 @@ import TeamPresenceBar from './TeamPresenceBar';
 import ConsensusExplainability from './ConsensusExplainability';
 import ScenarioSimulator from './ScenarioSimulator';
 
+/**
+ * 天气是外部供应商数据，必须能说清"什么时候取到的、是不是缓存"。
+ * 后端从 2026-10-28 起下发 fetched_at / cached / cache_age_seconds；
+ * 没下发时如实说"未提供采集时间"，不假装是刚刚的实时数据。
+ */
+function weatherFreshnessLabel(weather: any): string {
+  const fetchedAt = typeof weather?.fetched_at === 'string' ? weather.fetched_at : '';
+  if (!fetchedAt) return '供应商未提供采集时间';
+  const timestamp = new Date(fetchedAt);
+  if (Number.isNaN(timestamp.getTime())) return '供应商未提供采集时间';
+  const timeText = timestamp.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  if (weather?.cached) {
+    const ageMinutes = Math.max(0, Math.round(Number(weather?.cache_age_seconds || 0) / 60));
+    return `采集于 ${timeText} · 来自缓存（约 ${ageMinutes} 分钟前取到）`;
+  }
+  return `采集于 ${timeText} · 实时获取`;
+}
+
 export default function MafengwoStylePanel({ 
   routes, totalDays, activeDayIndex, onSelectDay, travelDetails, selectedPoiIndex, 
   onSelectPoi, weatherInfo, trafficInfo, onReset, consensusSummary, budgetData, 
-  onSwapPoi, onMarkVisited, visitedNodes = [], roomCode, roomMembers, teamSatisfaction, arbitrationRecords, nodeVotes, onVote,
-  wsConnected = true, fairnessAudit,
+  onSwapPoi, onMarkVisited, visitedNodes = [], roomCode, roomMembers, teamSatisfaction, arbitrationRecords, nodeVotes, peerVoteCounts, onVote,
+  wsConnected = true, fairnessAudit, memberNegotiation,
   safetyInfo, safetyBrief, briefLoading, onGenerateSafetyBrief, targetCity,
   onPhotoClick, currentUser, onApplyScenario, onSecondaryPlan, planLedgers
 }: any) {
@@ -60,6 +83,7 @@ export default function MafengwoStylePanel({
           route={routes || []}
           members={(roomMembers || []).map((member: any) => ({ id: member.id, name: member.name, interestTags: member.intent ? [member.intent] : [] }))}
           fairnessAudit={fairnessAudit}
+          memberNegotiation={memberNegotiation}
         />
         <ScenarioSimulator
           route={routes || []}
@@ -82,6 +106,7 @@ export default function MafengwoStylePanel({
                 <div>
                   <h4 className="text-sm font-black text-slate-800">目的地气象：{weatherInfo.condition}</h4>
                   <p className="text-xs text-slate-500 mt-0.5 font-medium">{trafficInfo?.advice || '暂无供应商路况数据，请在出行前重新获取'}</p>
+                  <p className="text-[11px] text-slate-400 mt-1 font-medium" data-testid="weather-fetched-at">{weatherFreshnessLabel(weatherInfo)}</p>
                 </div>
               </div>
               <button 
@@ -180,8 +205,9 @@ export default function MafengwoStylePanel({
 
           {Array.isArray(routes) && routes.map((pt: any, idx: number) => {
             const isSelected = selectedPoiIndex === idx;
+            const peerVotes = peerVoteCounts?.[pt.name];
+            const hasPeerVotes = Boolean(peerVotes && (peerVotes.up > 0 || peerVotes.down > 0));
 
-            const validPhotoUrls = (pt.photos || []).filter((u: string) => Boolean(u && (u.startsWith('http') || u.startsWith('//'))));
             const fallbackImg = getCleanPhotoUrl(pt.map_image || '');
 
             // 👑 地点详情链接：优先后端回填的 amap_url，缺失时回退到高德关键词搜索，保证"查看详情"永远可点击
@@ -191,14 +217,29 @@ export default function MafengwoStylePanel({
 
             return (
               <div key={`poi-node-card-${pt.name}-${idx}`} className="relative mb-10">
-                <div 
+                <button
+                  type="button"
+                  aria-label={`查看第 ${idx + 1} 个节点：${pt.name}`}
                   onClick={() => onSelectPoi(idx)}
-                  className={`absolute -left-[30px] top-0.5 w-7 h-7 rounded-full flex items-center justify-center text-[12px] font-black cursor-pointer transition-all z-10 ${isSelected ? 'bg-orange-500 text-white shadow-lg shadow-orange-300 ring-4 ring-orange-100 scale-110' : 'bg-white text-slate-500 border-2 border-slate-300 hover:border-orange-400'}`}
+                  className={`absolute -left-[30px] top-0.5 w-7 h-7 p-0 rounded-full flex items-center justify-center text-[12px] font-black cursor-pointer transition-all z-10 ${isSelected ? 'bg-orange-500 text-white shadow-lg shadow-orange-300 ring-4 ring-orange-100 scale-110' : 'bg-white text-slate-500 border-2 border-slate-300 hover:border-orange-400'}`}
                 >
                   {idx + 1}
-                </div>
+                </button>
 
-                <div className="cursor-pointer group" onClick={() => onSelectPoi(idx)}>
+                <div
+                  className="cursor-pointer group"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`查看 ${pt.name} 详情`}
+                  onClick={() => onSelectPoi(idx)}
+                  onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return;
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onSelectPoi(idx);
+                    }
+                  }}
+                >
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2.5 flex-wrap">
                       <h3 className={`text-xl font-black transition-colors ${isSelected ? 'text-orange-500' : 'text-slate-800 group-hover:text-orange-500'}`}>{pt.name}</h3>
@@ -223,6 +264,16 @@ export default function MafengwoStylePanel({
                     </div>
 
                     <div className="flex items-center gap-1.5">
+                      {hasPeerVotes && (
+                        <span
+                          data-testid={`peer-votes-${idx}`}
+                          className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-500"
+                          title="房间内其他成员的投票（实时同步）"
+                        >
+                          <ThumbsUp className="w-3 h-3 text-emerald-500" />{peerVotes.up}
+                          <ThumbsDown className="w-3 h-3 text-rose-500" />{peerVotes.down}
+                        </span>
+                      )}
                       <button
                         data-testid={`vote-up-${idx}`}
                         onClick={(e) => { e.stopPropagation(); onVote(pt.name, 'up'); }}
@@ -321,7 +372,7 @@ export default function MafengwoStylePanel({
                     <div className="mb-3 p-3 rounded-2xl bg-gradient-to-r from-orange-600/10 to-orange-400/10 border border-orange-500/30 text-xs">
                       <div className="font-bold text-orange-800 dark:text-orange-400 flex items-center gap-1.5 mb-1">
                         <Split className="w-3.5 h-3.5" />
-                        <span>多智能体分合流时空调度：</span>
+                        <span>结伴分合流时空调度：</span>
                       </div>
                       <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed font-medium">
                         {pt.split_info}

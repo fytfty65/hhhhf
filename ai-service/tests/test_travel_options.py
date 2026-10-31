@@ -138,7 +138,7 @@ class TravelOptionsTests(unittest.TestCase):
             box = self._toolbox()
             result = asyncio.run(box.get_travel_options("81.3,43.9", "81.4,43.95", "伊宁"))
         self.assertEqual(result, {})
-        self.assertEqual(_TRAVEL_OPTIONS_CACHE, {}, "空结果不能进缓存（否则一次限流被固化）")
+        self.assertEqual(len(_TRAVEL_OPTIONS_CACHE), 0, "空结果不能进缓存（否则一次限流被固化）")
 
     def test_missing_key_returns_empty_without_any_request(self):
         box = self._toolbox()
@@ -153,16 +153,24 @@ class ConcurrencyGuardTests(unittest.TestCase):
         from api import agent as agent_module
 
         self.assertEqual(agent_module._TRAVEL_OPTIONS_SEMAPHORE._value, 8)
-        self.assertEqual(agent_module._TRAVEL_OPTIONS_CACHE, {})
+        self.assertEqual(len(agent_module._TRAVEL_OPTIONS_CACHE), 0)
 
-    def test_cache_is_cleared_before_it_grows_without_bound(self):
-        import io
-        import pathlib
+    def test_cache_has_bound_and_ttl_instead_of_clearing_everything(self):
+        """超限要淘汰最久未用的一条，而不是整体 clear（整体清空会把热点一起丢）。"""
+        from api import agent as agent_module
+        from core.cache_registry import BoundedTTLCache
 
-        source = pathlib.Path(__file__).resolve().parents[1] / "api" / "agent.py"
-        with io.open(source, encoding="utf-8") as handle:
-            text = handle.read()
-        self.assertIn("if len(_TRAVEL_OPTIONS_CACHE) >= 512:", text)
+        live = agent_module._TRAVEL_OPTIONS_CACHE
+        self.assertEqual(live.max_entries, 512)
+        self.assertGreater(live.ttl_seconds, 0)
+
+        cache = BoundedTTLCache("test_travel_options", max_entries=512, ttl_seconds=3600)
+        for index in range(513):
+            cache.set(f"pair-{index}", {"duration_min": index})
+        self.assertEqual(len(cache), 512)
+        self.assertIsNone(cache.get("pair-0"), "最久未用的一条应被淘汰")
+        self.assertEqual(cache.get("pair-512"), {"duration_min": 512})
+        self.assertEqual(cache.evictions, 1)
 
 
 if __name__ == "__main__":

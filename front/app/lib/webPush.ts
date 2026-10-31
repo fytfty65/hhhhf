@@ -1,37 +1,8 @@
-import { resolveApiBase } from './gatewayBase.ts';
-
-// 与 lib/utils 用同一套推导（端口可配、运行期优先），不再各自写死 :8080
-const API_BASE = resolveApiBase(
-  process.env.NEXT_PUBLIC_API_BASE,
-  typeof window !== 'undefined' ? window.location : undefined,
-  process.env.NEXT_PUBLIC_GATEWAY_PORT,
-);
-
-async function pushApiJson(input: RequestInfo | URL, init: RequestInit = {}) {
-  const headers = new Headers(init.headers || {});
-  if (typeof window !== 'undefined') {
-    try {
-      const raw = window.localStorage.getItem('omni_user');
-      const token = raw ? JSON.parse(raw)?.token : '';
-      if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
-    } catch { /* notification settings must degrade safely */ }
-  }
-  const response = await fetch(input, { ...init, headers });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload?.error?.message || payload?.error || '通知服务暂不可用');
-  return payload;
-}
+import { apiRequest } from './apiClient.ts';
 
 export type WebPushState = 'unsupported' | 'permission-default' | 'permission-denied' | 'subscribed' | 'available' | 'disabled';
 
 const vapidPublicKey = () => String(process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY || '').trim();
-
-function base64UrlToUint8Array(value: string) {
-  const padding = '='.repeat((4 - (value.length % 4)) % 4);
-  const normalized = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(normalized);
-  return Uint8Array.from([...raw].map((char) => char.charCodeAt(0)));
-}
 
 export function webPushCapability(): WebPushState {
   if (typeof window === 'undefined' || !('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) return 'unsupported';
@@ -54,8 +25,11 @@ export async function requestWebPushSubscription(): Promise<{ state: WebPushStat
   // —— B 方案：运输层改用 FCM（VAPID 公钥 = Firebase 控制台 → Cloud Messaging → Web Push 证书那串 B...）——
   // 状态机、文案与降级行为都保持原样：拿不到凭据就退回"站内通知"，绝不假装订阅成功。
   try {
-    const configResponse = await fetch('/api/push/config', { cache: 'no-store' });
-    const publicConfig = await configResponse.json().catch(() => null);
+    const publicConfig = await apiRequest<{ enabled?: boolean }>('/api/push/config', {
+      origin: 'self',
+      auth: false,
+      retries: 0,
+    }).catch(() => null);
     if (!publicConfig || publicConfig.enabled !== true) {
       return { state: 'disabled', message: '尚未配置 Web Push 公钥，将继续使用站内通知' };
     }
@@ -77,10 +51,10 @@ export async function requestWebPushSubscription(): Promise<{ state: WebPushStat
     });
     if (!deviceToken) return { state: 'available', message: '未能取得推送凭据，已保留站内通知' };
 
-    await pushApiJson(`${API_BASE}/api/v1/notifications/push/fcm-token`, {
+    await apiRequest('/api/v1/notifications/push/fcm-token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: deviceToken, platform: String(navigator.userAgent || '').slice(0, 32) }),
+      body: { token: deviceToken, platform: String(navigator.userAgent || '').slice(0, 32) },
+      retries: 0,
     });
     return { state: 'subscribed', message: '浏览器通知已开启，重大风险会提醒你' };
   } catch (error) {
@@ -115,10 +89,11 @@ export async function disableWebPushSubscription() {
     /* 取消订阅失败不能卡住用户，下面仍然尝试服务端注销 */
   }
   try {
-    await pushApiJson(
-      `${API_BASE}/api/v1/notifications/push/fcm-token${deviceToken ? `?token=${encodeURIComponent(deviceToken)}` : ''}`,
-      { method: 'DELETE' },
-    );
+    await apiRequest('/api/v1/notifications/push/fcm-token', {
+      method: 'DELETE',
+      query: { token: deviceToken || undefined },
+      retries: 0,
+    });
   } catch {
     /* 服务端注销失败也保持安静：本地已 deleteToken，之后不会再收到 */
   }

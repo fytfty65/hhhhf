@@ -73,6 +73,14 @@ class TestBudgetReport(unittest.TestCase):
         plan = {"route": [node("a", "¥300")]}
         self.assertEqual(budget_report({"days": 1}, plan)["status"], "no_budget")
 
+    def test_money_arithmetic_uses_decimal_not_binary_float(self):
+        """0.1 + 0.2 在二进制浮点里是 0.30000000000000004，十进制求和必须等于 0.3。"""
+        plan = {"route": [node("a", "¥0.10", day=1), node("b", "¥0.20", day=2)]}
+        report = budget_report({"days": 2, "budget": 0.3}, plan)
+        self.assertEqual(report["verified_cost"], 0.3)
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["shortfall"], 0.0)
+
 
     def test_upgraded_intent_is_protected_from_downgrade(self):
         """用户明确说"住宿住好一点"时，兜底不得把这部分降档。"""
@@ -159,6 +167,20 @@ class TestFallbackRegressions(unittest.TestCase):
         plan = {"route": [node("博物馆", "¥100", kind="博物馆"), node("面馆", "¥50", kind="餐饮")]}
         result = propose_fallback(CONTEXT, plan, shortfall=0)
         self.assertGreater(result["preserved_ratio"], 0.0)
+        self.assertFalse(result["needs_confirmation"])
+
+    def test_saving_is_exact_in_decimal(self):
+        """平替节省额必须精确到分，不能出现 0.6000000000000001。"""
+        plan = {"route": [
+            node("景点", "¥0.90", day=1),
+            node("酒店", "¥200", kind="住宿", day=1),
+            node("面馆", "¥50", kind="餐饮", day=2),
+            node("城墙", "¥50", kind="文化", day=2),
+        ]}
+        candidates = {"cultural": [{"name": "便宜景点", "price": 0.3, "price_tier": "economy"}]}
+        result = propose_fallback(CONTEXT, plan, shortfall=0.6, candidates_by_intent=candidates)
+        self.assertEqual(result["substitutions"][0]["saving"], 0.6)
+        self.assertEqual(result["remaining_shortfall"], 0.0)
         self.assertFalse(result["needs_confirmation"])
 
 

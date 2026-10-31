@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .candidate_index import normalize_text
 
@@ -121,8 +121,9 @@ def summarize_feedback(
     for entry in memory[: max(0, int(limit))]:
         if not isinstance(entry, Mapping):
             continue
+        raw_score: Any = entry.get("Score")
         try:
-            score = int(entry.get("Score"))
+            score = int(raw_score)
         except (TypeError, ValueError):
             continue
         if score >= 0:

@@ -39,7 +39,7 @@ def _candidates_of(proposal: Mapping[str, Any]) -> List[Mapping[str, Any]]:
 def _far_candidates(candidates: Sequence[Mapping[str, Any]]) -> List[str]:
     names: List[str] = []
     for row in candidates:
-        distance = row.get("distance_km")
+        distance: Any = row.get("distance_km")
         try:
             value = float(distance)
         except (TypeError, ValueError):
@@ -51,7 +51,7 @@ def _far_candidates(candidates: Sequence[Mapping[str, Any]]) -> List[str]:
 
 def _health_limit(proposal: Mapping[str, Any]) -> Optional[int]:
     for row in _candidates_of(proposal):
-        raw = row.get("daily_node_limit")
+        raw: Any = row.get("daily_node_limit")
         try:
             return int(raw)
         except (TypeError, ValueError):
@@ -138,8 +138,9 @@ def summarize_stances(proposals: Any) -> Dict[str, Any]:
             carbon_rows = _carbon_options(proposal)
             values: List[float] = []
             for row in carbon_rows:
+                carbon: Any = row.get("carbon_kg")
                 try:
-                    values.append(float(row.get("carbon_kg")))
+                    values.append(float(carbon))
                 except (TypeError, ValueError):
                     continue
             signals["options"] = len(carbon_rows)
@@ -237,7 +238,8 @@ def detect_conflicts(
         values: List[float] = []
         for row in carbon_rows:
             try:
-                values.append(float(row.get("carbon_kg")))
+                raw_carbon: Any = row.get("carbon_kg")
+                values.append(float(raw_carbon))
             except (TypeError, ValueError):
                 continue
         labels = " ".join(str(row.get("label") or "") for row in carbon_rows)

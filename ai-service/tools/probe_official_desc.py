@@ -12,13 +12,16 @@ import asyncio
 import glob
 import io
 import json
-import os
 import sys
 from pathlib import Path
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = SERVICE_ROOT.parent
 sys.path.insert(0, str(SERVICE_ROOT))
+
+from core.console import ensure_utf8_console  # noqa: E402
+
+ensure_utf8_console()
 
 from core.web_price_tool import lookup_description, provider_states  # noqa: E402
 

@@ -1,7 +1,8 @@
 'use client';
 import React, { useState } from 'react';
 import { Star, X } from 'lucide-react';
-import { API_BASE, apiJson } from '../lib/utils';
+import { apiJson } from '../lib/apiClient';
+import { trackPlanningEvent } from '../lib/planningEvents';
 
 export default function SatisfactionModal({ open, onClose, userId, tripId, banditArmId, onSubmitted }: { open: boolean; onClose: () => void; userId: string; tripId: string; banditArmId?: string; onSubmitted?: (score: number) => void }) {
   const [score, setScore] = useState(0);
@@ -18,16 +19,12 @@ export default function SatisfactionModal({ open, onClose, userId, tripId, bandi
     setSubmitting(true);
     setError('');
     try {
-      await apiJson(`${API_BASE}/api/v1/satisfaction`, {
+      await apiJson(`/api/v1/satisfaction`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, trip_id: tripId, score, comment, bandit_arm_id: banditArmId || '' }),
       });
-      void apiJson(`${API_BASE}/api/v1/planning/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trip_id: tripId, event_type: 'satisfaction', value: score, payload: { module: 'trip_review', has_comment: Boolean(comment.trim()) } }),
-      }).catch(() => {});
+      trackPlanningEvent({ trip_id: tripId, event_type: 'satisfaction', value: score, payload: { module: 'trip_review', has_comment: Boolean(comment.trim()) } });
       setDone(true);
       onSubmitted?.(score);
       setTimeout(() => {
@@ -44,8 +41,9 @@ export default function SatisfactionModal({ open, onClose, userId, tripId, bandi
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-[min(360px,calc(100vw-32px))] rounded-lg border border-slate-200 bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <button type="button" aria-label="关闭弹窗" onClick={onClose} className="absolute inset-0 cursor-default" />
+      <div className="relative z-10 w-[min(360px,calc(100vw-32px))] rounded-lg border border-slate-200 bg-white p-6 shadow-2xl">
         <div className="flex items-center justify-between mb-3">
           <h4 className="text-base font-black text-slate-800">行程满意度评价</h4>
           <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer" title="关闭评价" aria-label="关闭评价">

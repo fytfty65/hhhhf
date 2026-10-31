@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # —— 默认配比（白天节点份额）——
 DEFAULT_SCENIC_SHARE = 0.4
@@ -609,7 +609,6 @@ def rebalance_days_by_geography(
     days_with_meal_before = {
         day: any(category(node) == "food" for node in fixed[day] + movable[day]) for day in days
     }
-    floating_meals = sum(1 for day in days for node in movable[day] if category(node) == "food")
 
     # 每天要**至少**保留哪些类别（不是"数量完全照旧"—— 那会把远点死死锁在原天：
     # 实测喀什第 2 天有 2 个人文点，「胡杨书院」(巴楚 216km) 就被这条硬约束留在了市区那天）。
@@ -622,7 +621,6 @@ def rebalance_days_by_geography(
             if key != "other":
                 counts[key] = 1  # 下限 1
         need[day] = counts
-    hungry_days = [day for day in days if not days_with_meal_before[day]]
     # ⚠️ 这里**不**给"原本没饭点的那天"加下限（2026-10-07 实测）：餐饮候选都在市区时，
     #    硬把它塞给"远点那天"会凭空加出 city→far→city 两趟（喀什 449km → 460km），
     #    于是整个重排被收益门槛否掉。缺餐该由**收口后的补餐**解决（就近取候选池的餐饮），
@@ -831,7 +829,6 @@ def rebalance_days_by_geography(
     # 👑 每天的"玩点性质"不能丢（2026-10-07 自测抓到）：门禁里有一条"以自然为主的行程
     #    每天至少 1 个自然景观、文化类设上限"。重排如果让某天**原本有自然点、重排后一个都没了**，
     #    就会凭空调出一个新的门禁失败 —— 宁可这一天的远点不挪。
-    play_kinds = ("scenic", "cultural")
     # 判"某天还有没有得看"用更全的玩点集合（公园/地标也算玩点）
     PLAYS_FOR_GUARD = PLAY_CATEGORIES
 

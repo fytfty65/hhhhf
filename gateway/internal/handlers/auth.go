@@ -24,12 +24,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// sessionStore is the development fallback. Production deployments should set
-// REDIS_URL so tokens are shared across gateway instances.
+// Redis dialling is the shared backend for access tokens, WebSocket tickets and
+// refresh rotation. Production deployments must set REDIS_URL so tokens are
+// shared across gateway instances.
 var (
-	sessionMu    sync.RWMutex
-	sessionStore = make(map[string]sessionEntry)
-
 	// Redis dialling is guarded by a mutex rather than a sync.Once. A Once
 	// caches the first failure permanently, which made every later login return
 	// 503 even after Redis came back — an optional dependency outage took the
@@ -47,8 +45,6 @@ var (
 // Without it every request that touches the session store would pay the full
 // go-redis dial timeout (5 attempts) before falling back.
 const redisRetryCooldown = 5 * time.Second
-
-const sessionTTL = 24 * time.Hour
 
 // dummyPasswordHash is a valid bcrypt hash of a value no user can supply. Login
 // compares against it when the username does not exist so that a missing
@@ -88,11 +84,6 @@ func ValidateOriginAllowlist() error {
 		}
 	}
 	return nil
-}
-
-type sessionEntry struct {
-	userID    string
-	expiresAt time.Time
 }
 
 // sessionRedis returns a live Redis client, dialling lazily on first use.
@@ -173,64 +164,10 @@ func redisSessionStore() *redis.Client {
 	return client
 }
 
-func newSessionToken(userID string) (string, error) {
-	token := uuid.New().String()
-	if client := redisSessionStore(); client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := client.Set(ctx, "omni:session:"+token, userID, sessionTTL).Err(); err != nil {
-			return "", err
-		}
-		return token, nil
-	}
-	sessionMu.Lock()
-	sessionStore[token] = sessionEntry{userID: userID, expiresAt: time.Now().Add(sessionTTL)}
-	sessionMu.Unlock()
-	return token, nil
-}
-
 // LookupSessionUserID resolves a bearer token created by the auth handlers.
-// The store is intentionally kept behind this function so it can be replaced
-// with Redis/JWT validation without changing every handler.
 func LookupSessionUserID(token string) (string, bool) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", false
-	}
-	if client := redisSessionStore(); client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		userID, err := client.Get(ctx, "omni:session:"+token).Result()
-		return userID, err == nil && userID != ""
-	}
-	sessionMu.RLock()
-	entry, ok := sessionStore[token]
-	sessionMu.RUnlock()
-	if !ok || entry.userID == "" || time.Now().After(entry.expiresAt) {
-		if ok {
-			sessionMu.Lock()
-			delete(sessionStore, token)
-			sessionMu.Unlock()
-		}
-		return "", false
-	}
-	return entry.userID, true
-}
-
-func revokeSession(token string) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return
-	}
-	if client := redisSessionStore(); client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = client.Del(ctx, "omni:session:"+token).Err()
-		return
-	}
-	sessionMu.Lock()
-	delete(sessionStore, token)
-	sessionMu.Unlock()
+	userID, _, ok := LookupAccessSession(token)
+	return userID, ok
 }
 
 func requestToken(c *gin.Context) string {
@@ -238,13 +175,66 @@ func requestToken(c *gin.Context) string {
 	if strings.HasPrefix(strings.ToLower(header), "bearer ") {
 		return strings.TrimSpace(header[len("Bearer "):])
 	}
-	// Browser WebSocket clients cannot set arbitrary headers. Accept a query
-	// token only during an actual upgrade request; accepting it on ordinary
-	// HTTP URLs would leak credentials through access logs and referrers.
+	// Browser WebSocket clients cannot set arbitrary headers. Two channels are
+	// accepted, and both only during an actual upgrade request (accepting either
+	// on ordinary HTTP URLs would leak credentials through logs and referrers):
+	//
+	//   1. `Sec-WebSocket-Protocol: bearer.<token>` — preferred. The frontend
+	//      sends the token as a subprotocol and we echo it back on the handshake.
+	//   2. `?access_token=` — legacy fallback, kept so older clients keep working.
 	if c.Request.Method == http.MethodGet && strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+		if token := websocketSubprotocolToken(c.Request); token != "" {
+			return token
+		}
 		return strings.TrimSpace(c.Query("access_token"))
 	}
 	return ""
+}
+
+const websocketTokenPrefix = "bearer."
+
+// websocketSubprotocolToken extracts the token from the `bearer.<token>`
+// subprotocol the browser sends during a WebSocket handshake.
+func websocketSubprotocolToken(r *http.Request) string {
+	for _, protocol := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		protocol = strings.TrimSpace(protocol)
+		if len(protocol) <= len(websocketTokenPrefix) {
+			continue
+		}
+		if strings.EqualFold(protocol[:len(websocketTokenPrefix)], websocketTokenPrefix) {
+			if token := strings.TrimSpace(protocol[len(websocketTokenPrefix):]); token != "" {
+				return token
+			}
+		}
+	}
+	return ""
+}
+
+// websocketSubprotocols returns the client-requested subprotocols in order, with
+// the bearer token first. The upgrader must echo at least one of them: browsers
+// reject a handshake whose requested subprotocol the server did not select.
+func websocketSubprotocols(r *http.Request) []string {
+	requested := strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",")
+	ordered := make([]string, 0, len(requested))
+	tokenProtocol := ""
+	for _, protocol := range requested {
+		protocol = strings.TrimSpace(protocol)
+		if protocol == "" {
+			continue
+		}
+		if tokenProtocol == "" && len(protocol) >= len(websocketTokenPrefix) && strings.EqualFold(protocol[:len(websocketTokenPrefix)], websocketTokenPrefix) {
+			tokenProtocol = protocol
+			continue
+		}
+		ordered = append(ordered, protocol)
+	}
+	if tokenProtocol != "" {
+		ordered = append([]string{tokenProtocol}, ordered...)
+	}
+	if len(ordered) > 8 {
+		ordered = ordered[:8]
+	}
+	return ordered
 }
 
 // CurrentUserID returns the authenticated principal for the request.
@@ -268,14 +258,16 @@ func AuthMiddleware() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "不受信任的来源", "code": "ORIGIN_FORBIDDEN"})
 			return
 		}
-		userID, ok := LookupSessionUserID(requestToken(c))
+		userID, sessionID, ok := authenticateRequest(c)
 		if !ok {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未登录或登录已过期", "code": "AUTH_REQUIRED"})
 			return
 		}
 		c.Set("user_id", userID)
+		c.Set("session_id", sessionID)
 
 		if supplied := strings.TrimSpace(c.Query("user_id")); supplied != "" && supplied != userID {
+			logIdentityMismatch(c, supplied)
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "无权访问其他用户数据", "code": "USER_MISMATCH"})
 			return
 		}
@@ -314,6 +306,7 @@ func AuthMiddleware() gin.HandlerFunc {
 					for _, key := range []string{"user_id", "created_by"} {
 						if value, exists := fields[key]; exists {
 							if supplied, isString := value.(string); isString && strings.TrimSpace(supplied) != "" && supplied != userID {
+								logIdentityMismatch(c, supplied)
 								c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "请求身份与登录用户不一致", "code": "USER_MISMATCH"})
 								return
 							}
@@ -417,15 +410,11 @@ func RegisterHandler(c *gin.Context) {
 		return
 	}
 
-	token, err := newSessionToken(user.ID)
-	if err != nil {
-		log.Printf("auth session store unavailable: %v", err)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "认证服务暂不可用", "code": "SESSION_STORE_UNAVAILABLE"})
-		return
-	}
+	// Registration deliberately does not create a device session: the UI asks
+	// the user to sign in afterwards, and minting a refresh cookie here would
+	// silently log them in on the next page load.
 	c.JSON(http.StatusOK, gin.H{
 		"message": "注册成功",
-		"token":   token,
 		"user":    buildAuthUser(user),
 	})
 }
@@ -441,7 +430,21 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	username := strings.TrimSpace(req.Username)
+	user, ok := verifyCredentials(c, strings.TrimSpace(req.Username), req.Password)
+	if !ok {
+		return
+	}
+
+	respondWithSession(c, "登录成功", user)
+}
+
+// verifyCredentials applies the rules shared by every password sign-in
+// transport (browser cookie session and mobile token session): per-account
+// lockout, timing-equalised unknown-username handling, failure accounting and
+// auditing. It writes the failure response itself and returns ok=false, so each
+// caller keeps its own success payload.
+func verifyCredentials(c *gin.Context, username, password string) (models.User, bool) {
+	var user models.User
 
 	// Per-account lockout. Checked before any database or bcrypt work so a
 	// locked account costs the attacker nothing and costs us nothing.
@@ -450,49 +453,59 @@ func LoginHandler(c *gin.Context) {
 		if seconds < 1 {
 			seconds = 1
 		}
+		// Audited: without this line a lockout is invisible, so neither the
+		// account owner nor an operator can tell that someone is cycling 8
+		// failures to keep a known account locked.
+		logAccountLockout(c, username, seconds)
 		c.Header("Retry-After", strconv.Itoa(seconds))
 		c.JSON(http.StatusTooManyRequests, gin.H{
 			"error": "该账号尝试次数过多，请稍后再试",
 			"code":  "ACCOUNT_TEMPORARILY_LOCKED",
 		})
-		return
+		return models.User{}, false
 	}
 
-	var user models.User
 	if err := database.DB.Where("username = ?", username).First(&user).Error; err != nil {
 		// Run a dummy comparison so an unknown username and a wrong password
 		// take comparable time; otherwise response latency reveals which
 		// accounts exist.
-		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(req.Password))
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
 		recordAuthFailure(username)
+		// Audited: this is the brute-force signal (unknown account).
+		logLoginFailure(c, username, "INVALID_CREDENTIALS")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户名或密码错误", "code": "INVALID_CREDENTIALS"})
-		return
+		return models.User{}, false
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		recordAuthFailure(username)
+		// Audited: brute-force signal against a real account.
+		logLoginFailure(c, username, "INVALID_CREDENTIALS")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户名或密码错误", "code": "INVALID_CREDENTIALS"})
-		return
+		return models.User{}, false
 	}
 
 	clearAuthFailures(username)
-
-	token, err := newSessionToken(user.ID)
-	if err != nil {
-		log.Printf("auth session store unavailable: %v", err)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "认证服务暂不可用", "code": "SESSION_STORE_UNAVAILABLE"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"message": "登录成功",
-		"token":   token,
-		"user":    buildAuthUser(user),
-	})
+	return user, true
 }
 
-// LogoutHandler revokes only the current token. This is intentionally
-// idempotent so clients can safely call it during cleanup or expiry recovery.
+// LogoutHandler revokes the current device session (access token + refresh
+// token) and clears the refresh cookie. Idempotent, so clients can safely call
+// it during cleanup or expiry recovery.
 func LogoutHandler(c *gin.Context) {
-	revokeSession(requestToken(c))
+	current := requestToken(c)
+	_, sessionID, ok := LookupAccessSession(current)
+	if ok {
+		_ = revokeDeviceSession(CurrentUserID(c), sessionID)
+	}
+	revokeAccessToken(current)
+	clearRefreshCookie(c)
 	c.JSON(http.StatusOK, gin.H{"message": "已退出登录"})
+}
+
+// SessionID returns the device session bound to the current access token.
+func SessionID(c *gin.Context) string {
+	value, _ := c.Get("session_id")
+	sessionID, _ := value.(string)
+	return sessionID
 }

@@ -100,6 +100,8 @@ def parse_coordinates(value: Any) -> Optional[List[float]]:
     """归一化成 `[lng, lat]`；非法/零点返回 None（不编造坐标）。"""
     if isinstance(value, Mapping):
         lng, lat = value.get("lng"), value.get("lat")
+        if lng is None or lat is None:
+            return None
         try:
             coords = [float(lng), float(lat)]
         except (TypeError, ValueError):
@@ -177,7 +179,8 @@ def normalize_node(raw: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise TypeError("node_must_be_mapping")
 
-    sources = raw.get("data_sources") if isinstance(raw.get("data_sources"), Mapping) else {}
+    raw_sources = raw.get("data_sources")
+    sources: Mapping[str, Any] = raw_sources if isinstance(raw_sources, Mapping) else {}
     name = _text(_first(raw, "name", "title"))
     location = _first(raw, "location", "address")
     if not name and isinstance(location, str) and not looks_like_coordinates(location):

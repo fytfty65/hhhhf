@@ -20,6 +20,7 @@ from core.web_price_tool import (
     enabled_providers,
     extract_price_candidates,
     host_is_allowed,
+    host_of_url,
     price_max_nodes,
     price_timeout_seconds,
     search_proxy,
@@ -141,6 +142,90 @@ class HostAllowlistTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WEB_PRICE_ALLOW_ANY_HOST": ""}, clear=False):
             allowed, _ = host_is_allowed("https://some-random-site.com/price")
             self.assertFalse(allowed)
+
+
+class HostParsingBypassTests(unittest.TestCase):
+    """SSRF 回归钉（2026-10-09 实测复现的真实绕过）。
+
+    旧实现用字符串切分取主机名：
+        host = text.split("//", 1)[-1].split("/", 1)[0].lower()
+    `https://evil.example.com#.gov.cn/` 于是得到 `evil.example.com#.gov.cn` ——
+    以 `.gov.cn` 结尾，**通过白名单**；而 httpx 丢弃片段，实际去连 `evil.example.com`。
+    `http://169.254.169.254#.gov.cn/` 同理放行**云元数据地址**。
+
+    这个白名单是 `fetch_page_text` 的**唯一出站闸门**（见 `official_page` 分支），
+    所以它不是"主机名字符串不干净"，而是 SSRF；而且抓回的文本会被盖成
+    `verified: True` 的官方票价，等于同时伪造了可信度。
+
+    修法是 `host_of_url()` 一律走 `urlsplit`，本类把这些用例永久钉住。
+    """
+
+    #: 这些 URL 的"真实主机"都不在允许清单里，必须一律拒绝。
+    BYPASS_URLS = (
+        "https://evil.example.com#.gov.cn/",
+        "http://169.254.169.254#.gov.cn/",
+        "http://metadata.google.internal#.gov.cn/",
+        "https://evil.example.com?.gov.cn",
+        "https://evil.example.com/.gov.cn",
+        "https://evil.example.com;.gov.cn",
+        "https://user:pass@evil.example.com#.gov.cn/",
+        "http://127.0.0.1#.gov.cn/",
+        "http://[::1]#.gov.cn/",
+        "http://192.168.1.1#.gov.cn/",
+    )
+
+    def test_fragment_and_query_suffix_bypasses_are_refused(self):
+        for url in self.BYPASS_URLS:
+            with self.subTest(url=url):
+                allowed, reason = host_is_allowed(url)
+                self.assertFalse(allowed, f"{url} 必须被拒绝，但被放行了：{reason}")
+
+    def test_metadata_and_private_ips_are_refused_even_with_allow_any_host(self):
+        """`WEB_PRICE_ALLOW_ANY_HOST=1` 是"允许任意域名"，不是"允许元数据地址"。
+
+        顺序很关键：IP/userinfo 的拒绝必须发生在 ANY_HOST 开关**之前**。
+        """
+        with mock.patch.dict(os.environ, {"WEB_PRICE_ALLOW_ANY_HOST": "1"}, clear=False):
+            for url in (
+                "http://169.254.169.254/latest/meta-data/",
+                "http://127.0.0.1:8080/admin",
+                "http://[::1]/x",
+                "https://user:pass@legit.example.com/",
+            ):
+                with self.subTest(url=url):
+                    allowed, reason = host_is_allowed(url)
+                    self.assertFalse(allowed, f"{url} 即使开了 ANY_HOST 也必须拒绝：{reason}")
+
+    def test_real_official_pages_still_allowed(self):
+        """修完不能把正常能力一起砍掉 —— 详情页（带参数）是真实取价来源。"""
+        for url in (
+            "https://www.xinjiang.gov.cn/lyyou/2026/price.html",
+            "https://ylwl.xjyl.gov.cn/show/scenicspot/detail?id=581",
+            "https://www.ihg.com/hotels/us/en/reservation",
+        ):
+            with self.subTest(url=url):
+                allowed, reason = host_is_allowed(url)
+                self.assertTrue(allowed, f"{url} 应当仍被允许：{reason}")
+
+    def test_host_of_url_returns_the_real_host(self):
+        cases = {
+            "https://WWW.Example.COM:8443/Path": "www.example.com",
+            "https://example.com./x": "example.com",  # 末尾点不能用来绕过后缀匹配
+            "https://user:pw@shop.example.com/x": "",  # userinfo：拒
+            "http://169.254.169.254/": "",  # IP 字面量：拒
+            "https://[::1]/": "",
+            "ftp://example.com": "",
+            "not a url": "",
+            "": "",
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(host_of_url(url), expected)
+
+    def test_trailing_dot_host_cannot_bypass_suffix_match(self):
+        """`evil.example.com.` 这种绝对 FQDN 写法等价于 `evil.example.com`，不得放行。"""
+        allowed, reason = host_is_allowed("https://evil.example.com./x")
+        self.assertFalse(allowed, reason)
 
 
 class ConfigTests(unittest.TestCase):

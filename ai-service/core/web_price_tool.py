@@ -31,11 +31,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+from urllib.parse import urlsplit
 
 # 允许直接抓取的域名后缀：
 #   ① 政府/事业单位这类明显公开的页面；
@@ -87,6 +89,11 @@ _PRICE_PATTERNS = (
     (re.compile(r"(?:门票|票价|人均|每晚|房价|价格)\s*[:：]?\s*(\d+(?:\.\d+)?)"), None),
 )
 FREE_MARKER = "免费"
+
+# 域名合法性（见 host_of_url）：Unicode 文字 + 数字 + `.` `-` `_`。
+# 用 `\w` 是为了放行 IDN（中文域名）；它同时排除空格、`;`、`\`、`[` `]` 与控制字符。
+_HOSTNAME_RE = re.compile(r"[\w-]+(?:\.[\w-]+)*", re.UNICODE)
+
 CONTEXT_MARKERS = ("门票", "票价", "人均", "每晚", "房价", "价格", "费用", "起")
 # 明确的价格语境（比"免费/带单位"更能说明这就是我们要的那个价）
 STRONG_PRICE_MARKERS = ("门票", "票价", "全价", "半价", "房价", "人均", "每晚", "价格")
@@ -225,12 +232,65 @@ def allow_any_host() -> bool:
     return str(os.getenv("WEB_PRICE_ALLOW_ANY_HOST") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def host_of_url(url: str) -> str:
+    """取 URL 的**真实主机名**：小写、去掉 userinfo/端口/末尾点；非法返回空串。
+
+    ⚠️ 这里的唯一事实来源必须是 `urlsplit`，**不能**再用字符串切分。
+    2026-10-09 实测的绕过（白名单是唯一的出站闸门，所以这是 SSRF）：
+        `https://evil.example.com#.gov.cn/`  → 切分得到 `evil.example.com#.gov.cn`，
+                                               以 `.gov.cn` 结尾 → **放行**；
+                                               而 httpx 丢弃片段，实际连 `evil.example.com`。
+        `http://169.254.169.254#.gov.cn/`    → 同样放行，实际连**云元数据地址**。
+    另外两类必须一并拒掉：
+      · IP 字面量（含 169.254/10/172.16/192.168/127/::1）——官方站点永远是域名；
+      · userinfo（`https://user:pass@evil.example.com`）——UA/凭据注入面。
+    合法解析不出来就返回空串，让调用方按"不许抓"处理（fail closed）。
+    """
+    text = str(url or "").strip()
+    if not text.startswith(("http://", "https://")):
+        return ""
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+    if parsed.username or parsed.password:
+        return ""  # 带 userinfo：拒
+    try:
+        host = parsed.hostname or ""
+    except ValueError:
+        return ""
+    host = host.strip().strip(".").lower()
+    if not host:
+        return ""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass  # 不是 IP，继续按域名校验
+    else:
+        return ""  # IP 字面量：拒（官方站点永远是域名）
+    # 域名合法性：必须是「字母/数字/Unicode 文字 + . - _」。
+    # 这一条挡住的是**权威段分割类**的畸形写法，例如 `evil.example.com;.gov.cn`
+    # ——`urlsplit`/httpx 会把它当整个主机名（因此其实连不上，不是可用绕过），
+    # 但 `;` 在权威段里属于经典的解析器歧义字符（不同中间件/代理可能按 `;` 截断），
+    # 所以不进入任何白名单判定。空格、反斜杠、方括号、控制字符同理。
+    if not _HOSTNAME_RE.fullmatch(host):
+        return ""
+    return host
+
+
 def host_is_allowed(url: str) -> tuple[bool, str]:
     """这个 URL 能不能直接抓：返回 `(是否允许, 原因)`。"""
     text = str(url or "").strip()
     if not text.startswith(("http://", "https://")):
         return False, "不是 http(s) 链接"
-    host = text.split("//", 1)[-1].split("/", 1)[0].lower()
+    host = host_of_url(text)
+    if not host:
+        # 解析不出真实主机（畸形 URL / IP 字面量 / 带凭据）——一律 fail closed。
+        # 注意顺序：这一条必须在 allow_any_host() 之前，否则"允许任意域名"的开关
+        # 会顺手把元数据地址也放出去。
+        return False, f"{text[:80]} 的主机名无法安全解析（畸形 URL / IP 字面量 / 含凭据），拒绝抓取"
     for marker in BLOCKED_HOST_MARKERS:
         if marker in host:
             return False, f"{host} 属于平台电商页（价格在登录态接口里，且抓取违反其服务条款）"
@@ -370,13 +430,11 @@ def extract_price_candidates(text: str) -> List[Dict[str, Any]]:
         for match in pattern.finditer(value):
             if forced is not None:
                 amount = float(forced)
-                excerpt = match.group(0)
             else:
                 try:
                     amount = float(match.group(1))
                 except (TypeError, ValueError, IndexError):
                     continue
-                excerpt = match.group(0)
             if amount < 0 or amount > 100000:
                 continue
             if amount in seen:
@@ -780,10 +838,8 @@ def parse_baidu_results(html: str, *, limit: int = 5) -> List[Dict[str, Any]]:
 
 
 def _host_of(url: str) -> str:
-    raw = str(url or "")
-    if "//" not in raw:
-        return ""
-    return raw.split("//", 1)[-1].split("/", 1)[0]
+    """主机名（委托 `host_of_url`，避免第三处字符串切分实现 —— 2026-10-09 统一）。"""
+    return host_of_url(url)
 
 
 async def fetch_baidu(query: str, *, max_results: int = 5) -> List[Dict[str, Any]]:
@@ -823,7 +879,7 @@ async def fetch_baidu(query: str, *, max_results: int = 5) -> List[Dict[str, Any
             if need_home or attempt > 0:
                 try:
                     home = await client.get(BAIDU_HOME)
-                    _BAIDU_COOKIES = {cookie.name: cookie.value for cookie in client.cookies.jar}
+                    _BAIDU_COOKIES = {cookie.name: cookie.value for cookie in client.cookies.jar if cookie.value}
                     _BAIDU_SESSION_AT = time.monotonic()
                     _ = home
                 except Exception:
@@ -899,7 +955,7 @@ TICKET_PLATFORM_MARKERS = (
 
 
 def host_is_ticket_platform(url: str) -> bool:
-    host = str(url or "").strip().split("//", 1)[-1].split("/", 1)[0].lower()
+    host = host_of_url(url)
     return any(marker in host for marker in TICKET_PLATFORM_MARKERS)
 
 
@@ -940,7 +996,7 @@ _TICKET_PRICE_VAGUE = (
 
 
 def extract_ticket_price(
-    text: Any, *, require_name: str = "", name_window: int = 30
+    text: Any, *, require_name: str | Sequence[str] = "", name_window: int = 30
 ) -> Optional[Dict[str, Any]]:
     """从一段文字里抽**确定的门票价**；抽不到就返回 None（纯函数）。
 
@@ -1180,7 +1236,10 @@ async def search_texts(
         last_quota_exhausted_at = _time.time()
         return []
 
-    async with _search_lock:
+    lock = _search_lock
+    if lock is None:  # pragma: no cover - 极端环境下退化为无锁
+        lock = _asyncio.Lock()
+    async with lock:
         cached = _search_cache.get(cache_key)
         if cached and (_time.monotonic() - cached[0]) < search_cache_ttl_seconds():
             last_search_attempts = [{"provider": "cache", "ok": True, "results": len(cached[1])}]
@@ -1437,6 +1496,7 @@ last_search_attempts: List[Dict[str, Any]] = []
 last_quota_exhausted_at: float = 0.0
 _last_search_at: float = 0.0
 _search_cache: Dict[str, Any] = {}
+_search_lock: Optional[Any]
 try:  # 锁在导入时创建（同进程内串行化搜索，避免互相触发限流）
     import asyncio as _asyncio
 

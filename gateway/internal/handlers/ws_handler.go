@@ -34,10 +34,6 @@ type FrontendMessage struct {
 	} `json:"payload"`
 }
 
-var omniUpgrader = websocket.Upgrader{
-	CheckOrigin: websocketOriginAllowed,
-}
-
 var negotiationSlots = struct {
 	sync.Mutex
 	active map[string]bool
@@ -138,12 +134,35 @@ func HandleWebSocket(c *gin.Context) {
 		return
 	}
 
-	conn, err := omniUpgrader.Upgrade(c.Writer, c.Request, nil)
+	// 每个连接使用局部 upgrader：Subprotocols 需要回显客户端请求的
+	// `bearer.<token>`，若共用一个全局变量并发升级会互相覆盖（数据竞争）。
+	upgrader := websocket.Upgrader{
+		CheckOrigin:  websocketOriginAllowed,
+		Subprotocols: websocketSubprotocols(c.Request),
+	}
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Println("🔥 WebSocket 升级失败:", err)
 		return
 	}
-	conn.SetReadLimit(1 << 20)
+	conn.SetReadLimit(service.MaxMessageSize)
+
+	// Liveness budget for the read side.
+	//
+	// This loop cannot delegate to service.ReadPump (it routes a larger message
+	// vocabulary), and it previously read with no deadline whatsoever. A peer
+	// that disappears without sending a close frame — a dropped mobile
+	// connection, which is the common case — left this goroutine blocked in
+	// ReadMessage forever, still registered in the hub with a live send channel.
+	// WritePump's periodic ping is what elicits the pong that refreshes this
+	// deadline, so an unresponsive peer is now reclaimed within the budget.
+	// ConnectionPongWait() honours WS_PONG_WAIT_SECONDS so tests can assert the
+	// behaviour without waiting the production 60s.
+	pongWait := service.ConnectionPongWait()
+	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
 
 	client := &service.Client{
 		Hub:       GlobalHub,
@@ -211,6 +230,40 @@ func HandleWebSocket(c *gin.Context) {
 			continue
 		case "cursor_leave":
 			GlobalHub.ClearPresence(roomID, userID)
+			continue
+		case "node_vote":
+			// 节点投票同步：本人已经在前端做了乐观更新，这里只负责把投票事实
+			// 广播给房间内其他成员。空字符串 / "null" 表示撤销投票。
+			// 节点名来自客户端，按展示字段处理：截断到合理长度后再进入广播。
+			var p struct {
+				Payload struct {
+					NodeName string `json:"node_name"`
+					Vote     string `json:"vote"`
+				} `json:"payload"`
+			}
+			_ = json.Unmarshal(message, &p)
+			nodeName := truncateRunes(strings.TrimSpace(p.Payload.NodeName), 200)
+			if nodeName == "" {
+				continue
+			}
+			vote := strings.ToLower(strings.TrimSpace(p.Payload.Vote))
+			if vote == "null" {
+				vote = ""
+			}
+			if vote != "" && vote != "up" && vote != "down" {
+				continue
+			}
+			GlobalHub.Broadcast <- models.WSMessage{
+				Type:   "node_vote",
+				RoomID: roomID,
+				UserID: userID,
+				Payload: map[string]string{
+					"node_name": nodeName,
+					"vote":      vote,
+					"user_id":   userID,
+					"nickname":  nickname,
+				},
+			}
 			continue
 		}
 
@@ -303,7 +356,14 @@ func HandleWebSocket(c *gin.Context) {
 			httpClient := &http.Client{
 				Timeout: 300 * time.Second,
 			}
-			httpReq, reqErr := http.NewRequest(http.MethodPost, pythonURL, bytes.NewBuffer(reqBody))
+			// Bind the upstream call to the client's request context. With a
+			// plain http.NewRequest the context is context.Background(), so a
+			// user who closes the tab mid-planning left the gateway streaming
+			// from the AI service (and burning LLM tokens) for up to the 300s
+			// client timeout, with nobody left to receive the output. The
+			// request context is cancelled when the client connection goes away,
+			// so the upstream call is torn down with it.
+			httpReq, reqErr := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, pythonURL, bytes.NewBuffer(reqBody))
 			if reqErr == nil {
 				httpReq.Header.Set("Content-Type", "application/json")
 				if internalToken := strings.TrimSpace(os.Getenv("AI_SERVICE_INTERNAL_TOKEN")); internalToken != "" {

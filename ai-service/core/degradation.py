@@ -344,12 +344,12 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     moved_out = list(repaired.get("moved_out") or [])
     if moved_out:
         # 名字**去重**（同一个点可能被两道收口各移出一次）；次数保留真实动作数
-        names = "、".join(_unique_names(moved_out))
+        moved_names = "、".join(_unique_names(moved_out))
         items.append(
             _entry(
                 "travel_feasibility",
                 STATUS_DEGRADED,
-                f"一天跑不了两个远景区，已移出 {len(moved_out)} 个（{names}）；想保留可以说明愿意多留一天",
+                f"一天跑不了两个远景区，已移出 {len(moved_out)} 个（{moved_names}）；想保留可以说明愿意多留一天",
             )
         )
 
@@ -358,8 +358,8 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     lodging_repair = _as_mapping(data.get("lodging_repair"))
     lodging_actions = [item for item in (lodging_repair.get("actions") or []) if isinstance(item, Mapping)]
     if lodging_actions:
-        parts = "、".join(f"第 {item.get('day')} 晚→{item.get('to')}" for item in lodging_actions[:3])
-        items.append(_entry("route_composition", STATUS_DEGRADED, f"原本有晚上没安排住宿，已补上：{parts}"))
+        lodging_parts = "、".join(f"第 {item.get('day')} 晚→{item.get('to')}" for item in lodging_actions[:3])
+        items.append(_entry("route_composition", STATUS_DEGRADED, f"原本有晚上没安排住宿，已补上：{lodging_parts}"))
     missing_nights = list(lodging_repair.get("missing_days") or [])
     if missing_nights:
         items.append(
@@ -376,12 +376,12 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     lodging_dropped = [item for item in (lodging_trim.get("actions") or []) if isinstance(item, Mapping)]
     if lodging_dropped:
         nights = int(lodging_trim.get("nights") or 0)
-        names = "、".join(str(item.get("from")) for item in lodging_dropped[:3])
+        dropped_names = "、".join(str(item.get("from")) for item in lodging_dropped[:3])
         items.append(
             _entry(
                 "route_composition",
                 STATUS_DEGRADED,
-                f"住宿比夜数多（这趟 {nights} 晚），已移出 {len(lodging_dropped)} 个：{names}",
+                f"住宿比夜数多（这趟 {nights} 晚），已移出 {len(lodging_dropped)} 个：{dropped_names}",
             )
         )
 
@@ -630,23 +630,23 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     alternatives = _as_mapping(data.get("travel_alternatives"))
     alt_days = [item for item in (alternatives.get("days") or []) if isinstance(item, Mapping)]
     if alt_days:
-        parts: List[str] = []
+        alt_parts: List[str] = []
         for item in alt_days[:3]:
             options = [option for option in (item.get("options") or []) if isinstance(option, Mapping)]
             if options:
-                parts.append(
+                alt_parts.append(
                     f"第 {item.get('day')} 天（约 {item.get('travel_km')}km）可换成 "
                     + "、".join(
                         f"{option.get('name')}（离当天其它点约 {option.get('nearest_day_km')}km）" for option in options[:2]
                     )
                 )
             else:
-                parts.append(f"第 {item.get('day')} 天（约 {item.get('travel_km')}km）候选池里没有同类近点可换")
+                alt_parts.append(f"第 {item.get('day')} 天（约 {item.get('travel_km')}km）候选池里没有同类近点可换")
         items.append(
             _entry(
                 "travel_alternatives",
                 STATUS_DEGRADED,
-                "；".join(parts) + "。想换直接说一句就行，不说就不动",
+                "；".join(alt_parts) + "。想换直接说一句就行，不说就不动",
             )
         )
 

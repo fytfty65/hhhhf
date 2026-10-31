@@ -33,7 +33,7 @@ func GetExecutionStateHandler(c *gin.Context) {
 		return
 	}
 	var states []models.TripExecutionState
-	if err := database.DB.Where("user_id = ? AND trip_id = ?", userID, tripID).Order("updated_at asc").Find(&states).Error; err != nil {
+	if err := database.Reader().Where("user_id = ? AND trip_id = ?", userID, tripID).Order("updated_at asc").Find(&states).Error; err != nil {
 		planningError(c, http.StatusInternalServerError, "EXECUTION_QUERY_FAILED", "执行状态查询失败", nil)
 		return
 	}
@@ -102,7 +102,7 @@ func UpdateExecutionStateHandler(c *gin.Context) {
 	// Event writes are best effort after the state itself is durable.
 	payloadBytes, _ := json.Marshal(payload)
 	if database.DB != nil {
-		_ = database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: req.TripID, PlanID: req.PlanID, EventType: eventType, Value: float64(req.DelayMinutes), Payload: string(payloadBytes), CreatedAt: time.Now().UTC()}).Error
+		_ = database.CreateWithRetry(database.DB, &models.PlanningEvent{UserID: userID, TripID: req.TripID, PlanID: req.PlanID, EventType: eventType, Value: float64(req.DelayMinutes), Payload: string(payloadBytes), CreatedAt: time.Now().UTC()})
 	}
 	response := gin.H{"state": state, "event_type": eventType}
 	// 事件流：真正"到访"了才发 trip.visited（计划内状态变更不进事件流，避免噪音淹没审计）。
@@ -134,7 +134,7 @@ func createExecutionReplanProposal(userID, tripID, nodeKey string, delayMinutes 
 		return nil
 	}
 	var events []models.PlanningEvent
-	if err := database.DB.Where("user_id = ? AND trip_id = ? AND event_type = ?", userID, tripID, "replan_triggered").Order("created_at desc").Limit(20).Find(&events).Error; err == nil {
+	if err := database.Reader().Where("user_id = ? AND trip_id = ? AND event_type = ?", userID, tripID, "replan_triggered").Order("created_at desc").Limit(20).Find(&events).Error; err == nil {
 		for _, event := range events {
 			var payload map[string]any
 			if json.Unmarshal([]byte(event.Payload), &payload) == nil && payload["status"] == "pending_confirmation" && strings.TrimSpace(fmt.Sprint(payload["node_key"])) == nodeKey {
@@ -144,7 +144,7 @@ func createExecutionReplanProposal(userID, tripID, nodeKey string, delayMinutes 
 	}
 	proposal := gin.H{"proposal_id": fmt.Sprintf("execution-%d", time.Now().UTC().UnixNano()), "status": "pending_confirmation", "trip_id": tripID, "node_key": nodeKey, "reason": "execution_delay", "delay_minutes": delayMinutes, "changed_signals": []string{"delay_minutes"}, "confirmation_required": true, "generated_at": time.Now().UTC()}
 	payload, _ := json.Marshal(proposal)
-	if err := database.DB.Create(&models.PlanningEvent{UserID: userID, TripID: tripID, EventType: "replan_triggered", Payload: string(payload), CreatedAt: time.Now().UTC()}).Error; err != nil {
+	if err := database.CreateWithRetry(database.DB, &models.PlanningEvent{UserID: userID, TripID: tripID, EventType: "replan_triggered", Payload: string(payload), CreatedAt: time.Now().UTC()}); err != nil {
 		return nil
 	}
 	return proposal

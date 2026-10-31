@@ -14,14 +14,11 @@ import {
   BarChart3,
 } from 'lucide-react';
 import {
-  RADAR_FONT,
   parseCostNumber,
   useRadarTheme,
-  radarPalette,
   radarBackground,
   radarSharedCss,
 } from './lib/radarTheme';
-import DraggablePanel from './components/DraggablePanel';
 import TripMacroDashboard from './components/TripMacroDashboard';
 import InteractiveAmapComponent, { RoutePoint, SafetyInfo } from './InteractiveAmapComponent';
 
@@ -155,7 +152,6 @@ export default function FullRouteVisualizer({
   onSelectPlanVariant,
 }: FullRouteVisualizerProps) {
   const mode = useRadarTheme();
-  const COLORS = radarPalette(mode);
 
   // 控制 2D 地图 (MICRO) 与 行程数据看板 (MACRO)
   const [viewState, setViewState] = useState<'MACRO' | 'MICRO'>('MICRO');

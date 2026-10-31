@@ -49,10 +49,12 @@ export default function BottomMapCarousel({ selectedIndex, onSelect, routes }: a
           const isHotel = typeLabel.includes('宿') || typeLabel.includes('酒店');
 
           return (
-            <div
+            <button
+              type="button"
               key={`carousel-card-item-${r.name}-${idx}`}
+              aria-label={`查看 ${r.name} 详情`}
               onClick={() => onSelect(idx)}
-              className={`snap-center shrink-0 w-[210px] h-[130px] rounded-2xl overflow-hidden relative cursor-pointer transition-all duration-500 transform ${
+              className={`snap-center shrink-0 w-[210px] h-[130px] rounded-2xl overflow-hidden relative cursor-pointer transition-all duration-500 transform p-0 text-left ${
                 isSelected
                   ? 'ring-2 ring-orange-400 ring-offset-2 ring-offset-slate-950 scale-110 shadow-[0_0_30px_rgba(251,146,60,0.4)] z-20'
                   : 'opacity-70 hover:opacity-100 hover:scale-105 shadow-lg hover:shadow-xl'
@@ -100,7 +102,7 @@ export default function BottomMapCarousel({ selectedIndex, onSelect, routes }: a
                   )}
                 </div>
               </div>
-            </div>
+            </button>
           );
         })}
       </div>

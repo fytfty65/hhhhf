@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 # 自然型目的地的判定线索：地名/原话/兴趣里出现这些，就认为这趟是奔着自然去的
 NATURE_DESTINATION_HINTS = (
@@ -50,7 +50,8 @@ def _texts(context: Mapping[str, Any], signals: Optional[Mapping[str, Any]]) -> 
         str(context.get("city") or ""),
         " ".join(str(item) for item in (context.get("destinations") or [])),
     ]
-    preferences = context.get("preferences") if isinstance(context.get("preferences"), Mapping) else {}
+    raw_preferences = context.get("preferences")
+    preferences: Mapping[str, Any] = raw_preferences if isinstance(raw_preferences, Mapping) else {}
     interests = preferences.get("interest") or []
     if isinstance(interests, str):
         interests = [interests]

@@ -171,3 +171,47 @@ def capability_registry() -> List[AgentCapability]:
         )
         for agent_id, label, domain, responsibility, tools, timeout_ms, fallback, metrics in raw
     ]
+
+
+def audit_route_agent_proposal(route: list[dict], *, agent_id: str = "route-planner") -> dict:
+    """Run the generated route through the coordinator-facing proposal gate.
+
+    This audit is non-blocking during migration: invalid or unsourced output is
+    marked degraded and remains visible to the coordinator/UI, but it cannot be
+    mistaken for a fully evidenced specialist proposal.
+
+    Moved here from ``api/agent.py`` (2026-10-10). It belongs beside
+    ``validate_agent_proposal`` and ``proposal_timestamp`` — it is the route-domain
+    adapter for this contract, so keeping it in the agent module meant the contract
+    and its only adapter lived in different files. ``api.agent`` re-exports it.
+    """
+    evidence = []
+    for node in route if isinstance(route, list) else []:
+        if not isinstance(node, dict):
+            continue
+        sources = node.get("data_sources") or {}
+        if not isinstance(sources, dict):
+            continue
+        for field, provider in sources.items():
+            provider_name = provider.get("provider") if isinstance(provider, dict) else provider
+            if provider_name in (None, "", "unavailable", "estimated"):
+                continue
+            evidence.append({"field": str(field), "provider": str(provider_name), "observed_at": proposal_timestamp(), "estimated": bool(node.get("estimated", False))})
+    payload = {
+        "agent_id": agent_id,
+        "domain": "itinerary",
+        "status": "ok" if route and evidence else "degraded",
+        "degraded": not bool(route and evidence),
+        "candidates": [{"name": node.get("name") or node.get("location")} for node in route[:50] if isinstance(node, dict)],
+        "hard_constraint_results": {"route_present": bool(route)},
+        "evidence": evidence[:200],
+        "confidence": 0.75 if evidence else 0.0,
+        "failure": None if route and evidence else {"code": "evidence_missing", "message": "路线存在但缺少可核验来源", "retryable": False, "fallback": "supplier_refresh"},
+    }
+    try:
+        proposal = validate_agent_proposal(payload)
+        return {"agent_id": proposal.agent_id, "status": proposal.status, "evidence_count": len(proposal.evidence), "candidate_count": len(proposal.candidates), "degraded": proposal.degraded}
+    except Exception as error:
+        raw_candidates = payload.get("candidates")
+        candidate_count = len(raw_candidates) if isinstance(raw_candidates, list) else 0
+        return {"agent_id": agent_id, "status": "failed", "evidence_count": len(evidence), "candidate_count": candidate_count, "degraded": True, "error": str(error)}

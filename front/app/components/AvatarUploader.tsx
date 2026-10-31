@@ -3,7 +3,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ImagePlus, X, Check, AlertCircle, Upload, ZoomIn, ZoomOut, RefreshCw } from 'lucide-react';
-import { API_BASE } from '../lib/utils';
+import { apiFetch, assetUrl } from '../lib/apiClient';
 
 const CROP_SIZE = 288; // 裁剪视窗边长（px）
 const OUTPUT_SIZE = 512; // 输出头像边长（px）
@@ -44,7 +44,6 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
       const dh = imgH * baseScale;
       setOffset({ x: (CROP_SIZE - dw) / 2, y: (CROP_SIZE - dh) / 2 });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imgW, imgH]);
 
   const validateFile = (file: File): string | null => {
@@ -149,14 +148,14 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
 
     // 👑 前置诊断：先确认后端是否可达
     try {
-      const pingRes = await fetch(`${API_BASE}/ping`, { method: 'GET', signal: AbortSignal.timeout(5000) });
+      const pingRes = await apiFetch('/ping', { method: 'GET', timeoutMs: 5000 });
       if (!pingRes.ok) {
         setError(`后端服务响应异常 (HTTP ${pingRes.status})，请检查服务状态后重试`);
         setStage('crop');
         return;
       }
     } catch (pingErr: any) {
-      const msg = pingErr.name === 'TimeoutError' || pingErr.name === 'AbortError'
+      const msg = pingErr?.code === 'REQUEST_TIMEOUT' || pingErr.name === 'TimeoutError' || pingErr.name === 'AbortError'
         ? '连接后端超时（5秒），请确认网关服务已启动'
         : '无法连接到后端服务，请确认网关已启动、API_BASE 配置正确且防火墙未拦截';
       setError(msg);
@@ -170,17 +169,13 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
     form.append('file', blob, `avatar.${ext}`);
 
     // 👑 使用 fetch 替代 XHR：fetch 的 CORS 处理更现代，与前面 /ping 一致
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-
     try {
       setProgress(30); // 开始上传，给个初始进度
-      const res = await fetch(`${API_BASE}/api/user/avatar/upload`, {
+      const res = await apiFetch('/api/user/avatar/upload', {
         method: 'POST',
         body: form,
-        signal: controller.signal,
+        timeoutMs: 30000,
       });
-      clearTimeout(timeoutId);
       setProgress(90);
 
       if (res.ok) {
@@ -218,9 +213,8 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
         setStage('crop');
       }
     } catch (err: any) {
-      clearTimeout(timeoutId);
       console.error('[AvatarUpload] fetch 上传失败:', err);
-      if (err.name === 'AbortError') {
+      if (err?.code === 'REQUEST_TIMEOUT' || err.name === 'AbortError') {
         setError('上传超时（30秒），请检查网络后重试');
       } else {
         setError(`上传请求失败：${err.message || '网络异常'}。请确认后端服务已重启并重新尝试。`);
@@ -320,7 +314,7 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
               <div className="w-16 h-16 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center"><Check className="w-8 h-8" /></div>
               <p className="text-sm font-bold text-stone-700">头像上传成功</p>
               {doneUrl && (
-                <img src={`${API_BASE}${doneUrl}`} alt="新头像" className="w-20 h-20 rounded-full border-2 border-amber-200 object-cover" />
+                <img src={assetUrl(doneUrl)} alt="新头像" className="w-20 h-20 rounded-full border-2 border-amber-200 object-cover" />
               )}
               <button onClick={onClose} className="px-6 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition-colors cursor-pointer">完成</button>
             </div>
@@ -341,7 +335,7 @@ export default function AvatarUploader({ userId, onClose, onSuccess }: AvatarUpl
                     onClick={async () => {
                       setError('正在诊断连接...');
                       try {
-                        const r = await fetch(`${API_BASE}/ping`, { method: 'GET', signal: AbortSignal.timeout(5000) });
+                        const r = await apiFetch('/ping', { method: 'GET', timeoutMs: 5000 });
                         if (r.ok) {
                           const d = await r.json().catch(() => ({}));
                           setError(`✅ 后端连接正常！(${d.service || 'OmniRoute'}) 请重新点击「裁剪并上传」尝试。`);

@@ -669,7 +669,8 @@ def candidate_from_poi(poi: Mapping[str, Any], intent: Optional[str] = None) -> 
         # 搜"园林"会带出「xx园林宾馆」——它们都只是名字里含关键词，实际是设施/商店/住宿。
         return None
     price = _parse_price(poi.get("cost"))
-    sources = poi.get("data_sources") if isinstance(poi.get("data_sources"), Mapping) else {}
+    raw_sources = poi.get("data_sources")
+    sources: Mapping[str, Any] = raw_sources if isinstance(raw_sources, Mapping) else {}
     price_source = str(sources.get("cost") or "").strip().lower() or "unavailable"
     candidate: Dict[str, Any] = {
         "name": name,
@@ -702,7 +703,8 @@ def poi_record_from_amap(poi: Mapping[str, Any], city: str = "", amap_key: str =
     import urllib.parse
 
     name = str(poi.get("name") or "")
-    biz_ext = poi.get("biz_ext") if isinstance(poi.get("biz_ext"), Mapping) else {}
+    raw_biz_ext = poi.get("biz_ext")
+    biz_ext: Mapping[str, Any] = raw_biz_ext if isinstance(raw_biz_ext, Mapping) else {}
     rating = biz_ext.get("rating")
     if isinstance(rating, list):
         rating = rating[0] if rating else None

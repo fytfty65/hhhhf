@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"math"
 	"net/http"
+	"strings"
 
 	"gateway/internal/database"
 	"gateway/internal/models"
@@ -11,16 +13,50 @@ import (
 	"github.com/google/uuid"
 )
 
-// SetBudgetHandler 创建或更新某行程的预算（支持多币种）。
+// maxMoneyCents bounds input at 10 billion major units, far beyond any travel
+// budget, so int64 accumulation can never overflow.
+const maxMoneyCents int64 = 1_000_000_000_000
+
+// resolveMoneyInput accepts the canonical integer-minor-unit field and, during
+// the migration window, the legacy float field. The conversion happens once at
+// the API boundary; nothing downstream sees a float.
+func resolveMoneyInput(cents *int64, major *float64) (int64, bool) {
+	if cents != nil {
+		return *cents, true
+	}
+	if major != nil {
+		if math.IsNaN(*major) || math.IsInf(*major, 0) {
+			return 0, false
+		}
+		return int64(math.Round(*major * 100)), true
+	}
+	return 0, false
+}
+
+// normalizeMoneyCurrency rejects unknown codes instead of silently treating
+// them as CNY, which used to turn a EUR amount into a CNY amount.
+func normalizeMoneyCurrency(raw string) (string, bool) {
+	code := strings.ToUpper(strings.TrimSpace(raw))
+	if code == "" {
+		return "CNY", true
+	}
+	if !service.IsKnownCurrency(code) {
+		return "", false
+	}
+	return code, true
+}
+
+// SetBudgetHandler 创建或更新某行程的预算（支持多币种，金额以整数分存储）。
 func SetBudgetHandler(c *gin.Context) {
 	var req struct {
-		UserID      string  `json:"user_id"` // legacy field; authenticated principal is authoritative
-		TripID      string  `json:"trip_id" binding:"required"`
-		TotalBudget float64 `json:"total_budget" binding:"required"`
-		Currency    string  `json:"currency"`
+		UserID           string   `json:"user_id"` // legacy field; authenticated principal is authoritative
+		TripID           string   `json:"trip_id" binding:"required"`
+		TotalBudgetCents *int64   `json:"total_budget_cents"`
+		TotalBudget      *float64 `json:"total_budget"` // legacy major-unit field
+		Currency         string   `json:"currency"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整", "code": "INVALID_BUDGET_REQUEST"})
 		return
 	}
 	userID, ok := currentUserIDOrReject(c)
@@ -32,52 +68,62 @@ func SetBudgetHandler(c *gin.Context) {
 	}
 	// The authenticated principal, never the body, owns the budget record.
 	req.UserID = userID
-	if req.TotalBudget <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "预算必须大于 0"})
+	cents, ok := resolveMoneyInput(req.TotalBudgetCents, req.TotalBudget)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供 total_budget_cents（整数分）", "code": "BUDGET_AMOUNT_REQUIRED"})
 		return
 	}
-	if req.Currency == "" {
-		req.Currency = "CNY"
+	if cents <= 0 || cents > maxMoneyCents {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "预算必须大于 0 且不超过合理上限", "code": "BUDGET_AMOUNT_INVALID"})
+		return
 	}
-	if !service.IsKnownCurrency(req.Currency) {
-		req.Currency = "CNY"
+	currency, ok := normalizeMoneyCurrency(req.Currency)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持该币种", "code": "UNSUPPORTED_CURRENCY"})
+		return
 	}
 
 	var plan models.BudgetPlan
 	err := database.DB.Where("user_id = ? AND trip_id = ?", req.UserID, req.TripID).First(&plan).Error
 	if err != nil {
 		plan = models.BudgetPlan{
-			ID:          uuid.New().String(),
-			UserID:      req.UserID,
-			TripID:      req.TripID,
-			TotalBudget: req.TotalBudget,
-			Currency:    req.Currency,
+			ID:               uuid.New().String(),
+			UserID:           req.UserID,
+			TripID:           req.TripID,
+			TotalBudgetCents: cents,
+			Currency:         currency,
 		}
 		if e := database.DB.Create(&plan).Error; e != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "预算创建失败"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "预算创建失败", "code": "BUDGET_CREATE_FAILED"})
 			return
 		}
 	} else {
-		plan.TotalBudget = req.TotalBudget
-		plan.Currency = req.Currency
+		plan.TotalBudgetCents = cents
+		plan.Currency = currency
 		database.DB.Save(&plan)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "预算已设置", "budget_plan": plan})
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "预算已设置",
+		"budget_plan": plan,
+		// Echo the normalised precision so clients never guess.
+		"precision": service.CurrencyPrecision,
+	})
 }
 
 // AddExpenseHandler 记录一笔实际消费（支持多币种，自动换算）。
 func AddExpenseHandler(c *gin.Context) {
 	var req struct {
-		UserID   string  `json:"user_id"` // legacy field; authenticated principal is authoritative
-		TripID   string  `json:"trip_id" binding:"required"`
-		Category string  `json:"category"`
-		Amount   float64 `json:"amount" binding:"required"`
-		Currency string  `json:"currency"`
-		Note     string  `json:"note"`
+		UserID      string   `json:"user_id"` // legacy field; authenticated principal is authoritative
+		TripID      string   `json:"trip_id" binding:"required"`
+		Category    string   `json:"category"`
+		AmountCents *int64   `json:"amount_cents"`
+		Amount      *float64 `json:"amount"` // legacy major-unit field
+		Currency    string   `json:"currency"`
+		Note        string   `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整", "code": "INVALID_EXPENSE_REQUEST"})
 		return
 	}
 	userID, ok := currentUserIDOrReject(c)
@@ -88,28 +134,32 @@ func AddExpenseHandler(c *gin.Context) {
 		return
 	}
 	req.UserID = userID
-	if req.Amount <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "消费金额必须大于 0"})
+	cents, ok := resolveMoneyInput(req.AmountCents, req.Amount)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供 amount_cents（整数分）", "code": "EXPENSE_AMOUNT_REQUIRED"})
+		return
+	}
+	if cents <= 0 || cents > maxMoneyCents {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "消费金额必须大于 0 且不超过合理上限", "code": "EXPENSE_AMOUNT_INVALID"})
 		return
 	}
 	if req.Category == "" {
 		req.Category = "其他"
 	}
-	if req.Currency == "" {
-		req.Currency = "CNY"
-	}
-	if !service.IsKnownCurrency(req.Currency) {
-		req.Currency = "CNY"
+	currency, ok := normalizeMoneyCurrency(req.Currency)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持该币种", "code": "UNSUPPORTED_CURRENCY"})
+		return
 	}
 
 	exp := models.ExpenseRecord{
-		ID:       uuid.New().String(),
-		UserID:   req.UserID,
-		TripID:   req.TripID,
-		Category: req.Category,
-		Amount:   req.Amount,
-		Currency: req.Currency,
-		Note:     req.Note,
+		ID:          uuid.New().String(),
+		UserID:      req.UserID,
+		TripID:      req.TripID,
+		Category:    req.Category,
+		AmountCents: cents,
+		Currency:    currency,
+		Note:        req.Note,
 	}
 	if err := database.DB.Create(&exp).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "消费记录失败"})
@@ -154,18 +204,23 @@ func OCRExpenseHandler(c *gin.Context) {
 		return
 	}
 
-	if req.Currency == "" || !service.IsKnownCurrency(req.Currency) {
-		req.Currency = receipt.Currency
+	currency, okCurrency := normalizeMoneyCurrency(req.Currency)
+	if !okCurrency {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持该币种", "code": "UNSUPPORTED_CURRENCY"})
+		return
+	}
+	if strings.TrimSpace(req.Currency) == "" {
+		currency = receipt.Currency
 	}
 
 	exp := models.ExpenseRecord{
-		ID:       uuid.New().String(),
-		UserID:   req.UserID,
-		TripID:   req.TripID,
-		Category: receipt.Category,
-		Amount:   receipt.Amount,
-		Currency: req.Currency,
-		Note:     "拍照记账（OCR 自动识别）",
+		ID:          uuid.New().String(),
+		UserID:      req.UserID,
+		TripID:      req.TripID,
+		Category:    receipt.Category,
+		AmountCents: receipt.AmountCents,
+		Currency:    currency,
+		Note:        "拍照记账（OCR 自动识别）",
 	}
 	if err := database.DB.Create(&exp).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "消费记录失败"})
@@ -224,16 +279,16 @@ func BudgetReviewHandler(c *gin.Context) {
 		"summary":  summary,
 		"expenses": expenses,
 		"report": gin.H{
-			"highest_category": topCategory(summary.ByCategory),
+			"highest_category": topCategory(summary.ByCategoryCents),
 			"advice":           budgetAdvice(summary.Level),
 		},
 	})
 }
 
-// topCategory 返回消费最高分类。
-func topCategory(byCategory map[string]float64) string {
+// topCategory 返回消费最高分类（金额为整数分）。
+func topCategory(byCategory map[string]int64) string {
 	top := "其他"
-	max := -1.0
+	max := int64(-1)
 	for k, v := range byCategory {
 		if v > max {
 			max = v

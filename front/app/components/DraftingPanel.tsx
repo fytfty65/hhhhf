@@ -16,7 +16,7 @@ import VoiceIntentChips from './VoiceIntentChips';
 // 出行方式与偏好定位的快捷切换选项（值需与后端 user_preferences.mode / role 完全对齐）
 const TRAVEL_MODES = [
   { value: 'solo', label: '一人行', hint: '1', desc: '单人专属节奏', icon: MapPin },
-  { value: 'coop', label: '亲友结伴', hint: '2', desc: '多智能体博弈平衡', icon: Users },
+  { value: 'coop', label: '亲友结伴', hint: '2', desc: '自动平衡多人偏好', icon: Users },
   { value: 'pvp', label: '高性价比', hint: '3', desc: '极致体验成本比', icon: PiggyBank },
 ];
 const USER_ROLES = [
@@ -170,7 +170,7 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
               <button type="button" onClick={toggleVoice} disabled={isReady} title="语音输入" aria-label={listening ? '停止语音输入' : '开始语音输入'} className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${listening ? 'border-rose-200 bg-rose-50 text-rose-600' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'} ${isReady ? 'cursor-not-allowed opacity-50' : ''}`}>
                 <Mic className={`w-3.5 h-3.5 ${listening ? 'animate-pulse' : ''}`} />
               </button>
-              {isReady && <span className="flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700"><Check className="h-3 w-3"/> 已提交推演</span>}
+              {isReady && <span className="flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700"><Check className="h-3 w-3"/> 已提交规划</span>}
             </div>
           </div>
           

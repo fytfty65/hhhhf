@@ -1,11 +1,11 @@
 // 交通票务查询客户端服务层
 // 负责参数验证、错误处理、超时控制、响应转换
 
+import { ApiRequestError, apiFetch } from './apiClient.ts';
+
 import type {
   TransportSearchParams,
   TransportSearchResponse,
-  TransportSearchError,
-  TransportType,
 } from '../types/transport';
 
 const REQUEST_TIMEOUT_MS = 15000;
@@ -47,12 +47,15 @@ export async function searchTransport(params: TransportSearchParams): Promise<Tr
   });
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`/api/transport?${query.toString()}`, {
-      signal: controller.signal,
+    const response = await apiFetch(`/api/transport?${query.toString()}`, {
+      origin: 'self',
+      auth: false,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      retries: 0,
       headers: { 'Accept': 'application/json' },
+      signal: controller.signal,
     });
 
     const data = await response.json();
@@ -65,14 +68,14 @@ export async function searchTransport(params: TransportSearchParams): Promise<Tr
 
     return data.data as TransportSearchResponse;
   } catch (error) {
-    clearTimeout(timeoutId);
     if (error instanceof TransportApiError) throw error;
+    if (error instanceof ApiRequestError && error.code === 'REQUEST_TIMEOUT') {
+      throw new TransportApiError('查询超时，请稍后重试', 'REQUEST_TIMEOUT', 504);
+    }
     if (error instanceof Error && error.name === 'AbortError') {
       throw new TransportApiError('查询超时，请稍后重试', 'REQUEST_TIMEOUT', 504);
     }
     throw new TransportApiError('暂时无法连接订票服务，请稍后重试', 'NETWORK_ERROR', 0);
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 

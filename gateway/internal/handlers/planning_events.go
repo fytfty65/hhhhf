@@ -63,53 +63,62 @@ var planningQualityMetrics = map[string]bool{
 	"error_rate":                   true,
 }
 
-// RecordPlanningEventHandler is deliberately append-only. It separates
-// explicit feedback from passive interaction so future training can avoid
-// treating a button click as a satisfaction label.
-func RecordPlanningEventHandler(c *gin.Context) {
-	var req struct {
-		UserID      string         `json:"user_id"`
-		TripID      string         `json:"trip_id"`
-		RoomID      string         `json:"room_id"`
-		Destination string         `json:"destination"`
-		StartDate   string         `json:"start_date"`
-		Travelers   int            `json:"travelers"`
-		Budget      float64        `json:"budget"`
-		EventType   string         `json:"event_type" binding:"required"`
-		PlanID      string         `json:"plan_id"`
-		Value       float64        `json:"value"`
-		Payload     map[string]any `json:"payload"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		planningError(c, http.StatusBadRequest, "INVALID_EVENT", "事件参数不完整", nil)
-		return
-	}
+// maxPlanningEventBatch bounds one batch request. Fifty events covers a burst
+// from a single planning interaction while keeping the transaction short: the
+// whole batch takes the write lock once, so a large cap would hold it longer
+// than the per-event endpoint it replaces.
+const maxPlanningEventBatch = 50
+
+// planningEventRequest is the wire shape shared by the single and batch
+// endpoints. One struct means a field added for attribution cannot be accepted
+// by one route and silently dropped by the other.
+type planningEventRequest struct {
+	UserID      string         `json:"user_id"`
+	TripID      string         `json:"trip_id"`
+	RoomID      string         `json:"room_id"`
+	Destination string         `json:"destination"`
+	StartDate   string         `json:"start_date"`
+	Travelers   int            `json:"travelers"`
+	Budget      float64        `json:"budget"`
+	EventType   string         `json:"event_type" binding:"required"`
+	PlanID      string         `json:"plan_id"`
+	Value       float64        `json:"value"`
+	Payload     map[string]any `json:"payload"`
+}
+
+// preparePlanningEvent applies authentication, access control and payload
+// normalisation, and returns the row to persist.
+//
+// It writes the error response itself and returns false when the request must
+// not be recorded. Persistence is left to the caller so the batch route can
+// insert many prepared rows in one statement without duplicating validation.
+func preparePlanningEvent(c *gin.Context, req *planningEventRequest) (models.PlanningEvent, bool) {
 	userID, ok := currentUserIDOrReject(c)
 	if !ok {
-		return
+		return models.PlanningEvent{}, false
 	}
 	if strings.TrimSpace(req.TripID) == "" {
 		if req.EventType != "plan_favorited" && req.EventType != "plan_swapped" && req.EventType != "node_visited" {
 			planningError(c, http.StatusBadRequest, "TRIP_ID_REQUIRED", "缺少 trip_id，请先保存或创建行程", nil)
-			return
+			return models.PlanningEvent{}, false
 		}
 	} else if _, ok := requireTripOrRoomAccess(c, req.TripID); !ok {
-		return
+		return models.PlanningEvent{}, false
 	}
 	if strings.TrimSpace(req.RoomID) != "" {
 		if _, ok := requireRoomMember(c, req.RoomID); !ok {
-			return
+			return models.PlanningEvent{}, false
 		}
 	}
 	req.UserID = userID
 	req.EventType = strings.TrimSpace(req.EventType)
 	if !planningEventTypes[req.EventType] {
 		planningError(c, http.StatusBadRequest, "EVENT_TYPE_UNSUPPORTED", "不支持的规划事件类型", map[string]string{"event_type": req.EventType})
-		return
+		return models.PlanningEvent{}, false
 	}
 	if len(req.PlanID) > 200 {
 		planningError(c, http.StatusBadRequest, "PLAN_ID_TOO_LONG", "方案标识过长", nil)
-		return
+		return models.PlanningEvent{}, false
 	}
 	if req.Payload == nil {
 		req.Payload = map[string]any{}
@@ -118,17 +127,17 @@ func RecordPlanningEventHandler(c *gin.Context) {
 		metric := strings.TrimSpace(fmt.Sprint(req.Payload["metric"]))
 		if !planningQualityMetrics[metric] {
 			planningError(c, http.StatusBadRequest, "QUALITY_METRIC_UNSUPPORTED", "不支持的智能体质量指标", map[string]string{"metric": metric})
-			return
+			return models.PlanningEvent{}, false
 		}
 		value, valid := numericPayload(req.Payload, "value")
 		if !valid || math.IsNaN(value) || math.IsInf(value, 0) {
 			planningError(c, http.StatusBadRequest, "QUALITY_METRIC_VALUE_INVALID", "质量指标值无效", nil)
-			return
+			return models.PlanningEvent{}, false
 		}
 		if strings.HasSuffix(metric, "_rate") || strings.Contains(metric, "fairness_") {
 			if value < 0 || value > 1 {
 				planningError(c, http.StatusBadRequest, "QUALITY_METRIC_VALUE_INVALID", "比例类质量指标必须在 0 到 1 之间", nil)
-				return
+				return models.PlanningEvent{}, false
 			}
 		}
 		req.Payload["metric"] = metric
@@ -142,7 +151,7 @@ func RecordPlanningEventHandler(c *gin.Context) {
 		propensity, valid := numericPayload(req.Payload, "propensity")
 		if !valid || propensity <= 0 || propensity > 1 {
 			planningError(c, http.StatusBadRequest, "PROPENSITY_INVALID", "propensity 必须在 0 到 1 之间", nil)
-			return
+			return models.PlanningEvent{}, false
 		}
 		req.Payload["propensity"] = propensity
 	}
@@ -164,38 +173,109 @@ func RecordPlanningEventHandler(c *gin.Context) {
 	version := "builtin-module-v1"
 	if req.PlanID != "" {
 		var run models.PlanningRun
-		if err := database.DB.Where("id = ? AND user_id = ? AND trip_id = ?", req.PlanID, userID, strings.TrimSpace(req.TripID)).First(&run).Error; err == nil {
+		if err := database.Reader().Where("id = ? AND user_id = ? AND trip_id = ?", req.PlanID, userID, strings.TrimSpace(req.TripID)).First(&run).Error; err == nil {
 			version = run.ModelVersion
 		} else if req.EventType == "plan_adopted" || req.EventType == "plan_rejected" || req.EventType == "plan_edited" {
 			planningError(c, http.StatusBadRequest, "PLAN_RUN_NOT_FOUND", "找不到该方案的生成记录，无法归因反馈", nil)
-			return
+			return models.PlanningEvent{}, false
 		}
 	}
 	req.Payload["model_version"] = version
 	payloadBytes, err := json.Marshal(req.Payload)
 	if err != nil || len(payloadBytes) > 64*1024 {
 		planningError(c, http.StatusBadRequest, "PAYLOAD_INVALID", "事件附加数据无效或过大", nil)
+		return models.PlanningEvent{}, false
+	}
+	return models.PlanningEvent{
+		UserID:    req.UserID,
+		TripID:    strings.TrimSpace(req.TripID),
+		RoomID:    strings.TrimSpace(req.RoomID),
+		EventType: req.EventType,
+		PlanID:    req.PlanID,
+		Value:     req.Value,
+		Payload:   string(payloadBytes),
+	}, true
+}
+
+// recordBanditFeedback forwards a reward to the AI service. It is best effort:
+// the durable gateway event remains the source of truth when the AI service is
+// temporarily unavailable.
+func recordBanditFeedback(c *gin.Context, req *planningEventRequest) {
+	if req.EventType != "plan_adopted" && req.EventType != "plan_rejected" {
 		return
 	}
-	event := models.PlanningEvent{UserID: req.UserID, TripID: strings.TrimSpace(req.TripID), RoomID: strings.TrimSpace(req.RoomID), EventType: req.EventType, PlanID: req.PlanID, Value: req.Value, Payload: string(payloadBytes)}
-	if err := database.DB.Create(&event).Error; err != nil {
+	if strings.TrimSpace(fmt.Sprint(req.Payload["bandit_arm_id"])) == "" {
+		return
+	}
+	reward := 0.0
+	if req.EventType == "plan_adopted" {
+		reward = 1.0
+	}
+	if value, valid := numericPayload(req.Payload, "reward"); valid {
+		reward = value
+	}
+	feedback, _ := json.Marshal(map[string]any{"arm_id": strings.TrimSpace(fmt.Sprint(req.Payload["bandit_arm_id"])), "reward": reward, "propensity": req.Payload["propensity"]})
+	_, _, _ = callAI(c, "/api/v1/agent/bandit/feedback", feedback)
+}
+
+// RecordPlanningEventHandler is deliberately append-only. It separates
+// explicit feedback from passive interaction so future training can avoid
+// treating a button click as a satisfaction label.
+func RecordPlanningEventHandler(c *gin.Context) {
+	var req planningEventRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		planningError(c, http.StatusBadRequest, "INVALID_EVENT", "事件参数不完整", nil)
+		return
+	}
+	event, ok := preparePlanningEvent(c, &req)
+	if !ok {
+		return
+	}
+	if err := database.CreateWithRetry(database.DB, &event); err != nil {
 		planningError(c, http.StatusInternalServerError, "EVENT_WRITE_FAILED", "规划事件记录失败", nil)
 		return
 	}
-	if (req.EventType == "plan_adopted" || req.EventType == "plan_rejected") && strings.TrimSpace(fmt.Sprint(req.Payload["bandit_arm_id"])) != "" {
-		reward := 0.0
-		if req.EventType == "plan_adopted" {
-			reward = 1.0
-		}
-		if value, valid := numericPayload(req.Payload, "reward"); valid {
-			reward = value
-		}
-		feedback, _ := json.Marshal(map[string]any{"arm_id": strings.TrimSpace(fmt.Sprint(req.Payload["bandit_arm_id"])), "reward": reward, "propensity": req.Payload["propensity"]})
-		// Feedback is best-effort: the durable gateway event remains the source
-		// of truth when the AI service is temporarily unavailable.
-		_, _, _ = callAI(c, "/api/v1/agent/bandit/feedback", feedback)
-	}
+	recordBanditFeedback(c, &req)
 	planningData(c, gin.H{"accepted": true, "event_id": event.ID, "recorded_at": time.Now().UTC()})
+}
+
+// RecordPlanningEventsBatchHandler records up to maxPlanningEventBatch events
+// with a single insert.
+//
+// Why a batch route instead of one insert per event: SQLite admits one writer,
+// and every INSERT takes and releases the write lock. A planning burst used to
+// mean N lock round trips interleaved with other writers; CREATE IN BATCHES
+// turns it into one statement and one lock acquisition. Validation, access
+// checks and normalisation still run per event, so batching changes throughput,
+// not trust.
+func RecordPlanningEventsBatchHandler(c *gin.Context) {
+	var req struct {
+		Events []planningEventRequest `json:"events"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		planningError(c, http.StatusBadRequest, "INVALID_EVENT", "事件参数不完整", nil)
+		return
+	}
+	if len(req.Events) == 0 || len(req.Events) > maxPlanningEventBatch {
+		planningError(c, http.StatusBadRequest, "BATCH_SIZE_INVALID", fmt.Sprintf("单次批量事件数量必须在 1 到 %d 之间", maxPlanningEventBatch), nil)
+		return
+	}
+	events := make([]models.PlanningEvent, 0, len(req.Events))
+	for i := range req.Events {
+		event, ok := preparePlanningEvent(c, &req.Events[i])
+		if !ok {
+			return
+		}
+		events = append(events, event)
+	}
+	if err := database.CreateInBatchesWithRetry(database.DB, &events, 100); err != nil {
+		planningError(c, http.StatusInternalServerError, "EVENT_WRITE_FAILED", "规划事件记录失败", nil)
+		return
+	}
+	for i := range req.Events {
+		recordBanditFeedback(c, &req.Events[i])
+	}
+	planningData(c, gin.H{"accepted": len(events), "recorded_at": time.Now().UTC()})
 }
 
 // normalizeSourceEvidenceEvent keeps the source-verification loop structured
@@ -482,10 +562,18 @@ func providerQualityGateSummary(events []models.PlanningEvent) map[string]any {
 		enumInvalid := float64(item.enumInvalid) / float64(item.candidates)
 		eligible := float64(item.eligible) / float64(item.candidates)
 		issues := []string{}
-		if stale > maxStale { issues = append(issues, "stale_ratio") }
-		if conflict > maxConflict { issues = append(issues, "source_conflict_ratio") }
-		if enumInvalid > maxEnumInvalid { issues = append(issues, "enum_invalid_ratio") }
-		if eligible < minEligible { issues = append(issues, "eligible_ratio") }
+		if stale > maxStale {
+			issues = append(issues, "stale_ratio")
+		}
+		if conflict > maxConflict {
+			issues = append(issues, "source_conflict_ratio")
+		}
+		if enumInvalid > maxEnumInvalid {
+			issues = append(issues, "enum_invalid_ratio")
+		}
+		if eligible < minEligible {
+			issues = append(issues, "eligible_ratio")
+		}
 		if len(issues) > 0 {
 			blocked++
 			reasons = append(reasons, key+":"+strings.Join(issues, ","))
@@ -494,7 +582,11 @@ func providerQualityGateSummary(events []models.PlanningEvent) map[string]any {
 		}
 	}
 	status := "available"
-	if blocked > 0 { status = "blocked" } else if insufficient > 0 { status = "insufficient_data" }
+	if blocked > 0 {
+		status = "blocked"
+	} else if insufficient > 0 {
+		status = "insufficient_data"
+	}
 	// Alerts are a bounded operator contract. They intentionally expose only
 	// severity, stable codes and affected counts; provider names and raw
 	// supplier payloads remain in neither the alert nor the dashboard contract.
@@ -508,10 +600,10 @@ func providerQualityGateSummary(events []models.PlanningEvent) map[string]any {
 	issueCounts := map[string]int{}
 	for _, reason := range reasons {
 		for issue, code := range map[string]string{
-			"stale_ratio": "provider_quality_stale_data",
+			"stale_ratio":           "provider_quality_stale_data",
 			"source_conflict_ratio": "provider_quality_source_conflict",
-			"enum_invalid_ratio": "provider_quality_enum_invalid",
-			"eligible_ratio": "provider_quality_low_eligibility",
+			"enum_invalid_ratio":    "provider_quality_enum_invalid",
+			"eligible_ratio":        "provider_quality_low_eligibility",
 		} {
 			if strings.Contains(reason, issue) {
 				issueCounts[code]++

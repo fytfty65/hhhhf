@@ -22,9 +22,9 @@ realtime_state）规整为带优先级的约束集合，并提供：
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from core.optimization import fairness_report, pareto_frontier, validate_candidate, validate_route
+from core.optimization import fairness_report, pareto_frontier, validate_route
 
 # ---------------------------------------------------------------------------
 # 约束优先级分层
@@ -163,7 +163,7 @@ def build_hard_constraints(context: Any) -> List[Dict[str, Any]]:
     for key, value in ctx["hard_constraints"].items():
         if key in {"budget_upper", "days", "required_categories", "max_nodes_per_day", "risk_tolerance"}:
             continue
-        params = value if isinstance(value, Mapping) else {"value": value}
+        params: Dict[str, Any] = dict(value) if isinstance(value, Mapping) else {"value": value}
         add(str(key), LEVEL_HARD if key.startswith(("hard_", "must_", "safety_")) else LEVEL_NEGOTIABLE,
             str(key), params, "context.hard_constraints")
     return constraints
@@ -389,7 +389,7 @@ def relax_hard_constraint(context: Any, code: str) -> Dict[str, Any]:
     """对单个可协商硬约束给出确定性放宽建议（不改变原上下文，返回新上下文副本）。"""
     ctx = normalize_context(context)
     relaxed = dict(ctx)
-    strategy = {
+    strategy: Dict[str, tuple[str, Dict[str, Any]]] = {
         "max_nodes_per_day": ("单日容量上限 +1", {"max_nodes_per_day": int(_number(ctx["max_nodes_per_day"], 0)) + 1}),
         "risk_tolerance": ("风险容忍度 +10", {"risk_tolerance": min(100.0, _number(ctx["risk_tolerance"], 100.0) + 10.0)}),
         "days": ("行程天数 +1", {"days": (ctx["days"] or 1) + 1}),

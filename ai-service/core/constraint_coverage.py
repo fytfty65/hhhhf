@@ -24,10 +24,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional
 
 from .plan_quality import (
-    node_day,
     node_name,
     nodes_of,
     score_anchoring,
@@ -119,7 +118,8 @@ def constraint_coverage(
     context = context or {}
     expectations = expectations or {}
     increment = increment or {}
-    preferences = context.get("preferences") if isinstance(context.get("preferences"), Mapping) else {}
+    raw_preferences = context.get("preferences")
+    preferences: Mapping[str, Any] = raw_preferences if isinstance(raw_preferences, Mapping) else {}
     haystack = _haystack(plan)
     names = [_norm(node_name(node)) for node in nodes_of(plan)]
     items: List[Dict[str, Any]] = []

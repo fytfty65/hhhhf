@@ -95,7 +95,7 @@ func EmergencyEvaluateHandler(c *gin.Context) {
 	proposalID := fmt.Sprintf("emergency-%d", time.Now().UTC().UnixNano())
 	proposal := gin.H{"proposal_id": proposalID, "trip_id": ctx.TripID, "actions": actions, "signal_count": len(req.ChangedSignals), "route_node_count": len(req.CurrentRoute), "generated_at": time.Now().UTC(), "policy": "deterministic_confirm_before_mutation"}
 	if payload, err := json.Marshal(proposal); err == nil && database.DB != nil {
-		_ = database.DB.Create(&models.PlanningEvent{UserID: ctx.UserID, TripID: ctx.TripID, EventType: "emergency_evaluated", Payload: string(payload)}).Error
+		_ = database.CreateWithRetry(database.DB, &models.PlanningEvent{UserID: ctx.UserID, TripID: ctx.TripID, EventType: "emergency_evaluated", Payload: string(payload)})
 	}
 	planningData(c, proposal)
 }

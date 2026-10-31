@@ -9,6 +9,7 @@ import (
 	"gateway/internal/contracts"
 	"gateway/internal/database"
 	"gateway/internal/models"
+	"gateway/internal/service"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -31,10 +32,13 @@ func CreateOrderHandler(c *gin.Context) {
 	}
 	var req struct {
 		contracts.PlanningContext
-		Provider  string         `json:"provider"`
-		OrderType string         `json:"order_type" binding:"required"`
-		Confirm   bool           `json:"confirm"`
-		Fields    map[string]any `json:"fields"`
+		Provider    string         `json:"provider"`
+		OrderType   string         `json:"order_type" binding:"required"`
+		Confirm     bool           `json:"confirm"`
+		Fields      map[string]any `json:"fields"`
+		AmountCents *int64         `json:"amount_cents"`
+		Amount      *float64       `json:"amount"` // legacy major-unit field
+		Currency    string         `json:"currency"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求数据格式不正确", "code": "INVALID_JSON"})
@@ -67,6 +71,22 @@ func CreateOrderHandler(c *gin.Context) {
 		return
 	}
 	kind := normalizeOrderKind(req.OrderType)
+	// Money is optional on an order (some supplier mutations are free holds),
+	// but when present it is validated once and stored as integer minor units.
+	var amountCents int64
+	if req.AmountCents != nil || req.Amount != nil {
+		parsed, okCents := resolveMoneyInput(req.AmountCents, req.Amount)
+		if !okCents || parsed < 0 || parsed > maxMoneyCents {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "订单金额不合法", "code": "ORDER_AMOUNT_INVALID"})
+			return
+		}
+		amountCents = parsed
+	}
+	currency, okCurrency := normalizeMoneyCurrency(req.Currency)
+	if !okCurrency {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持该币种", "code": "UNSUPPORTED_CURRENCY"})
+		return
+	}
 	configs := resolveProviderConfigs(kind)
 	provider := strings.TrimSpace(req.Provider)
 	var config providerConfig
@@ -117,7 +137,7 @@ func CreateOrderHandler(c *gin.Context) {
 	if status == "" {
 		status = "pending"
 	}
-	order := models.TravelOrder{ID: uuid.NewString(), Provider: provider, ProviderOrderID: providerOrderID, UserID: userID, TripID: req.TripID, OrderType: kind, Status: status, IdempotencyKey: idempotency}
+	order := models.TravelOrder{ID: uuid.NewString(), Provider: provider, ProviderOrderID: providerOrderID, UserID: userID, TripID: req.TripID, OrderType: kind, AmountCents: amountCents, Currency: currency, Status: status, IdempotencyKey: idempotency}
 	if err := database.DB.Create(&order).Error; err != nil {
 		var duplicate models.TravelOrder
 		if database.DB.Where("idempotency_key = ? AND user_id = ?", idempotency, userID).First(&duplicate).Error == nil {
@@ -138,6 +158,10 @@ func CancelOrderHandler(c *gin.Context) {
 	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少订单号", "code": "ORDER_ID_REQUIRED"})
+		return
+	}
+	if database.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "数据服务暂不可用", "code": "DATABASE_UNAVAILABLE"})
 		return
 	}
 	var order models.TravelOrder
@@ -189,6 +213,34 @@ func CancelOrderHandler(c *gin.Context) {
 	order.UpdatedAt = time.Now().UTC()
 	_ = database.DB.Save(&order).Error
 	c.JSON(http.StatusOK, orderResponse(order))
+}
+
+func ListOrdersHandler(c *gin.Context) {
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	if database.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "数据服务暂不可用", "code": "DATABASE_UNAVAILABLE"})
+		return
+	}
+	query := database.DB.Where("user_id = ?", userID)
+	if tripID := strings.TrimSpace(c.Query("trip_id")); tripID != "" {
+		if _, ok := requireTripOrRoomAccess(c, tripID); !ok {
+			return
+		}
+		query = query.Where("trip_id = ?", tripID)
+	}
+	var orders []models.TravelOrder
+	if err := query.Order("created_at desc").Limit(50).Find(&orders).Error; err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "订单列表读取失败", "code": "ORDER_LIST_FAILED"})
+		return
+	}
+	items := make([]gin.H, 0, len(orders))
+	for _, order := range orders {
+		items = append(items, orderResponse(order))
+	}
+	c.JSON(http.StatusOK, gin.H{"orders": items, "count": len(items)})
 }
 
 func chooseMutationTool(tools []mcpTool, kind string, cancel bool) mcpTool {
@@ -267,5 +319,5 @@ func normalizeOrderStatus(status string) string {
 }
 
 func orderResponse(order models.TravelOrder) gin.H {
-	return gin.H{"order_id": order.ID, "provider_order_id": order.ProviderOrderID, "status": order.Status, "provider": order.Provider, "order_type": order.OrderType, "trip_id": order.TripID, "cancelled": order.Status == "cancelled"}
+	return gin.H{"order_id": order.ID, "provider_order_id": order.ProviderOrderID, "status": order.Status, "provider": order.Provider, "order_type": order.OrderType, "trip_id": order.TripID, "amount_cents": order.AmountCents, "currency": order.Currency, "precision": service.CurrencyPrecision, "created_at": order.CreatedAt, "updated_at": order.UpdatedAt, "cancelled": order.Status == "cancelled"}
 }

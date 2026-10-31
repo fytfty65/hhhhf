@@ -267,7 +267,7 @@ async def lookup_official_site_price(
         )
         return base | {
             "note": (
-                f"官方票价页是**客户端渲染**（本机取不到正文）；官方渠道："
+                "官方票价页是**客户端渲染**（本机取不到正文）；官方渠道："
                 + (f"微信小程序『{channel['official_miniprogram']}』" if channel["official_miniprogram"] else channel["official_site"])
                 + (f"；你提供的官方页参考：{reference}（{entry.get('reference_source')}）" if reference else "")
             ),

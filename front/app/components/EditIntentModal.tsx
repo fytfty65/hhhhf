@@ -7,7 +7,7 @@
  * 仅搬运：props 签名、类名与文案逐字保留，未做任何行为改动。
  */
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { motion } from 'framer-motion';
 import { X } from 'lucide-react';
 
@@ -15,6 +15,8 @@ import { X } from 'lucide-react';
 export default function EditIntentModal({ currentRole, currentIntent, onClose, onSave }: any) {
   const [role, setRole] = useState(currentRole);
   const [intent, setIntent] = useState(currentIntent);
+  const roleGroupId = useId();
+  const intentInputId = useId();
   const roles = ['寻味探索', '视觉体验', '休闲漫步', '深度探索'];
 
   return (
@@ -27,8 +29,8 @@ export default function EditIntentModal({ currentRole, currentIntent, onClose, o
         <p className="text-xs text-slate-400 mb-4">修改后将实时同步至同一房间内所有好友的沙盘中</p>
 
         <div className="mb-4">
-          <label className="text-xs font-bold text-slate-600 mb-1.5 block">偏好定位</label>
-          <div className="grid grid-cols-2 gap-2">
+          <div id={roleGroupId} className="text-xs font-bold text-slate-600 mb-1.5 block">偏好定位</div>
+          <div role="group" aria-labelledby={roleGroupId} className="grid grid-cols-2 gap-2">
             {roles.map(r => (
               <button key={r} onClick={() => setRole(r)} className={`py-2 px-3 text-xs font-bold rounded-xl border transition-all cursor-pointer ${role === r ? 'bg-orange-50 border-orange-500 text-orange-600 shadow-2xs' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>{r}</button>
             ))}
@@ -36,8 +38,8 @@ export default function EditIntentModal({ currentRole, currentIntent, onClose, o
         </div>
 
         <div className="mb-5">
-          <label className="text-xs font-bold text-slate-600 mb-1 block">具体出行诉求</label>
-          <textarea rows={3} value={intent} onChange={(e) => setIntent(e.target.value)} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs outline-none focus:border-orange-500 focus:bg-white resize-none font-medium leading-relaxed" />
+          <label htmlFor={intentInputId} className="text-xs font-bold text-slate-600 mb-1 block">具体出行诉求</label>
+          <textarea id={intentInputId} rows={3} value={intent} onChange={(e) => setIntent(e.target.value)} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs outline-none focus:border-orange-500 focus:bg-white resize-none font-medium leading-relaxed" />
         </div>
 
         <div className="flex gap-2">

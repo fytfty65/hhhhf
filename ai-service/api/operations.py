@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from core.agent_contracts import AgentInput, validate_agent_proposal
+from core.agent_contracts import AgentInput, AgentProposal, validate_agent_proposal
 from core.agent_runtime import EMERGENCY_AGENT_ID, emergency_handler
 from core.route_profile import (  # 参考路线 → 结构化画像（纯逻辑在 core/route_profile.py）
     extract_route_profile,
@@ -20,13 +20,8 @@ from core.route_profile import (  # 参考路线 → 结构化画像（纯逻辑
 )
 from core.ttl_cache import AsyncTtlCache  # 分层 TTL 缓存（见 _risk_snapshot 的性能说明）
 
-from api.agent import (
-    ExpertToolbox,
-    OMNI_EVENTS_STREAM,
-    RiskService,
-    detect_risk_changes,
-    event_bus,
-)
+from api.agent import ExpertToolbox, OMNI_EVENTS_STREAM, RiskService, event_bus
+from api.risk_service import detect_risk_changes
 
 router = APIRouter()
 
@@ -249,8 +244,8 @@ async def risk_global(payload: Dict[str, Any]):
     if not isinstance(raw_cities, list) or not raw_cities:
         return {"results": [], "errors": [{"code": "CITIES_REQUIRED", "message": "cities 必须为非空数组"}], "limits": {"max_cities": _GLOBAL_RISK_MAX_CITIES, "concurrency": _GLOBAL_RISK_CONCURRENCY}}
 
-    errors = []
-    requests = []
+    errors: List[Dict[str, Any]] = []
+    requests: List[Dict[str, Any]] = []
     seen = set()
     for index, item in enumerate(raw_cities):
         if not isinstance(item, dict):
@@ -285,7 +280,7 @@ async def risk_global(payload: Dict[str, Any]):
             try:
                 snapshot, changes = await _risk_snapshot(item["city"], item["coordinate"], item["baseline"])
                 return {"city": item["city"], "snapshot": snapshot, "changes": changes, "available": bool(snapshot)}
-            except Exception as exc:
+            except Exception:
                 # Provider failures are isolated to one city; never fabricate a
                 # risk value for the remaining cities.
                 return {"city": item["city"], "snapshot": None, "changes": [], "available": False, "error": "CITY_SNAPSHOT_UNAVAILABLE"}
@@ -346,7 +341,7 @@ async def risk_replan_scope(payload: Dict[str, Any]):
             context={"route": list(route), "risk_event": dict(risk_event)},
         )
     )
-    proposal = validate_agent_proposal(raw)
+    proposal = raw if isinstance(raw, AgentProposal) else validate_agent_proposal(raw)
 
     emitted: List[Dict[str, Any]] = []
     risk_event_id = str(uuid.uuid4())

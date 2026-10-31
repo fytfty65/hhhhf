@@ -1,7 +1,8 @@
 'use client';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { X, Camera, PieChart } from 'lucide-react';
-import { API_BASE, apiJson } from '../lib/utils';
+import { apiJson } from '../lib/apiClient';
+import { formatCents, majorToCents, MAX_MONEY_CENTS } from '../lib/money';
 
 const CATEGORY_COLORS: Record<string, string> = {
   餐饮: '#f97316',
@@ -15,13 +16,14 @@ const CATEGORY_COLORS: Record<string, string> = {
 const CATEGORIES = ['餐饮', '住宿', '交通', '门票', '购物', '其他'];
 
 type Summary = {
-  total_budget: number;
-  spent: number;
-  remaining: number;
+  total_budget_cents: number;
+  spent_cents: number;
+  remaining_cents: number;
   ratio: number;
   level: string;
   currency: string;
-  by_category: Record<string, number>;
+  precision: number;
+  by_category_cents: Record<string, number>;
   category_pct: Record<string, number>;
   expense_count: number;
 };
@@ -29,11 +31,18 @@ type Summary = {
 type Expense = {
   id: string;
   category: string;
-  amount: number;
+  amount_cents: number;
   currency: string;
   note: string;
   created_at: string;
 };
+
+/** 按本机日期判断是否“今天”。解析失败的记录不计入今天，避免凑数。 */
+function isSameLocalDay(value: string, reference: Date): boolean {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getFullYear() === reference.getFullYear() && date.getMonth() === reference.getMonth() && date.getDate() === reference.getDate();
+}
 
 export default function ExpenseReportModal({ open, onClose, userId, tripId }: { open: boolean; onClose: () => void; userId: string; tripId: string }) {
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -44,11 +53,13 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  // 复盘默认先看今天：整趟数据仍在，只是列表与合计先按当天口径展示。
+  const [scope, setScope] = useState<'today' | 'all'>('today');
 
   const reload = useCallback(async () => {
     if (!tripId) return;
     try {
-      const j = await apiJson<{ summary?: Summary; expenses?: Expense[] }>(`${API_BASE}/api/v1/budget/review?trip_id=${encodeURIComponent(tripId)}`);
+      const j = await apiJson<{ summary?: Summary; expenses?: Expense[] }>(`/api/v1/budget/review?trip_id=${encodeURIComponent(tripId)}`);
       setSummary(j.summary || null);
       setExpenses(Array.isArray(j.expenses) ? j.expenses : []);
       setError('');
@@ -58,7 +69,10 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
   }, [tripId]);
 
   useEffect(() => {
-    if (open) reload();
+    if (open) {
+      reload();
+      setScope('today');
+    }
   }, [open, reload]);
 
   const pieGradient = useMemo(() => {
@@ -73,6 +87,15 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
     return `conic-gradient(${stops.join(', ')})`;
   }, [summary]);
 
+  const todayExpenses = useMemo(() => {
+    const now = new Date();
+    return expenses.filter((expense) => isSameLocalDay(expense.created_at, now));
+  }, [expenses]);
+  const visibleExpenses = scope === 'today' ? todayExpenses : expenses;
+  const todayCents = todayExpenses.reduce((sum, expense) => sum + (Number.isFinite(expense.amount_cents) ? expense.amount_cents : 0), 0);
+  const displayCurrency = summary?.currency || 'CNY';
+  const displayPrecision = summary?.precision ?? 2;
+
   if (!open) return null;
 
   const submitOcr = async () => {
@@ -80,7 +103,7 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
     setBusy(true);
     setMessage('');
     try {
-      const j = await apiJson<{ message?: string; error?: string; summary?: Summary }>(`${API_BASE}/api/v1/expense/ocr`, {
+      const j = await apiJson<{ message?: string; error?: string; summary?: Summary }>('/api/v1/expense/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, trip_id: tripId, ocr_text: ocrText }),
@@ -99,14 +122,19 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
   };
 
   const submitManual = async () => {
-    if (!amount) return;
+    // 输入是「元」，只把整数分发给后端。
+    const cents = majorToCents(amount);
+    if (cents === null || cents <= 0 || cents > MAX_MONEY_CENTS) {
+      setMessage('请输入有效的金额');
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
-      const j = await apiJson<{ message?: string; error?: string }>(`${API_BASE}/api/v1/expense`, {
+      const j = await apiJson<{ message?: string; error?: string }>('/api/v1/expense', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, trip_id: tripId, category, amount: Number(amount), currency: 'CNY' }),
+        body: JSON.stringify({ user_id: userId, trip_id: tripId, category, amount_cents: cents, currency: 'CNY' }),
       });
       setMessage(j.message || j.error || '已记账');
       setAmount('');
@@ -119,8 +147,9 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
   };
 
   return (
-    <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-h-[86vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <button type="button" aria-label="关闭弹窗" onClick={onClose} className="absolute inset-0 cursor-default" />
+      <div className="relative z-10 bg-white rounded-2xl shadow-2xl w-[420px] max-h-[86vh] overflow-y-auto p-6">
         <div className="flex items-center justify-between mb-4">
           <h4 className="text-base font-black text-slate-800 flex items-center gap-1.5">
             <PieChart className="w-4 h-4 text-orange-700" /> 花费报告
@@ -129,6 +158,17 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5" role="group" aria-label="复盘范围" data-testid="expense-scope">
+            <button type="button" data-testid="expense-scope-today" aria-pressed={scope === 'today'} onClick={() => setScope('today')} className={`min-h-8 rounded-md px-3 text-xs font-semibold transition-colors ${scope === 'today' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>今天</button>
+            <button type="button" data-testid="expense-scope-all" aria-pressed={scope === 'all'} onClick={() => setScope('all')} className={`min-h-8 rounded-md px-3 text-xs font-semibold transition-colors ${scope === 'all' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>全部</button>
+          </div>
+          <span className="text-[11px] text-slate-400">预算对比始终按整趟行程</span>
+        </div>
+        {scope === 'today' && (todayExpenses.length > 0
+          ? <p className="mb-3 text-xs font-bold text-slate-700" data-testid="expense-today-summary">今天已记账 {todayExpenses.length} 笔 · 合计 ¥{formatCents(todayCents, displayPrecision)} {displayCurrency}</p>
+          : <p className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500" data-testid="expense-today-empty">今天还没有记账（按本机日期统计；切到「全部」查看整趟行程）</p>)}
 
         {error && <div className="mb-3 flex items-center justify-between gap-2 rounded-lg bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700"><span>{error}</span><button type="button" onClick={() => void reload()} className="shrink-0 underline">重试</button></div>}
 
@@ -144,18 +184,18 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
               </div>
               <div className="flex-1 space-y-2">
                 <div className="text-xs text-slate-500">
-                  已消费 <span className="font-black text-slate-800">{summary.spent.toFixed(2)}</span> / 预算{' '}
-                  <span className="font-black text-slate-800">{summary.total_budget.toFixed(2)}</span> {summary.currency}
+                  本次行程已消费 <span className="font-black text-slate-800">{formatCents(summary.spent_cents, summary.precision)}</span> / 预算{' '}
+                  <span className="font-black text-slate-800">{formatCents(summary.total_budget_cents, summary.precision)}</span> {summary.currency}
                 </div>
                 <p className={`text-xs font-bold ${summary.level === 'over' ? 'text-rose-600' : summary.level === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}>
-                  {summary.level === 'over' ? '已超预算' : summary.level === 'warning' ? '接近预算上限' : '预算控制良好'} · 剩余 {summary.remaining.toFixed(2)}
+                  {summary.level === 'over' ? '已超预算' : summary.level === 'warning' ? '接近预算上限' : '预算控制良好'} · 剩余 {formatCents(summary.remaining_cents, summary.precision)}
                 </p>
                 <div className="space-y-1">
                   {Object.entries(summary.category_pct).map(([k, v]) => (
                     <div key={k} className="flex items-center gap-1.5 text-[11px]">
                       <span className="w-2 h-2 rounded-full shrink-0" style={{ background: CATEGORY_COLORS[k] || '#94a3b8' }} />
                       <span className="text-slate-600">{k}</span>
-                      <span className="ml-auto text-slate-400">{summary.by_category[k]?.toFixed(2)} · {v.toFixed(0)}%</span>
+                      <span className="ml-auto text-slate-400">{formatCents(summary.by_category_cents[k] ?? 0, summary.precision)} · {v.toFixed(0)}%</span>
                     </div>
                   ))}
                 </div>
@@ -199,16 +239,16 @@ export default function ExpenseReportModal({ open, onClose, userId, tripId }: { 
 
         {/* 消费明细 */}
         <div>
-          <p className="text-xs font-bold text-slate-600 mb-2">消费明细</p>
-          {expenses.length === 0 ? (
-            <p className="text-xs text-slate-400 py-3 text-center">暂无消费记录</p>
+          <p className="text-xs font-bold text-slate-600 mb-2">消费明细{scope === 'today' ? ' · 今天' : ' · 整趟行程'}</p>
+          {visibleExpenses.length === 0 ? (
+            <p className="text-xs text-slate-400 py-3 text-center">{scope === 'today' ? '今天还没有消费记录' : '暂无消费记录'}</p>
           ) : (
             <ul className="space-y-1.5">
-              {expenses.map((e) => (
-                <li key={e.id} className="flex items-center justify-between text-xs py-1.5 px-2 rounded-lg bg-slate-50">
+              {visibleExpenses.map((e) => (
+                <li key={e.id} data-testid="expense-item" className="flex items-center justify-between text-xs py-1.5 px-2 rounded-lg bg-slate-50">
                   <span className="font-bold text-slate-600">{e.category}</span>
                   <span className="text-slate-400 truncate mx-2 flex-1">{e.note}</span>
-                  <span className="font-black text-slate-800">¥{e.amount.toFixed(2)}</span>
+                  <span className="font-black text-slate-800">{formatCents(e.amount_cents)} {e.currency}</span>
                 </li>
               ))}
             </ul>

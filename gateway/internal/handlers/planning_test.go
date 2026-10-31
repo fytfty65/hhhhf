@@ -785,6 +785,67 @@ func TestRecordPlanningEventAttributesGenerationModelVersion(t *testing.T) {
 	}
 }
 
+func TestRecordPlanningEventsBatchInsertsAllEvents(t *testing.T) {
+	oldDB := database.DB
+	t.Cleanup(func() { database.DB = oldDB })
+	db, err := gorm.Open(sqlite.Open("file:planning-batch-test?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.TripPlan{}, &models.PlanningRun{}, &models.PlanningEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+	if err := db.Create(&models.TripPlan{ID: "trip-batch", UserID: "user-1", Title: "批量测试"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/planning/events/batch", func(c *gin.Context) { c.Set("user_id", "user-1"); RecordPlanningEventsBatchHandler(c) })
+	body := `{"events":[
+		{"trip_id":"trip-batch","event_type":"plan_generated","payload":{"module":"route"}},
+		{"trip_id":"trip-batch","event_type":"node_visited","payload":{"module":"route"}}
+	]}`
+	req := httptest.NewRequest(http.MethodPost, "/planning/events/batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected batch accepted, got %d %s", res.Code, res.Body.String())
+	}
+	var count int64
+	if err := db.Model(&models.PlanningEvent{}).Where("trip_id = ?", "trip-batch").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 inserted events, got %d", count)
+	}
+}
+
+func TestRecordPlanningEventsBatchRejectsEmptyBatch(t *testing.T) {
+	oldDB := database.DB
+	t.Cleanup(func() { database.DB = oldDB })
+	db, err := gorm.Open(sqlite.Open("file:planning-batch-empty-test?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.TripPlan{}, &models.PlanningEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	database.DB = db
+
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set("user_id", "user-1")
+	c.Request = httptest.NewRequest(http.MethodPost, "/planning/events/batch", strings.NewReader(`{"events":[]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	RecordPlanningEventsBatchHandler(c)
+	if c.Writer.Status() != http.StatusBadRequest {
+		t.Fatalf("expected empty batch rejected, got %d", c.Writer.Status())
+	}
+}
+
 func TestRecordPlanningEventRejectsInvalidPropensity(t *testing.T) {
 	oldDB := database.DB
 	t.Cleanup(func() { database.DB = oldDB })

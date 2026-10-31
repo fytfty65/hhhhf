@@ -3,134 +3,19 @@ import React, { useState } from 'react';
 import { Camera, ExternalLink } from 'lucide-react';
 import type { PoiImageProps } from '../types';
 
-import { resolveApiBase, resolveWsBase } from './gatewayBase.ts';
+import {
+  API_BASE, assetUrl, apiFetch, apiJson, apiRequest, getAuthToken, ApiRequestError,
+  setAccessToken, clearAccessToken, refreshAccessToken, fetchWsTicket,
+} from './apiClient.ts';
+import { resolveWsBase } from './gatewayBase.ts';
 
-// 基址推导集中在 lib/gatewayBase（纯函数、有单测）：网关端口可配（NEXT_PUBLIC_GATEWAY_PORT），
-// https 页面自动用 wss。此前两处各自写死 :8080，端口一改就得改代码，也容易两边不一致。
-const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE;
-export const API_BASE = resolveApiBase(
-  configuredApiBase,
-  typeof window !== 'undefined' ? window.location : undefined,
-  process.env.NEXT_PUBLIC_GATEWAY_PORT,
-);
+// API 基址、认证、超时、错误码、重试与请求追踪都收敛在 lib/apiClient。
+// 这里只保留 WebSocket 基址（由同一个 API 基址推导，https → wss）。
+export {
+  assetUrl, apiFetch, apiJson, apiRequest, getAuthToken, ApiRequestError,
+  setAccessToken, clearAccessToken, refreshAccessToken, fetchWsTicket,
+};
 export const WS_BASE = resolveWsBase(API_BASE, process.env.NEXT_PUBLIC_WS_BASE);
-
-export function getAuthToken(): string {
-  if (typeof window === 'undefined') return '';
-  try {
-    const raw = localStorage.getItem('omni_user');
-    const user = raw ? JSON.parse(raw) : null;
-    return typeof user?.token === 'string' ? user.token : '';
-  } catch {
-    return '';
-  }
-}
-
-/** Central request helper. The interceptor keeps legacy feature components
- * authenticated while they migrate to this API client incrementally. */
-export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
-  const headers = new Headers(init.headers || {});
-  const token = getAuthToken();
-  if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
-  return fetch(input, { ...init, headers });
-}
-
-export class ApiRequestError extends Error {
-  status: number;
-  code: string;
-
-  constructor(message: string, status = 0, code = 'REQUEST_FAILED') {
-    super(message);
-    this.name = 'ApiRequestError';
-    this.status = status;
-    this.code = code;
-  }
-}
-
-function friendlyHttpError(status: number, serverMessage?: string, code?: string) {
-  if (status === 401) return '登录状态已失效，请返回大厅重新登录';
-  if (status === 403 && code === 'ORIGIN_FORBIDDEN') return '当前访问地址未获网关授权，请检查前端来源配置';
-  if (status === 403) return '当前账号没有执行此操作的权限';
-  if (status === 404) return '请求的数据或服务不存在';
-  if (status === 429) return '操作过于频繁，请稍后再试';
-  if (status >= 500) return '数据服务暂时不可用，请稍后重试';
-  return serverMessage || `请求失败 (HTTP ${status})`;
-}
-
-/**
- * Authenticated JSON request with a finite timeout and user-facing failures.
- * Components should render the message as a recoverable state instead of
- * exposing browser errors such as "Failed to fetch".
- */
-export async function apiJson<T>(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 12000): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  const upstreamSignal = init.signal;
-  const abortFromUpstream = () => controller.abort();
-  upstreamSignal?.addEventListener('abort', abortFromUpstream, { once: true });
-
-  try {
-    const response = await apiFetch(input, { ...init, signal: controller.signal });
-    const raw = await response.text();
-    let payload: any = {};
-    if (raw.trim()) {
-      try {
-        payload = JSON.parse(raw);
-      } catch {
-        if (!response.ok) {
-          const plain = raw.trim();
-          const serverMessage = plain.length <= 200 && !/<[a-z][\s\S]*>/i.test(plain) ? plain : undefined;
-          throw new ApiRequestError(
-            friendlyHttpError(response.status, serverMessage),
-            response.status,
-            'NON_JSON_ERROR_RESPONSE',
-          );
-        }
-        throw new ApiRequestError(
-          `数据服务返回了非 JSON 内容 (HTTP ${response.status})，请检查网关或代理配置`,
-          response.status,
-          'INVALID_RESPONSE',
-        );
-      }
-    }
-    if (!response.ok) {
-      const envelopeError = payload?.error;
-      const serverMessage = typeof envelopeError === 'string'
-        ? envelopeError
-        : envelopeError?.message || payload?.message;
-      const serverCode = envelopeError?.code || payload?.code;
-      throw new ApiRequestError(
-        friendlyHttpError(response.status, serverMessage, serverCode),
-        response.status,
-        serverCode || 'REQUEST_FAILED',
-      );
-    }
-    return payload as T;
-  } catch (error) {
-    if (error instanceof ApiRequestError) throw error;
-    if (controller.signal.aborted) {
-      throw new ApiRequestError('连接数据服务超时，请确认服务已启动后重试', 0, 'REQUEST_TIMEOUT');
-    }
-    throw new ApiRequestError('暂时无法连接数据服务，请确认网关已启动后重试', 0, 'NETWORK_UNAVAILABLE');
-  } finally {
-    clearTimeout(timeoutId);
-    upstreamSignal?.removeEventListener('abort', abortFromUpstream);
-  }
-}
-
-export function installApiFetchInterceptor() {
-  if (typeof window === 'undefined' || (window as any).__omniRouteFetchInstalled) return;
-  const originalFetch = window.fetch.bind(window);
-  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-    if (!url.startsWith(API_BASE) || url.includes('/api/auth/')) return originalFetch(input, init);
-    const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
-    const token = getAuthToken();
-    if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
-    return originalFetch(input, { ...init, headers });
-  };
-  (window as any).__omniRouteFetchInstalled = true;
-}
 
 // 精简行政区名称
 export function shortenRegionName(full: string) {
@@ -139,8 +24,9 @@ export function shortenRegionName(full: string) {
 
 export const predictBudget = async (city: string, days: number) => {
     try {
-        const res = await apiFetch(`${API_BASE}/api/v1/budget/predict?city=${encodeURIComponent(city)}&days=${days}`);
-        const data = await res.json();
+        const data = await apiRequest<{ estimated_cost?: number }>('/api/v1/budget/predict', {
+            query: { city, days },
+        });
         return data.estimated_cost;
     } catch {
         return null;
@@ -269,7 +155,7 @@ export function extractStreamingRoutes(text: string): any[] {
 }
 
 // 图片 URL 清理
-export function getCleanPhotoUrl(photoUrl?: string, poiName: string = '', photoIndex: number = 0) {
+export function getCleanPhotoUrl(photoUrl?: string) {
   if (!photoUrl || typeof photoUrl !== 'string') return '';
   let u = photoUrl.trim();
   if (u.startsWith('//')) u = 'https:' + u;
@@ -278,7 +164,7 @@ export function getCleanPhotoUrl(photoUrl?: string, poiName: string = '', photoI
 }
 
 // POI 图片组件
-export function PoiImage({ photos = [], mapImage = '', amapUrl = '', name, type = '', className = '', index, onPhotoClick }: PoiImageProps) {
+export function PoiImage({ photos = [], amapUrl = '', name, type = '', className = '', index, onPhotoClick }: PoiImageProps) {
   const queue = React.useMemo(() => {
     const urls: string[] = [];
     (Array.isArray(photos) ? photos : []).forEach(p => {
@@ -311,7 +197,17 @@ export function PoiImage({ photos = [], mapImage = '', amapUrl = '', name, type 
     return (
       <div
         className={`relative overflow-hidden cursor-pointer group ${className}`}
+        role="button"
+        tabIndex={0}
+        aria-label={`搜索 ${name} 的实景照片`}
         onClick={onPhotoClick}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onPhotoClick?.();
+          }
+        }}
         title="点击搜索该地点实景照片"
       >
         <div className={`absolute inset-0 bg-gradient-to-br ${typeColor} transition-transform duration-300 group-hover:scale-105`} />

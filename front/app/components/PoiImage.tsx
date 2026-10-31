@@ -150,7 +150,7 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
     const fallbackUrl = String(resolvedFallback?.url || '');
     if (fallbackUrl) {
       return (
-        <div className={`relative overflow-hidden group ${className}`} onClick={onPhotoClick} title={String(resolvedFallback?.caption || '位置示意')}>
+        <button type="button" aria-label={`查看 ${name} 的位置示意`} className={`relative overflow-hidden group p-0 text-left ${className}`} onClick={onPhotoClick} title={String(resolvedFallback?.caption || '位置示意')}>
           <img
             src={fallbackUrl}
             alt={name}
@@ -174,7 +174,7 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
               </span>
             )}
           </div>
-        </div>
+        </button>
       );
     }
     const typeLabel = type || '目的地';
@@ -183,8 +183,18 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
       : 'from-stone-300 to-stone-400';
     return (
       <div
-        className={`relative overflow-hidden cursor-pointer group ${className}`}
+        className={`relative overflow-hidden cursor-pointer group p-0 text-left ${className}`}
+        role="button"
+        tabIndex={0}
+        aria-label={`搜索 ${name} 的实景照片`}
         onClick={onPhotoClick}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onPhotoClick?.();
+          }
+        }}
         title="点击搜索该地点实景照片"
       >
         <div className={`absolute inset-0 bg-gradient-to-br ${typeColor} transition-transform duration-300 group-hover:scale-105`} />
@@ -206,7 +216,7 @@ export default function PoiImage({ photos = [], mapImage = '', amapUrl = '', nam
             </div>
           )}
           {/* ⑥ 官方/网络都没有这个地点的照片时，让用户放一张自己拍的：真归属、真有用 */}
-          <div className="mt-1" onClick={(event) => event.stopPropagation()}>
+          <div className="mt-1">
             {renderPicker('传我的实拍')}
           </div>
           {photoNotice && <p className="text-white/85 text-[9px] text-center">{photoNotice}</p>}

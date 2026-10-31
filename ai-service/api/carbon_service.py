@@ -17,7 +17,7 @@
 """
 
 import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -83,7 +83,7 @@ def _green_alternative(mode: str) -> str:
     return ""
 
 
-def segment_emission(mode: str, distance_km: float) -> Dict[str, Any]:
+def segment_emission(mode: str, distance_km: Optional[float]) -> Dict[str, Any]:
     """计算单段排放：返回 {mode, distance_km, emission_kg, is_estimated}。"""
     mode = mode if mode in EMISSION_FACTORS else "transit"
     est_km = False

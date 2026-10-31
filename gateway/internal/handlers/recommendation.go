@@ -204,7 +204,7 @@ func TrackRecommendationEventHandler(c *gin.Context) {
 		Clicked: req.Clicked,
 		Source:  req.Source,
 	}
-	if err := database.DB.Create(&event).Error; err != nil {
+	if err := database.CreateWithRetry(database.DB, &event); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "埋点记录失败"})
 		return
 	}
@@ -291,7 +291,7 @@ func RecordSwapSignalHandler(c *gin.Context) {
 	}
 
 	// 被替换景点 = 负向偏好信号
-	database.DB.Create(&models.FeedbackLog{
+	_ = database.CreateWithRetry(database.DB, &models.FeedbackLog{
 		RoomID: req.RoomID,
 		UserID: req.UserID,
 		Target: req.ReplacedTarget,
@@ -301,7 +301,7 @@ func RecordSwapSignalHandler(c *gin.Context) {
 
 	// 若有明确替换目标，记为正向偏好信号
 	if req.Replacement != "" {
-		database.DB.Create(&models.FeedbackLog{
+		_ = database.CreateWithRetry(database.DB, &models.FeedbackLog{
 			RoomID: req.RoomID,
 			UserID: req.UserID,
 			Target: req.Replacement,

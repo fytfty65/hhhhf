@@ -74,7 +74,10 @@ export interface DeductionPanelProps {
   latestLog?: string;
   error?: string | null;
   timedOut?: boolean;
+  // 真实的等待时长（秒），只在规划进行中上报；失败/超时态不显示。
+  elapsedSeconds?: number;
   onRetry?: () => void;
+  onCancel?: () => void;
   onBack?: () => void;
   reasoningSteps?: ReasoningStep[];
 }

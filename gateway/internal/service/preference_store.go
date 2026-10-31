@@ -136,7 +136,7 @@ func collectExpenseSamples(userID string) []FeedbackSample {
 		if target == "" {
 			continue // 不映射三大预维度的分类（如住宿/交通/购物）不产生偏好噪声
 		}
-		reason := fmt.Sprintf("消费记录: %s %.2f%s", e.Category, e.Amount, e.Currency)
+		reason := fmt.Sprintf("消费记录: %s %s%s", e.Category, CentsToMajor(e.AmountCents), e.Currency)
 		if note := strings.TrimSpace(e.Note); note != "" {
 			reason += " " + note
 		}
@@ -307,7 +307,9 @@ func expenseAmountTendency(userID string) string {
 		if !isBudgetSignalCategory(e.Category) {
 			continue
 		}
-		cny := Convert(e.Amount, e.Currency, "CNY")
+		// Convert in integer cents, then divide once for the yuan-based
+		// threshold function. Storage never carries a float.
+		cny := float64(ConvertCents(e.AmountCents, e.Currency, "CNY")) / 100
 		single = append(single, cny)
 		tripTotal[e.TripID] += cny
 	}

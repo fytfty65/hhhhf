@@ -188,7 +188,7 @@ def substitute(
         return None
     if near_only:
         # 用户说了"不想跑远"：**先看离得近**，同样近再看档位/价格
-        return min(
+        nearest = min(
             filtered,
             key=lambda item: (
                 _distance_km(item.get("lnglat"), prefer_near_to),
@@ -196,9 +196,12 @@ def substitute(
                 float(item.get("price") or 0),
             ),
         )
+        return dict(nearest)
     if prefer_cheaper:
-        return min(filtered, key=lambda item: float(item.get("price") or 0))
-    return max(filtered, key=lambda item: (int(item.get("tier_level") or 0), -float(item.get("price") or 0)))
+        cheapest = min(filtered, key=lambda item: float(item.get("price") or 0))
+        return dict(cheapest)
+    best = max(filtered, key=lambda item: (int(item.get("tier_level") or 0), -float(item.get("price") or 0)))
+    return dict(best)
 
 
 def apply_exclusions(

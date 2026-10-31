@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Footprints, MapPin, Navigation, RefreshCw, Search, Sparkles, Store, X } from 'lucide-react';
-import { API_BASE, apiJson } from '../lib/utils';
+import { apiJson } from '../lib/apiClient';
+import { useFocusTrap } from '../lib/useFocusTrap';
 
 type Poi = {
   name?: string;
@@ -47,6 +48,8 @@ export default function SecondaryPlanner({ open, city, poi, onClose, userId, tri
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [searched, setSearched] = useState(false);
+  // 弹窗可见时才锁焦点；未打开时组件返回 null，此处必须无条件调用
+  const dialogRef = useFocusTrap<HTMLElement>(open && !!poi);
 
   useEffect(() => {
     if (!open) {
@@ -70,7 +73,7 @@ export default function SecondaryPlanner({ open, city, poi, onClose, userId, tri
       const keywords = `${poi.name} ${need.trim()}`;
       const query = new URLSearchParams({ city, keywords, offset: '20' });
       const data = await apiJson<{ available?: boolean; pois?: MicroPoi[]; message?: string }>(
-        `${API_BASE}/api/v1/amap/poi?${query.toString()}`,
+        `/api/v1/amap/poi?${query.toString()}`,
       );
       if (!data.available) throw new Error(data.message || '地图 POI 服务尚未配置');
       const unique = new Map<string, MicroPoi>();
@@ -88,7 +91,7 @@ export default function SecondaryPlanner({ open, city, poi, onClose, userId, tri
       // core secondary-planning workflow usable through the typed planner API.
       try {
         if (!userId || !tripId) throw e;
-        const fallback = await apiJson<any>(`${API_BASE}/api/v1/planning/secondary`, {
+        const fallback = await apiJson<any>('/api/v1/planning/secondary', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user_id: userId, trip_id: tripId, destination: city, requirements: need.trim() }),
         });
@@ -123,8 +126,9 @@ export default function SecondaryPlanner({ open, city, poi, onClose, userId, tri
   if (!open || !poi) return null;
 
   return (
-    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onClick={onClose}>
-      <section className="w-full max-w-2xl overflow-hidden rounded-2xl border border-white/20 bg-white shadow-2xl" onClick={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="micro-plan-title">
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+      <button type="button" aria-label="关闭弹窗" onClick={onClose} className="absolute inset-0 cursor-default" />
+      <section ref={dialogRef} className="relative z-10 w-full max-w-2xl overflow-hidden rounded-2xl border border-white/20 bg-white shadow-2xl" aria-modal="true" role="dialog" aria-labelledby="micro-plan-title">
         <header className="flex items-start justify-between border-b border-slate-100 bg-slate-50 px-5 py-4">
           <div className="flex items-start gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white"><Footprints className="h-5 w-5" /></div>

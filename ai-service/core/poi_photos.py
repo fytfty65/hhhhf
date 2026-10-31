@@ -31,6 +31,8 @@ def parse_lnglat(value: Any) -> Optional[list]:
     """容错解析坐标：接受 [lng, lat] / "lng,lat" / {"lng","lat"}；非法一律 None。"""
     if isinstance(value, Mapping):
         lng, lat = value.get("lng"), value.get("lat")
+        if lng is None or lat is None:
+            return None
         try:
             return [float(lng), float(lat)]
         except (TypeError, ValueError):

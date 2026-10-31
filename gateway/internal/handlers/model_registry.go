@@ -251,6 +251,13 @@ func monitorCanaryDeployments() {
 // ModelRuntimeHealthHandler exposes the same bounded health calculation used
 // by automatic assignment. It is diagnostic only; it never returns raw events.
 func ModelRuntimeHealthHandler(c *gin.Context) {
+	// Deliberately NOT admin-gated. The frontend fetches this together with the
+	// other diagnostics endpoints in a single Promise.all whose catch clears every
+	// panel at once, so returning 403 here would blank the whole diagnostics
+	// surface for ordinary users rather than just this tile. The payload is a
+	// bounded health calculation (sample counts, error rate, fairness spread) and
+	// never includes the model Endpoint, so it is safe to keep readable while
+	// ListModelDeploymentsHandler — which does expose Endpoint — is gated.
 	if _, ok := currentUserIDOrReject(c); !ok {
 		return
 	}
@@ -1354,8 +1361,30 @@ func validateModelEndpointHost(raw string) error {
 	return nil
 }
 
+// currentPlanningAdminOrReject resolves the caller and enforces the planning-admin
+// allowlist, writing a 403 and returning false when they are not an admin.
+//
+// It exists because the write side of the model registry (register / evaluate /
+// promote) was already admin-gated while the read side was not. The registry is
+// infrastructure configuration, not user data: a ModelDeployment row carries the
+// internal inference Endpoint, and the runtime view exposes whether a model is in
+// canary, its error rate and its fairness spread. Serving that to any logged-in
+// account is internal-topology disclosure and free reconnaissance for the SSRF
+// surface that validateModelEndpointHost exists to contain.
+func currentPlanningAdminOrReject(c *gin.Context) (string, bool) {
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return "", false
+	}
+	if !isPlanningAdmin(userID) {
+		planningError(c, http.StatusForbidden, "MODEL_ADMIN_REQUIRED", "只有规划服务管理员可以查看模型注册表", nil)
+		return "", false
+	}
+	return userID, true
+}
+
 func ListModelDeploymentsHandler(c *gin.Context) {
-	if _, ok := currentUserIDOrReject(c); !ok {
+	if _, ok := currentPlanningAdminOrReject(c); !ok {
 		return
 	}
 	var modelsList []models.ModelDeployment

@@ -100,13 +100,13 @@ def hotel_rows(payload: Any) -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             return []
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, Mapping)]
+        return [dict(item) for item in payload if isinstance(item, Mapping)]
     if not isinstance(payload, Mapping):
         return []
     for key in ("hotelInformationList", "hotels", "list", "items", "data"):
         value = payload.get(key)
         if isinstance(value, list):
-            return [item for item in value if isinstance(item, Mapping)]
+            return [dict(item) for item in value if isinstance(item, Mapping)]
         if isinstance(value, Mapping):
             nested = hotel_rows(value)
             if nested:
@@ -154,7 +154,8 @@ def check_in_from_url(url: Any) -> str:
 
 def normalize_hotel(row: Mapping[str, Any]) -> Dict[str, Any]:
     """供应商行 → 我们内部的酒店记录（字段名固定，缺就是缺）。"""
-    price = row.get("price") if isinstance(row.get("price"), Mapping) else {}
+    raw_price = row.get("price")
+    price: Mapping[str, Any] = raw_price if isinstance(raw_price, Mapping) else {}
     lowest = price.get("lowestPrice")
     value: Optional[float] = None
     if isinstance(lowest, (int, float)) and not isinstance(lowest, bool):
@@ -245,10 +246,12 @@ async def _call_tool(tool: str, arguments: Mapping[str, Any], *, timeout: Option
     if envelope.get("error"):
         message = envelope["error"].get("message") if isinstance(envelope["error"], Mapping) else envelope["error"]
         return {"ok": False, "payload": None, "error": f"MCP error: {str(message)[:140]}"}
-    result = envelope.get("result") if isinstance(envelope.get("result"), Mapping) else {}
+    raw_result = envelope.get("result")
+    result: Mapping[str, Any] = raw_result if isinstance(raw_result, Mapping) else {}
     if result.get("isError"):
         return {"ok": False, "payload": result, "error": "工具返回 isError=True"}
-    content = result.get("content") if isinstance(result.get("content"), list) else []
+    raw_content = result.get("content")
+    content: List[Any] = raw_content if isinstance(raw_content, list) else []
     text = ""
     for item in content:
         if isinstance(item, Mapping) and item.get("text"):
@@ -497,7 +500,8 @@ async def price_lodging_nodes(
     for node in nodes_of(plan):
         if intent_of(node) != "hotel":
             continue
-        sources = node.get("data_sources") if isinstance(node.get("data_sources"), Mapping) else {}
+        raw_sources = node.get("data_sources")
+        sources: Mapping[str, Any] = raw_sources if isinstance(raw_sources, Mapping) else {}
         current = str(sources.get("cost_estimate") or sources.get("cost") or "").strip().lower()
         if is_verified_source(current):
             continue  # 已经有可核实价格（例如供应商/高德给的），不必再查

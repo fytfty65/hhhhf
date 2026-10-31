@@ -1,5 +1,7 @@
 # Python
 __pycache__/
+.mypy_cache/
+.ruff_cache/
 *.py[cod]
 *$py.class
 *.so
@@ -62,5 +64,38 @@ ai-service/bandit_state.json.tmp
 front/.env.local
 gateway/.env.local
 ai-service/.env.local
+# Every non-example env variant. The rules above only covered `.env.local`, so a
+# `.env.production` / `.env.development` / `.env.staging` file — precisely the
+# ones that hold real credentials — was NOT ignored and would be committed by a
+# routine `git add -A`. `.env.example` files stay tracked by design.
+.env.*
+!.env.example
+!*/.env.example
+
+# 私钥与证书：TLS key、客户端证书、密钥库。之前没有任何规则覆盖它们，
+# 一次手滑就会把私钥提交上去。
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+*.der
+*.csr
+
 # 联网取价的当日用量（日请求上限开关的本机状态，和 bandit 状态同类）
 ai-service/web_price_usage.json
+
+# 运行时缓存：这些 JSON 是抓取/渲染结果的本机缓存，会随运行改变，
+# 且可能包含第三方页面内容。它们不应进仓库（此前靠运气未被提交）。
+ai-service/mct_marker_cache.json
+ai-service/official_directory_cache.json
+ai-service/official_domain_candidates.json
+ai-service/official_render_cache.json
+ai-service/*_cache.json
+# 历史遗留：`rendered_page.py` 以前多拼一层 `..`，把渲染缓存写到了仓库根目录。
+# 代码已修正为写在 ai-service/ 下，这一行留着是为了让旧机器上残留的那份文件
+# 不再出现在 `git status` 里。
+official_render_cache.json

@@ -354,7 +354,8 @@ def compute_risk_dimensions(intel: Dict[str, Any], weather: Optional[Dict] = Non
     关键原则：不臆造风险。治安/政治两维仅在接入真实情报源（WorldMonitor/GDELT）时按等级分档，
     否则保持低基线并显式标注 is_estimated=True，杜绝把「哈希噪声」当情报对外展示。
     """
-    alerts = intel.get("active_alerts") if isinstance(intel.get("active_alerts"), list) else []
+    raw_alerts = intel.get("active_alerts")
+    alerts: List[Any] = raw_alerts if isinstance(raw_alerts, list) else []
     src = str(intel.get("source") or "")
 
     # 治安：优先使用时间衰减事件强度（连续值），否则按等级分档；安全/犯罪类告警加权
@@ -508,8 +509,10 @@ def detect_risk_changes(baseline: Optional[Dict[str, Any]], current: Dict[str, A
         })
 
     # 3) 实时路况恶化
-    prev_traffic = baseline.get("traffic") if isinstance(baseline.get("traffic"), dict) else {}
-    cur_traffic = current.get("traffic") if isinstance(current.get("traffic"), dict) else {}
+    raw_prev_traffic = baseline.get("traffic")
+    prev_traffic: Dict[str, Any] = raw_prev_traffic if isinstance(raw_prev_traffic, dict) else {}
+    raw_cur_traffic = current.get("traffic")
+    cur_traffic: Dict[str, Any] = raw_cur_traffic if isinstance(raw_cur_traffic, dict) else {}
     prev_sc, cur_sc = _int(prev_traffic.get("status_code"), 1), _int(cur_traffic.get("status_code"), 1)
     if cur_sc > prev_sc and cur_sc >= 3:
         changes.append({
@@ -739,7 +742,8 @@ class RiskService:
         }
 
         # 追加融合信号预警（按标题去重）
-        existing = intel.get("active_alerts") if isinstance(intel.get("active_alerts"), list) else []
+        raw_existing = intel.get("active_alerts")
+        existing: List[Dict[str, Any]] = raw_existing if isinstance(raw_existing, list) else []
         seen = set(str(a.get("title")) for a in existing)
         for al in new_alerts:
             if str(al.get("title")) not in seen:

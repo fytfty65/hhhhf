@@ -19,9 +19,19 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
-import { API_BASE, apiJson } from '../lib/utils';
+import { apiJson } from '../lib/apiClient';
 import { fetchRiskSnapshot } from '../lib/riskSnapshot';
 import { normalizeRiskNotification, parseRiskTimestamp } from '../lib/riskNotifications';
+import {
+  applySnooze,
+  confidenceLabel,
+  isSnoozed,
+  nextActionText,
+  parseSnoozeMap,
+  pruneSnoozes,
+  scopeText,
+  severityLabel,
+} from '../lib/riskNotificationGuidance';
 import { enqueueRiskNotificationAction, loadRiskInboxCache, removeRiskNotificationActions, saveRiskInboxCache } from '../lib/riskNotificationCache';
 import { disableWebPushSubscription, requestWebPushSubscription, webPushCapability, type WebPushState } from '../lib/webPush';
 
@@ -32,7 +42,7 @@ export interface RiskChange {
   severity: 'LOW' | 'MEDIUM' | 'HIGH';
   title: string;
   detail: string;
-  replan?: { proposal_id?: string; status?: string; trip_id?: string; reason?: string; trigger_types?: string[]; expires_at?: string; changed_signals?: unknown[] };
+  replan?: { proposal_id?: string; status?: string; trip_id?: string; reason?: string; trigger_types?: string[]; expires_at?: string; changed_signals?: unknown[]; affected_nodes?: string[] };
 }
 
 interface RiskInboxItem extends RiskChange {
@@ -57,6 +67,16 @@ interface RiskNotificationResponse {
   unread_count?: number;
 }
 
+/** 交给需求页的提醒摘要：只带已收到的字段，没收到的不补。 */
+export interface RiskInboxHandle {
+  id: string;
+  title: string;
+  detail: string;
+  city?: string;
+  severity: RiskChange['severity'];
+  affectedNodes?: string[];
+}
+
 interface RiskPushCenterProps {
   city?: string;
   coordinate?: [number, number] | null;
@@ -67,7 +87,13 @@ interface RiskPushCenterProps {
   // 目的地风险订阅（P5）：需用户 ID 与房间号以持久化基线并广播变更通知
   userId?: string;
   roomCode?: string;
+  // 当前行程的节点名：用来算“其余几个安排本次不受影响”，拿不到就不说
+  routeNodes?: string[];
   onReplan?: (proposal: RiskChange['replan']) => void;
+  // 跳到旅中执行层查看受影响的具体安排（只在决策阶段可用）
+  onOpenExecution?: () => void;
+  // 把一条没有重排提案的提醒带回需求页，由用户确认后再生成；不会自动改方案
+  onRequestReplan?: (item: RiskInboxHandle) => void;
 }
 
 // 严重等级视觉元数据
@@ -115,12 +141,30 @@ export default function RiskPushCenter({
   enabled = true,
   userId,
   roomCode,
+  routeNodes,
   onReplan,
+  onOpenExecution,
+  onRequestReplan,
 }: RiskPushCenterProps) {
   const [items, setItems] = useState<RiskInboxItem[]>([]);
   const [open, setOpen] = useState(false);
   const [serverUnread, setServerUnread] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // 暂不处理：只在本机、只在当天生效，不改行程也不改服务端处理状态
+  const [snoozeMap, setSnoozeMap] = useState<Record<string, number>>({});
+  const snoozeKey = `omni_risk_snooze_${userId || 'anonymous'}`;
+  useEffect(() => {
+    try {
+      setSnoozeMap(pruneSnoozes(parseSnoozeMap(localStorage.getItem(snoozeKey))));
+    } catch {}
+  }, [snoozeKey]);
+  const toggleSnooze = (id: string, snoozed: boolean) => {
+    setSnoozeMap((previous) => {
+      const next = pruneSnoozes(applySnooze(previous, id, snoozed));
+      try { localStorage.setItem(snoozeKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
   const [polling, setPolling] = useState(false);
   const [lastSync, setLastSync] = useState<number | null>(null);
   const [subscribed, setSubscribed] = useState(false);
@@ -130,9 +174,24 @@ export default function RiskPushCenter({
   const [cacheLoaded, setCacheLoaded] = useState(false);
   const [pushState, setPushState] = useState<WebPushState>('unsupported');
   const [pushBusy, setPushBusy] = useState(false);
+  const snoozedIds = useMemo(
+    () => new Set(items.filter((item) => isSnoozed(snoozeMap, item.id)).map((item) => item.id)),
+    [items, snoozeMap],
+  );
+  const routeNodeNames = useMemo(
+    () => (Array.isArray(routeNodes) ? routeNodes : []).map((name) => String(name || '').trim()).filter(Boolean),
+    [routeNodes],
+  );
+  // 暂缓的提醒不算未读，避免“暂不处理”之后角标还在催
   const unread = useMemo(
-    () => Math.max(serverUnread, items.filter((item) => item.status === 'unread').length),
-    [items, serverUnread],
+    () => Math.max(
+      0,
+      Math.max(
+        serverUnread - snoozedIds.size,
+        items.filter((item) => item.status === 'unread' && !snoozedIds.has(item.id)).length,
+      ),
+    ),
+    [items, serverUnread, snoozedIds],
   );
 
   useEffect(() => {
@@ -151,7 +210,7 @@ export default function RiskPushCenter({
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
-    apiJson<{ data?: { subscribed?: boolean }; subscribed?: boolean }>(`${API_BASE}/api/v1/notifications/push/status`)
+    apiJson<{ data?: { subscribed?: boolean }; subscribed?: boolean }>(`/api/v1/notifications/push/status`)
       .then((response) => {
         if (cancelled) return;
         const payload = response.data || response;
@@ -233,7 +292,7 @@ export default function RiskPushCenter({
       const applied: string[] = [];
       for (const action of cached.pending) {
         try {
-          await apiJson(`${API_BASE}/api/v1/risk/notifications/${encodeURIComponent(action.id)}/read?status=${action.status}`, { method: 'POST' });
+          await apiJson(`/api/v1/risk/notifications/${encodeURIComponent(action.id)}/read?status=${action.status}`, { method: 'POST' });
           applied.push(action.id);
         } catch {
           // Keep failed actions queued for the next online event.
@@ -241,7 +300,7 @@ export default function RiskPushCenter({
       }
       if (applied.length) removeRiskNotificationActions(userId, applied);
     }
-    const response = await apiJson<RiskNotificationResponse>(`${API_BASE}/api/v1/risk/notifications`);
+    const response = await apiJson<RiskNotificationResponse>(`/api/v1/risk/notifications`);
     const payload = response.data || response;
     const persisted = (Array.isArray(payload.notifications) ? payload.notifications : [])
       .map(normalizeRiskNotification)
@@ -270,7 +329,7 @@ export default function RiskPushCenter({
     await Promise.all(unreadItems.map(async (item) => {
       try {
         if (!online) throw new Error('offline');
-        await apiJson(`${API_BASE}/api/v1/risk/notifications/${encodeURIComponent(item.id)}/read?status=read`, { method: 'POST' });
+        await apiJson(`/api/v1/risk/notifications/${encodeURIComponent(item.id)}/read?status=read`, { method: 'POST' });
       } catch {
         enqueueRiskNotificationAction(userId || '', { id: item.id, status: 'read', queuedAt: Date.now() });
       }
@@ -284,7 +343,7 @@ export default function RiskPushCenter({
     }
     try {
       if (!online) throw new Error('offline');
-      await apiJson(`${API_BASE}/api/v1/risk/notifications/${encodeURIComponent(item.id)}/read?status=acknowledged`, { method: 'POST' });
+      await apiJson(`/api/v1/risk/notifications/${encodeURIComponent(item.id)}/read?status=acknowledged`, { method: 'POST' });
       setItems((previous) => previous.map((entry) => entry.id === item.id ? { ...entry, status: 'acknowledged' } : entry));
     } catch (error) {
       enqueueRiskNotificationAction(userId || '', { id: item.id, status: 'acknowledged', queuedAt: Date.now() });
@@ -292,6 +351,26 @@ export default function RiskPushCenter({
       setStatusMessage('当前离线，已记录“已处理”，网络恢复后自动同步');
     }
   }, [online, userId]);
+
+  // 「按这条提醒重排」不是替用户做决定：只是把风险原文带回需求页，
+  // 由用户自己确认后再生效。没有收到受影响节点时不补任何节点名。
+  const requestReplanFromItem = useCallback((it: RiskInboxItem) => {
+    if (!onRequestReplan) return;
+    setOpen(false);
+    onRequestReplan({
+      id: it.id,
+      title: it.title,
+      detail: it.detail,
+      city: it.city || city,
+      severity: it.severity,
+      affectedNodes: Array.isArray(it.replan?.affected_nodes) ? it.replan!.affected_nodes : undefined,
+    });
+  }, [city, onRequestReplan]);
+
+  const openExecution = useCallback(() => {
+    setOpen(false);
+    onOpenExecution?.();
+  }, [onOpenExecution]);
 
   const poll = useCallback(async () => {
     if (!city) return;
@@ -305,7 +384,7 @@ export default function RiskPushCenter({
       let changes: RiskChange[] = [];
       if (subscribed && userId) {
         // 已订阅：走网关订阅服务，对比服务端持久化基线，检测变更并广播房间通知
-        const data = await apiJson<{ alerts?: Array<{ change?: RiskChange }> }>(`${API_BASE}/api/v1/risk/subscriptions/check`, {
+        const data = await apiJson<{ alerts?: Array<{ change?: RiskChange }> }>(`/api/v1/risk/subscriptions/check`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user_id: userId, room_id: roomCode || '' }),
@@ -373,7 +452,7 @@ export default function RiskPushCenter({
     (async () => {
       try {
         const data = await apiJson<{ subscriptions?: Array<{ city?: string }> }>(
-          `${API_BASE}/api/v1/risk/subscriptions?user_id=${encodeURIComponent(userId)}`,
+          `/api/v1/risk/subscriptions?user_id=${encodeURIComponent(userId)}`,
         );
         const list = Array.isArray(data?.subscriptions) ? data.subscriptions : [];
         if (cancelled) return;
@@ -391,7 +470,7 @@ export default function RiskPushCenter({
     if (!userId || !city) return;
     setSubscriptionBusy(true);
     try {
-      await apiJson(`${API_BASE}/api/v1/risk/subscribe`, {
+      await apiJson(`/api/v1/risk/subscribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, city, coordinate }),
@@ -412,7 +491,7 @@ export default function RiskPushCenter({
     if (!userId || !city) return;
     setSubscriptionBusy(true);
     try {
-      await apiJson(`${API_BASE}/api/v1/risk/unsubscribe`, {
+      await apiJson(`/api/v1/risk/unsubscribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, city }),
@@ -428,7 +507,7 @@ export default function RiskPushCenter({
 
   if (!city) return null;
 
-  const activeRisk = items.some((i) => i.severity === 'HIGH' || i.severity === 'MEDIUM');
+  const activeRisk = items.some((i) => !snoozedIds.has(i.id) && (i.severity === 'HIGH' || i.severity === 'MEDIUM'));
 
   return (
     <>
@@ -447,7 +526,6 @@ export default function RiskPushCenter({
                 <div className="flex items-start gap-2">
                   {(() => {
                     const Icon = typeIcon(items[0].type);
-                    const meta = SEVERITY_META[items[0].severity] || SEVERITY_META.LOW;
                     return <Icon className="w-4 h-4 mt-0.5 shrink-0 text-slate-600" />;
                   })()}
                   <div className="min-w-0">
@@ -461,6 +539,7 @@ export default function RiskPushCenter({
         </AnimatePresence>
 
         <motion.button
+          data-testid="risk-push-toggle"
           onClick={() => {
             const nextOpen = !open;
             setOpen(nextOpen);
@@ -492,6 +571,7 @@ export default function RiskPushCenter({
         {open && (
           <motion.div
             key="risk-push-panel"
+            data-testid="risk-push-panel"
             initial={{ opacity: 0, y: 16, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.96 }}
@@ -563,8 +643,15 @@ export default function RiskPushCenter({
                   const sourceLabel = it.source || '风险聚合服务';
                   const cityQuery = encodeURIComponent(it.city || city);
                   const observedLabel = it.observedAt ? new Date(it.observedAt).toLocaleString('zh-CN', { hour12: false }) : '时间未知';
+                  const affectedNodes = Array.isArray(it.replan?.affected_nodes) ? it.replan!.affected_nodes : [];
+                  const snoozed = snoozedIds.has(it.id);
+                  // 只有后端明确给了受影响节点，才谈得上“其余不受影响”；没给节点不能当成没影响
+                  const unaffectedNames = affectedNodes.length > 0
+                    ? routeNodeNames.filter((name) => !affectedNodes.includes(name))
+                    : [];
+                  const scope = scopeText(affectedNodes, unaffectedNames);
                   return (
-                    <div key={it.id} className={`px-4 py-3 border-b border-slate-50 flex items-start gap-3 hover:bg-slate-50/60 ${it.status === 'acknowledged' ? 'opacity-70' : ''}`}>
+                    <div key={it.id} data-testid="risk-push-item" data-status={snoozed ? 'snoozed' : it.status} className={`px-4 py-3 border-b border-slate-50 flex items-start gap-3 hover:bg-slate-50/60 ${it.status === 'acknowledged' || snoozed ? 'opacity-70' : ''}`}>
                       <div className={`mt-0.5 p-1.5 rounded-lg border shrink-0 ${meta.badge}`}>
                         <Icon className="w-4 h-4" />
                       </div>
@@ -573,10 +660,31 @@ export default function RiskPushCenter({
                           <p className="text-xs font-bold text-slate-800 leading-tight">{it.title}</p>
                           <span className="text-[9px] text-slate-400 shrink-0 font-medium">{relativeTime(it.ts)}</span>
                         </div>
-                        <p className="text-[11px] text-slate-500 leading-snug mt-0.5">{it.detail}</p>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                          <span data-testid="risk-severity-label" className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[9px] font-black ${meta.badge}`}>
+                            {severityLabel(it.severity)}
+                          </span>
+                          <span data-testid="risk-confidence" className="text-[9px] font-bold text-slate-400">
+                            {confidenceLabel({ estimated: it.estimated, severity: it.severity })}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 leading-snug mt-1">{it.detail}</p>
+                        {scope && (
+                          <p data-testid="risk-scope" className="mt-1 text-[10px] leading-snug text-slate-500">{scope}</p>
+                        )}
+                        {!snoozed && it.status !== 'acknowledged' && (
+                          <p data-testid="risk-next-action" className="mt-1.5 rounded-md bg-slate-50 px-2 py-1 text-[10px] leading-relaxed text-slate-700">
+                            <span className="font-black text-slate-800">现在需要做什么：</span>
+                            {nextActionText({
+                              severity: it.severity,
+                              estimated: it.estimated,
+                              hasReplan: Boolean(it.replan),
+                              affectedCount: affectedNodes.length,
+                            })}
+                          </p>
+                        )}
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[9px] text-slate-400">
                           <span>来源：{sourceLabel}</span>
-                          <span>{it.estimated ? '估算信号' : '供应商信号'}</span>
                           <span>观测：{observedLabel}</span>
                           <button type="button" onClick={() => setExpandedId(expanded ? null : it.id)} className="inline-flex items-center gap-0.5 font-bold text-slate-500 hover:text-orange-700">
                             {expanded ? '收起证据' : '查看证据'} {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
@@ -591,12 +699,35 @@ export default function RiskPushCenter({
                             <div className="mt-1.5 flex flex-wrap gap-2">
                               <a href={`https://www.amap.com/search?query=${cityQuery}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-orange-700 hover:text-orange-900"><ExternalLink className="h-3 w-3" />高德查看目的地</a>
                               <a href={`https://ditu.amap.com/dir?city=${cityQuery}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-orange-700 hover:text-orange-900"><ExternalLink className="h-3 w-3" />高德规划路线</a>
-                              {it.status !== 'acknowledged' && <button type="button" onClick={() => void acknowledgeNotification(it)} className="font-bold text-emerald-700 hover:text-emerald-900">标记已处理</button>}
                             </div>
                           </div>
                         )}
-                        {it.replan && onReplan && (
-                          <button type="button" onClick={() => onReplan(it.replan)} className="mt-2 inline-flex min-h-7 items-center rounded-md bg-orange-50 px-2.5 text-[10px] font-bold text-orange-700 hover:bg-orange-100">查看并确认重排提案</button>
+                        {snoozed ? (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <p className="text-[10px] font-bold text-slate-500" data-testid="risk-push-snoozed">已暂缓 · 今天不再提醒，行程未改动</p>
+                            <button type="button" data-testid="risk-action-unsnooze" onClick={() => toggleSnooze(it.id, false)} className="inline-flex min-h-7 items-center rounded-md border border-slate-200 bg-white px-2.5 text-[10px] font-bold text-slate-600 transition-colors hover:bg-slate-50">恢复提醒</button>
+                          </div>
+                        ) : it.status !== 'acknowledged' ? (
+                          <>
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5" data-testid="risk-push-actions">
+                              {it.replan && onReplan && (
+                                <button type="button" data-testid="risk-action-replan" onClick={() => { setOpen(false); onReplan(it.replan); }} className="inline-flex min-h-7 items-center rounded-md bg-orange-50 px-2.5 text-[10px] font-bold text-orange-700 transition-colors hover:bg-orange-100">查看并确认重排提案</button>
+                              )}
+                              {!it.replan && onRequestReplan && (
+                                <button type="button" data-testid="risk-action-replan-request" onClick={() => requestReplanFromItem(it)} className="inline-flex min-h-7 items-center rounded-md border border-orange-200 bg-white px-2.5 text-[10px] font-bold text-orange-700 transition-colors hover:bg-orange-50">按这条提醒重排剩余行程</button>
+                              )}
+                              {onOpenExecution && (
+                                <button type="button" data-testid="risk-action-view-execution" onClick={openExecution} className="inline-flex min-h-7 items-center rounded-md border border-slate-200 bg-white px-2.5 text-[10px] font-bold text-slate-600 transition-colors hover:bg-slate-50">查看受影响的安排</button>
+                              )}
+                              <button type="button" data-testid="risk-action-ack" onClick={() => void acknowledgeNotification(it)} className="inline-flex min-h-7 items-center rounded-md border border-emerald-200 bg-white px-2.5 text-[10px] font-bold text-emerald-700 transition-colors hover:bg-emerald-50">标记已处理</button>
+                              <button type="button" data-testid="risk-action-snooze" onClick={() => toggleSnooze(it.id, true)} className="inline-flex min-h-7 items-center rounded-md border border-slate-200 bg-white px-2.5 text-[10px] font-bold text-slate-600 transition-colors hover:bg-slate-50">暂不处理</button>
+                            </div>
+                            {!it.replan && onRequestReplan && (
+                              <p className="mt-1 text-[9px] leading-relaxed text-slate-400">会先回到需求页，由你确认后再生成；不会自动改方案。</p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="mt-2 text-[10px] font-bold text-emerald-700" data-testid="risk-push-acknowledged">已处理 · 这条提醒不再提示</p>
                         )}
                       </div>
                       <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${meta.dot}`} />

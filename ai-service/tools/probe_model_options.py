@@ -43,6 +43,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.console import ensure_utf8_console  # noqa: E402
+
+ensure_utf8_console()
+
 from dotenv import load_dotenv  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
 

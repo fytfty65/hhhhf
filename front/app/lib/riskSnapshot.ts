@@ -12,8 +12,10 @@
 // recent result for a short window. Callers that genuinely need a fresh read
 // (a manual refresh, a tab switch) pass { force: true }.
 //
-// It intentionally depends on nothing but fetch so it can be unit tested with
-// `node --experimental-strip-types`, which does not transform .tsx modules.
+// It intentionally depends on the framework-free lib/apiClient so it can be unit
+// tested with `node --experimental-strip-types`, which does not transform .tsx modules.
+
+import { ApiRequestError, apiRequest } from './apiClient.ts';
 
 export interface RiskSnapshot {
   [key: string]: unknown;
@@ -34,31 +36,6 @@ const cache = new Map<string, CacheEntry>();
 function keyFor(city: string, coordinate?: [number, number] | null): string {
   const coord = Array.isArray(coordinate) && coordinate.length >= 2 ? `${coordinate[0]},${coordinate[1]}` : '';
   return `${city}::${coord}`;
-}
-
-/** Resolve the API base exactly like lib/utils does, without importing it. */
-function apiBase(): string {
-  const configured = process.env.NEXT_PUBLIC_API_BASE;
-  if (configured) return configured.replace(/\/$/, '');
-  if (typeof window !== 'undefined' && window.location) {
-    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-    return `${protocol}//${window.location.hostname}:8080`;
-  }
-  return 'http://127.0.0.1:8080';
-}
-
-function authHeaders(): Record<string, string> {
-  const base: Record<string, string> = { 'Content-Type': 'application/json' };
-  try {
-    if (typeof localStorage !== 'undefined') {
-      const raw = localStorage.getItem('omni_user');
-      const token = raw ? (JSON.parse(raw) as { token?: string } | null)?.token : '';
-      if (typeof token === 'string' && token) base.Authorization = `Bearer ${token}`;
-    }
-  } catch {
-    // A malformed localStorage entry must not break risk polling.
-  }
-  return base;
 }
 
 export interface FetchRiskSnapshotOptions {
@@ -177,17 +154,24 @@ export async function fetchRiskSnapshot(
   }
 
   const promise = (async (): Promise<RiskSnapshot | null> => {
-    const response = await fetch(`${apiBase()}/api/v1/risk/realtime`, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: JSON.stringify({
-        city: cityName,
-        coordinate: options.coordinate ?? undefined,
-        baseline: options.baseline,
-      }),
-    });
-    if (!response.ok) return null;
-    const payload = (await response.json()) as { snapshot?: RiskSnapshot } | null;
+    let payload: { snapshot?: RiskSnapshot } | null = null;
+    try {
+      payload = await apiRequest<{ snapshot?: RiskSnapshot } | null>('/api/v1/risk/realtime', {
+        method: 'POST',
+        body: {
+          city: cityName,
+          coordinate: options.coordinate ?? undefined,
+          baseline: options.baseline,
+        },
+        retries: 0,
+      });
+    } catch (error) {
+      // A non-OK response means "no usable snapshot right now" — callers keep
+      // their previous value. Transport failures still propagate so the polling
+      // layer can surface them.
+      if (error instanceof ApiRequestError && error.status > 0) return null;
+      throw error;
+    }
     const snapshot = payload?.snapshot;
     if (!snapshot || typeof snapshot !== 'object') return null;
     cache.set(key, { data: snapshot, at: Date.now(), promise: null });
@@ -229,15 +213,16 @@ export async function fetchGlobalRiskSnapshots(
     .slice(0, 6)
     .map((item) => ({ ...item, city: item.city.trim() }));
   if (!selected.length) return { results: [], errors: [{ code: 'CITIES_REQUIRED', message: '请选择城市' }] };
-  const response = await fetch(`${apiBase()}/api/v1/risk/global`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({ cities: selected }),
-  });
-  const payload = (await response.json().catch(() => null)) as GlobalRiskBatchResponse | null;
-  if (!response.ok) {
-    const error = payload?.errors?.[0] || { code: 'GLOBAL_RISK_UNAVAILABLE', message: '全球情报服务暂不可用' };
-    throw new Error(error.message || error.code || 'GLOBAL_RISK_UNAVAILABLE');
+  let payload: GlobalRiskBatchResponse | null = null;
+  try {
+    payload = await apiRequest<GlobalRiskBatchResponse>('/api/v1/risk/global', {
+      method: 'POST',
+      body: { cities: selected },
+      retries: 0,
+    });
+  } catch (error) {
+    if (error instanceof ApiRequestError) throw new Error(error.message);
+    throw error;
   }
   return {
     results: Array.isArray(payload?.results) ? payload!.results : [],

@@ -3,7 +3,7 @@ import ThemeToggle from './components/ThemeToggle'
 
 export const metadata = {
   title: 'OmniRoute Dashboard',
-  description: '多智能体旅游路线协商中枢',
+  description: '结伴旅行路线协同与规划中枢',
 }
 
 // 首屏防闪烁：根据 localStorage（手动覆盖）/ 系统偏好设置 .dark 类，并实时跟随系统变化

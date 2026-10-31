@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import inspect
-import math
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from .candidate_index import intent_of
@@ -146,7 +145,8 @@ def continuity_report(plan: Any, context: Mapping[str, Any], chunk_days: int = C
     不适合直接判死（跨城本来就要坐车）。
     """
     days = max(1, int(context.get("days") or context.get("trip_days") or 1))
-    expectations = context.get("expectations") if isinstance(context.get("expectations"), Mapping) else {}
+    raw_expectations = context.get("expectations")
+    expectations: Mapping[str, Any] = raw_expectations if isinstance(raw_expectations, Mapping) else {}
     nodes = nodes_of(plan)
     failures: List[Dict[str, Any]] = []
     advisories: List[str] = []
@@ -347,12 +347,13 @@ def merge_segment_nodes(plan: Any, start_day: int, end_day: int, nodes: Sequence
 
     incoming: List[Dict[str, Any]] = []
     out_of_range: List[int] = []
-    for node in nodes or []:
-        if not isinstance(node, Mapping):
+    for raw_node in nodes or []:
+        if not isinstance(raw_node, Mapping):
             continue
-        candidate = dict(node)
+        candidate = dict(raw_node)
+        raw_day: Any = candidate.get("day")
         try:
-            day_int = int(candidate.get("day"))
+            day_int = int(raw_day)
         except (TypeError, ValueError):
             day_int = start_day
         if day_int < start_day or day_int > end_day:

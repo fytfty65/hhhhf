@@ -25,7 +25,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 
 # 渠道登记表：目前**逐条实测**过的只有伊犁文旅（伊宁用）。

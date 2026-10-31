@@ -32,12 +32,6 @@ function toDay(n: RouteNode): number {
   return Number(n.day) || 1;
 }
 
-function toMinutes(hhmm: string): number {
-  const m = /^(\d{1,2}):(\d{2})/.exec(hhmm || '');
-  if (!m) return 0;
-  return Number(m[1]) * 60 + Number(m[2]);
-}
-
 function toHHMM(total: number): string {
   const h = Math.floor(total / 60);
   const mm = total % 60;

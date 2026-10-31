@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Leaf, Wind, Trees, X, Route, RefreshCw, TrendingDown, Info } from 'lucide-react';
-import { API_BASE, apiJson } from '../lib/utils';
+import { apiJson } from '../lib/apiClient';
 
 
 // 中文出行方式 → 碳核算模式键（与 ai-service 的 EMISSION_FACTORS 对齐）
@@ -94,7 +94,7 @@ export default function CarbonFootprintPanel({ routes, travelDetails }: CarbonFo
     setLoading(true);
     setError('');
     try {
-      const data = await apiJson<{ result?: any; error?: string }>(`${API_BASE}/api/v1/carbon/footprint`, {
+      const data = await apiJson<{ result?: any; error?: string }>('/api/v1/carbon/footprint', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ segments }),

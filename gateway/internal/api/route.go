@@ -28,6 +28,24 @@ func RegisterRoutes(r *gin.Engine) {
 		authGroup.POST("/register", handlers.AuthRegisterRateLimitMiddleware(), handlers.RegisterHandler)
 		authGroup.POST("/login", handlers.AuthLoginRateLimitMiddleware(), handlers.LoginHandler)
 		authGroup.POST("/logout", handlers.AuthMiddleware(), handlers.LogoutHandler)
+		// Short-lived access token + rotating refresh cookie.
+		authGroup.POST("/refresh", handlers.RefreshHandler)
+		// Single-use WebSocket ticket, so credentials never appear in a WS URL.
+		authGroup.POST("/ws-ticket", handlers.AuthMiddleware(), handlers.IssueWSTicketHandler)
+		// 移动端（Android 原生客户端）令牌流程：
+		// refresh token 通过响应体下发并根据请求体轮换，不依赖 Cookie。
+		// logout 不强制要求 Authorization：access token 过期后仍可用 refresh
+		// token 撤销服务端设备会话，避免本地已清空而服务端会话还活着。
+		authGroup.POST("/mobile/login", handlers.AuthLoginRateLimitMiddleware(), handlers.MobileLoginHandler)
+		authGroup.POST("/mobile/refresh", handlers.AuthMobileRefreshRateLimitMiddleware(), handlers.MobileRefreshHandler)
+		authGroup.POST("/mobile/logout", handlers.MobileLogoutHandler)
+		// Account lifecycle: password change / reset and device management.
+		authGroup.POST("/password/change", handlers.AuthMiddleware(), handlers.ChangePasswordHandler)
+		authGroup.POST("/password/forgot", handlers.AuthLoginRateLimitMiddleware(), handlers.ForgotPasswordHandler)
+		authGroup.POST("/password/reset", handlers.AuthLoginRateLimitMiddleware(), handlers.ResetPasswordHandler)
+		authGroup.POST("/logout-all", handlers.AuthMiddleware(), handlers.LogoutAllHandler)
+		authGroup.GET("/sessions", handlers.AuthMiddleware(), handlers.ListSessionsHandler)
+		authGroup.DELETE("/sessions/:id", handlers.AuthMiddleware(), handlers.RevokeSessionHandler)
 	}
 
 	// ==========================================
@@ -93,7 +111,7 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/notifications/push/fcm-token", handlers.RegisterFCMTokenHandler)
 		apiGroup.DELETE("/notifications/push/fcm-token", handlers.UnregisterFCMTokenHandler)
 		// 举报：任何登录用户可用，**立刻把照片退回待审**（对其他用户不可见）等人工复核
-		apiGroup.POST("/photos/:id/report", handlers.ReportPhotoHandler)
+		apiGroup.POST("/photos/:id/report", handlers.PhotoReportRateLimitMiddleware(), handlers.ReportPhotoHandler)
 		// 管理端：待复核列表 / 通过 / 拒绝（拒绝必须给理由，理由回传上传者）。
 		// 身份来自服务端配置 ADMIN_USER_IDS（逗号分隔），不信任请求里自报的角色。
 		apiGroup.GET("/admin/photos", handlers.ReviewPhotosHandler)
@@ -136,8 +154,12 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/planning/joint", handlers.JointPlanHandler)
 		apiGroup.POST("/planning/ranking/evaluate", handlers.RankingEvaluationHandler)
 		apiGroup.POST("/planning/orders", handlers.CreateOrderHandler)
+		apiGroup.GET("/planning/orders", handlers.ListOrdersHandler)
 		apiGroup.DELETE("/planning/orders/:id", handlers.CancelOrderHandler)
 		apiGroup.POST("/planning/events", handlers.RecordPlanningEventHandler)
+		// Batched ingestion for bursts from one planning interaction: one INSERT
+		// statement instead of one write-lock round trip per event.
+		apiGroup.POST("/planning/events/batch", handlers.RecordPlanningEventsBatchHandler)
 		apiGroup.GET("/planning/quality", handlers.PlanningQualityHandler)
 		apiGroup.GET("/planning/dataset/export", handlers.ExportPlanningDatasetHandler)
 		apiGroup.GET("/planning/providers/health", handlers.PlanningProviderHealthHandler)
@@ -158,6 +180,9 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/planning/models/evaluation-audit/summary", handlers.ModelEvaluationAuditSummaryHandler)
 		apiGroup.GET("/planning/models/evaluation-audit/compare", handlers.ModelEvaluationAuditCompareHandler)
 		apiGroup.GET("/planning/models/audit-cleanup-health", handlers.ModelAuditCleanupHealthHandler)
+		// Retention state for the four usage-driven event tables. Same shape as
+		// the audit-cleanup health endpoint: configuration and counts only.
+		apiGroup.GET("/planning/events/retention-health", handlers.EventRetentionCleanupHealthHandler)
 
 		// AI 代理状态同步路由
 		apiGroup.POST("/agent/sync", handlers.AgentSyncHandler)

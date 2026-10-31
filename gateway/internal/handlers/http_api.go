@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // 生成 6 位大写字母+数字的邀请码
@@ -210,7 +211,7 @@ func SubmitFeedbackHandler(c *gin.Context) {
 		Score:  req.Score,
 		Reason: req.Reason,
 	}
-	database.DB.Create(&feedback)
+	_ = database.CreateWithRetry(database.DB, &feedback)
 
 	// 🎯 实时采集 → 画像动态更新：提交反馈后立即重聚合用户旅行画像
 	if profile, err := service.RefreshProfile(req.UserID); err == nil {
@@ -241,7 +242,7 @@ func GetProfileHandler(c *gin.Context) {
 	}
 
 	var trips []models.TripPlan
-	database.DB.Where("user_id = ?", userID).Order("created_at desc").Find(&trips)
+	database.Reader().Where("user_id = ?", userID).Order("created_at desc").Find(&trips)
 
 	c.JSON(http.StatusOK, gin.H{
 		"user": gin.H{
@@ -265,7 +266,7 @@ func GetTripsHandler(c *gin.Context) {
 		return
 	}
 	var trips []models.TripPlan
-	if err := database.DB.Where("user_id = ?", userID).Order("created_at desc").Find(&trips).Error; err != nil {
+	if err := database.Reader().Where("user_id = ?", userID).Order("created_at desc").Find(&trips).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "行程加载失败", "code": "TRIPS_LOAD_FAILED"})
 		return
 	}
@@ -461,6 +462,7 @@ func UpdateProfileHandler(c *gin.Context) {
 	// AuthMiddleware already rejects a mismatched body user_id; re-check here so
 	// the handler is safe even if it is ever mounted without that middleware.
 	if supplied := strings.TrimSpace(req.UserID); supplied != "" && supplied != userID {
+		logIdentityMismatch(c, supplied)
 		c.JSON(http.StatusForbidden, gin.H{"error": "请求身份与登录用户不一致", "code": "USER_MISMATCH"})
 		return
 	}
@@ -525,7 +527,9 @@ func ListPostsHandler(c *gin.Context) {
 	userID := c.Query("user_id")
 	viewerID := CurrentUserID(c)
 
-	q := database.DB.Order("created_at desc").Limit(500)
+	// Feed reads go through the reader pool: a long analytics write no longer
+	// queues page loads behind the single write connection.
+	q := database.Reader().Order("created_at desc").Limit(500)
 	if userID != "" {
 		q = q.Where("user_id = ?", userID)
 	}
@@ -555,7 +559,7 @@ func ListPostsHandler(c *gin.Context) {
 
 		// Each lookup is aggregated over the whole page in a single query.
 		var commentRows []countRow
-		database.DB.Model(&models.Comment{}).
+		database.Reader().Model(&models.Comment{}).
 			Select("post_id, COUNT(*) AS n").
 			Where("post_id IN ?", ids).
 			Group("post_id").
@@ -565,7 +569,7 @@ func ListPostsHandler(c *gin.Context) {
 		}
 
 		var favoriteRows []countRow
-		database.DB.Model(&models.PostFavorite{}).
+		database.Reader().Model(&models.PostFavorite{}).
 			Select("post_id, COUNT(*) AS n").
 			Where("post_id IN ?", ids).
 			Group("post_id").
@@ -576,7 +580,7 @@ func ListPostsHandler(c *gin.Context) {
 
 		if viewerID != "" {
 			var ownedIDs []string
-			database.DB.Model(&models.PostFavorite{}).
+			database.Reader().Model(&models.PostFavorite{}).
 				Where("post_id IN ? AND user_id = ?", ids, viewerID).
 				Pluck("post_id", &ownedIDs)
 			for _, id := range ownedIDs {
@@ -651,13 +655,13 @@ func ListPostsHandler(c *gin.Context) {
 // feed (and without exposing any user identifiers).
 func CommunityStatsHandler(c *gin.Context) {
 	var posts, routes, comments, favorites int64
-	if err := database.DB.Model(&models.CommunityPost{}).Count(&posts).Error; err != nil {
+	if err := database.Reader().Model(&models.CommunityPost{}).Count(&posts).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "社区统计暂不可用", "code": "COMMUNITY_STATS_FAILED"})
 		return
 	}
-	database.DB.Model(&models.CommunityPost{}).Where("content LIKE ?", "%\"routes\"%").Count(&routes)
-	database.DB.Model(&models.Comment{}).Count(&comments)
-	database.DB.Model(&models.PostFavorite{}).Count(&favorites)
+	database.Reader().Model(&models.CommunityPost{}).Where("content LIKE ?", "%\"routes\"%").Count(&routes)
+	database.Reader().Model(&models.Comment{}).Count(&comments)
+	database.Reader().Model(&models.PostFavorite{}).Count(&favorites)
 	c.JSON(http.StatusOK, gin.H{"posts": posts, "structured_routes": routes, "comments": comments, "favorites": favorites})
 }
 
@@ -731,7 +735,7 @@ func GetCommentsHandler(c *gin.Context) {
 	}
 
 	var comments []models.Comment
-	database.DB.Where("post_id = ?", postID).Order("created_at asc").Find(&comments)
+	database.Reader().Where("post_id = ?", postID).Order("created_at asc").Find(&comments)
 
 	result := make([]gin.H, 0, len(comments))
 	for _, cm := range comments {
@@ -802,6 +806,17 @@ func CommentHandler(c *gin.Context) {
 }
 
 // LikePostHandler 给帖子点赞
+//
+// The counter is incremented with an atomic SQL expression rather than
+// read-modify-write. The previous `post.Likes = post.Likes + 1; DB.Save(&post)`
+// loaded the row, incremented in Go and wrote the whole row back, so two
+// concurrent likes read the same value and one increment was silently lost.
+//
+// Note the known limitation: there is no per-user like record, so a single user
+// can like repeatedly and the count is not idempotent. FavouritePostHandler below
+// already shows the pattern for fixing that (a per-user table with a unique
+// index); doing it for likes needs a new table plus a schema migration, so it is
+// recorded here rather than half-done.
 func LikePostHandler(c *gin.Context) {
 	var req struct {
 		PostID string `json:"post_id" binding:"required"`
@@ -811,18 +826,34 @@ func LikePostHandler(c *gin.Context) {
 		return
 	}
 
+	// Existence check first so a bad id is a clean 404 rather than a 0-row update.
 	var post models.CommunityPost
 	if err := database.DB.Where("id = ?", req.PostID).First(&post).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "帖子不存在"})
 		return
 	}
-	post.Likes = post.Likes + 1
-	if err := database.DB.Save(&post).Error; err != nil {
+
+	// Single atomic statement: the database does the arithmetic, so concurrent
+	// increments cannot overwrite each other.
+	if err := database.DB.Model(&models.CommunityPost{}).
+		Where("id = ?", req.PostID).
+		UpdateColumn("likes", gorm.Expr("likes + ?", 1)).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "点赞失败"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "点赞成功", "likes": post.Likes})
+	// Read the committed value back so the response reports the real count.
+	var likes int64
+	if err := database.DB.Model(&models.CommunityPost{}).
+		Where("id = ?", req.PostID).
+		Pluck("likes", &likes).Error; err != nil {
+		// The like was recorded; only the echo failed. Do not report failure for
+		// a write that succeeded.
+		c.JSON(http.StatusOK, gin.H{"message": "点赞成功"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "点赞成功", "likes": likes})
 }
 
 // FavoritePostHandler 收藏/取消收藏帖子（一人一藏，重复点击切换）。
@@ -865,7 +896,7 @@ func FavoritePostHandler(c *gin.Context) {
 // ListTagsHandler 返回全站话题标签及出现次数（供热门标签选择与筛选）。
 func ListTagsHandler(c *gin.Context) {
 	var posts []models.CommunityPost
-	database.DB.Find(&posts)
+	database.Reader().Find(&posts)
 
 	counter := map[string]int{}
 	for _, p := range posts {

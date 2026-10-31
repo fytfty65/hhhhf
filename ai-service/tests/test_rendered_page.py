@@ -102,5 +102,58 @@ class RenderedPageTests(unittest.TestCase):
         self.assertIn("空 URL", result["error"])
 
 
+class RenderCachePathTests(unittest.TestCase):
+    """默认缓存路径必须落在 ai-service/ 下（2026-10-09 修掉的真实 bug）。
+
+    之前 `render_cache_path()` 取到 service_root 后又 join 了 `".."`，于是渲染
+    缓存被写到**仓库根目录**：根目录出现一份 13,908 字节的真缓存，而
+    `ai-service/official_render_cache.json` 永远是一份 2 字节的 `{}`。
+    同目录其它缓存（mct_marker / official_directory / official_domain_candidates /
+    web_price_usage）全都在 `ai-service/` 下，所以这不只是观感问题 —— 它让
+    "哪些文件是运行时产生的" 变得无法判断，也让 .gitignore 规则失去一致口径。
+
+    本类**不设置** `OFFICIAL_RENDER_CACHE_FILE`，测的就是默认值本身。
+    """
+
+    def setUp(self):
+        self._saved = os.environ.pop("OFFICIAL_RENDER_CACHE_FILE", None)
+
+    def tearDown(self):
+        if self._saved is not None:
+            os.environ["OFFICIAL_RENDER_CACHE_FILE"] = self._saved
+
+    def test_default_cache_lives_in_the_service_directory(self):
+        service_root = os.path.dirname(os.path.dirname(os.path.abspath(rendered_page.__file__)))
+        expected = os.path.join(service_root, "official_render_cache.json")
+        self.assertEqual(
+            os.path.normpath(rendered_page.render_cache_path()),
+            os.path.normpath(expected),
+        )
+
+    def test_default_cache_is_not_written_outside_the_service(self):
+        """回归守卫：默认路径不得逃出 ai-service/（尤其是不能落到仓库根）。"""
+        service_root = os.path.normpath(
+            os.path.dirname(os.path.dirname(os.path.abspath(rendered_page.__file__)))
+        )
+        resolved = os.path.normpath(rendered_page.render_cache_path())
+        self.assertTrue(
+            resolved.startswith(service_root + os.sep),
+            f"默认渲染缓存路径逃出了 ai-service/: {resolved}",
+        )
+
+    def test_cache_filename_matches_the_gitignore_rule(self):
+        """文件名要与 .gitignore 里 `ai-service/*_cache.json` 的口径一致。"""
+        self.assertTrue(
+            os.path.basename(rendered_page.render_cache_path()).endswith("_cache.json"),
+            "缓存文件名需以 _cache.json 结尾，才能被 ai-service/*_cache.json 覆盖",
+        )
+
+    def test_env_override_still_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "custom.json")
+            os.environ["OFFICIAL_RENDER_CACHE_FILE"] = target
+            self.assertEqual(rendered_page.render_cache_path(), target)
+
+
 if __name__ == "__main__":
     unittest.main()

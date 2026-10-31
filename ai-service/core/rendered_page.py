@@ -35,11 +35,25 @@ def renderer_script() -> str:
 
 
 def render_cache_path() -> str:
+    """渲染结果缓存文件（默认 `ai-service/official_render_cache.json`）。
+
+    ⚠️ 这里以前多拼了一层 `..`：它先取到 service_root，又 join 了 `".."`，
+    于是缓存被写到**仓库根目录**，而同一批运行时缓存
+    （`mct_marker_cache.json` / `official_directory_cache.json` /
+    `official_domain_candidates.json` / `web_price_usage.json`）全都写在
+    `ai-service/` 下 —— 结果就是根目录出现一份 13,908 字节的真缓存，
+    而 `ai-service/official_render_cache.json` 永远是一份 2 字节的 `{}`。
+    除了一致性，这也让"哪些文件是运行时产生的"变得难以判断。
+
+    判定基准：与本目录其它缓存函数保持一致，即
+    `os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "<name>.json")`，
+    用 `normpath` 消掉 `..` 以免路径里带上一串 `..` 让人误判层级。
+    """
     raw = str(os.getenv("OFFICIAL_RENDER_CACHE_FILE") or "").strip()
     if raw:
         return raw
     service_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(service_root, "..", "official_render_cache.json")
+    return os.path.normpath(os.path.join(service_root, "official_render_cache.json"))
 
 
 def render_cache_ttl_seconds() -> float:

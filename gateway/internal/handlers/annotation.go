@@ -40,7 +40,7 @@ func CreateAnnotationHandler(c *gin.Context) {
 		ParentID: req.ParentID,
 		Status:   "open",
 	}
-	if err := database.DB.Create(&ann).Error; err != nil {
+	if err := database.CreateWithRetry(database.DB, &ann); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "批注创建失败"})
 		return
 	}
@@ -80,13 +80,13 @@ func ListAnnotationsHandler(c *gin.Context) {
 	}
 
 	var anns []models.NodeAnnotation
-	q := database.DB.Order("created_at asc")
+	q := database.Reader().Order("created_at asc")
 	if roomID != "" {
 		q = q.Where("room_id = ?", roomID)
 	} else {
 		// A node key is not globally unique. When room_id is omitted, scope the
 		// query to rooms in which the authenticated user is a member.
-		q = q.Where("room_id IN (?)", database.DB.Model(&models.RoomMember{}).Select("room_id").Where("user_id = ?", userID))
+		q = q.Where("room_id IN (?)", database.Reader().Model(&models.RoomMember{}).Select("room_id").Where("user_id = ?", userID))
 	}
 	if nodeKey != "" {
 		q = q.Where("node_key = ?", nodeKey)
@@ -194,11 +194,11 @@ func VoteAnnotationHandler(c *gin.Context) {
 
 	// 一人一票：先清除该用户此前的投票，再写入新票
 	database.DB.Where("annotation_id = ? AND user_id = ?", req.AnnotationID, req.UserID).Delete(&models.NodeAnnotationVote{})
-	if err := database.DB.Create(&models.NodeAnnotationVote{
+	if err := database.CreateWithRetry(database.DB, &models.NodeAnnotationVote{
 		AnnotationID: req.AnnotationID,
 		UserID:       req.UserID,
 		Value:        req.Value,
-	}).Error; err != nil {
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "投票失败"})
 		return
 	}
@@ -237,11 +237,11 @@ func AnnotationHistoryHandler(c *gin.Context) {
 	}
 
 	var anns []models.NodeAnnotation
-	q := database.DB.Order("created_at asc")
+	q := database.Reader().Order("created_at asc")
 	if roomID != "" {
 		q = q.Where("room_id = ?", roomID)
 	} else {
-		q = q.Where("room_id IN (?)", database.DB.Model(&models.RoomMember{}).Select("room_id").Where("user_id = ?", userID))
+		q = q.Where("room_id IN (?)", database.Reader().Model(&models.RoomMember{}).Select("room_id").Where("user_id = ?", userID))
 	}
 	if nodeKey != "" {
 		q = q.Where("node_key = ?", nodeKey)

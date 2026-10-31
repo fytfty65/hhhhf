@@ -1,6 +1,6 @@
 // front/hooks/useOmniRouteWs.ts
 import { useState, useEffect, useRef } from 'react';
-import { WS_BASE, getAuthToken } from '../app/lib/utils';
+import { WS_BASE, fetchWsTicket } from '../app/lib/utils';
 
 export interface AgentLog {
   role: string;
@@ -29,26 +29,41 @@ export function useOmniRouteWs(roomId: string) {
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    // 连接到 Go 网关
-    const ws = new WebSocket(`${WS_BASE}/api/v1/room/${roomId}/ws?access_token=${encodeURIComponent(getAuthToken())}`);
-    wsRef.current = ws;
-
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
-    
-    ws.onmessage = (event) => {
+    let disposed = false;
+    let ws: WebSocket | null = null;
+    (async () => {
+      // Ticket instead of a long-lived token in the URL. The ticket is
+      // single-use and expires after 60 seconds.
+      let ticket = '';
       try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'ai_negotiation_result') {
-          setData(msg.payload);
-          setIsInferring(false); 
-        }
-      } catch (error) {
-        console.error('WebSocket 数据解析失败', error);
+        ticket = await fetchWsTicket();
+      } catch {
+        return;
       }
-    };
+      if (disposed || !ticket) return;
+      ws = new WebSocket(`${WS_BASE}/api/v1/room/${roomId}/ws?ticket=${encodeURIComponent(ticket)}`);
+      wsRef.current = ws;
 
-    return () => ws.close();
+      ws.onopen = () => setIsConnected(true);
+      ws.onclose = () => setIsConnected(false);
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'ai_negotiation_result') {
+            setData(msg.payload);
+            setIsInferring(false);
+          }
+        } catch (error) {
+          console.error('WebSocket 数据解析失败', error);
+        }
+      };
+    })();
+
+    return () => {
+      disposed = true;
+      ws?.close();
+    };
   }, [roomId]);
 
   const triggerNegotiation = (destinations: string[], userPrefs: any) => {

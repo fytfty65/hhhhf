@@ -23,6 +23,8 @@ function stubFetch(respond: (call: Call, index: number) => { ok?: boolean; json?
     return {
       ok: result.ok ?? true,
       status: result.ok === false ? 502 : 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify(result.json ?? {}),
       json: async () => result.json,
     } as unknown as Response;
   }) as typeof globalThis.fetch;

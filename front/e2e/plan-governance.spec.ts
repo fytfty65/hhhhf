@@ -1,5 +1,10 @@
 import { test, expect, Page } from '@playwright/test';
 
+// 产品默认是"普通模式"；本用例验证的是证据层与专业层，先切到专业模式再断言。
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('omni_experience_mode', 'pro'));
+});
+
 /**
  * 行程核对面板（预算核对 / 已作调整 / 行程规模 / 本次调整 / 价格核对 / 跨城怎么走 / 长途分段 /
  * 还需要你留意）的渲染与视觉回归。
@@ -502,6 +507,11 @@ async function installMocks(page: Page) {
           const w = window as unknown as { __wsSends?: unknown[] };
           w.__wsSends = [...(w.__wsSends || []), request];
           if (request.type !== 'agent_negotiate') return;
+          // "正在重排"提示会在新方案到达时立刻消失。真实后端重排要几秒，
+          // 这里若 80ms 就回包，Playwright 可能一次都没轮询到提示（实测 1/3 概率红）。
+          // 换点/换住宿这类重排请求按真实延迟回包，其余请求保持原节奏。
+          const intent = String(request.payload?.user_preferences?.intent || '');
+          const replyDelay = /不想跑那么远|住宿换成/.test(intent) ? 900 : 0;
           const route = [
             { day: 1, location: '钟楼酒店', name: '钟楼酒店', time: '09:00', type: '住宿', cost_estimate: '¥300', tags: ['住宿'], data_sources: { cost_estimate: 'rollinggo' }, price_excerpt: '查价成功。1晚总价：300CNY',
               // P3 可信度四态之一：**已核实**（官方/供应商 + 新鲜）
@@ -546,7 +556,7 @@ async function installMocks(page: Page) {
             this.onmessage?.({
               data: JSON.stringify({ type: 'target_city', payload: { name: '西安', lnglat: [108.94, 34.26] } }),
             });
-          }, 20);
+          }, 20 + replyDelay);
           setTimeout(() => {
             this.onmessage?.({
               data: JSON.stringify({
@@ -684,7 +694,7 @@ async function installMocks(page: Page) {
                   }),
               }),
             });
-          }, 80);
+          }, 80 + replyDelay);
           // 生产里后端在保底模式下会额外下发一条 final_route（status=degraded_fallback），
           // 这里照实补上，才能验证"保底路线"标记是真的会显示出来。
           setTimeout(() => {
@@ -738,7 +748,7 @@ async function installMocks(page: Page) {
                 },
               }),
             });
-          }, 120);
+          }, 120 + replyDelay);
         }
         close() {
           this.readyState = 3;
@@ -753,6 +763,8 @@ async function installMocks(page: Page) {
 
   await page.route('**/api/v1/**', (route) => route.fulfill({ json: { ok: true, success: true, data: {} } }));
   await page.route('**/api/auth/login', (route) => route.fulfill({ json: { message: '登录成功', token: user.token, user } }));
+  // WebSocket 使用一次性票据，不再把长期令牌放进 URL。
+  await page.route('**/api/auth/ws-ticket', (route) => route.fulfill({ json: { ticket: 'e2e-ws-ticket', expires_in: 60 } }));
   await page.route('**/api/user/**', (route) => route.fulfill({ json: { ok: true, user, trips: [] } }));
   // 具体路由要注册在通配路由**之后**（Playwright 后注册者优先），否则会被通配吃掉
   await page.route('**/api/user/trip', async (route) => {
@@ -848,8 +860,8 @@ async function reachDecision(page: Page, options: { referenceText?: string } = {
   await page.getByTestId('join-room-submit').click();
   await expect(page.getByTestId('room-code')).not.toBeEmpty();
   await page.getByTestId('begin-plan').click();
-  await expect(page.getByText('进入共识沙盘')).toBeVisible({ timeout: 10_000 });
-  await page.getByText('进入共识沙盘').click();
+  await expect(page.getByText('查看规划方案')).toBeVisible({ timeout: 10_000 });
+  await page.getByText('查看规划方案').click();
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
 
   if (options.referenceText) {
@@ -899,8 +911,8 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await page.getByTestId('join-room-submit').click();
     await expect(page.getByTestId('room-code')).not.toBeEmpty();
     await page.getByTestId('begin-plan').click();
-    await expect(page.getByText('进入共识沙盘')).toBeVisible({ timeout: 10_000 });
-    await page.getByText('进入共识沙盘').click();
+    await expect(page.getByText('查看规划方案')).toBeVisible({ timeout: 10_000 });
+    await page.getByText('查看规划方案').click();
     await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
 
     const panel = page.getByTestId('reference-route-panel');
@@ -1072,7 +1084,7 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await expect(panel.getByTestId('negotiation-inactive')).toContainText('budget-agent（candidate_pool_empty）');
     // 协商回环：分歧真的被"重提"解决了（不是只裁断一句）
     await expect(panel.getByTestId('negotiation-revision')).toContainText('协商第 1 轮');
-    await expect(panel.getByTestId('negotiation-revision')).toContainText('route-planner 按裁决重提');
+    await expect(panel.getByTestId('negotiation-revision')).toContainText('route-planner 按决定重提');
     await expect(panel.getByTestId('negotiation-revision')).toContainText('分歧 1 条 → 0 条');
     await expect(panel.getByTestId('negotiation-revision')).toContainText('max_far_scenic 上限 3，去掉 10 条');
     // 为什么停在这里（收敛判断）：不许默默停
@@ -1231,7 +1243,7 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
 
     // 保底路线必须一眼看出来（不是正常推演结果），核对面板里也要有这条降级
     await expect(page.getByTestId('fallback-route-badge')).toBeVisible();
-    await expect(page.getByTestId('fallback-route-badge')).toContainText('非智能体推演');
+    await expect(page.getByTestId('fallback-route-badge')).toContainText('系统兜底');
     await expect(panel.getByText('多智能体推演')).toBeVisible();
     await expect(panel.getByText(/大模型不可用，本次方案改由高德候选池合成/)).toBeVisible();
 

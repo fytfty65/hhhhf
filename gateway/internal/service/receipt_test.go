@@ -55,7 +55,8 @@ func TestCategorizeReceipt(t *testing.T) {
 
 func TestParseReceipt(t *testing.T) {
 	r, ok := ParseReceipt("川西坝子火锅\n合计：128.50元")
-	if !ok || r.Amount != 128.50 || r.Category != "餐饮" || r.Currency != "CNY" {
+	// 128.50 元必须精确落在 12850 分，而不是浮点近似值。
+	if !ok || r.AmountCents != 12850 || r.Category != "餐饮" || r.Currency != "CNY" {
 		t.Fatalf("ParseReceipt 结果异常: %+v ok=%v", r, ok)
 	}
 }

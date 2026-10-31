@@ -33,7 +33,7 @@ func (c *Client) handleAnnotation(wsType string, payload interface{}) {
 			Status:   "open",
 		}
 		if database.DB != nil {
-			database.DB.Create(&ann)
+			_ = database.CreateWithRetry(database.DB, &ann)
 		}
 		c.Hub.Broadcast <- models.WSMessage{
 			Type:   "annotation_sync",
@@ -53,7 +53,7 @@ func (c *Client) handleAnnotation(wsType string, payload interface{}) {
 		}
 		if database.DB != nil {
 			database.DB.Where("annotation_id = ? AND user_id = ?", annotationID, c.UserID).Delete(&models.NodeAnnotationVote{})
-			database.DB.Create(&models.NodeAnnotationVote{AnnotationID: annotationID, UserID: c.UserID, Value: value})
+			_ = database.CreateWithRetry(database.DB, &models.NodeAnnotationVote{AnnotationID: annotationID, UserID: c.UserID, Value: value})
 		}
 		c.Hub.Broadcast <- models.WSMessage{
 			Type:   "annotation_sync",

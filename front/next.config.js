@@ -91,8 +91,6 @@ const PUSH_HOSTS = [
   'https://www.gstatic.com',
 ];
 
-const API_TARGETS_PLACEHOLDER_REMOVED = true;
-
 function contentSecurityPolicy() {
   const scriptSrc = isDev
     ? "'self' 'unsafe-inline' 'unsafe-eval' blob:"

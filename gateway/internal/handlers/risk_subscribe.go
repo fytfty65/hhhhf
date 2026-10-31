@@ -288,7 +288,9 @@ func CheckRiskSubscriptionsHandler(c *gin.Context) {
 // requestMinimumPerturbationScope 调用 ai-service 的旅中闭环入口 `/api/v1/risk/replan-scope`。
 //
 // 返回 ai-service 的原样响应（含 proposal 与已发出的事件链），或一个**如实标注**的失败对象：
-//   {"status": "unavailable" | "rejected" | "unparsable" | "needs_user_context", ...}
+//
+//	{"status": "unavailable" | "rejected" | "unparsable" | "needs_user_context", ...}
+//
 // 调用方（风险告警广播）把它当作可选增强 —— 失败不影响告警本身。
 func requestMinimumPerturbationScope(userID, city, roomID string, changes []map[string]interface{}) any {
 	base := strings.TrimRight(strings.TrimSpace(os.Getenv("AI_SERVICE_URL")), "/")

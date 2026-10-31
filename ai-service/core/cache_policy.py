@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:

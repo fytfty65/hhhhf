@@ -8,7 +8,7 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import { API_BASE } from '../lib/utils';
+import { assetUrl } from '../lib/apiClient';
 import type { ActivityEvt } from '../types';
 import { Activity, Check, Copy, Radio, Scale, Users } from 'lucide-react';
 
@@ -18,14 +18,16 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
   const [feed] = useState<ActivityEvt[]>([]);
   const [copied, setCopied] = useState(false);
 
-  // 初始化：同步真实满意度与在线状态（不再随机生成假数据）
+  // 初始化：只同步"真实存在"的满意度与在线状态。
+  // 这里原先给缺数据的成员补 90 分、均值兜底 94 —— 那是在展示编造的评估结果。
+  // 现在没有模型仿真的真实输出就保持未知，界面显示"暂无评估"。
   useEffect(() => {
     const init: Record<string, number> = {};
     const onlineInit: Record<string, boolean> = {};
-    members.forEach((m: any, idx: number) => {
+    members.forEach((m: any) => {
       const k = m.name;
       const ext = Number(teamSatisfaction[k]);
-      init[k] = Number.isFinite(ext) && ext > 0 ? ext : 90;
+      if (Number.isFinite(ext) && ext > 0) init[k] = ext;
       onlineInit[k] = true; // 房间成员默认可用
     });
     setLiveSat(init);
@@ -38,15 +40,16 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
       const next = { ...prev };
       Object.entries(teamSatisfaction || {}).forEach(([k, v]) => {
         const n = Number(v);
-        if (Number.isFinite(n) && n > 0) next[k] = Math.max(60, Math.min(99, n));
+        if (Number.isFinite(n) && n > 0) next[k] = Math.max(0, Math.min(100, n));
       });
       return next;
     });
   }, [teamSatisfaction]);
 
+  // 没有任何真实分数时返回 null —— 让调用处渲染"暂无评估"，而不是一个假均值。
   const avgSatisfaction = useMemo(() => {
     const vals = Object.values(liveSat).map(v => Number(v)).filter(v => Number.isFinite(v) && v > 0);
-    return vals.length > 0 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : 94;
+    return vals.length > 0 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
   }, [liveSat]);
 
   const copyRoom = async () => {
@@ -71,7 +74,7 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
     }
     // 相对路径补全为绝对路径
     if (url && !url.startsWith('http') && !url.startsWith('data:')) {
-      url = `${API_BASE}${url}`;
+      url = assetUrl(url);
     }
     if (url) return url;
     return `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(m.avatarSeed || m.name)}&backgroundColor=fdeed8`;
@@ -106,25 +109,35 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
         </div>
 
         <div className="flex items-center gap-2">
-          {/* 团队满意度 */}
-          <div className="flex items-center gap-2.5 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2">
+          {/* 团队满意度：只有拿到模型仿真的成员效用结果才显示数值 */}
+          <div
+            className="flex items-center gap-2.5 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2"
+            title={avgSatisfaction == null ? '尚未拿到模型对该路线成员效用的仿真结果' : '依据：模型对每位成员在本路线上的效用做蒙特卡洛仿真后取平均'}
+          >
             <div className="relative w-10 h-10 shrink-0">
               <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
                 <circle cx="18" cy="18" r="15" fill="none" stroke="#e2e8f0" strokeWidth="3" />
-                <circle
-                  cx="18" cy="18" r="15" fill="none"
-                  stroke={avgSatisfaction >= 90 ? '#10b981' : avgSatisfaction >= 78 ? '#14b8a6' : avgSatisfaction >= 65 ? '#f59e0b' : '#f43f5e'}
-                  strokeWidth="3" strokeLinecap="round"
-                  strokeDasharray={`${(avgSatisfaction / 100) * 94.25} 94.25`}
-                  style={{ transition: 'stroke-dasharray 0.6s ease, stroke 0.6s ease' }}
-                />
+                {avgSatisfaction != null && (
+                  <circle
+                    cx="18" cy="18" r="15" fill="none"
+                    stroke={avgSatisfaction >= 90 ? '#10b981' : avgSatisfaction >= 78 ? '#14b8a6' : avgSatisfaction >= 65 ? '#f59e0b' : '#f43f5e'}
+                    strokeWidth="3" strokeLinecap="round"
+                    strokeDasharray={`${(avgSatisfaction / 100) * 94.25} 94.25`}
+                    style={{ transition: 'stroke-dasharray 0.6s ease, stroke 0.6s ease' }}
+                  />
+                )}
               </svg>
               <div className="absolute inset-0 flex items-center justify-center">
-                <span className={`text-[11px] font-black ${getSatColor(avgSatisfaction)}`}>{avgSatisfaction}</span>
+                <span className={`text-[11px] font-black ${avgSatisfaction == null ? 'text-slate-400' : getSatColor(avgSatisfaction)}`}>
+                  {avgSatisfaction == null ? '—' : avgSatisfaction}
+                </span>
               </div>
             </div>
             <div>
               <p className="text-[11px] font-bold text-slate-700">团队满意度</p>
+              <p className="text-[10px] text-slate-400">
+                {avgSatisfaction == null ? '暂无评估' : '模型仿真估算'}
+              </p>
             </div>
           </div>
 
@@ -152,7 +165,9 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {members.map((m: any, idx: number) => {
-            const score = typeof liveSat[m.name] === 'number' ? liveSat[m.name] : 90;
+            // 没有真实仿真结果就是未知，不再拿 90 分兜底
+            const rawScore = liveSat[m.name];
+            const score = typeof rawScore === 'number' && Number.isFinite(rawScore) ? rawScore : null;
             const isOnline = onlineMap[m.name] !== false;
             const roleColor =
               m.role?.includes('寻味') || m.role?.includes('美食') ? 'text-orange-600 bg-orange-50 border-orange-200'
@@ -183,15 +198,21 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
                       )}
                     </div>
                     <p className="text-[11px] text-slate-400 truncate mt-0.5">{m.intent || '期待同行'}</p>
-                    {/* 满意度进度条 */}
+                    {/* 满意度进度条：仅在有真实评估时渲染 */}
                     <div className="mt-2 flex items-center gap-2">
-                      <div className="flex-1 h-1.5 rounded-full bg-slate-200 overflow-hidden">
-                        <div
-                          className={`h-full rounded-full bg-gradient-to-r ${getSatBar(score)} transition-all duration-700`}
-                          style={{ width: `${score}%` }}
-                        />
-                      </div>
-                      <span className={`text-[10px] font-bold w-6 text-right ${getSatColor(score)}`}>{score}</span>
+                      {score == null ? (
+                        <span className="text-[10px] font-bold text-slate-400">满意度暂无评估</span>
+                      ) : (
+                        <>
+                          <div className="flex-1 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                            <div
+                              className={`h-full rounded-full bg-gradient-to-r ${getSatBar(score)} transition-all duration-700`}
+                              style={{ width: `${score}%` }}
+                            />
+                          </div>
+                          <span className={`text-[10px] font-bold w-6 text-right ${getSatColor(score)}`}>{Math.round(score)}</span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>

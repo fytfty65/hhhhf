@@ -129,7 +129,7 @@ func ProvincePoiClickHandler(c *gin.Context) {
 		Clicked: true,
 		Source:  "province",
 	}
-	if err := database.DB.Create(&event).Error; err != nil {
+	if err := database.CreateWithRetry(database.DB, &event); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "埋点记录失败"})
 		return
 	}

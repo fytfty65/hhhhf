@@ -1,6 +1,6 @@
 # ai-service/api/conflict.py
-import os
 import json
+import time
 from fastapi import APIRouter, HTTPException
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
@@ -8,6 +8,7 @@ from models.schemas import GatewayMessage, ConflictResponse # 🚨 核心修复�
 from core.llm_config import api_key as llm_api_key
 from core.llm_config import base_url as llm_base_url
 from core.llm_config import model_name  # 单一来源：模型名兜底值（曾与 agent.py 各写一套）
+from core.llm_metrics import record_llm_call  # LLM 调用记账（延迟/失败率/token）
 
 load_dotenv()
 
@@ -42,17 +43,39 @@ async def run_conflict_detection(msg: GatewayMessage):
         input_str = json.dumps(members_data, ensure_ascii=False)
         print(f"收到房间 {msg.room_id} 的冲突检测请求，正在调用模型 [{MODEL_NAME}]...")
 
-        response = await client.chat.completions.create(
+        started = time.monotonic()
+        try:
+            response = await client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": CONFLICT_PROMPT},
+                    {"role": "user", "content": f"请检测以下成员需求是否存在冲突：\n{input_str}"}
+                ],
+                response_format={ "type": "json_object" },
+                temperature=0.1
+            )
+        except Exception as call_err:
+            record_llm_call(
+                model=MODEL_NAME,
+                label="conflict_detect",
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                ok=False,
+                error=type(call_err).__name__,
+            )
+            raise
+        _usage = getattr(response, "usage", None)
+        record_llm_call(
             model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": CONFLICT_PROMPT},
-                {"role": "user", "content": f"请检测以下成员需求是否存在冲突：\n{input_str}"}
-            ],
-            response_format={ "type": "json_object" },
-            temperature=0.1
+            label="conflict_detect",
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            ok=True,
+            prompt_tokens=getattr(_usage, "prompt_tokens", None),
+            completion_tokens=getattr(_usage, "completion_tokens", None),
         )
 
         raw_result = response.choices[0].message.content
+        if not raw_result:
+            raise ValueError("模型返回了空内容")
         result_dict = json.loads(raw_result)
         return ConflictResponse(**result_dict)
 

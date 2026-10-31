@@ -27,6 +27,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.llm_metrics import record_llm_call  # 视觉调用同样计入 LLM 延迟/失败率/token
+
 # 截图（小红书/朋友圈）常见的三种格式；HEIC 等手机原生格式各家视觉接口支持不一，
 # 与其"上传成功然后识别不出来"，不如在入口就说清楚要先转格式。
 SUPPORTED_MIME = ("image/png", "image/jpeg", "image/webp")
@@ -196,7 +198,24 @@ async def recognize_route_text(
     except OcrUnavailable:
         raise
     except Exception as exc:  # 网络/额度/模型名错误都要如实报出来
+        record_llm_call(
+            model=chosen_model,
+            label="route_ocr",
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            ok=False,
+            error=type(exc).__name__,
+        )
         raise OcrUnavailable("vision_call_failed", f"图片识别服务调用失败：{str(exc)[:200]}")
+
+    _usage = getattr(response, "usage", None)
+    record_llm_call(
+        model=chosen_model,
+        label="route_ocr",
+        latency_ms=(time.monotonic() - started) * 1000.0,
+        ok=True,
+        prompt_tokens=getattr(_usage, "prompt_tokens", None),
+        completion_tokens=getattr(_usage, "completion_tokens", None),
+    )
 
     content = ""
     try:
@@ -228,7 +247,6 @@ async def recognize_route_text(
 
 def _default_client() -> Any:
     """按 core/llm_config 的单一来源构造客户端；没有 key 就返回 None（由调用方如实报错）。"""
-    import os
 
     from core.llm_config import api_key, base_url
 

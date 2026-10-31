@@ -1,18 +1,31 @@
-import sys
 import hmac
 import os
 
-sys.stdout.reconfigure(encoding='utf-8')
-sys.stderr.reconfigure(encoding='utf-8')
+# Windows 控制台/重定向管道默认按 cp936 写 stdout：输出 emoji 会抛
+# UnicodeEncodeError，把一次成功的启动伪装成崩溃。入口统一改成 UTF-8，
+# 且不可编码字符降级为替换符，日志永远不能因为字符集中断进程。
+from core.console import ensure_utf8_console
 
-from dotenv import load_dotenv
+ensure_utf8_console()
+
+# 下面的导入必须晚于 stdout 重配置与 load_dotenv()：api 模块在导入时会读取环境变量。
+from dotenv import load_dotenv  # noqa: E402
 load_dotenv()
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
-from api import conflict, agent, carbon_service, operations, evaluation
-from api.agent import planning_bandit
-from core.observability import ObservabilityMiddleware, METRICS  # P3 可观测性
+# Fail before the heavy imports below if the interpreter is not the pinned one or
+# a locked dependency is missing/unimportable. Without this, a wrong environment
+# surfaced as a ModuleNotFoundError from deep inside api.agent, which hid both the
+# cause and the fix.
+from core.preflight import assert_runtime_ready  # noqa: E402
+assert_runtime_ready()
+
+from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.responses import JSONResponse, Response  # noqa: E402
+from api import conflict, agent, carbon_service, operations, evaluation  # noqa: E402
+from api.agent import planning_bandit  # noqa: E402
+from core.observability import ObservabilityMiddleware, METRICS  # P3 可观测性  # noqa: E402
+from core.cache_registry import cache_metrics  # 缓存命中率/容量/TTL 快照  # noqa: E402
+from core.llm_metrics import llm_metrics  # LLM 次数/失败率/延迟分位/token/成本  # noqa: E402
 
 app = FastAPI(
     title="OmniRoute AI Service",
@@ -62,9 +75,15 @@ async def health_check():
     return {"status": "healthy", "service": "OmniRoute-AI"}
 
 # 指标端点：请求总数 / 分路径计数 / 平均延迟 / 分状态计数
+# 另附两块此前不可观测的口径：
+#   caches —— 每个缓存的容量上限、TTL、命中率、过期/淘汰条数（"缓存到底有没有用"）
+#   llm    —— 调用次数、失败率、延迟 p50/p95、首 token 延迟、token 与成本（未配置单价时为 null）
 @app.get("/metrics")
 async def metrics():
-    return METRICS.snapshot()
+    snapshot = METRICS.snapshot()
+    snapshot["caches"] = cache_metrics()
+    snapshot["llm"] = llm_metrics()
+    return snapshot
 
 
 # Prometheus 文本格式（含延迟直方图，可算分位数），供抓取器使用。
@@ -72,13 +91,25 @@ async def metrics():
 @app.get("/metrics/prometheus")
 async def metrics_prometheus():
     bandit = planning_bandit.snapshot()
+    llm = llm_metrics()
     extra = {
         "bandit_decisions": bandit.get("decisions", 0),
         "bandit_explorations": bandit.get("explorations", 0),
         "bandit_rewards_recorded": bandit.get("rewards_recorded", 0),
         "bandit_arm_count": bandit.get("arm_count", 0),
         "bandit_observed_non_greedy_rate": bandit.get("observed_non_greedy_rate", 0.0),
+        "llm_calls_total": llm.get("calls", 0),
+        "llm_failures_total": llm.get("failures", 0),
+        "llm_failure_rate": float(llm.get("failure_rate") or 0.0),
+        "llm_latency_p95_ms": float((llm.get("latency_ms") or {}).get("p95") or 0.0),
+        "llm_cost_total": float(llm.get("cost") or 0.0),
     }
+    for name, stats in cache_metrics().items():
+        safe = "".join(ch if ch.isalnum() else "_" for ch in str(name))
+        extra[f"cache_{safe}_entries"] = stats.get("entries", 0)
+        extra[f"cache_{safe}_hit_rate"] = float(stats.get("hit_rate") or 0.0)
+        extra[f"cache_{safe}_evictions_total"] = stats.get("evictions", 0)
+        extra[f"cache_{safe}_expired_total"] = stats.get("expired", 0)
     return Response(
         content=METRICS.prometheus(extra=extra),
         media_type="text/plain; version=0.0.4; charset=utf-8",

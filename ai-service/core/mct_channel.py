@@ -23,7 +23,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional
 
 MCT_API = "https://lyfw.mct.gov.cn/api"
 MCT_TYPE_SCENIC = 1  # 实测：1 = 5A 景区（全国 359 条）
@@ -135,8 +135,9 @@ async def mct_markers(city: str, *, type_id: int = MCT_TYPE_SCENIC) -> List[Dict
         return []
     key = f"{type_id}:{code}"
     cache = _load_cache()
-    items = cache.get("markers") if isinstance(cache.get("markers"), dict) else {}
-    entry = items.get(key) if isinstance(items, dict) else None
+    raw_items = cache.get("markers")
+    items: Dict[str, Any] = raw_items if isinstance(raw_items, dict) else {}
+    entry = items.get(key)
     if isinstance(entry, dict) and time.time() - float(entry.get("fetched_at") or 0.0) <= mct_cache_ttl_seconds():
         rows = entry.get("rows")
         if isinstance(rows, list):

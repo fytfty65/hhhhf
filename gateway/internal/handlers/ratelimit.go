@@ -126,6 +126,15 @@ var (
 	// request costs a bcrypt hash.
 	authLoginLimiter    = newFixedWindowLimiter(10, time.Minute)
 	authRegisterLimiter = newFixedWindowLimiter(5, time.Minute)
+	// Mobile refresh carries a credential in the body, so it needs brute-force
+	// protection too. Separate namespace and budget: a device refreshes every
+	// 15 minutes and must never consume the login allowance.
+	authMobileRefreshLimiter = newFixedWindowLimiter(30, time.Minute)
+	// Photo reports immediately hide someone else's photo pending review, so an
+	// unlimited caller could un-publish the whole gallery. Deliberately the
+	// tightest per-principal budget here: a legitimate user reports a handful of
+	// images, not twenty a minute.
+	photoReportLimiter = newFixedWindowLimiter(5, time.Minute)
 )
 
 // authFailureMu guards authFailureCount, which implements a per-account
@@ -252,6 +261,9 @@ func allowAuthAttempt(c *gin.Context, namespace string, limit int, local *fixedW
 		if seconds < 1 {
 			seconds = 1
 		}
+		// Audited: a tripped limiter is exactly the signal an operator needs to
+		// alert on, and it was previously invisible in the logs.
+		logRateLimited(c, namespace, seconds)
 		c.Header("Retry-After", strconv.Itoa(seconds))
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 			"error": "尝试过于频繁，请稍后再试",
@@ -276,6 +288,18 @@ func AuthLoginRateLimitMiddleware() gin.HandlerFunc {
 func AuthRegisterRateLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !allowAuthAttempt(c, "auth-register", 5, authRegisterLimiter) {
+			return
+		}
+		c.Next()
+	}
+}
+
+// AuthMobileRefreshRateLimitMiddleware limits unauthenticated mobile token
+// refreshes. The refresh token is itself a credential, so the endpoint is
+// guarded like login while keeping its own budget.
+func AuthMobileRefreshRateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !allowAuthAttempt(c, "auth-mobile-refresh", 30, authMobileRefreshLimiter) {
 			return
 		}
 		c.Next()
@@ -347,6 +371,38 @@ func RoomRateLimitMiddleware() gin.HandlerFunc {
 			}
 			c.Header("Retry-After", strconv.Itoa(seconds))
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "房间操作过于频繁，请稍后再试", "code": "ROOM_RATE_LIMITED"})
+			return
+		}
+		c.Next()
+	}
+}
+
+// PhotoReportRateLimitMiddleware bounds photo reports per principal.
+//
+// Reporting is a takedown primitive: ReportPhotoHandler immediately flips the
+// photo to `pending`, which hides it from every other user until a human reviews
+// it. That is the right default for a genuine report — it is the "stop the harm
+// now" path — but with no limit a single authenticated account could walk the
+// gallery and un-publish every photo. The budget is intentionally tighter than
+// the room or AI limits because a real user reports a few images, not many.
+//
+// Keyed on principal plus client IP so one account cannot multiply its budget by
+// rotating addresses, matching how the other per-user limiters are keyed.
+func PhotoReportRateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if CurrentUserID(c) == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未登录", "code": "AUTH_REQUIRED"})
+			return
+		}
+		key := CurrentUserID(c) + ":" + c.ClientIP()
+		if allowed, retryAfter := checkLimit("photo-report", key, 5, time.Minute, photoReportLimiter); !allowed {
+			seconds := int(math.Ceil(retryAfter.Seconds()))
+			if seconds < 1 {
+				seconds = 1
+			}
+			logRateLimited(c, "photo-report", seconds)
+			c.Header("Retry-After", strconv.Itoa(seconds))
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "举报过于频繁，请稍后再试", "code": "PHOTO_REPORT_RATE_LIMITED"})
 			return
 		}
 		c.Next()

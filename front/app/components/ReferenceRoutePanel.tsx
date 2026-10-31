@@ -15,7 +15,8 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { Bookmark, ChevronDown, ImageUp, RefreshCw, Trash2 } from 'lucide-react';
-import { apiJson, API_BASE, getAuthToken } from '../lib/utils';
+import { apiJson } from '../lib/apiClient';
+import { getAuthToken } from '../lib/utils';
 import {
   buildOcrPayload,
   buildSavePayload,
@@ -49,7 +50,7 @@ export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOp
 
   const load = useCallback(async () => {
     try {
-      const payload = await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_ENDPOINT}`);
+      const payload = await apiJson<any>(REFERENCE_ROUTE_ENDPOINT);
       const profile = (payload?.data?.profile ?? payload?.profile ?? null) as ReferenceProfile | null;
       const count = Number(payload?.data?.reference_count ?? payload?.reference_count ?? 0);
       setSaved({ profile, referenceCount: Number.isFinite(count) ? count : 0 });
@@ -71,7 +72,7 @@ export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOp
     setBusy(true);
     setMessage('');
     try {
-      const payload = await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_ENDPOINT}`, {
+      const payload = await apiJson<any>(REFERENCE_ROUTE_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAuthToken()}` },
         body: JSON.stringify(built.payload),
@@ -111,7 +112,7 @@ export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOp
         reader.onerror = () => reject(new Error('图片读取失败，请重新选择文件'));
         reader.readAsDataURL(file as File);
       });
-      const payload = await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_OCR_ENDPOINT}`, {
+      const payload = await apiJson<any>(REFERENCE_ROUTE_OCR_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAuthToken()}` },
         body: JSON.stringify(buildOcrPayload(dataUrl, String(file?.type || ''))),
@@ -151,7 +152,7 @@ export default function ReferenceRoutePanel({ defaultOpen = false }: { defaultOp
     setBusy(true);
     setMessage('');
     try {
-      await apiJson<any>(`${API_BASE}${REFERENCE_ROUTE_ENDPOINT}`, {
+      await apiJson<any>(REFERENCE_ROUTE_ENDPOINT, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${getAuthToken()}` },
       });

@@ -1,0 +1,14 @@
+# Development and CI tooling for the AI service.
+#
+# Kept separate from requirements.txt so a runtime-only install (deploy image,
+# production host) does not pull linters or scanners. Install this file inside
+# the pinned `.venv`; `scripts/init-ai-service.ps1` does it for you.
+#
+# The three tools below are exactly the versions used by CI and by
+# `python tools/check.py`, so a local run and a CI run produce the same verdict.
+
+-r requirements.txt
+
+ruff==0.14.2
+mypy==1.18.2
+pip-audit==2.9.0

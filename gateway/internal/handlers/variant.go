@@ -222,15 +222,15 @@ func AdoptVariantHandler(c *gin.Context) {
 	var plan models.BudgetPlan
 	if err := database.DB.Where("user_id = ? AND trip_id = ?", req.UserID, tripID).First(&plan).Error; err != nil {
 		plan = models.BudgetPlan{
-			ID:          uuid.New().String(),
-			UserID:      req.UserID,
-			TripID:      tripID,
-			TotalBudget: estimated,
-			Currency:    "CNY",
+			ID:               uuid.New().String(),
+			UserID:           req.UserID,
+			TripID:           tripID,
+			TotalBudgetCents: estimated,
+			Currency:         "CNY",
 		}
 		database.DB.Create(&plan)
 	} else {
-		plan.TotalBudget = estimated
+		plan.TotalBudgetCents = estimated
 		database.DB.Save(&plan)
 	}
 
@@ -259,7 +259,7 @@ func AdoptVariantHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "方案已采纳，预算基线已建立",
 		"variant": variantBrief(variant),
-		"budget":  gin.H{"trip_id": tripID, "total_budget": estimated, "currency": "CNY"},
+		"budget":  gin.H{"trip_id": tripID, "total_budget_cents": estimated, "currency": "CNY", "precision": service.CurrencyPrecision},
 	})
 }
 

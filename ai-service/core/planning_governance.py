@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence
 
 from .budget_planner import propose_fallback
 from .candidate_index import apply_exclusions
@@ -78,7 +78,7 @@ async def prepare_governance(
         or bool(quota)
         or mentions_exclusion(request_text)
     )
-    pool: Dict[str, List[Dict[str, Any]]] = dict(pool or {})
+    pool = dict(pool or {})
     if not pool and needs_pool and fetch and city:
         intents = intents_for_plan(plan, extra=[str(item) for item in exclude_terms])
         for intent in quota:

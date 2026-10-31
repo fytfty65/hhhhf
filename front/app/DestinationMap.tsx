@@ -8,7 +8,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import { X, MapPin, Star, Flame, Utensils, Landmark, Search, Sparkles, Compass, ExternalLink } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PROVINCE_DATA } from './data/provinceData';
-import { API_BASE } from './lib/utils';
+import { apiFetch } from './lib/apiClient';
 import { seasonOf, seasonLabel, type ServerRank, type Season } from './lib/provinceDynamics';
 import {
   AMAP_ATTRIBUTION,
@@ -48,7 +48,7 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
   const fetchDynamicRank = async (provinceName: string, hotspots: { name: string; desc: string }[]) => {
     setDynamicLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/v1/province/dynamic`, {
+      const res = await apiFetch('/api/v1/province/dynamic', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ season, hotspots: hotspots.map(h => ({ name: h.name, desc: h.desc })) })
@@ -63,7 +63,7 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
 
   // POI 点击埋点（供后续热度权重回填）
   const trackPoiClick = (target: string) => {
-    fetch(`${API_BASE}/api/v1/province/click`, {
+    apiFetch('/api/v1/province/click', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_id: 'guest', target })
@@ -136,7 +136,6 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
     map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
     let fallbackTimer: number | undefined;
-    let styleTimer: number | undefined;
     let styleReady = false;
     let firstTileSeen = false;
     const activateFallback = (message = '高德底图暂时不可达，已切换备用地图') => {
@@ -168,7 +167,7 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
     queueMicrotask(() => {
       try { if (map.isStyleLoaded()) markStyleReady(); } catch {}
     });
-    styleTimer = window.setTimeout(() => {
+    const styleTimer = window.setTimeout(() => {
       if (!styleReady) setMapError('地图引擎加载超时，请检查网络后重试');
     }, MAP_TILE_TIMEOUT_MS + 2500);
     map.on('sourcedata', (event: any) => {
@@ -245,7 +244,6 @@ export default function DestinationMap({ onClose, onStartPlan }: DestinationMapP
         .addTo(map);
       markersRef.current.push(marker);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady, entries, selected]);
 
   const selectedInfo = selected ? PROVINCE_DATA[selected] : null;

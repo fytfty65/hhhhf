@@ -112,6 +112,56 @@ func TestAuthMiddlewareRejectsMissingToken(t *testing.T) {
 	}
 }
 
+func TestRequestTokenPrefersWebSocketSubprotocol(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	req := httptest.NewRequest(http.MethodGet, "/ws?room_id=r1&access_token=query-token", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Protocol", "chat, Bearer.subprotocol-token")
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+	if got := requestToken(c); got != "subprotocol-token" {
+		t.Fatalf("子协议 token 必须优先于 URL query，实际 %q", got)
+	}
+}
+
+func TestRequestTokenKeepsQueryFallbackForUpgrade(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	req := httptest.NewRequest(http.MethodGet, "/ws?room_id=r1&access_token=query-token", nil)
+	req.Header.Set("Upgrade", "websocket")
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+	if got := requestToken(c); got != "query-token" {
+		t.Fatalf("旧客户端仍应能用 query token，实际 %q", got)
+	}
+}
+
+func TestRequestTokenIgnoresSubprotocolOnPlainHTTP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// 普通 HTTP 请求带子协议头不应被当成已认证 —— 否则凭证会经由日志泄露。
+	req := httptest.NewRequest(http.MethodGet, "/api", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "bearer.leaked")
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+	if got := requestToken(c); got != "" {
+		t.Fatalf("非 Upgrade 请求不得读取子协议 token，实际 %q", got)
+	}
+}
+
+func TestWebSocketSubprotocolsAreEchoedWithBearerFirst(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "chat, bearer.tok, graphql")
+	got := websocketSubprotocols(req)
+	want := []string{"bearer.tok", "chat", "graphql"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
+	}
+}
+
 func TestLogoutRevokesCurrentToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	token, _ := newSessionToken("user-logout")

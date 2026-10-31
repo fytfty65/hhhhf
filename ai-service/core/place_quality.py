@@ -43,6 +43,8 @@ _REAL_SOURCE_MARKERS = ("amap", "provider", "vendor", "official", "rollinggo", "
 
 # "像玩点"的设施/站点标记（与 core.poi_pool 的 FACILITY_NAME_MARKERS 同源，这里只取关键的；
 # 完整清单在 poi_pool，避免两处维护：能导入就导入，导入不到就用这份兜底）
+_FACILITY_MARKERS: tuple[str, ...]
+_COMMERCE_MARKERS: tuple[str, ...]
 try:  # pragma: no cover - 正常都能导入
     from .poi_pool import COMMERCE_NAME_MARKERS as _COMMERCE_MARKERS
     from .poi_pool import FACILITY_NAME_MARKERS as _FACILITY_MARKERS
@@ -448,8 +450,11 @@ def score_completeness(
         budget_km, grace_km = 160.0, 176.0
     worst_day, worst_km = 0, 0.0
     for day in range(1, days + 1):
-        points = [node_lnglat(item) for item in by_day.get(day, [])]
-        points = [point for point in points if point]
+        points: List[Tuple[float, float]] = []
+        for item in by_day.get(day, []):
+            point = node_lnglat(item)
+            if point is not None:
+                points.append(point)
         distance = 0.0
         for first, second in zip(points, points[1:]):
             step = haversine_km(first, second)

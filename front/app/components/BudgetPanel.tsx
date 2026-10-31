@@ -1,18 +1,18 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { API_BASE, apiJson } from '../lib/utils';
-
-const BASE = `${API_BASE}/api/v1`;
+import { apiJson } from '../lib/apiClient';
+import { formatCents, majorToCents, MAX_MONEY_CENTS } from '../lib/money';
 
 interface Summary {
-  total_budget: number;
-  spent: number;
-  remaining: number;
+  total_budget_cents: number;
+  spent_cents: number;
+  remaining_cents: number;
   ratio: number;
   level: string;
   currency: string;
-  by_category: Record<string, number>;
+  precision: number;
+  by_category_cents: Record<string, number>;
   category_pct: Record<string, number>;
   expense_count: number;
 }
@@ -37,7 +37,7 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
     setLoading(true);
     setError('');
     try {
-      const j = await apiJson<{ summary?: Summary }>(`${BASE}/budget/summary?trip_id=${encodeURIComponent(tripId)}`);
+      const j = await apiJson<{ summary?: Summary }>(`/api/v1/budget/summary?trip_id=${encodeURIComponent(tripId)}`);
       setSummary(j.summary || null);
     } catch (e) {
       setError(e instanceof Error ? e.message : '预算数据暂时不可用');
@@ -51,11 +51,12 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
   }, [reload]);
 
   const setBudgetPlan = async () => {
-    const value = Number(budget);
-    if (!tripId || !Number.isFinite(value) || value <= 0) { setMessage('请输入大于 0 的预算金额'); return; }
+    // 用户输入的是「元」，请求体只发整数分；精度由后端 currency 决定。
+    const cents = majorToCents(budget);
+    if (!tripId || cents === null || cents <= 0 || cents > MAX_MONEY_CENTS) { setMessage('请输入大于 0 的预算金额'); return; }
     setBusy(true); setError('');
     try {
-      const j = await apiJson<{ message?: string }>(`${BASE}/budget`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, trip_id: tripId, total_budget: value, currency }) });
+      const j = await apiJson<{ message?: string }>(`/api/v1/budget`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, trip_id: tripId, total_budget_cents: cents, currency }) });
       setMessage(j.message || '预算已保存');
       await reload();
     } catch (e) { setError(e instanceof Error ? e.message : '预算保存失败'); }
@@ -63,11 +64,11 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
   };
 
   const addExpense = async () => {
-    const value = Number(amount);
-    if (!tripId || !Number.isFinite(value) || value <= 0) { setMessage('请输入大于 0 的消费金额'); return; }
+    const cents = majorToCents(amount);
+    if (!tripId || cents === null || cents <= 0 || cents > MAX_MONEY_CENTS) { setMessage('请输入大于 0 的消费金额'); return; }
     setBusy(true); setError('');
     try {
-      const j = await apiJson<{ message?: string; summary?: Summary }>(`${BASE}/expense`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, trip_id: tripId, category, amount: value, currency: expCurrency, note }) });
+      const j = await apiJson<{ message?: string; summary?: Summary }>(`/api/v1/expense`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, trip_id: tripId, category, amount_cents: cents, currency: expCurrency, note }) });
       setMessage(j.summary?.level === 'over' ? '已超出预算，请注意控制消费节奏' : (j.message || '消费已记录'));
       setAmount(''); setNote('');
       await reload();
@@ -121,11 +122,11 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
             <div>
               <p className="text-xs text-slate-500">已消费 / 总预算（{summary.currency}）</p>
               <p className="text-2xl font-bold text-slate-800">
-                {summary.spent.toFixed(2)} / {summary.total_budget.toFixed(2)}
+                {formatCents(summary.spent_cents, summary.precision)} / {formatCents(summary.total_budget_cents, summary.precision)}
               </p>
             </div>
             <p className={`text-sm font-semibold ${levelMeta[summary.level]?.cls || ''}`}>
-              {levelMeta[summary.level]?.label} · 剩余 {summary.remaining.toFixed(2)}
+              {levelMeta[summary.level]?.label} · 剩余 {formatCents(summary.remaining_cents, summary.precision)}
             </p>
           </div>
 
@@ -144,7 +145,7 @@ export default function BudgetPanel({ userId, tripId }: { userId: string; tripId
               <div key={k} className="mb-1.5">
                 <div className="flex justify-between text-xs text-slate-600">
                   <span>{k}</span>
-                  <span>{summary.by_category[k]?.toFixed(2)} · {v.toFixed(0)}%</span>
+                  <span>{formatCents(summary.by_category_cents[k] ?? 0, summary.precision)} · {v.toFixed(0)}%</span>
                 </div>
                 <div className="mt-0.5 h-2 w-full rounded-full bg-slate-200">
                   <div className="h-full rounded-full bg-orange-500" style={{ width: `${v}%` }} />

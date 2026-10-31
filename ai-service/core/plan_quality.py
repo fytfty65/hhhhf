@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .simulation import category_of, cost_of, dwell_minutes_of, travel_minutes_of
+# cost_of 在本模块未直接使用，但它是本模块对外的再导出：
+# budget_planner / price_sources / long_trip 都从 .plan_quality 导入它。
+from .simulation import category_of, cost_of, dwell_minutes_of, travel_minutes_of  # noqa: F401
 # 类别归一的**唯一权威**在 node_contract.CATEGORY_ALIASES。
 # 这里复用而不是自己再写一套关键词：`plan_quality` 与 `node_contract` 曾各有一套口径，
 # 结果同一份方案在两处得到不同类别（2026-10-08 抽查表上肉眼可见）。
@@ -537,7 +539,8 @@ def _signals_to_tags(signals: Optional[Mapping[str, Any]], context: Mapping[str,
     """把偏好信号（字符串/数组/布尔）映射为 PREFERENCE_TAXONOMY 的标签集合。"""
     tags: List[str] = []
     raw_chunks: List[str] = []
-    preferences = context.get("preferences") if isinstance(context.get("preferences"), Mapping) else {}
+    raw_preferences = context.get("preferences")
+    preferences: Mapping[str, Any] = raw_preferences if isinstance(raw_preferences, Mapping) else {}
 
     def absorb(value: Any) -> None:
         if value is None:
@@ -579,13 +582,15 @@ def score_preference_coverage(
         f"{node_name(n)} {n.get('type') or ''} {n.get('desc') or ''} {' '.join(map(str, n.get('tags') or []))}"
         for n in nodes
     )
-    addressed, missing = [], []
+    addressed: List[str] = []
+    missing: List[str] = []
     for label in tags:
         keywords = PREFERENCE_TAXONOMY[label]
         (addressed if any(k in haystack for k in keywords) else missing).append(label)
 
     # 复合意图（如"有山有水"要求两类**都**出现，而不是命中任意一类就算满足）
-    preferences = context.get("preferences") if isinstance(context.get("preferences"), Mapping) else {}
+    raw_preferences = context.get("preferences")
+    preferences: Mapping[str, Any] = raw_preferences if isinstance(raw_preferences, Mapping) else {}
     request_text = " ".join(
         [
             str((signals or {}).get("interest") or ""),
@@ -641,8 +646,11 @@ def score_pacing(
         dwell = sum(dwell_minutes_of(n) for n in day_nodes)
         travel = sum(travel_minutes_of(n) for n in day_nodes)
         total = dwell + travel
-        clocks = [parse_clock(n.get("time")) for n in day_nodes]
-        clocks = [c for c in clocks if c is not None]
+        clocks: List[int] = []
+        for clock_node in day_nodes:
+            clock = parse_clock(clock_node.get("time"))
+            if clock is not None:
+                clocks.append(clock)
         has_lunch = any(
             any(k in f"{node_name(n)} {n.get('type') or ''}" for k in PREFERENCE_TAXONOMY["food"])
             and MEAL_WINDOWS[0][0] <= (parse_clock(n.get("time")) or -1) <= MEAL_WINDOWS[0][1]
@@ -712,8 +720,11 @@ def score_space_efficiency(context: Mapping[str, Any], plan: Any) -> Dict[str, A
     day_km: List[float] = []
     days_with_coords = 0
     for day, day_nodes in sorted(by_day.items()):
-        coords = [node_lnglat(n) for n in day_nodes]
-        coords = [c for c in coords if c is not None]
+        coords: List[Tuple[float, float]] = []
+        for coord_node in day_nodes:
+            position = node_lnglat(coord_node)
+            if position is not None:
+                coords.append(position)
         if len(coords) >= 2:
             days_with_coords += 1
         km = 0.0
@@ -814,8 +825,13 @@ def score_anchoring(context: Mapping[str, Any], plan: Any) -> Dict[str, Any]:
     checked = within = coord_total = coord_ok = 0
     far_nodes: List[Dict[str, Any]] = []
     for day, day_nodes in sorted(by_day.items()):
-        plays = [(node_name(n), node_lnglat(n)) for n in day_nodes if not _is_anchor_side(n)]
-        plays = [(name, pos) for name, pos in plays if pos is not None]
+        plays: List[Tuple[str, Tuple[float, float]]] = []
+        for play_node in day_nodes:
+            if _is_anchor_side(play_node):
+                continue
+            play_position = node_lnglat(play_node)
+            if play_position is not None:
+                plays.append((node_name(play_node), play_position))
         for node in day_nodes:
             if not _is_anchor_side(node):
                 continue
@@ -884,7 +900,8 @@ def score_truthfulness(plan: Any) -> Dict[str, Any]:
 
     unrelated_desc: List[Dict[str, str]] = []
     for node in nodes:
-        sources = node.get("data_sources") if isinstance(node.get("data_sources"), Mapping) else {}
+        raw_sources = node.get("data_sources")
+        sources: Mapping[str, Any] = raw_sources if isinstance(raw_sources, Mapping) else {}
         claimed = [f for f in SOURCED_FIELDS if _is_claim(node.get(f))]
         desc_text = str(node.get("desc") or "").strip()
         desc_is_claim = bool(desc_text) and "暂无简介" not in desc_text

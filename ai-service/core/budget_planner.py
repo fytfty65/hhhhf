@@ -21,11 +21,30 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .plan_quality import PREFERENCE_TAXONOMY, cost_of, node_lnglat, node_name, nodes_of
 from .plan_quality import haversine_km
 from .candidate_index import intent_of as _intent_of
+
+_CENT = Decimal("0.01")
+
+
+def _dec(value: Any) -> Decimal:
+    """把任意金额输入转成 Decimal；AI 侧的钱一律用十进制算，不用二进制浮点。"""
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def _money(value: Decimal) -> float:
+    """仅在与 JSON/前端交界处转回 float，并统一四舍五入到分。"""
+    return float(value.quantize(_CENT, rounding=ROUND_HALF_UP))
+
 
 VERIFIED_SOURCES = {
     "provider", "vendor", "amap", "rollinggo", "seniverse", "official", "ticket", "api", "supplier", "official_site",
@@ -48,7 +67,8 @@ def _is_food(node: Mapping[str, Any]) -> bool:
 def price_of(node: Mapping[str, Any]) -> Dict[str, Any]:
     """单个节点的价格与**来源级别**。没有来源的价格一律降级为 estimated（不冒充已验证）。"""
     value = cost_of(node)
-    sources = node.get("data_sources") if isinstance(node.get("data_sources"), Mapping) else {}
+    raw_sources = node.get("data_sources")
+    sources: Mapping[str, Any] = raw_sources if isinstance(raw_sources, Mapping) else {}
     source = ""
     for field in ("cost_estimate", "cost", "price"):
         if field in sources:
@@ -70,30 +90,29 @@ def price_of(node: Mapping[str, Any]) -> Dict[str, Any]:
 def budget_report(context: Mapping[str, Any], plan: Any) -> Dict[str, Any]:
     """预算可行性报告：分开统计"已验证"和"估算"，给出 risk 与置信度。"""
     nodes = nodes_of(plan)
-    budget = 0.0
     raw_budget = context.get("budget") if isinstance(context, Mapping) else None
     try:
-        budget = float(raw_budget or 0)
+        budget = _dec(raw_budget or 0)
     except (TypeError, ValueError):
-        budget = 0.0
+        budget = Decimal("0")
 
     prices = [price_of(node) for node in nodes]
-    verified = sum(p["value"] for p in prices if p["tier"] == "verified" and p["value"] is not None)
-    estimated = sum(p["value"] for p in prices if p["tier"] == "estimated" and p["value"] is not None)
+    verified = sum((_dec(p["value"]) for p in prices if p["tier"] == "verified" and p["value"] is not None), Decimal("0"))
+    estimated = sum((_dec(p["value"]) for p in prices if p["tier"] == "estimated" and p["value"] is not None), Decimal("0"))
     unknown = [p["name"] for p in prices if p["tier"] == "unknown"]
     estimated_items = [p["name"] for p in prices if p["tier"] == "estimated"]
 
     if budget <= 0:
-        status, shortfall = "no_budget", 0.0
+        status, shortfall = "no_budget", Decimal("0")
     elif verified > budget:
-        status, shortfall = "over", round(verified - budget, 2)
+        status, shortfall = "over", verified - budget
     elif verified + estimated > budget:
-        status, shortfall = "at_risk", round(verified + estimated - budget, 2)
+        status, shortfall = "at_risk", verified + estimated - budget
     elif verified == 0 and estimated == 0:
         # 一个价格都取不到：不能声称"预算内可行"
-        status, shortfall = "unverifiable", 0.0
+        status, shortfall = "unverifiable", Decimal("0")
     else:
-        status, shortfall = "ok", 0.0
+        status, shortfall = "ok", Decimal("0")
 
     if not nodes or (verified == 0 and estimated == 0):
         confidence = "low"
@@ -103,15 +122,15 @@ def budget_report(context: Mapping[str, Any], plan: Any) -> Dict[str, Any]:
         confidence = "high"
 
     return {
-        "budget": budget,
-        "verified_cost": round(verified, 2),
-        "estimated_cost": round(estimated, 2),
+        "budget": _money(budget),
+        "verified_cost": _money(verified),
+        "estimated_cost": _money(estimated),
         "unknown_count": len(unknown),
         "unknown_nodes": unknown[:8],
         "estimated_count": len(estimated_items),
         "estimated_nodes": estimated_items[:8],
         "status": status,
-        "shortfall": shortfall,
+        "shortfall": _money(shortfall),
         "confidence": confidence,
         "note": "estimated 部分为估算（已标明），不计入已验证结论；unknown 表示取不到价格。",
     }
@@ -139,17 +158,17 @@ def _intents_present(nodes: Sequence[Mapping[str, Any]]) -> List[str]:
     return sorted(present)
 
 
-def _disclosure(shortfall_before: float, coverage: float, preserved_ratio: float, needs_confirmation: bool,
+def _disclosure(shortfall_before: Any, coverage: float, preserved_ratio: float, needs_confirmation: bool,
                 actions: Sequence[Mapping[str, Any]]) -> str:
     parts: List[str] = []
     if shortfall_before > 0:
-        parts.append(f"你的预算比'已验证花费'少约 ¥{shortfall_before:.0f}")
+        parts.append(f"你的预算比'已验证花费'少约 ¥{_money(_dec(shortfall_before)):.0f}")
     real = [a for a in actions if a.get("saving")]
     suggestions = [a for a in actions if not a.get("saving")]
     if real:
-        saved = sum(float(a.get("saving") or 0) for a in real)
+        saved = sum((_dec(a.get("saving") or 0) for a in real), Decimal("0"))
         parts.append(
-            f"我做了 {len(real)} 处平替（合计约省 ¥{saved:.0f}）：" + "；".join(str(a.get("reason") or "") for a in real[:4])
+            f"我做了 {len(real)} 处平替（合计约省 ¥{_money(saved):.0f}）：" + "；".join(str(a.get("reason") or "") for a in real[:4])
         )
     if suggestions:
         parts.append("另有建议（不自动改）：" + "；".join(str(a.get("reason") or "") for a in suggestions[:2]))
@@ -176,7 +195,7 @@ def propose_fallback(
     """
     nodes = [dict(node) for node in nodes_of(plan)]
     report = budget_report(context, plan)
-    gap = float(shortfall if shortfall is not None else report["shortfall"])
+    gap = _dec(shortfall if shortfall is not None else report["shortfall"])
     candidates_by_intent = candidates_by_intent or {}
     policy = dict(tier_policy_map or {})
 
@@ -215,15 +234,15 @@ def propose_fallback(
             if not cheaper:
                 continue
             used_replacements.append(str(cheaper.get("name")))
-            saving = float(current["value"]) - float(cheaper["price"])
+            saving = _dec(current["value"]) - _dec(cheaper["price"])
             tier = "lodging_downgrade" if intent == "hotel" else ("tier_down_food" if intent == "food" else "tier_down_play")
             action = {
                 "kind": tier,
                 "node": node_name(node),
                 "from": node_name(node),  # 与 candidate_index.apply_exclusions 保持同一形状
                 "to": str(cheaper.get("name")),
-                "saving": round(saving, 2),
-                "reason": f"把「{node_name(node)}」换成同类的「{cheaper.get('name')}」(约省 ¥{saving:.0f})",
+                "saving": _money(saving),
+                "reason": f"把「{node_name(node)}」换成同类的「{cheaper.get('name')}」(约省 ¥{_money(saving):.0f})",
                 "target_tier": cheaper.get("price_tier") or cheaper.get("tier") or "cheaper",
             }
             actions.append(action)
@@ -234,28 +253,29 @@ def propose_fallback(
         if remaining > 0 and len(actions) < max_actions:
             plays: List[Mapping[str, Any]] = [n for n in nodes if not _is_hotel(n) and not _is_food(n)]
             seen_days: Dict[int, int] = {}
-            secondary = []
-            for index, node in enumerate(plays, start=1):
-                day = int(node.get("day") or 1)
+            secondary: List[Mapping[str, Any]] = []
+            for index, play_node in enumerate(plays, start=1):
+                day = int(play_node.get("day") or 1)
                 seen_days[day] = seen_days.get(day, 0) + 1
                 if seen_days[day] > 1:
-                    secondary.append(node)
-            for node in sorted(secondary, key=lambda n: float(price_of(n)["value"] or 0), reverse=True):
+                    secondary.append(play_node)
+            for secondary_node in sorted(secondary, key=lambda n: float(price_of(n)["value"] or 0), reverse=True):
                 if remaining <= 0 or len(actions) >= max_actions:
                     break
-                value = price_of(node)["value"]
+                value = price_of(secondary_node)["value"]
                 if value is None:
                     continue
+                spend = _dec(value)
                 actions.append(
                     {
                         "kind": "drop_secondary_play",
-                        "node": node_name(node),
-                        "saving": round(float(value), 2),
-                        "reason": f"删掉次要玩点「{node_name(node)}」(省 ¥{float(value):.0f})，保留当天核心玩点与全部正餐住宿",
+                        "node": node_name(secondary_node),
+                        "saving": _money(spend),
+                        "reason": f"删掉次要玩点「{node_name(secondary_node)}」(省 ¥{_money(spend):.0f})，保留当天核心玩点与全部正餐住宿",
                     }
                 )
-                dropped.append(node_name(node))
-                remaining -= float(value)
+                dropped.append(node_name(secondary_node))
+                remaining -= spend
 
         # ④ 换更近的点（只有候选池带坐标时才能算；用里程差近似节省）
         if remaining > 0 and len(actions) < max_actions:
@@ -265,10 +285,10 @@ def propose_fallback(
                 here = node_lnglat(node)
                 if here is None:
                     continue
-                pool = candidates_by_intent.get(_intent_of(node)) or []
+                intent_pool = candidates_by_intent.get(_intent_of(node)) or []
                 nearer = None
                 best = None
-                for candidate in pool:
+                for candidate in intent_pool:
                     there = candidate.get("lnglat")
                     if not isinstance(there, (list, tuple)) or len(there) < 2:
                         continue
@@ -307,8 +327,8 @@ def propose_fallback(
 
     return {
         "trigger": "budget_shortfall" if gap > 0 else "none",
-        "shortfall": round(gap, 2),
-        "remaining_shortfall": round(max(0.0, remaining), 2),
+        "shortfall": _money(gap),
+        "remaining_shortfall": _money(max(Decimal("0"), remaining)),
         "actions": actions,
         "substitutions": substitutions,
         "dropped": dropped,
@@ -316,5 +336,11 @@ def propose_fallback(
         "dropped_intents": [intent for intent in requested if intent not in preserved],
         "preserved_ratio": round(preserved_ratio, 3),
         "needs_confirmation": needs_confirmation,
-        "disclosure": _disclosure(gap, 1.0 - (max(0.0, remaining) / gap) if gap > 0 else 1.0, preserved_ratio, needs_confirmation, actions),
+        "disclosure": _disclosure(
+            gap,
+            1.0 - float(max(Decimal("0"), remaining) / gap) if gap > 0 else 1.0,
+            preserved_ratio,
+            needs_confirmation,
+            actions,
+        ),
     }

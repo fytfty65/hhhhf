@@ -770,7 +770,7 @@ export default function PlanGovernancePanel({
             </div>
           ) : (
             <p className="mt-2 text-[12.5px] leading-relaxed text-slate-500" data-testid="negotiation-no-conflicts">
-              {negotiation?.notes?.[0] || '这次各智能体没有显式分歧。'}
+              {negotiation?.notes?.[0] || '这次各角色没有显式分歧。'}
             </p>
           )}
 
@@ -779,9 +779,9 @@ export default function PlanGovernancePanel({
             <ul className="mt-1.5 space-y-1" data-testid="negotiation-arbitration">
               {(negotiation?.arbitration || []).map((item) => (
                 <li key={`${item.code}-${item.decision}`} className="text-[12.5px] leading-relaxed text-slate-600">
-                  · 裁决：{item.decision}
+                  · 决定：{item.decision}
                   {item.why ? `（${item.why}）` : ''}
-                  {item.mechanism ? <span className="text-slate-400">　由 {item.mechanism} 执行</span> : null}
+                  {item.mechanism ? <span className="text-slate-400">{'　'}由 {item.mechanism} 执行</span> : null}
                 </li>
               ))}
             </ul>
@@ -793,8 +793,8 @@ export default function PlanGovernancePanel({
               <p className="text-[12.5px] leading-relaxed text-slate-600">
                 协商第 {negotiation.revision.round ?? 1} 轮：
                 {(negotiation.revision.revised_agents?.length ?? 0) > 0
-                  ? `${negotiation.revision.revised_agents?.join('、')} 按裁决重提`
-                  : '没有智能体需要重提'}
+                  ? `${negotiation.revision.revised_agents?.join('、')} 按决定重提`
+                  : '没有角色需要重提'}
                 ；
                 {(negotiation.revision.conflicts_before?.length ?? 0) > 0
                   ? `分歧 ${negotiation.revision.conflicts_before?.length} 条 → ${negotiation.revision.conflicts_after?.length ?? 0} 条`

@@ -27,7 +27,8 @@ MIN_PLAY_PER_DAY = 1
 
 
 def _pace_of(context: Mapping[str, Any]) -> str:
-    preferences = context.get("preferences") if isinstance(context.get("preferences"), Mapping) else {}
+    raw_preferences = context.get("preferences")
+    preferences: Mapping[str, Any] = raw_preferences if isinstance(raw_preferences, Mapping) else {}
     return str(preferences.get("pace") or context.get("pace") or "normal").strip().lower()
 
 

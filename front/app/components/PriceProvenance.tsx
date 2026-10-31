@@ -87,7 +87,7 @@ export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
  * 为什么要单独一个组件：后端已经给每条事实标了四态，但用户看到的仍然只是"¥30"。
  * 这个徽章把"这条信息到底可不可信、该不该去官方渠道再确认"直接摆在数字旁边。
  */
-export function TrustBadge({ node, factKind }: { node: any; factKind?: string }) {
+export function TrustBadge({ node }: { node: any; factKind?: string }) {
   const view = trustOf(node);
   if (!view) return null;
   const style = TRUST_STYLES[view.state as TrustState] || TRUST_STYLES.unknown;

@@ -106,9 +106,9 @@ def validate_route(
     if required_categories:
         for day, categories in required_categories.items():
             actual = set().union(*(_categories(node) for node in by_day.get(int(day), []))) if by_day.get(int(day)) else set()
-            missing = [category for category in categories if not any(str(category).lower() in value for value in actual)]
-            if missing:
-                violations.append({"code": "required_category_missing", "day": int(day), "categories": missing})
+            missing_categories = [category for category in categories if not any(str(category).lower() in value for value in actual)]
+            if missing_categories:
+                violations.append({"code": "required_category_missing", "day": int(day), "categories": missing_categories})
     return {
         "feasible": not violations,
         "violations": violations,

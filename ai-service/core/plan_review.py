@@ -31,7 +31,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .optimization import repair_route
 from .plan_quality import (
@@ -334,7 +334,7 @@ def top_up_missing_meals(
         coord = node_lnglat(item)
         if not center or not coord:
             return float("inf")
-        return haversine_km(list(center), list(coord))
+        return haversine_km((float(center[0]), float(center[1])), coord)
 
     # ① 先做一次**全局分配**：把所有"缺餐的天 × 候选池餐饮"按距离排序，近的优先配
     #    （逐天各取最近会把离 A 天最近的那家配给先轮到、其实更远的 B 天 —— 实测踩到过）。
@@ -468,7 +468,7 @@ def top_up_missing_meals(
 
     def _leg_km(nodes: Sequence[Mapping[str, Any]]) -> float:
         total = 0.0
-        previous: List[float] = []
+        previous: Optional[Tuple[float, float]] = None
         for node in nodes:
             coord = node_lnglat(node)
             if coord and previous:
@@ -577,8 +577,11 @@ async def adjust_lodging_by_geography(
         if not plays:
             measured.append({"day": day, "status": "no_play_with_coords", "hotel": str(hotels[0].get("name") or "")})
             continue
-        coords = [node_lnglat(node) for node in plays]
-        center = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        coords: List[Tuple[float, float]] = []
+        for node in plays:
+            play_coord = node_lnglat(node)
+            if play_coord:
+                coords.append(play_coord)
         hotel = hotels[0]
         hotel_coord = node_lnglat(hotel)
         if not hotel_coord:
@@ -587,7 +590,7 @@ async def adjust_lodging_by_geography(
         # ⚠️ 同 `adjust_meals_by_geography`：**判定距离要与尺子一致**（到当天任一玩点的最近距离），
         #    质心只当检索中心用。否则出现"最近玩点 24.9km（尺子扣分）／质心 1.2km（这里不管）"的死角
         #    —— 伊宁 yn25 第 1 天 信泰达民宿 就是这个形态。
-        def _nearest_play_km(position):
+        def _nearest_play_km(position: Tuple[float, float]) -> float:
             return min(float(haversine_km(position, play_pos)) for play_pos in coords)
 
         current_km = _nearest_play_km(hotel_coord)
@@ -693,8 +696,11 @@ async def adjust_meals_by_geography(
         ]
         if not plays:
             continue
-        coords = [node_lnglat(node) for node in plays]
-        center = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        coords: List[Tuple[float, float]] = []
+        for node in plays:
+            play_coord = node_lnglat(node)
+            if play_coord:
+                coords.append(play_coord)
         # ⚠️ **判定用的距离必须和尺子一致**（2026-10-08 实测修，这是伊宁 anchoring 卡在 0.714 的真因）：
         #    尺子 `score_anchoring` 看的是"到当天**任一玩点的最近距离**"，
         #    而这里原来用"到当天玩点**质心**的距离" —— 两个数在一日多点时差得很远，
@@ -703,7 +709,7 @@ async def adjust_meals_by_geography(
         #      · 伊宁 yn25 第 1 天 信泰达民宿：最近玩点 24.9km／质心 1.2km —— 完全看不见。
         #    反向也错：库尔勒 馍夹肉 最近玩点 3.8km（尺子通过）却被质心 13.7km 判为"需要换"。
         #    质心仍留作**检索中心**（问周边餐馆时用），但**判定**改用最近玩点距离。
-        def _nearest_play_km(position):
+        def _nearest_play_km(position: Tuple[float, float]) -> float:
             return min(float(haversine_km(position, play_pos)) for play_pos in coords)
 
         meals = [node for node in day_nodes if _intent_of_node(node) == "food" and node_lnglat(node)]
@@ -719,13 +725,16 @@ async def adjust_meals_by_geography(
                 break
             if not any(node is meal for node in nodes):
                 continue  # 这个饭点刚被换掉了（旧对象已不在路线里），别再重复处理
-            current_km = _nearest_play_km(node_lnglat(meal))
+            meal_coord = node_lnglat(meal)
+            if meal_coord is None:
+                continue
+            current_km = _nearest_play_km(meal_coord)
             if current_km <= float(threshold_km):
                 continue
             measured.append({"day": day, "meal": str(meal.get("name") or ""), "km": round(current_km, 1)})
             # 检索中心用**离这个饭点最近的玩点**（比质心更贴：质心可能落在几个玩点中间的空地上，
             # 周边餐馆既不属于任何一个玩点）。
-            nearest_play_pos = min(coords, key=lambda play_pos: float(haversine_km(node_lnglat(meal), play_pos)))
+            nearest_play_pos = min(coords, key=lambda play_pos: float(haversine_km(meal_coord, play_pos)))
             search_center = nearest_play_pos
             try:
                 rows = await fetch_nearby(search_center, keywords, radius_km=radius_km, limit=limit) or []
@@ -855,13 +864,13 @@ def fill_structural_gaps(
             room = None if cap is None else max(0, cap - len(day_nodes))
 
             if not day_nodes:
-                if (cap is None or room >= 1) and any(_pool_pick(pool, intent, set()) for intent in PLAY_INTENTS):
+                if (cap is None or (room is not None and room >= 1)) and any(_pool_pick(pool, intent, set()) for intent in PLAY_INTENTS):
                     if add(day, _first_play_intent(pool, used), "fill_day", "10:00", "这一天原本是空的"):
                         room = None if cap is None else max(0, cap - 1)
             elif not plays:
-                if (cap is None or room >= 1) and any(_pool_pick(pool, intent, set()) for intent in PLAY_INTENTS):
+                if (cap is None or (room is not None and room >= 1)) and any(_pool_pick(pool, intent, set()) for intent in PLAY_INTENTS):
                     if add(day, _first_play_intent(pool, used), "add_play", "10:00", "这一天只有吃住、没有玩点"):
-                        room = None if cap is None else max(0, room - 1)
+                        room = None if cap is None else max(0, (room or 0) - 1)
 
             if "food" not in intents and (cap is None or (room or 0) >= 1):
                 add(day, "food", "add_meal", "12:30", "这一天没有餐饮节点")
@@ -881,7 +890,7 @@ def fill_structural_gaps(
                     continue
                 day_nodes = [node for node in (nodes + additions) if node_day(node, 1) == day]
                 room = None if cap is None else max(0, cap - len(day_nodes))
-                if cap is not None and room < 1:
+                if cap is not None and (room or 0) < 1:
                     continue
                 add(day, "scenic", "add_scenic", "15:00", f"这一天还没有自然景观（策略：{policy['note']}）")
 

@@ -250,14 +250,14 @@ def merge_profiles(profiles: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     text_chars = 0
 
     for profile in valid:
-        features = profile.get("features") or {}
-        for category, count in (features.get("category_mix") or {}).items():
+        profile_features = profile.get("features") or {}
+        for category, count in (profile_features.get("category_mix") or {}).items():
             mixed[category] = mixed.get(category, 0) + int(count)
         for key in ("pace", "time_style", "budget_tier", "lodging_style", "walking_intensity"):
-            value = features.get(key)
+            value = profile_features.get(key)
             if isinstance(value, str) and value and value != "unknown":
                 votes.setdefault(key, {})[value] = votes.setdefault(key, {}).get(value, 0) + 1
-        for value in features.get("transport") or []:
+        for value in profile_features.get("transport") or []:
             votes.setdefault("transport", {})[value] = votes.setdefault("transport", {}).get(value, 0) + 1
         for key, snippet in (profile.get("evidence") or {}).items():
             evidence.setdefault(key, snippet)

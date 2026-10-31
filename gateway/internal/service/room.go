@@ -179,7 +179,7 @@ func (c *Client) triggerAgentNegotiation(wsMsg models.WSMessage) {
 	}
 
 	if database.DB != nil {
-		database.DB.Create(&models.Message{
+		_ = database.CreateWithRetry(database.DB, &models.Message{
 			RoomID:   c.RoomID,
 			UserID:   "0", // 系统/AI 统一标识
 			RoleType: "ai",
@@ -219,7 +219,7 @@ func (c *Client) HandleIncomingMessage(message []byte) {
 			chatContent = string(message)
 		}
 
-		database.DB.Create(&models.Message{
+		_ = database.CreateWithRetry(database.DB, &models.Message{
 			RoomID:   c.RoomID,
 			UserID:   c.UserID,
 			RoleType: "human",

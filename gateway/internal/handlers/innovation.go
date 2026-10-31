@@ -34,14 +34,14 @@ func FeatureSnapshotHandler(c *gin.Context) {
 		}
 	}
 	var feedback, events int64
-	database.DB.Model(&models.FeedbackLog{}).Where("user_id = ?", userID).Count(&feedback)
-	database.DB.Model(&models.PlanningEvent{}).Where("user_id = ?", userID).Count(&events)
+	database.Reader().Model(&models.FeedbackLog{}).Where("user_id = ?", userID).Count(&feedback)
+	database.Reader().Model(&models.PlanningEvent{}).Where("user_id = ?", userID).Count(&events)
 	profile := planningService.ProfilePayload(userID)
 	delete(profile, "prompt_hint")
 	behavior := map[string]int{}
 	channelBehavior := map[string]any{"clicks": 0, "returned": 0, "verified": 0, "adopted": 0, "by_module": map[string]map[string]int{}, "by_channel": map[string]map[string]int{}, "candidate_actions": map[string]map[string]int{}}
 	var behaviorEvents []models.PlanningEvent
-	behaviorQuery := database.DB.Where("user_id = ?", userID)
+	behaviorQuery := database.Reader().Where("user_id = ?", userID)
 	if tripID != "" {
 		behaviorQuery = behaviorQuery.Where("trip_id = ?", tripID)
 	}
@@ -84,7 +84,7 @@ func FeatureSnapshotHandler(c *gin.Context) {
 	if tripID != "" {
 		journey["status"] = "available"
 		var run models.PlanningRun
-		if err := database.DB.Where("user_id = ? AND trip_id = ?", userID, tripID).Order("created_at desc").First(&run).Error; err == nil {
+		if err := database.Reader().Where("user_id = ? AND trip_id = ?", userID, tripID).Order("created_at desc").First(&run).Error; err == nil {
 			var stored map[string]any
 			if json.Unmarshal([]byte(run.Features), &stored) == nil {
 				journey["features"] = stored
@@ -129,7 +129,7 @@ func candidateBehaviorFeatures(userID, tripID, module string) map[string]any {
 		return features
 	}
 	var events []models.PlanningEvent
-	query := database.DB.Where("user_id = ? AND event_type IN ?", userID, []string{"official_channel_verified", "candidate_adopted"})
+	query := database.Reader().Where("user_id = ? AND event_type IN ?", userID, []string{"official_channel_verified", "candidate_adopted"})
 	if strings.TrimSpace(tripID) != "" {
 		query = query.Where("trip_id = ?", tripID)
 	}
@@ -256,7 +256,7 @@ func AgentEvaluationHandler(c *gin.Context) {
 	if !ok {
 		return
 	}
-	query := database.DB.Where("user_id = ?", userID)
+	query := database.Reader().Where("user_id = ?", userID)
 	if tripID := strings.TrimSpace(c.Query("trip_id")); tripID != "" {
 		if _, ok := requireTripOrRoomAccess(c, tripID); !ok {
 			return
@@ -589,7 +589,7 @@ func OfficialChannelClickHandler(c *gin.Context) {
 	}
 	payload, _ := json.Marshal(gin.H{"channel": req.Channel, "destination": req.Destination, "target_url": req.TargetURL})
 	event := models.PlanningEvent{UserID: userID, TripID: req.TripID, EventType: "official_channel_click", Payload: string(payload), CreatedAt: time.Now().UTC()}
-	if err := database.DB.Create(&event).Error; err != nil {
+	if err := database.CreateWithRetry(database.DB, &event); err != nil {
 		planningError(c, http.StatusInternalServerError, "CHANNEL_EVENT_WRITE_FAILED", "渠道点击记录失败", nil)
 		return
 	}
@@ -602,7 +602,7 @@ func OfficialChannelMetricsHandler(c *gin.Context) {
 		return
 	}
 	var events []models.PlanningEvent
-	query := database.DB.Where("user_id = ? AND event_type IN ?", userID, []string{"official_channel_click", "official_channel_returned", "official_channel_verified", "candidate_adopted"})
+	query := database.Reader().Where("user_id = ? AND event_type IN ?", userID, []string{"official_channel_click", "official_channel_returned", "official_channel_verified", "candidate_adopted"})
 	if tripID := strings.TrimSpace(c.Query("trip_id")); tripID != "" {
 		if _, ok := requireTripOrRoomAccess(c, tripID); !ok {
 			return

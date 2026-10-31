@@ -3,12 +3,18 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 
 	"gateway/internal/database"
 	"gateway/internal/models"
 )
+
+// CurrencyPrecision is the number of decimal places for every supported
+// currency in the storage layer. Amounts are stored as integer minor units
+// (amount * 10^precision), so this is also the divisor used when rendering.
+const CurrencyPrecision = 2
 
 // 多币种汇率表（以 CNY 为基准）。用于「自动汇率转换」：
 // Convert(金额, 原币种, 目标币种) 通过 CNY 中间价换算，保证预算计算准确率 100%。
@@ -61,6 +67,34 @@ func Convert(amount float64, from, to string) float64 {
 	return round2(cny / toRate)
 }
 
+// ConvertCents converts integer minor units between currencies. The rates are
+// still float constants, but only the conversion is floating point: the stored
+// and returned value is a rounded integer, so repeated arithmetic cannot drift.
+func ConvertCents(cents int64, from, to string) int64 {
+	from = normalizeCurrency(from)
+	to = normalizeCurrency(to)
+	if from == to {
+		return cents
+	}
+	fromRate, ok1 := currencyRates[from]
+	toRate, ok2 := currencyRates[to]
+	if !ok1 || !ok2 || toRate == 0 {
+		return cents // unknown currency: never invent a conversion
+	}
+	return int64(math.Round(float64(cents) * fromRate / toRate))
+}
+
+// CentsToMajor renders integer minor units as a decimal string with exactly
+// CurrencyPrecision places, e.g. 12850 -> "128.50". Used in logs and prompts.
+func CentsToMajor(cents int64) string {
+	sign := ""
+	if cents < 0 {
+		sign = "-"
+		cents = -cents
+	}
+	return fmt.Sprintf("%s%d.%02d", sign, cents/100, cents%100)
+}
+
 // normalizeCurrency 规范化币种代号为大写，未知值兜底为 CNY。
 func normalizeCurrency(c string) string {
 	if c == "" {
@@ -81,40 +115,44 @@ func normalizeCurrency(c string) string {
 }
 
 // ExpenseSummary 消费汇总结果。
+//
+// All money fields are integer minor units with an explicit `currency` and
+// `precision`, so a client never has to guess whether 12.5 means 12.50 yuan.
 type ExpenseSummary struct {
-	TotalBudget  float64                       `json:"total_budget"`
-	Spent        float64                       `json:"spent"`
-	Remaining    float64                       `json:"remaining"`
-	Ratio        float64                       `json:"ratio"` // 已用预算占比 0~1+
-	Level        string                        `json:"level"` // safe / warning / over
-	Currency     string                        `json:"currency"`
-	ByCategory   map[string]float64            `json:"by_category"`
-	CategoryPct  map[string]float64            `json:"category_pct"`
-	ExpenseCount int                           `json:"expense_count"`
+	TotalBudgetCents int64            `json:"total_budget_cents"`
+	SpentCents       int64            `json:"spent_cents"`
+	RemainingCents   int64            `json:"remaining_cents"`
+	Ratio            float64          `json:"ratio"` // 已用预算占比 0~1+（比例，不是金额）
+	Level            string           `json:"level"` // safe / warning / over
+	Currency         string           `json:"currency"`
+	Precision        int              `json:"precision"`
+	ByCategoryCents  map[string]int64 `json:"by_category_cents"`
+	CategoryPct      map[string]float64 `json:"category_pct"`
+	ExpenseCount     int              `json:"expense_count"`
 }
 
 // SummarizeBudget 汇总预算与实际消费，输出超支预警与分类占比。
-// 计算基于精确累加（换算到预算币种），准确率 100%。
-func SummarizeBudget(totalBudget float64, budgetCurrency string, expenses []models.ExpenseRecord) ExpenseSummary {
+// 金额全部用整数分累加，换算产生的舍入只发生在 ConvertCents 内部。
+func SummarizeBudget(totalBudgetCents int64, budgetCurrency string, expenses []models.ExpenseRecord) ExpenseSummary {
 	cur := normalizeCurrency(budgetCurrency)
-	byCategory := map[string]float64{}
-	spent := 0.0
+	byCategory := map[string]int64{}
+	var spent int64
 
 	for _, e := range expenses {
-		amount := Convert(e.Amount, e.Currency, cur)
+		amount := ConvertCents(e.AmountCents, e.Currency, cur)
 		spent += amount
 		cat := e.Category
 		if cat == "" {
 			cat = "其他"
 		}
-		byCategory[cat] = round2(byCategory[cat] + amount)
+		byCategory[cat] += amount
 	}
-	spent = round2(spent)
-	remaining := round2(totalBudget - spent)
+
+	remaining := totalBudgetCents - spent
 
 	ratio := 0.0
-	if totalBudget > 0 {
-		ratio = round2(spent / totalBudget)
+	if totalBudgetCents > 0 {
+		ratio = round2(float64(spent) / float64(totalBudgetCents))
 	}
 
 	level := OverrunLevel(ratio)
@@ -122,20 +160,21 @@ func SummarizeBudget(totalBudget float64, budgetCurrency string, expenses []mode
 	categoryPct := map[string]float64{}
 	if spent > 0 {
 		for k, v := range byCategory {
-			categoryPct[k] = round2(v / spent * 100)
+			categoryPct[k] = round2(float64(v) / float64(spent) * 100)
 		}
 	}
 
 	return ExpenseSummary{
-		TotalBudget:  round2(totalBudget),
-		Spent:        spent,
-		Remaining:    remaining,
-		Ratio:        ratio,
-		Level:        level,
-		Currency:     cur,
-		ByCategory:   byCategory,
-		CategoryPct:  categoryPct,
-		ExpenseCount: len(expenses),
+		TotalBudgetCents: totalBudgetCents,
+		SpentCents:       spent,
+		RemainingCents:   remaining,
+		Ratio:            ratio,
+		Level:            level,
+		Currency:         cur,
+		Precision:        CurrencyPrecision,
+		ByCategoryCents:  byCategory,
+		CategoryPct:      categoryPct,
+		ExpenseCount:     len(expenses),
 	}
 }
 
@@ -164,14 +203,14 @@ func BudgetSummaryFor(userID, tripID string) ExpenseSummary {
 	if currency == "" {
 		currency = "CNY"
 	}
-	return SummarizeBudget(plan.TotalBudget, currency, expenses)
+	return SummarizeBudget(plan.TotalBudgetCents, currency, expenses)
 }
 
 // routeCostRe 从路线节点的 cost / cost_estimate 字段提取首个金额数字（支持 ¥/￥/元 前缀、千分位逗号与小数）。
 var routeCostRe = regexp.MustCompile(`(\d[\d,]*(?:[.,]\d{1,2})?)`)
 
-// routeNodeCost 解析单个路线节点的费用字段，无法识别时返回 0。
-func routeNodeCost(node map[string]interface{}) float64 {
+// routeNodeCost 解析单个路线节点的费用字段，无法识别时返回 0（单位：分）。
+func routeNodeCost(node map[string]interface{}) int64 {
 	for _, key := range []string{"cost", "cost_estimate"} {
 		raw, ok := node[key]
 		if !ok {
@@ -182,7 +221,7 @@ func routeNodeCost(node map[string]interface{}) float64 {
 			continue
 		}
 		if m := routeCostRe.FindStringSubmatch(s); m != nil {
-			if v, ok := parseAmountString(m[1]); ok {
+			if v, ok := parseAmountCents(m[1]); ok {
 				return v
 			}
 		}
@@ -190,16 +229,16 @@ func routeNodeCost(node map[string]interface{}) float64 {
 	return 0
 }
 
-// EstimateRouteBudget 从方案路线 JSON 估算总预算（累加各节点人均费用），
+// EstimateRouteBudget 从方案路线 JSON 估算总预算（累加各节点人均费用，单位分），
 // 供「采纳→费用追踪」闭环建立预算基线。无法解析时返回 0（调用方可选兜底）。
-func EstimateRouteBudget(routeJSON string) float64 {
+func EstimateRouteBudget(routeJSON string) int64 {
 	var nodes []map[string]interface{}
 	if err := json.Unmarshal([]byte(routeJSON), &nodes); err != nil {
 		return 0
 	}
-	total := 0.0
+	var total int64
 	for _, n := range nodes {
 		total += routeNodeCost(n)
 	}
-	return round2(total)
+	return total
 }

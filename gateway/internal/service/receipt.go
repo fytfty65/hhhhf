@@ -7,10 +7,11 @@ import (
 )
 
 // Receipt 从 OCR 文本中解析出的小票结构化信息（纯函数层不依赖数据库模型）。
+// AmountCents 使用整数分，避免 128.50 在二进制浮点里变成 128.499999……
 type Receipt struct {
-	Amount   float64
-	Currency string
-	Category string
+	AmountCents int64
+	Currency    string
+	Category    string
 }
 
 // 合计/总计行金额匹配：优先锁定「合计、总计、应收、实收、应付、总额、总价」等关键词所在行的金额（英文关键词大小写不敏感）
@@ -48,7 +49,7 @@ func normalizeNumeric(s string) (string, bool) {
 	return strconv.FormatFloat(f, 'f', 2, 64), true
 }
 
-// parseAmountString 从金额字符串解析出浮点金额。
+// parseAmountString 从金额字符串解析出浮点金额（仅用于兼容旧调用）。
 func parseAmountString(s string) (float64, bool) {
 	norm, ok := normalizeNumeric(s)
 	if !ok {
@@ -59,6 +60,28 @@ func parseAmountString(s string) (float64, bool) {
 		return 0, false
 	}
 	return f, true
+}
+
+// parseAmountCents 将 "1,280.00" / "128.50" 精确解析为整数分，不做浮点运算。
+func parseAmountCents(s string) (int64, bool) {
+	norm, ok := normalizeNumeric(s)
+	if !ok {
+		return 0, false
+	}
+	parts := strings.SplitN(norm, ".", 2)
+	whole, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || whole < 0 {
+		return 0, false
+	}
+	frac := int64(0)
+	if len(parts) == 2 {
+		digits := parts[1] + "00"
+		frac, err = strconv.ParseInt(digits[:2], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+	}
+	return whole*100 + frac, true
 }
 
 // ExtractAmount 从小票 OCR 文本提取首个可靠金额（优先合计行、其次货币符号行）。
@@ -82,6 +105,25 @@ func ExtractAmount(text string) (float64, bool) {
 		}
 	}
 
+	return 0, false
+}
+
+// ExtractAmountCents 提取整数分金额，供存储层直接落库。
+func ExtractAmountCents(text string) (int64, bool) {
+	text = strings.ReplaceAll(text, "\u00a0", " ")
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if m := moneyLineRe.FindStringSubmatch(line); m != nil {
+			if cents, ok := parseAmountCents(m[1]); ok {
+				return cents, true
+			}
+		}
+	}
+	for _, m := range plainMoneyRe.FindAllStringSubmatch(text, -1) {
+		if cents, ok := parseAmountCents(m[1]); ok {
+			return cents, true
+		}
+	}
 	return 0, false
 }
 
@@ -110,13 +152,13 @@ func CategorizeReceipt(text string) string {
 
 // ParseReceipt 将 OCR 文本解析为结构化消费信息；无法识别金额时返回 found=false。
 func ParseReceipt(text string) (Receipt, bool) {
-	amount, ok := ExtractAmount(text)
+	amountCents, ok := ExtractAmountCents(text)
 	if !ok {
 		return Receipt{}, false
 	}
 	return Receipt{
-		Amount:   amount,
-		Currency: "CNY",
-		Category: CategorizeReceipt(text),
+		AmountCents: amountCents,
+		Currency:    "CNY",
+		Category:    CategorizeReceipt(text),
 	}, true
 }

@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 MODE_LABELS: Dict[str, str] = {
     "train": "高铁/火车",
@@ -233,17 +233,16 @@ def rank_options(
         if not option:
             continue
         score, why = score_option(option, preferences)
-        enriched = dict(option)
+        enriched: Dict[str, Any] = dict(option)
         enriched["fit_score"] = score
         enriched["why"] = why
         ranked.append(enriched)
-    ranked.sort(
-        key=lambda item: (
-            -float(item.get("fit_score") or 0),
-            not bool(item.get("fare_verified")),
-            float(item.get("price") if isinstance(item.get("price"), (int, float)) else 10**9),
-        )
-    )
+    def _sort_key(item: Dict[str, Any]) -> Tuple[float, bool, float]:
+        raw_price: Any = item.get("price")
+        price_value = float(raw_price) if isinstance(raw_price, (int, float)) else float(10**9)
+        return (-float(item.get("fit_score") or 0), not bool(item.get("fare_verified")), price_value)
+
+    ranked.sort(key=_sort_key)
     return ranked
 
 
@@ -320,7 +319,8 @@ def cheapest_verified(options: Sequence[Mapping[str, Any]]) -> Optional[Dict[str
     verified = [item for item in options or [] if item.get("fare_verified") and isinstance(item.get("price"), (int, float))]
     if not verified:
         return None
-    return min(verified, key=lambda item: float(item["price"]))
+    cheapest = min(verified, key=lambda item: float(item["price"]))
+    return dict(cheapest)
 
 
 # --------------------------------------------------------------------------
@@ -364,6 +364,8 @@ def normalize_travel_info(travel_info: Mapping[str, Any], default_source: str = 
 def _parse_lnglat(value: Any) -> Optional[Tuple[float, float]]:
     if isinstance(value, Mapping):
         lng, lat = value.get("lng"), value.get("lat")
+        if lng is None or lat is None:
+            return None
         try:
             return float(lng), float(lat)
         except (TypeError, ValueError):
@@ -408,7 +410,7 @@ def find_transfer_legs(
 
     nodes = nodes_of(plan)
     legs: List[Dict[str, Any]] = []
-    previous = None
+    previous: Optional[Dict[str, Any]] = None
     previous_day = None
     for index, node in enumerate(nodes, start=1):
         position = _parse_lnglat(node.get("lnglat"))

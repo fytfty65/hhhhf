@@ -136,7 +136,7 @@ export default function NegotiationDiagnostics({
             </ul>
           ) : (
             <p className="mt-2 text-[11.5px] leading-relaxed text-slate-500" data-testid="diagnostics-no-conflicts">
-              这次各智能体没有显式分歧（是逐条检查过且一致，不是没看）。
+              这次各角色没有显式分歧（是逐条检查过且一致，不是没看）。
             </p>
           )}
 
@@ -148,7 +148,7 @@ export default function NegotiationDiagnostics({
                   <Scale className="mr-1 inline h-3 w-3 text-slate-400" />
                   {item.decision}
                   {item.why ? `（${item.why}）` : ''}
-                  {item.mechanism ? <span className="text-slate-400">　执行层：{item.mechanism}</span> : null}
+                  {item.mechanism ? <span className="text-slate-400">{'　'}执行层：{item.mechanism}</span> : null}
                 </li>
               ))}
             </ul>
@@ -178,7 +178,7 @@ export default function NegotiationDiagnostics({
                 <ul className="mt-1 space-y-0.5">
                   {(revision.changed || []).map((item) => (
                     <li key={item.agent_id} className="text-[11px] leading-relaxed text-slate-500">
-                      · {item.agent_id} 按裁决去掉：
+                      · {item.agent_id} 按决定去掉：
                       {Object.entries(item.applied || {})
                         .map(([key, value]) => `${key} ${value?.dropped_count ?? 0} 条`)
                         .join('；')}

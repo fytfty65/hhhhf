@@ -12,9 +12,9 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .agent_contracts import AgentInput, AgentProposal, capability_registry, validate_agent_proposal
+from .agent_contracts import AgentInput, AgentProposal, EvidenceRef, FailureInfo, capability_registry, validate_agent_proposal
 from .joint_optimization import rank_lodging_options  # 联合优化（P2）：住宿 ↔ 通勤/费用/体力/碳排/预算
 from .tool_permissions import audit_tool_calls, filter_tool_calls  # P2：工具权限真实校验
 
@@ -69,7 +69,8 @@ def _apply_contract_limits(rows: list[dict[str, Any]], hard_constraints: Mapping
             if bool(row.get("out_of_town")):
                 return True
             try:
-                return float(row.get("distance_km")) >= 40.0
+                raw_distance: Any = row.get("distance_km")
+                return float(raw_distance) >= 40.0
             except (TypeError, ValueError):
                 return False
 
@@ -77,7 +78,8 @@ def _apply_contract_limits(rows: list[dict[str, Any]], hard_constraints: Mapping
         if len(far_rows) > far_value:
             def _distance(row: Mapping[str, Any]) -> float:
                 try:
-                    return float(row.get("distance_km"))
+                    raw_distance: Any = row.get("distance_km")
+                    return float(raw_distance)
                 except (TypeError, ValueError):
                     return 0.0
 
@@ -113,17 +115,19 @@ def _apply_contract_limits(rows: list[dict[str, Any]], hard_constraints: Mapping
                     continue
             return None
 
-        dropped_prices = [
-            (str(row.get("name") or ""), _nightly(row))
-            for row in result
-            if (_nightly(row) is not None and float(_nightly(row)) > price_cap)
-        ]
+        dropped_prices: List[Tuple[str, float]] = []
+        for row in result:
+            nightly = _nightly(row)
+            if nightly is not None and nightly > price_cap:
+                dropped_prices.append((str(row.get("name") or ""), nightly))
         unknown = sum(1 for row in result if _nightly(row) is None)
         if dropped_prices:
-            result = [
-                row for row in result
-                if _nightly(row) is None or float(_nightly(row)) <= price_cap
-            ]
+            kept: List[Dict[str, Any]] = []
+            for row in result:
+                nightly = _nightly(row)
+                if nightly is None or nightly <= price_cap:
+                    kept.append(row)
+            result = kept
             applied["max_price_per_night"] = {
                 "limit": price_cap,
                 "dropped": [name for name, _ in dropped_prices][:8],
@@ -138,7 +142,11 @@ def pool_handler(agent_id: str, domain: str, *, provider: str, field: str) -> Ag
 
     async def handle(request: AgentInput) -> Mapping[str, Any]:
         candidates = request.context.get("candidates")
-        rows = [item for item in candidates if isinstance(item, Mapping)] if isinstance(candidates, Sequence) and not isinstance(candidates, (str, bytes)) else []
+        rows: List[Dict[str, Any]] = (
+            [dict(item) for item in candidates if isinstance(item, Mapping)]
+            if isinstance(candidates, Sequence) and not isinstance(candidates, (str, bytes))
+            else []
+        )
         rows, applied = _apply_contract_limits(rows, request.hard_constraints or {})
         if not rows:
             return {
@@ -613,8 +621,10 @@ def health_handler() -> AgentHandler:
 
     async def handle(request: AgentInput) -> Mapping[str, Any]:
         context = request.context or {}
-        profile = context.get("profile") if isinstance(context.get("profile"), Mapping) else {}
-        weather = context.get("weather") if isinstance(context.get("weather"), Mapping) else {}
+        raw_profile = context.get("profile")
+        profile: Mapping[str, Any] = raw_profile if isinstance(raw_profile, Mapping) else {}
+        raw_weather = context.get("weather")
+        weather: Mapping[str, Any] = raw_weather if isinstance(raw_weather, Mapping) else {}
         raw_daily = context.get("daily_nodes")
         try:
             daily_nodes = int(raw_daily) if raw_daily is not None else None
@@ -659,7 +669,7 @@ def health_handler() -> AgentHandler:
             limit = max(1, min(limit, 4))
             reasons.append("成员存在健康约束（" + "、".join(constraints[:3]) + "），按保守节奏安排")
 
-        candidate = {
+        candidate: Dict[str, Any] = {
             "daily_node_limit": limit,
             "rest_buffer_minutes": 30 if limit >= 4 else 45,
             "advice": "；".join(reasons) if reasons else "维持常规节奏",
@@ -723,7 +733,8 @@ def replan_scope(route: Sequence[Mapping[str, Any]], risk_event: Mapping[str, An
         day_hit = False
         if day_set and not named:
             try:
-                day_hit = int(node.get("day")) in day_set
+                raw_day: Any = node.get("day")
+                day_hit = int(raw_day) in day_set
             except (TypeError, ValueError):
                 day_hit = False
         if name_hit or day_hit:
@@ -977,14 +988,14 @@ class SpecialistRuntime:
         if capability is None:
             return AgentProposal(
                 agent_id=request.agent_id, domain=request.domain, status="failed",
-                failure={"code": "agent_not_registered", "message": "智能体未注册", "retryable": False},
+                failure=FailureInfo(code="agent_not_registered", message="智能体未注册", retryable=False),
                 degraded=False, latency_ms=0,
             )
         if handler is None:
             return AgentProposal(
                 agent_id=request.agent_id, domain=request.domain, status="degraded",
-                failure={"code": "handler_unavailable", "message": capability.fallback, "retryable": True, "fallback": capability.fallback},
-                degraded=True, evidence=[_evidence("runtime", "handler")], latency_ms=0,
+                failure=FailureInfo(code="handler_unavailable", message=capability.fallback, retryable=True, fallback=capability.fallback),
+                degraded=True, evidence=[EvidenceRef(**_evidence("runtime", "handler"))], latency_ms=0,
             )
         try:
             raw = await asyncio.wait_for(handler(request), timeout=capability.timeout_ms / 1000)
@@ -1029,14 +1040,14 @@ class SpecialistRuntime:
         except asyncio.TimeoutError:
             return AgentProposal(
                 agent_id=request.agent_id, domain=request.domain, status="degraded",
-                failure={"code": "agent_timeout", "message": f"超过 {capability.timeout_ms}ms 超时预算", "retryable": True, "fallback": capability.fallback},
-                degraded=True, evidence=[_evidence("runtime", "timeout")], latency_ms=capability.timeout_ms,
+                failure=FailureInfo(code="agent_timeout", message=f"超过 {capability.timeout_ms}ms 超时预算", retryable=True, fallback=capability.fallback),
+                degraded=True, evidence=[EvidenceRef(**_evidence("runtime", "timeout"))], latency_ms=capability.timeout_ms,
             )
         except Exception as exc:
             return AgentProposal(
                 agent_id=request.agent_id, domain=request.domain, status="failed",
-                failure={"code": "agent_failed", "message": str(exc)[:300], "retryable": True, "fallback": capability.fallback},
-                degraded=False, evidence=[_evidence("runtime", "failure")],
+                failure=FailureInfo(code="agent_failed", message=str(exc)[:300], retryable=True, fallback=capability.fallback),
+                degraded=False, evidence=[EvidenceRef(**_evidence("runtime", "failure"))],
                 latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
             )
 
@@ -1097,13 +1108,15 @@ def build_pool_runtime(
     if isinstance(facts, Mapping) and facts:
         from core.plan_facts import facts_version as _facts_version
 
-        constraints = facts.get("constraints") if isinstance(facts.get("constraints"), Mapping) else {}
+        raw_constraints = facts.get("constraints")
+        constraints: Mapping[str, Any] = raw_constraints if isinstance(raw_constraints, Mapping) else {}
         for key, entry in constraints.items():
             value = entry.get("value") if isinstance(entry, Mapping) else entry
             if value is None:
                 continue
             hard_constraints[str(key)] = value
-        decisions = facts.get("decisions") if isinstance(facts.get("decisions"), Mapping) else {}
+        raw_decisions = facts.get("decisions")
+        decisions: Mapping[str, Any] = raw_decisions if isinstance(raw_decisions, Mapping) else {}
         targets_entry = decisions.get("composition_targets") if isinstance(decisions, Mapping) else None
         targets = targets_entry.get("value") if isinstance(targets_entry, Mapping) else None
         if isinstance(targets, Mapping):

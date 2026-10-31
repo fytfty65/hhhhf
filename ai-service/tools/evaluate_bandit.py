@@ -29,7 +29,7 @@ import sqlite3
 import statistics
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 # Minimum evidence before a verdict is meaningful. Below this the honest answer
 # is "we do not know yet".

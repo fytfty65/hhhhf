@@ -17,6 +17,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.console import ensure_utf8_console  # noqa: E402
+
+ensure_utf8_console()
+
 import httpx  # noqa: E402
 
 from core.poi_pool import (  # noqa: E402

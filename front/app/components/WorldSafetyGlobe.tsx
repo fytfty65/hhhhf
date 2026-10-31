@@ -5,9 +5,9 @@ import { createPortal } from 'react-dom';
 import Globe from 'react-globe.gl';
 import {
   ShieldCheck, AlertTriangle, X, Activity, RotateCw, Radar,
-  Thermometer, CloudRain, Globe2, Eye, Siren,
+  Thermometer, Globe2, Eye, Siren,
   Navigation, CheckCircle2, Info, Target,
-  Clock, Building2, DollarSign
+  Building2, DollarSign
 } from 'lucide-react';
 
 import {
@@ -24,6 +24,7 @@ import {
 import { fetchGlobalRiskSnapshots, fetchRiskSnapshot, summarizeGlobalRiskSnapshot } from '../lib/riskSnapshot';
 import { validLngLat } from '../lib/mapTiles';
 import RiskRadarChart from './RiskRadarChart';
+import { useFocusTrap } from '../lib/useFocusTrap';
 import DraggablePanel from './DraggablePanel';
 
 export interface SafetyAlert {
@@ -227,6 +228,13 @@ export default function WorldSafetyGlobe({
 }: WorldSafetyGlobeProps) {
   const globeRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // 全球风险雷达是整屏模态层：组件挂载即意味着弹窗打开，直接锁焦点。
+  // 与已有的 containerRef 合并成一个回调 ref，两处都拿到同一个节点。
+  const focusTrapRef = useFocusTrap<HTMLDivElement>(true);
+  const setContainerNode = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    focusTrapRef.current = node;
+  }, [focusTrapRef]);
   const globeHostRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState(() => typeof window === 'undefined'
     ? { width: 800, height: 600 }
@@ -643,7 +651,6 @@ export default function WorldSafetyGlobe({
 
   const alertCount = liveSafety?.active_alerts?.length || 0;
   const hasSafetyData = !!liveSafety;
-  const safetySource = String(liveSafety?.source || '').trim();
   const requestFreshnessLabel = lastRefreshed ? `${Math.max(0, Math.round((currentTime.getTime() - lastRefreshed) / 1000))} 秒前` : '未同步';
   const snapshotTimestamp = Number(liveSafety?.risk_ts);
   const snapshotFreshnessLabel = Number.isFinite(snapshotTimestamp) && snapshotTimestamp > 0
@@ -655,7 +662,7 @@ export default function WorldSafetyGlobe({
   if (typeof document === 'undefined') return null;
 
   return createPortal(
-    <div ref={containerRef} role="dialog" aria-modal="true" aria-label="全球风险地图" className="radar-modal-root fixed inset-0 z-[2147483000] overflow-hidden pointer-events-auto" style={{ background: bg }}>
+    <div ref={setContainerNode} role="dialog" aria-modal="true" aria-label="全球风险地图" className="radar-modal-root fixed inset-0 z-[2147483000] overflow-hidden pointer-events-auto" style={{ background: bg }}>
       {/* 轻量背景：把数据可读性放在装饰之前。 */}
       <div className="absolute inset-0 pointer-events-none" style={{
         background: mode === 'dark'

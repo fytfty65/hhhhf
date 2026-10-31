@@ -36,6 +36,48 @@ func RedactSensitiveText(value string) string {
 
 const requestIDKey = "request_id"
 
+// maxMetricPaths bounds how many distinct path labels the in-process metrics and
+// the Prometheus histograms may hold. Everything past the cap is folded into
+// metricPathOverflow so cardinality (and therefore memory) can never grow with
+// caller-supplied input.
+const maxMetricPaths = 200
+
+// metricPathOverflow is the label every path beyond maxMetricPaths is recorded
+// under. It is deliberately not a valid URL so it cannot collide with a route.
+const metricPathOverflow = "__other__"
+
+// metricPath returns the bounded label used for per-path counters and
+// histograms.
+//
+// It MUST be the matched route pattern (c.FullPath()), never the raw request
+// URL. The previous implementation used c.Request.URL.Path, which made the
+// label attacker-controlled: LoggingMiddleware runs globally (including for
+// unmatched 404/401 requests), so any unauthenticated caller could add one
+// permanent entry per unique path to requestsByPath, latencyByPath,
+// latencyCountByPath and pathHistogram — unbounded memory growth from a
+// trivial request loop. Unmatched requests now collapse into a single
+// "unmatched" series instead of one series per junk path.
+func metricPath(c *gin.Context) string {
+	if full := c.FullPath(); full != "" {
+		return full
+	}
+	return "unmatched"
+}
+
+// metricStatus keeps the status dimension bounded. The set of valid HTTP status
+// codes is fixed, so this is not strictly necessary for memory safety; it keeps
+// the series count (and the /metrics payload) small while preserving every code
+// that actually signals something about this service.
+func metricStatus(status int) string {
+	switch status {
+	case 200, 201, 202, 204, 301, 302, 304, 400, 401, 403, 404, 405, 409, 413, 415, 422, 429, 500, 502, 503, 504:
+		return fmt.Sprintf("%d", status)
+	default:
+		// Bucket by class so a scanner cannot mint thousands of distinct codes.
+		return fmt.Sprintf("%dxx", status/100)
+	}
+}
+
 var (
 	metricsMu          sync.Mutex
 	requestsTotal      int
@@ -43,20 +85,38 @@ var (
 	requestsByStatus   = map[string]int{}
 	latencyByPath      = map[string]float64{}
 	latencyCountByPath = map[string]int{}
-	startTime          = time.Now()
+	// requestsDroppedFromPath counts requests whose path label was folded into
+	// metricPathOverflow because the cardinality cap was reached. If this is
+	// climbing, either the route table grew past maxMetricPaths or something is
+	// generating synthetic paths; either way it is alertable rather than silent.
+	requestsDroppedFromPath int
+	startTime               = time.Now()
 )
 
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
 }
 
+// recordRequest accumulates the in-process counters. The path argument must
+// already be bounded (see metricPath).
 func recordRequest(method, path string, status int, latencyMs float64) {
 	metricsMu.Lock()
 	defer metricsMu.Unlock()
 	requestsTotal++
 	key := method + " " + path
+	// Cardinality guard. Two rules matter here:
+	//   1. The main cap is maxMetricPaths-1 so that the overflow bucket always has
+	//      a slot of its own — otherwise the bucket created on first overflow
+	//      pushes the map to maxMetricPaths+1 and the cap leaks by one.
+	//   2. A label that literally collides with the reserved bucket name is
+	//      folded into the bucket rather than trusted, so a caller cannot occupy
+	//      (or dilute) the overflow series by requesting that path.
+	if _, seen := requestsByPath[key]; !seen && (len(requestsByPath) >= maxMetricPaths-1 || path == metricPathOverflow) {
+		requestsDroppedFromPath++
+		key = method + " " + metricPathOverflow
+	}
 	requestsByPath[key]++
-	requestsByStatus[fmt.Sprintf("%d", status)]++
+	requestsByStatus[metricStatus(status)]++
 	latencyByPath[key] += latencyMs
 	latencyCountByPath[key]++
 }
@@ -84,8 +144,11 @@ func LoggingMiddleware() gin.HandlerFunc {
 		status := c.Writer.Status()
 		rid, _ := c.Get(requestIDKey)
 
-		recordRequest(c.Request.Method, c.Request.URL.Path, status, latencyMs)
-		recordPrometheusLatency(c.Request.Method, c.Request.URL.Path, latencyMs)
+		// Metrics use the matched route pattern (bounded); the log line keeps the
+		// raw path so 404s stay debuggable without polluting the metric labels.
+		label := metricPath(c)
+		recordRequest(c.Request.Method, label, status, latencyMs)
+		recordPrometheusLatency(c.Request.Method, label, latencyMs)
 
 		entry := map[string]interface{}{
 			"ts":         time.Now().UnixMilli(),
@@ -94,6 +157,7 @@ func LoggingMiddleware() gin.HandlerFunc {
 			"request_id": rid,
 			"method":     c.Request.Method,
 			"path":       c.Request.URL.Path,
+			"route":      label,
 			"status":     status,
 			"latency_ms": round2(latencyMs),
 		}
@@ -180,6 +244,10 @@ func MetricsHandler(c *gin.Context) {
 		"requests_total":     requestsTotal,
 		"requests_by_status": requestsByStatus,
 		"requests_by_path":   paths,
+		// Cardinality guard visibility: how many requests were folded into the
+		// overflow bucket because the path cap was reached.
+		"metric_paths_dropped_to_overflow": requestsDroppedFromPath,
+		"metric_path_cap":                  maxMetricPaths,
 		// Learning-loop health. A climbing "missing_arm" means clients are not
 		// returning a bandit arm, so rewards are dropped and the policy cannot
 		// learn — the failure this instrumentation exists to surface.

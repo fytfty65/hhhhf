@@ -332,7 +332,7 @@ def _percentile(sorted_values: Sequence[float], fraction: float) -> float:
     if not sorted_values:
         return 0.0
     index = int(math.ceil(fraction * len(sorted_values))) - 1
-    return sorted_values[_clamp(index, 0, len(sorted_values) - 1)]
+    return sorted_values[int(_clamp(index, 0, len(sorted_values) - 1))]
 
 
 def _sample_dwell(rng: random.Random, base: float, sigma: float, queue_median: float, tod_factor: float, weather_factor: float, indoor: bool) -> float:
@@ -445,7 +445,7 @@ def simulate_plan(
         sample_count=sample_count,
     )
 
-    prepared = []
+    prepared: List[Dict[str, Any]] = []
     known_cost_total = 0.0
     for node in node_list:
         category = category_of(node)

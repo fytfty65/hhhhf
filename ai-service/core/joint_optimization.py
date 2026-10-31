@@ -92,8 +92,9 @@ def group_by_day(route: Sequence[Mapping[str, Any]]) -> Dict[int, List[Mapping[s
     for node in route:
         if not isinstance(node, Mapping):
             continue
+        raw_day: Any = node.get("day")
         try:
-            day = int(node.get("day"))
+            day = int(raw_day)
         except (TypeError, ValueError):
             continue
         days.setdefault(day, []).append(node)

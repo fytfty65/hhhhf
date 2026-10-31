@@ -18,6 +18,15 @@ pydantic==2.13.3
 openai==2.33.0
 httpx==0.28.1
 requests==2.34.2
+# ddgs is the *preferred* DuckDuckGo client: core/web_price_tool.py:1459 tries
+# `from ddgs import DDGS` first and only falls back to the legacy package below.
+# That legacy package is abandoned — the code's own comment at
+# core/web_price_tool.py:1451 records it returning 0 results — so omitting ddgs
+# meant a clean `pip install -r requirements.txt` (exactly what CI does) silently
+# degraded web price search to a dead backend while every test still passed.
+# Both are pinned: ddgs is the working path, duckduckgo-search remains only as the
+# fallback for environments that still have it.
+ddgs==9.16.0
 duckduckgo-search==8.1.1
 
 # --- configuration ---
@@ -34,3 +43,15 @@ scikit-learn==1.8.0
 # --- shared infrastructure ---
 # redis: semantic itinerary cache, event stream, bandit state sharing
 redis==8.0.0
+
+# --- transitive security pins ---
+# These are not imported directly, but `pip-audit` scans the installed
+# environment, and the versions resolved from the pins above carried published
+# advisories. Pinned explicitly so a clean install (and CI) gets the fixed
+# versions instead of whatever the resolver happens to pick.
+# Bump these together with the direct dependency that pulls them in.
+anyio==4.14.2
+certifi==2026.10.19
+idna==3.15
+starlette==1.3.1
+urllib3==2.8.0

@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -36,7 +35,6 @@ REPO_ROOT = SERVICE_ROOT.parent
 sys.path.insert(0, str(SERVICE_ROOT))
 
 from core.place_quality import (  # noqa: E402
-    _is_lodging,
     is_real_retrieval,
     looks_like_a_visitable_place,
     needs_human_review,

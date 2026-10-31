@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import time as _time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
@@ -15,23 +16,27 @@ import urllib.parse
 import traceback
 import uuid
 import numpy as np
-import networkx as nx
-from sklearn.cluster import DBSCAN
-from typing import List, Dict, Any, Optional, Tuple, Mapping, Sequence
+import redis.asyncio as redis
+from duckduckgo_search import DDGS
+from typing import List, Dict, Any, Optional, Mapping, Sequence, Tuple
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI, BadRequestError
-from models.schemas import GatewayMessage, NegotiateResponse
+from models.schemas import GatewayMessage
+from api.risk_service import RiskService, compute_node_risk
 from core.travel_utils import analyze_weather_for_planning, estimate_crowdedness, build_personalization_hint, build_profile_category_boost, build_profile_budget_gamma, build_profile_fine_tag_boost, build_profile_applied, classify_fine_tags, normalize_mode, normalize_role
 from core.time_intelligence import analyze_pace, monday_closure_notes
-from core.optimization import fairness_gate, fairness_report, pareto_frontier, repair_route, select_fair_route, validate_candidate, validate_route
+from core.optimization import fairness_gate, fairness_report, repair_route, validate_route
 from core.constraints import resolve_conflicts
 from core.contextual_bandit import ContextualThompsonBandit, derive_reward, stable_arm_id
-from core.agent_contracts import capability_registry, validate_agent_proposal, proposal_timestamp
-from core.simulation import member_utilities_for, simulate_plan
+from core.agent_contracts import capability_registry, audit_route_agent_proposal
+from core.simulation import simulate_plan
+from core.member_negotiation import member_interests, negotiate_member_routes
 from core import llm_config as llm_cfg  # LLM 调用参数单一来源（模型/端点/temperature/max_tokens）
 from core.llm_config import model_name  # LLM 默认值单一来源（曾与 conflict.py 各写一套）
 from core.events import new_event  # 统一事件协议信封（correlation_id / causation_id / version）
+from core.cache_registry import BoundedTTLCache, register_cache  # 有界 TTL 缓存：容量上限 + 淘汰 + 命中率
+from core.llm_metrics import record_llm_call  # LLM 调用记账：次数/失败率/延迟分位/token/成本
 # 候选池相关工具统一在模块级导入：实测教训（2026-10-04）—— 把它们各自写在函数内部局部导入，
 # 结果外层代码用了 `needs_widening` 却只在内层函数里导过 → NameError 让整条推演流中断，
 # 而单测全绿（因为没有任何单测覆盖这条长生成器路径）。放在顶层，缺名字在导入时就暴露。
@@ -72,7 +77,6 @@ from core.route_composition import (
     composition_hint as composition_hint_text,
     composition_targets,
     count_route_composition,
-    ensure_lodging_per_night,
     numeric_targets,
     order_route_by_day,
     rebalance_days_by_geography,
@@ -82,23 +86,16 @@ from core.route_composition import (
     summarize_supply_limits,
     summarize_targets,
     trim_category_over_cap,
-    trim_lodging_over_cap,
 )
-
-
-def _fairness_limit_from_env() -> float:
-    """Read the group fairness standard deviation limit defensively."""
-    try:
-        return max(0.0, float(os.getenv("PLANNING_FAIRNESS_MAX_STD", "0.15")))
-    except (TypeError, ValueError):
-        return 0.15
 
 
 # —— 出稿后路网拼装的并发控制与缓存（2026-10-05 实测：这一段要 48.4s，且算在用户等待里）——
 # 为什么要信号量：15 对相邻节点 × 3 种出行方式 = 45 个请求一次打出去，高德会 QPS 限流，
 # 表现成"大家一起排队等到超时"；有界并发反而更快也更省配额。
 _TRAVEL_OPTIONS_SEMAPHORE = asyncio.Semaphore(8)
-_TRAVEL_OPTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
+_TRAVEL_OPTIONS_CACHE: BoundedTTLCache = register_cache(
+    BoundedTTLCache("travel_options", max_entries=512, ttl_seconds=3600.0)
+)
 
 # —— 取数细分的耗时账本（2026-10-05）——
 # 分段耗时显示「取数与风控」要 28–34s，但里面是十几次高德调用并发跑，
@@ -128,7 +125,10 @@ _AMAP_LAST_AT_BY_LOOP: Dict[int, float] = {}
 _AMAP_GATE_STATS: Dict[str, float] = {"count": 0.0, "wait": 0.0, "held": 0.0}
 # 高德 POI 实景图缓存（按 POI id）：同一个 POI 常出现在多个关键词查询里，
 # 不缓存就会把同一张图问好几遍 —— 而每次问都在占用同一把 key 的 QPS。
-_AMAP_PHOTO_CACHE: Dict[str, List[str]] = {}
+# 实景图基本不变，TTL 给 7 天；超限丢最久未用的一条，不再整体清空。
+_AMAP_PHOTO_CACHE: BoundedTTLCache = register_cache(
+    BoundedTTLCache("amap_photos", max_entries=512, ttl_seconds=7 * 24 * 3600.0)
+)
 
 
 def amap_gate_summary() -> str:
@@ -212,7 +212,8 @@ class LoopWatchdog:
             stalled = time.monotonic() - self.heartbeat
             if stalled <= self.threshold:
                 continue
-            frame = sys._current_frames().get(main_thread.ident)
+            ident = main_thread.ident
+            frame = sys._current_frames().get(ident) if ident is not None else None
             print(f"🐌 [事件循环看门狗] 卡住 {stalled:.1f}s，主线程栈：", flush=True)
             if frame is not None:
                 for line in traceback.format_stack(frame)[-12:]:
@@ -404,7 +405,12 @@ def reset_fetch_timing() -> None:
 #   ③ 用户"换一换"、多人同城、以及我们自己的 warm-up，都会重复同样的查询。
 # 口径：只缓存**已经过过滤的真实结果**（不缓存失败、不缓存空），默认 30 分钟；
 # 缓存命中会在日志里说明"这一轮的候选来自缓存"，不让它看起来像刚查的。
-_POI_QUERY_CACHE: Dict[str, tuple] = {}
+_POI_QUERY_CACHE_IMPL: BoundedTTLCache = register_cache(
+    BoundedTTLCache("poi_query", max_entries=256, ttl_seconds=1800.0)
+)
+# 兼容存量代码与测试：以底层 dict 视图直接读条目（写入时刻, 行列表）。
+# 写入/淘汰/TTL/命中率统一走 _POI_QUERY_CACHE_IMPL，不再"超限整体清空"。
+_POI_QUERY_CACHE: Dict[str, tuple] = _POI_QUERY_CACHE_IMPL.entries
 _POI_CACHE_STATS: Dict[str, int] = {"hits": 0, "misses": 0}
 
 
@@ -431,25 +437,21 @@ def _poi_cache_key(city: str, keywords: str, types: str, limit: int, play_worthy
 
 
 def _poi_cache_get(key: str) -> Optional[List[Dict[str, Any]]]:
-    ttl = poi_cache_ttl_seconds()
-    if ttl <= 0:
+    if poi_cache_ttl_seconds() <= 0:
         return None
-    item = _POI_QUERY_CACHE.get(key)
-    if not item:
-        return None
-    stored_at, rows = item
-    if time.monotonic() - float(stored_at) > ttl:
-        _POI_QUERY_CACHE.pop(key, None)
+    rows, age = _POI_QUERY_CACHE_IMPL.get_with_meta(key)
+    if rows is None or age is None:
         return None
     return [dict(row) for row in rows]
 
 
 def _poi_cache_set(key: str, rows: Sequence[Mapping[str, Any]]) -> None:
-    if poi_cache_ttl_seconds() <= 0 or not rows:
+    ttl = poi_cache_ttl_seconds()
+    if ttl <= 0 or not rows:
         return
-    if len(_POI_QUERY_CACHE) >= 256:  # 简单的上限，避免长时间运行把内存吃光
-        _POI_QUERY_CACHE.clear()
-    _POI_QUERY_CACHE[key] = (time.monotonic(), [dict(row) for row in rows])
+    # 有容量上限（256）与 LRU 淘汰：不再"超限整体 clear"——整体清空会把还在命中的热点一起丢，
+    # 下一次同样的查询又要重新打高德（QPS 是本项目最紧的资源）。
+    _POI_QUERY_CACHE_IMPL.set(key, [dict(row) for row in rows], ttl=ttl)
 
 
 
@@ -559,9 +561,6 @@ def _satisfaction_from_simulation(simulation: Any) -> Dict[str, int]:
         if isinstance(value, (int, float)):
             scores[str(name)] = int(round(max(0.0, min(1.0, float(value))) * 100))
     return scores
-from duckduckgo_search import DDGS
-import redis.asyncio as redis
-from api.risk_service import RiskService, compute_node_risk, detect_risk_changes
 
 router = APIRouter()
 
@@ -598,14 +597,40 @@ planning_bandit = ContextualThompsonBandit(
 for _arm in filter(None, (item.strip() for item in os.getenv("AI_BANDIT_ARMS", "builtin-joint-v1:balanced,builtin-joint-v1:relaxed").split(","))):
     planning_bandit.register(_arm)
 _bandit_state_file = os.getenv("AI_BANDIT_STATE_FILE", "").strip()
+# Bandit 状态也有 TTL（默认 30 天）：状态文件长期不更新，通常意味着模型版本/奖励口径已经换过，
+# 继续拿几十天前学到的后验当"当前最优臂"是在用一个过期的结论做决策。
+# 过期就不恢复（从新建状态文件开始学），并在日志里说明原因 —— 不静默沿用。
+def _bandit_state_stale_days(path: str) -> Optional[float]:
+    # 默认 30 天；显式设为 0/负数表示不做过期判断（仍在日志里给出文件年龄便于排查）
+    ttl_days_raw = str(os.getenv("AI_BANDIT_STATE_TTL_DAYS") or "").strip() or "30"
+    try:
+        ttl_days = float(ttl_days_raw)
+    except ValueError:
+        ttl_days = 30.0
+    if ttl_days <= 0:
+        return None
+    try:
+        age_seconds = max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        return None
+    age_days = age_seconds / 86400.0
+    return age_days if age_days > ttl_days else None
+
+
 if _bandit_state_file:
-    if planning_bandit.load(_bandit_state_file):
+    _stale_days = _bandit_state_stale_days(_bandit_state_file)
+    if _stale_days is not None:
+        print(
+            f"⌛ [Bandit] 学习状态已过期（{_stale_days:.1f} 天未更新），不恢复旧后验，重新开始学习",
+            flush=True,
+        )
+    if _stale_days is None and planning_bandit.load(_bandit_state_file):
         print(f"♻️ [Bandit] 已从 {_bandit_state_file} 恢复学习状态", flush=True)
     else:
-        # The state file does not exist yet. Arm the path and write an initial
-        # snapshot, otherwise `record()` has no path to save to and every learned
-        # posterior is lost on restart — which is what made the learning loop
-        # look like it worked while accumulating nothing durable.
+        # The state file does not exist yet (or is stale, see above). Arm the path
+        # and write an initial snapshot, otherwise `record()` has no path to save to
+        # and every learned posterior is lost on restart — which is what made the
+        # learning loop look like it worked while accumulating nothing durable.
         try:
             planning_bandit.save(_bandit_state_file)
             planning_bandit.arm_state_file(_bandit_state_file)
@@ -616,118 +641,42 @@ if _bandit_state_file:
 
 # ==========================================
 # 实时数据缓存层：降低 API 调用成本、提高响应速度（TTL=1h，满足更新频率>=每小时1次）
+# 容量上限 512：以前是裸 dict 无上限，长跑进程内存只增不减；
+# 每条带到期时刻，过期即删，命中率登记到 /metrics（`cache_metrics()`）。
 # ==========================================
-import time as _time
 
-_api_cache: Dict[str, tuple] = {}
+_api_cache: BoundedTTLCache = register_cache(
+    BoundedTTLCache("external_api", max_entries=512, ttl_seconds=3600.0)
+)
 
 def _cache_get(key: str):
-    item = _api_cache.get(key)
-    if not item:
-        return None
-    expire_ts, val = item
-    if _time.time() > expire_ts:
-        _api_cache.pop(key, None)
-        return None
+    val, _age = _api_cache.get_with_meta(key)
     return val
 
+def _cache_get_with_meta(key: str):
+    """返回 (值, 缓存年龄秒)：数据卡片要如实说明"这是缓存还是刚取的"。"""
+    return _api_cache.get_with_meta(key)
+
 def _cache_set(key: str, val, ttl: int = 3600):
-    _api_cache[key] = (_time.time() + ttl, val)
+    _api_cache.set(key, val, ttl=ttl)
+
+
+def _llm_usage_tokens(resp: Any) -> Tuple[Optional[int], Optional[int]]:
+    """取 OpenAI 兼容响应的 usage（缺失就如实返回 None，不按字符数瞎估）。"""
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return None, None
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    return (
+        int(prompt) if isinstance(prompt, int) else None,
+        int(completion) if isinstance(completion, int) else None,
+    )
 
 
 # ==========================================
 # 👑 辅助工具：中文与多格式游玩天数解析器
 # ==========================================
-def parse_chinese_days(text: str) -> int:
-    """
-    智能解析用户输入中的游玩天数，支持 '3天', '三天', '五日游', '两天一夜', '七天大环线' 等表述
-    """
-    if not text:
-        return 3
-        
-    cn_num_map = {
-        '一': 1, '二': 2, '两': 2, '仨': 3, '三': 3, '四': 4, '五': 5, 
-        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15
-    }
-    
-    # 优先匹配阿拉伯数字：如 "3天", "5日", "7天6晚"
-    match_digit = re.search(r'(\d+)\s*[天日]', text)
-    if match_digit:
-        val = int(match_digit.group(1))
-        return max(1, min(15, val))
-        
-    # 匹配中文连词复合表达：如 "两天一夜" -> 2天, "三天两晚" -> 3天
-    match_compound = re.search(r'([一二两仨三四五六七八九十\d]+)\s*天\s*[一二两仨三四五六七八九十\d]+\s*[晚夜]', text)
-    if match_compound:
-        val_str = match_compound.group(1)
-        if val_str.isdigit():
-            return max(1, min(15, int(val_str)))
-        return cn_num_map.get(val_str, 3)
-        
-    # 匹配中文单个数字：如 "三天", "五天", "两日游"
-    match_cn = re.search(r'([一二两仨三四五六七八九十]+)\s*[天日]', text)
-    if match_cn:
-        cn_char = match_cn.group(1)
-        return cn_num_map.get(cn_char, 3)
-        
-    return 3
-
-
-def parse_budget_amount(text: str, trip_days: int = 1, member_count: int = 1) -> int:
-    """
-    从用户诉求文本中解析预算金额，返回「总预算」数值（元），无法解析时返回 0。
-    支持："预算5000"、"总预算1万"、"人均300"、"每天600"、"8000元"、"1.5万" 等表述。
-    """
-    if not text:
-        return 0
-    days = max(trip_days, 1)
-    members = max(member_count, 1)
-
-    def _to_number(num_str: str, unit: str = "") -> float:
-        try:
-            val = float(num_str)
-        except (TypeError, ValueError):
-            return 0.0
-        if "万" in (unit or ""):
-            val *= 10000
-        elif "千" in (unit or ""):
-            val *= 1000
-        return val
-
-    # 1) 总预算/预算 明确表述（优先级最高）
-    m = re.search(r'(?:总预算|整体预算|预算|花销)\D{0,4}(\d+(?:\.\d+)?)\s*(万|千|元|块)?', text)
-    if m:
-        val = _to_number(m.group(1), m.group(2))
-        if val >= 100:
-            return int(val)
-
-    # 2) 人均表述 -> 人均 × 人数 × 天数
-    m = re.search(r'人均\D{0,4}(\d+(?:\.\d+)?)\s*(万|千|元|块)?', text)
-    if m:
-        per = _to_number(m.group(1), m.group(2))
-        if per >= 10:
-            return int(per * members * days)
-
-    # 3) 每天/每日/一天 表述 -> 日均 × 天数
-    m = re.search(r'(?:每天|每日|一天|日均)\D{0,4}(\d+(?:\.\d+)?)\s*(万|千|元|块)?', text)
-    if m:
-        per = _to_number(m.group(1), m.group(2))
-        if per >= 10:
-            return int(per * days)
-
-    # 4) 裸金额带「万」：如 "1万"、"1.5万"
-    m = re.search(r'(\d+(?:\.\d+)?)\s*万', text)
-    if m:
-        return int(_to_number(m.group(1), "万"))
-
-    # 5) 裸金额带「元/块」：如 "5000元"、"800块"
-    m = re.search(r'(\d{3,})\s*(?:元|块)', text)
-    if m:
-        return int(float(m.group(1)))
-
-    return 0
-
-
 # ==========================================
 # 👑 文旅偏好信号与 POI 分类：驱动偏好权重、每日均衡排布与覆盖校验
 # ==========================================
@@ -827,7 +776,7 @@ async def collect_nearby_food_candidates(
     if isinstance(route, Mapping):
         nodes = [node for node in nodes_of(route)]
     else:
-        nodes = [node for node in (route or []) if isinstance(node, Mapping)]
+        nodes = [dict(node) for node in (route or []) if isinstance(node, Mapping)]
     pool: Dict[str, List[Dict[str, Any]]] = {"food": []}
     report: List[Dict[str, Any]] = []
     total_days = max(1, int(days or 1))
@@ -837,10 +786,19 @@ async def collect_nearby_food_candidates(
             continue
         if any(_is_food(node) for node in day_nodes):
             continue  # 这天已经有饭点了，不用查
-        coords = [node_lnglat(node) for node in day_nodes if not _is_lodging(node) and node_lnglat(node)]
+        coords: List[Tuple[float, float]] = []
+        for node in day_nodes:
+            if _is_lodging(node):
+                continue
+            coord = node_lnglat(node)
+            if coord:
+                coords.append(coord)
         if not coords:
             continue
-        center = [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        center = (
+            sum(c[0] for c in coords) / len(coords),
+            sum(c[1] for c in coords) / len(coords),
+        )
         try:
             rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
         except Exception as exc:
@@ -891,124 +849,6 @@ def _desc_for(item: Any, city: str, provider_desc: Any = "") -> "tuple[str, str]
     )
 
 
-def extract_preference_signals(text: str) -> Dict[str, Any]:
-    """从用户诉求文本中抽取住宿/餐饮/风景/文化/购物偏好信号，供权重与校验使用。"""
-    t = str(text or "").lower()
-
-    def positive_mention(words: List[str]) -> bool:
-        """忽略“不想去/少安排”等否定上下文，避免把排除项当成偏好项。"""
-        for word in words:
-            for match in re.finditer(re.escape(word), t):
-                prefix = t[max(0, match.start() - 10):match.start()]
-                if re.search(r"(?:不想|不要|不去|别|少|减少|去掉|换掉|排除|不需要)", prefix):
-                    continue
-                return True
-        return False
-
-    cultural_words = ["博物馆", "博物院", "展馆", "展览馆", "纪念馆", "美术馆", "历史", "古迹", "文化", "人文", "人文景观"]
-    # 排除人文的三种说法（用户口径 2026-10-04：说"只想看自然"时人文就该让位）：
-    #   ① 明确否定："不要博物馆/少安排人文"；
-    #   ② 只谈自然："只想看自然景观""专门来爬山的"——且整句里根本没提人文/文化；
-    #   ③ 老口径：否定词 + 文化类词。
-    excludes_cultural = bool(
-        re.search(r"(?:不想|不要|不去|别|少|减少|去掉|换掉|排除|不需要)[^。；，,!?！?]{0,10}(?:博物馆|博物院|展馆|展览馆|纪念馆|美术馆|文化|人文)", t)
-    ) or bool(
-        re.search(r"(?:不想|不要|不去|少安排|不用安排|别安排|别去|不看)[^。；，,!?！?]{0,6}(?:人文|博物馆|文化|古迹)", t)
-    ) or bool(
-        # 语序反过来："人文少安排""博物馆就不用去了"。这里必须列具体词，
-        # 不能写成"文化+不"，否则"人文不少"会被误判成排除。
-        re.search(r"(?:人文|文化|博物馆|古迹|历史)[^。；，,!?！?]{0,3}(?:少安排|少一点|少去|少逛|不用|不要|不去|免了|砍掉|去掉|别安排|别去)", t)
-    )
-    mentions_culture = any(word in t for word in ["人文", "文化", "博物馆", "博物院", "古迹", "历史"])
-    # ⚠️ 2026-10-07 用户裁决：「如果用户说只看自然，就没必要安排人文了，按照用户的需求来制定方案」。
-    #    原来的触发词只有"只想/只看/只要/专门/就想/全程"——真实的诉求「想看自然风景」**不匹配**，
-    #    于是 `exclude_cultural` 一直是 False、配比里仍留 20% 人文（伊宁真跑：9 景区 + 2 人文，
-    #    然后门禁反过来说"某天玩点全是人文"）。这里把"想看/想去看/主要是/以…为主/重点看"
-    #    一并算作"以自然为主"；`mentions_culture` 这道护栏不变（说了"也想去博物馆"就不排除）。
-    nature_focus = bool(
-        re.search(
-            r"(?:只想|只看|只要|专门|就想|想去看|想看|主要是|重点看|以|全程|就是为了)"
-            r"[^。；，,!?！?]{0,6}(?:自然|风景|景区|户外|雪山|爬山|登山|徒步|山|湖|草原|沙漠|峡谷|胡杨|湿地|森林)",
-            t,
-        )
-    ) or bool(re.search(r"(?:自然|风景|景区|户外)[^。；，,!?！?]{0,4}(?:为主|优先|就行|即可)", t))
-    if nature_focus and not mentions_culture:
-        excludes_cultural = True
-
-    # 距离容忍度：用户说"不考虑距离"时，规划形态应该变成"在更大范围里找景区最优路径"，
-    # 而不是继续在市区打转（实测：市区检索只有 ≤5km 的公园，真景区在 47-76km 外）。
-    #
-    # ⚠️ 顺序要紧：**先判"不介意距离"**，再判"嫌远" —— 否则"不介意太远"会被后一条抓成 low。
-    # 用户口径（2026-10-05）：方案里出现"单日 447km"这种是可以接受的（只要标明），
-    # 但**用户一说不想跑远，就必须按他的意思把远点移出去**（distance_tolerance=low
-    # → daily_far_limit=0 → travel 修复会移出远点）。所以"嫌远"的说法要尽量收全。
-    if any(k in t for k in ["不考虑距离", "不介意距离", "不嫌远", "多远都行", "多远都可以", "可以跑远", "跑远一点", "距离不是问题", "不介意远", "愿意跑远", "远一点也没关系", "不在乎距离", "不介意太远", "远点也行", "远一点也行", "可以远一点", "不介意跑远", "不介意跑太远", "跑远也行", "不介意走远", "远也愿意"]):
-        distance_tolerance = "high"
-    elif any(k in t for k in [
-        "不想跑远", "别太远", "不要太远", "不想走远", "就近", "附近玩", "近距离",
-        # 用户投诉/二次增量里真实会说的说法（2026-10-05 补）
-        "太远", "太远了", "太折腾", "路上太折腾", "别折腾", "不想跑那么远", "不想跑这么远",
-        "不想去那么远", "不想去这么远", "别安排那么远", "别排那么远", "换近", "近一点", "近一点的",
-        "不要那么远", "不要这么远", "远的地方不去", "少跑点", "别跑太远",
-    ]):
-        distance_tolerance = "low"
-    else:
-        distance_tolerance = "normal"
-
-    signals: Dict[str, Any] = {
-        "wants_hotel": False, "wants_food": False, "wants_scenic": False,
-        "wants_cultural": False, "wants_shopping": False, "luxury_hotel": False,
-        "exclude_cultural": excludes_cultural,
-        "distance_tolerance": distance_tolerance,
-        "requirements": [],
-    }
-    if any(k in t for k in ["酒店", "住宿", "民宿", "度假村", "客栈", "宾馆", "入住", "五星", "豪华"]):
-        signals["wants_hotel"] = True
-        signals["requirements"].append("住宿/酒店")
-    if any(k in t for k in ["高档", "豪华", "五星", "奢华", "品质", "度假", "高端"]):
-        signals["luxury_hotel"] = True
-    if any(k in t for k in ["美食", "吃", "餐厅", "特色菜", "小吃", "老字号", "夜市", "火锅", "口味", "本地菜"]) or "餐" in t:
-        signals["wants_food"] = True
-        signals["requirements"].append("餐饮/美食")
-    # 自然景观：只认**多字短语**，不收"景观""自然"这种宽词 ——
-    # 否则"人文景观"会被判成想看自然（用户的抱怨原话里就有这个词）。
-    scenic_phrases = [
-        "风景", "自然风光", "自然风景", "自然景观", "自然保护区", "地质公园", "湿地公园",
-        "森林公园", "山水", "公园", "景点", "景区", "户外", "峡谷", "草原", "温泉", "园林",
-        "爬山", "徒步", "雪山", "海岛", "湖边", "看海", "湖泊", "森林", "湿地", "沙漠",
-        "戈壁", "观景", "绿洲",
-        # 「以自然为主」这类说法也是明确的自然诉求（2026-10-07 用户裁决：以自然为主就别排人文）。
-        # 收的是**多字短语**，不会把"人文景观"误判成自然。
-        "自然为主", "以自然为主", "自然优先", "只看自然", "只想看自然",
-    ]
-    if any(k in t for k in scenic_phrases):
-        # 实测事故（2026-10-04）：用户原话是"我想看更多的自然景观"，而词表里只有
-        # "自然风光/风景"，于是 wants_scenic=False —— 诉求被丢掉，行程排成了人文景点。
-        signals["wants_scenic"] = True
-        signals["requirements"].append("自然风景")
-    if positive_mention(cultural_words) and not excludes_cultural:
-        signals["wants_cultural"] = True
-        signals["requirements"].append("文化历史")
-    if any(k in t for k in ["购物", "商场", "商圈", "商业街", "逛街"]):
-        signals["wants_shopping"] = True
-        signals["requirements"].append("购物商圈")
-    # 城市公园：默认限量（1~2 个），用户**明确想逛公园/乐园**时放宽 ——
-    # "喜欢的话后续再添加"这条产品口径就落在这个信号上。
-    park_words = ["公园", "游乐园", "动物园", "植物园", "乐园", "园林"]
-    if any(k in t for k in park_words) and positive_mention(park_words):
-        signals["wants_park"] = True
-        signals["requirements"].append("城市公园/乐园")
-    if distance_tolerance == "high":
-        signals["requirements"].append("不介意跑远（跨景区）")
-    elif distance_tolerance == "low":
-        signals["requirements"].append("尽量就近")
-    if excludes_cultural:
-        signals["requirements"] = [item for item in signals["requirements"] if item != "文化历史"]
-    if not signals["requirements"]:
-        signals["requirements"] = ["常规观光、特色美食与舒适住宿"]
-    return signals
-
-
 def validate_preference_coverage(routes: List[Dict], signals: Dict[str, Any]) -> Dict[str, Any]:
     """校验用户输入偏好是否都在路线中被覆盖，返回结构化结果。"""
     checks: List[Dict[str, Any]] = []
@@ -1041,36 +881,6 @@ def validate_preference_coverage(routes: List[Dict], signals: Dict[str, Any]) ->
 # ==========================================
 # 👑 容错 JSON 修复与解析器：彻底解决 JSON 语法崩溃与字符串内部非安全字符报错
 # ==========================================
-def safe_repair_and_parse_json(json_str: str) -> dict:
-    if not json_str:
-        return {}
-
-    clean_str = str(json_str).strip()
-    clean_str = re.sub(r'```json', '', clean_str)
-    clean_str = re.sub(r'```', '', clean_str).strip()
-
-    try:
-        return json.loads(clean_str)
-    except Exception:
-        pass
-
-    # 正则修复：清理 JSON 数组/对象末尾多余的逗号
-    clean_str = re.sub(r',\s*([\}\]])', r'\1', clean_str)
-    # 替换未转义的普通换行符
-    clean_str = clean_str.replace('\n', '\\n').replace('\r', '')
-
-    try:
-        return json.loads(clean_str)
-    except Exception:
-        last_brace = clean_str.rfind("}")
-        if last_brace != -1:
-            try:
-                return json.loads(clean_str[:last_brace+1])
-            except Exception:
-                pass
-    return {}
-
-
 # 风险计算逻辑（compute_risk_dimensions / compute_node_risk / detect_risk_changes）
 # 已抽离至 api/risk_service.py，本模块通过顶部 import 引用（RiskService / compute_node_risk / detect_risk_changes）。
 
@@ -1232,56 +1042,6 @@ event_bus = RedisEventStream()
 OMNI_EVENTS_STREAM = "omni:events:global"
 
 
-def build_reasoning_step(agent: str, action: str, claim: str, basis: str) -> dict:
-    """构造一条结构化推理步骤（供前端博弈过程可视化回放 + Redis 存档）。
-    action: claim（主张）/ compromise（妥协）/ decision（决策）。
-    """
-    return {
-        "agent": agent,
-        "action": action,
-        "claim": claim,
-        "basis": basis,
-        "ts": datetime.datetime.now().strftime("%H:%M:%S"),
-    }
-
-
-def audit_route_agent_proposal(route: list[dict], *, agent_id: str = "route-planner") -> dict:
-    """Run the generated route through the coordinator-facing proposal gate.
-
-    This audit is non-blocking during migration: invalid or unsourced output is
-    marked degraded and remains visible to the coordinator/UI, but it cannot be
-    mistaken for a fully evidenced specialist proposal.
-    """
-    evidence = []
-    for node in route if isinstance(route, list) else []:
-        if not isinstance(node, dict):
-            continue
-        sources = node.get("data_sources") or {}
-        if not isinstance(sources, dict):
-            continue
-        for field, provider in sources.items():
-            provider_name = provider.get("provider") if isinstance(provider, dict) else provider
-            if provider_name in (None, "", "unavailable", "estimated"):
-                continue
-            evidence.append({"field": str(field), "provider": str(provider_name), "observed_at": proposal_timestamp(), "estimated": bool(node.get("estimated", False))})
-    payload = {
-        "agent_id": agent_id,
-        "domain": "itinerary",
-        "status": "ok" if route and evidence else "degraded",
-        "degraded": not bool(route and evidence),
-        "candidates": [{"name": node.get("name") or node.get("location")} for node in route[:50] if isinstance(node, dict)],
-        "hard_constraint_results": {"route_present": bool(route)},
-        "evidence": evidence[:200],
-        "confidence": 0.75 if evidence else 0.0,
-        "failure": None if route and evidence else {"code": "evidence_missing", "message": "路线存在但缺少可核验来源", "retryable": False, "fallback": "supplier_refresh"},
-    }
-    try:
-        proposal = validate_agent_proposal(payload)
-        return {"agent_id": proposal.agent_id, "status": proposal.status, "evidence_count": len(proposal.evidence), "candidate_count": len(proposal.candidates), "degraded": proposal.degraded}
-    except Exception as error:
-        return {"agent_id": agent_id, "status": "failed", "evidence_count": len(evidence), "candidate_count": len(payload["candidates"]), "degraded": True, "error": str(error)}
-
-
 # ==========================================
 # 2. 算法层：文旅 POI 硬核清洗过滤器（彻底杜绝油漆/手机/建材等非旅游门店）
 # ==========================================
@@ -1303,7 +1063,7 @@ def deduplicate_and_diversify_pois(pois: List[Dict]) -> List[Dict]:
     seen_categories = set()
     seen_root_names = set()
     # 👑 类型多样性追踪：确保风景区/文化/美食三类都有充足候选
-    type_buckets = {"scenic": [], "cultural": [], "food": [], "shopping": [], "other": []}
+    type_buckets: Dict[str, List[Dict]] = {"scenic": [], "cultural": [], "food": [], "shopping": [], "other": []}
     result = []
 
     # 景区关键词（自然风景/公园/山/湖/河/园林等）
@@ -1343,7 +1103,6 @@ def deduplicate_and_diversify_pois(pois: List[Dict]) -> List[Dict]:
 
     def _classify_poi_type(name: str, poi_type: str) -> str:
         """根据名称和类型分类 POI"""
-        name_lower = name.lower()
         poi_type_str = str(poi_type or "").lower()
         # 高德 type 码直接映射
         if any(t in poi_type_str for t in ["110000", "风景名胜", "公园", "景点"]):
@@ -1416,129 +1175,51 @@ def deduplicate_and_diversify_pois(pois: List[Dict]) -> List[Dict]:
         ("shopping", type_buckets["shopping"]),
         ("other", type_buckets["other"]),
     ]
-    max_len = max(len(b) for _, b in buckets)
+    max_len = max(len(items) for _, items in buckets)
     for i in range(max_len):
-        for _, bucket in buckets:
-            if i < len(bucket):
-                diversified.append(bucket[i])
+        for _, bucket_items in buckets:
+            if i < len(bucket_items):
+                diversified.append(bucket_items[i])
     # 追加剩余未取完的
-    for _, bucket in buckets:
-        if len(bucket) > max_len:
-            diversified.extend(bucket[max_len:])
+    for _, bucket_items in buckets:
+        if len(bucket_items) > max_len:
+            diversified.extend(bucket_items[max_len:])
 
     return diversified
 
 
 # ==========================================
-# 3. 算法层：纳什均衡与帕累托最优
+# 3. 算法层：冲突消解（帕累托非支配筛选）与图论寻优
 # ==========================================
-class NashEquilibriumSolver:
-    @staticmethod
-    def _numeric(value: Any) -> float:
-        try:
-            match = re.search(r"-?\d+(?:\.\d+)?", str(value or ""))
-            return float(match.group()) if match else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+# ⚠️ 命名由来：类名 `NashEquilibriumSolver` 是历史遗留，它**不计算纳什均衡**，
+# 做的是多目标帕累托非支配筛选（见 core/negotiation_algos.py 的实现与注释）。
+# 名字保留是为了不破坏既有导入；但**对用户的文案不得沿用这个名字的暗示**
+# （见本文件下方 emit 文案的口径修正）。
+# 已抽取到 core/negotiation_algos.py（2026-10-10）：这两个类与请求/流式状态无关，
+# 是纯算法。搬出去后 agent.py 少 ~95 行，且它们可以被单独测试与复用。
+# 这里重新导出以保持既有调用方不变（`NashEquilibriumSolver` / `GraphRouteOptimizer`
+# 在 agent 命名空间下仍然可用）。
+from core.negotiation_algos import GraphRouteOptimizer, NashEquilibriumSolver  # noqa: E402,F401
 
-    @staticmethod
-    def resolve_conflicts(pois: List[Dict]) -> Dict[str, Any]:
-        """Return a real Pareto audit instead of a threshold-filtered list.
-
-        Candidate fitness remains one objective for compatibility, while cost,
-        risk and distance are kept explicit so the caller can inspect why a
-        candidate was retained or dominated.
-        """
-        if not isinstance(pois, list):
-            return {"frontier": [], "rejected": [], "objectives": []}
-        valid = []
-        rejected_invalid = []
-        for index, candidate in enumerate(pois):
-            if not isinstance(candidate, dict):
-                rejected_invalid.append({"candidate": "", "index": index, "reason": "candidate_not_object"})
-                continue
-            validation = validate_candidate(candidate)
-            if validation.get("valid"):
-                valid.append(candidate)
-            else:
-                rejected_invalid.append({"candidate": str(candidate.get("name") or candidate.get("location") or ""), "index": index, "reason": "hard_constraint_violation", "violations": validation.get("violations", [])})
-        result = pareto_frontier(
-            valid,
-            {
-                "fitness": lambda row: float(row.get("fitness_score", 0) or 0),
-                "cost": lambda row: NashEquilibriumSolver._numeric(row.get("cost", row.get("cost_estimate", 0))),
-                "risk": lambda row: NashEquilibriumSolver._numeric(row.get("risk_score", row.get("riskScore", 0))),
-            },
-            {"fitness": True, "cost": False, "risk": False},
-        )
-        result["rejected"] = rejected_invalid + result.get("rejected", [])
-        result["rejected_count"] = len(result["rejected"])
-        return result
-
-
-# ==========================================
-# 4. 算法层：DBSCAN 聚类与 NetworkX 图论寻优
-# ==========================================
-class GraphRouteOptimizer:
-    def __init__(self, fitness_calculator):
-        self.calc = fitness_calculator
-
-    def optimize_and_sort(self, pois: List[Dict], max_nodes: int) -> List[Dict]:
-        if not pois or not isinstance(pois, list):
-            return []
-        valid_pois = []
-        coords = []
-
-        for p in pois:
-            if not isinstance(p, dict):
-                continue
-            loc = p.get("location", "")
-            if isinstance(loc, list) and len(loc) >= 2:
-                try:
-                    lat, lon = float(loc[1]), float(loc[0])
-                    coords.append([lat, lon])
-                    valid_pois.append(p)
-                except Exception:
-                    pass
-            elif isinstance(loc, str) and "," in loc:
-                try:
-                    lon, lat = map(float, loc.split(","))
-                    coords.append([lat, lon]) 
-                    valid_pois.append(p)
-                except Exception:
-                    pass
-
-        if len(coords) < 3: 
-            return sorted(valid_pois, key=lambda x: float(x.get("fitness_score", 0) or 0), reverse=True)[:max_nodes]
-
-        try:
-            X = np.radians(np.array(coords))
-            db = DBSCAN(eps=6/6371.0, min_samples=1, algorithm='ball_tree', metric='haversine').fit(X)
-
-            G = nx.Graph()
-            for i, poi in enumerate(valid_pois):
-                poi['cluster'] = int(db.labels_[i])
-                G.add_node(i, attr=poi)
-
-            for i in range(len(valid_pois)):
-                for j in range(i + 1, len(valid_pois)):
-                    dist = self.calc._haversine_distance(coords[i][0], coords[i][1], coords[j][0], coords[j][1])
-                    score_val = float(valid_pois[j].get("fitness_score", 0) or 0)
-                    edge_weight = dist - (score_val * 0.1)
-                    G.add_edge(i, j, weight=max(0.1, edge_weight))
-
-            tsp_path = nx.approximation.traveling_salesman_problem(G, cycle=False)
-            optimized_pois = [G.nodes[n]['attr'] for n in tsp_path]
-            return optimized_pois[:max_nodes]
-        except Exception:
-            return sorted(valid_pois, key=lambda x: float(x.get("fitness_score", 0) or 0), reverse=True)[:max_nodes]
+# 用户输入解析与小工具（2026-10-10 抽取到 core/text_parsing.py，第二批）。
+# 这 7 个函数与请求/流式状态无关，AST 实测为零内部依赖，因此可以整批搬走。
+# 这里重新导出，既有调用方（含测试与 tools/）无需改动。
+from core.text_parsing import (  # noqa: E402,F401
+    _fairness_limit_from_env,
+    _static_map_url,
+    build_reasoning_step,
+    extract_preference_signals,
+    parse_budget_amount,
+    parse_chinese_days,
+    safe_repair_and_parse_json,
+)
 
 
 # ==========================================
 # 5. 算法层：全方位拓扑适应度计算器（全面防 Null 校验）
 # ==========================================
 class TopologyFitnessCalculator:
-    def __init__(self, user_prefs: dict, city_center_coord: str, evolution_memory: list, safety_intel: dict = None, is_luxury: bool = False, preference_signals: dict = None, profile_boost: dict = None, budget_gamma_scale: float = 1.0, fine_tag_boost: dict = None):
+    def __init__(self, user_prefs: dict, city_center_coord: str, evolution_memory: list, safety_intel: Optional[dict] = None, is_luxury: bool = False, preference_signals: Optional[dict] = None, profile_boost: Optional[dict] = None, budget_gamma_scale: float = 1.0, fine_tag_boost: Optional[dict] = None):
         self.user_prefs = user_prefs if isinstance(user_prefs, dict) else {}
         self.mode = str(self.user_prefs.get("mode") or "coop").lower()
         self.center_lat, self.center_lon = self._parse_coord(city_center_coord)
@@ -1647,7 +1328,7 @@ class TopologyFitnessCalculator:
         if not isinstance(poi, dict):
             return 0.0
 
-        rating_val = poi.get("rating")
+        rating_val: Any = poi.get("rating")
         if isinstance(rating_val, list):
             rating_val = rating_val[0] if rating_val else None
 
@@ -1891,8 +1572,7 @@ class ExpertToolbox:
             print(f"♻️ [候选缓存] {city} 的这次检索命中缓存（{len(_cached_rows)} 条，TTL {poi_cache_ttl_seconds():.0f}s）", flush=True)
             return _cached_rows
         _POI_CACHE_STATS["misses"] = int(_POI_CACHE_STATS.get("misses") or 0) + 1
-        from core.poi_pool import parse_amap_location as _parse_amap_location
-        from core.poi_pool import is_play_worthy, poi_record_from_amap, amap_error_is_retryable, amap_error_note
+        from core.poi_pool import is_play_worthy, poi_record_from_amap
         async with _http_client(6.0) as http_client:
             params = {
                 "key": self.amap_key, "keywords": keywords, "city": city,
@@ -1978,8 +1658,6 @@ class ExpertToolbox:
                         cost = biz_ext.get("cost")
                         if isinstance(cost, list):
                             cost = cost[0] if cost else None
-                        rating_source = "amap" if rating not in (None, "") else "unavailable"
-                        cost_source = "amap" if cost not in (None, "") else "unavailable"
 
                         # 记录构造走 core/poi_pool.poi_record_from_amap（纯函数、有单测）：
                         # 它保证**同时**给出 location（"lng,lat" 字符串，供静态地图/跳转）与
@@ -2007,9 +1685,11 @@ class ExpertToolbox:
                                 if _pid not in detail_ids:
                                     detail_ids.append(_pid)
                             detail_ids = detail_ids[:8]
-                            id_to_photos: Dict[str, Any] = {
-                                pid: list(_AMAP_PHOTO_CACHE[pid]) for pid in detail_ids if pid in _AMAP_PHOTO_CACHE
-                            }
+                            id_to_photos: Dict[str, Any] = {}
+                            for pid in detail_ids:
+                                cached_photos = _AMAP_PHOTO_CACHE.get(pid)
+                                if cached_photos is not None:
+                                    id_to_photos[pid] = list(cached_photos)
                             _todo = [pid for pid in detail_ids if pid not in id_to_photos]
                             _note_fetch("place/detail(缓存命中)", 0.0, len(detail_ids) - len(_todo))
                             if _todo:
@@ -2025,7 +1705,7 @@ class ExpertToolbox:
                                 detail_resps = await asyncio.gather(*detail_tasks, return_exceptions=True)
                                 _note_fetch("place/detail(补图)", time.monotonic() - _detail_started, len(_todo))
                                 for pid, dresp in zip(_todo, detail_resps):
-                                    if isinstance(dresp, Exception):
+                                    if isinstance(dresp, BaseException):
                                         continue
                                     try:
                                         dj = dresp.json()
@@ -2043,9 +1723,8 @@ class ExpertToolbox:
                                             if urls:
                                                 id_to_photos[pid] = urls[:3]
                                                 # 同一个 POI 在别的查询里还会再出现，缓存起来不再问
-                                                if len(_AMAP_PHOTO_CACHE) >= 512:
-                                                    _AMAP_PHOTO_CACHE.clear()
-                                                _AMAP_PHOTO_CACHE[str(pid)] = list(urls[:3])
+                                                # （容量/淘汰/命中率由 BoundedTTLCache 统一处理）
+                                                _AMAP_PHOTO_CACHE.set(str(pid), list(urls[:3]))
                                     except Exception:
                                         continue
                             for p in pois:
@@ -2104,7 +1783,7 @@ class ExpertToolbox:
             return _cached_rows
         _POI_CACHE_STATS["misses"] = int(_POI_CACHE_STATS.get("misses") or 0) + 1
 
-        from core.poi_pool import amap_error_is_retryable, amap_error_note, is_play_worthy, poi_record_from_amap
+        from core.poi_pool import is_play_worthy, poi_record_from_amap
 
         params: Dict[str, Any] = {
             "key": self.amap_key,
@@ -2163,7 +1842,19 @@ class ExpertToolbox:
         try:
             from core.plan_quality import haversine_km as _haversine_km
 
-            pois.sort(key=lambda item: _haversine_km([lng, lat], item.get("lnglat") or []) or 0.0)
+            center_coord = (float(lng), float(lat))
+
+            def _distance_to_center(item: Mapping[str, Any]) -> float:
+                raw_coord = item.get("lnglat")
+                if not raw_coord:
+                    return 0.0
+                try:
+                    item_lng, item_lat = float(raw_coord[0]), float(raw_coord[1])
+                except (TypeError, ValueError, IndexError, KeyError):
+                    return 0.0
+                return float(_haversine_km(center_coord, (item_lng, item_lat)) or 0.0)
+
+            pois.sort(key=_distance_to_center)
         except Exception:
             pass
         if pois:
@@ -2201,7 +1892,7 @@ class ExpertToolbox:
             return {"status_code": "unknown", "description": "暂无供应商数据", "advice": "请在出行前重新获取实时路况", "source": "unavailable", "estimated": True}
 
     def _extract_polyline_coords(self, path_obj) -> List[List[float]]:
-        coords = []
+        coords: List[List[float]] = []
         if not isinstance(path_obj, dict):
             return coords
         steps = path_obj.get("steps", [])
@@ -2277,7 +1968,7 @@ class ExpertToolbox:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             travel_info: Dict[str, Any] = {}
             for name, resp in zip(names, results):
-                if isinstance(resp, Exception) or not resp:
+                if isinstance(resp, BaseException) or not resp:
                     continue
                 try:
                     data = resp.json()
@@ -2332,9 +2023,8 @@ class ExpertToolbox:
                     continue
             # 只缓存**有结果**的对：空结果不缓存，避免把一次限流的失败固化 6 小时
             if travel_info:
-                if len(_TRAVEL_OPTIONS_CACHE) >= 512:
-                    _TRAVEL_OPTIONS_CACHE.clear()
-                _TRAVEL_OPTIONS_CACHE[cache_key] = dict(travel_info)
+                # 容量上限 512 + LRU 淘汰（不再整体 clear，避免把仍在命中的热点一起丢掉）
+                _TRAVEL_OPTIONS_CACHE.set(cache_key, dict(travel_info))
             return travel_info
         except Exception:
             return {}
@@ -2345,9 +2035,10 @@ class ExpertToolbox:
         if not self.amap_key:
             return {}
         cache_key = f"amap_weather:{city}"
-        cached = _cache_get(cache_key)
+        cached, cache_age = _cache_get_with_meta(cache_key)
         if cached:
-            return cached
+            # 如实标注"这是缓存"：天气卡片要显示采集时间，不能把一小时前取的天气说成刚取的
+            return {**cached, "cached": True, "cache_age_seconds": round(float(cache_age or 0.0), 1)}
 
         try:
             async with _http_client(3.5) as http_client:
@@ -2381,7 +2072,15 @@ class ExpertToolbox:
                             "temp": f"{d.get('nighttemp', '')}~{d.get('daytemp', '')}°C"
                         })
                     condition = f"{now_text} {now_temp}°C" if now_temp else now_text
-                    result = {"condition": condition or "暂无供应商数据", "forecast": forecast, "source": "amap", "estimated": False}
+                    result = {
+                        "condition": condition or "暂无供应商数据",
+                        "forecast": forecast,
+                        "source": "amap",
+                        "estimated": False,
+                        # 采集时间：外部数据必须能被追问"你是什么时候知道的"
+                        "fetched_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                        "cached": False,
+                    }
                     _cache_set(cache_key, result, ttl=3600)
                     return result
         except Exception:
@@ -2440,36 +2139,33 @@ class ExpertToolbox:
 
                     condition = f"{now_text} {now_temp}°C" if now_temp else now_text
                     if now_text or now_temp or forecast:
-                        return {"condition": condition or "暂无供应商数据", "forecast": forecast, "source": "seniverse", "estimated": False}
+                        return {
+                            "condition": condition or "暂无供应商数据",
+                            "forecast": forecast,
+                            "source": "seniverse",
+                            "estimated": False,
+                            "fetched_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                            "cached": False,
+                        }
 
             except Exception:
                 pass
 
         # Never synthesize current weather when every supplier is unavailable.
         # Callers can keep planning with an explicit unknown/estimated state.
-        return {"condition": "暂无供应商数据", "forecast": [], "source": "unavailable", "estimated": True}
+        return {
+            "condition": "暂无供应商数据",
+            "forecast": [],
+            "source": "unavailable",
+            "estimated": True,
+            "fetched_at": None,
+            "cached": False,
+        }
 
 
 # ==========================================
 # 6.5 🚀 LLM 语义缓存层：embedding 相似度 > 阈值直接复用，Redis 共享缓存避免多实例重复推理
 # ==========================================
-def _static_map_url(lnglat, amap_key, size: str = "720*480", zoom: int = 15) -> str:
-    """按坐标生成高德静态地图 URL（保底图片，永不空白）。"""
-    if not (isinstance(lnglat, list) and len(lnglat) >= 2):
-        return ""
-    try:
-        lng, lat = float(lnglat[0]), float(lnglat[1])
-    except (TypeError, ValueError):
-        return ""
-    if lng == 0.0 and lat == 0.0 or not amap_key:
-        return ""
-    loc_str = f"{lng},{lat}"
-    return (
-        f"https://restapi.amap.com/v3/staticmap?location={loc_str}&zoom={zoom}&size={size}&scale=2"
-        f"&markers=mid,0xFF5722,A:{loc_str}&key={amap_key}"
-    )
-
-
 # 👑 热门城市预生成种子模板：坐标全部来自前端 provinceData 真实数据源，保证冷启动首屏 < 1s
 HOT_CITY_SEED_ROUTES: Dict[str, Dict[str, Any]] = {
     "北京": {
@@ -2502,21 +2198,52 @@ HOT_CITY_SEED_ROUTES: Dict[str, Dict[str, Any]] = {
 }
 
 
+# 种子模板的"同城"半径：超出这个范围的景点已不属于市内当天往返行程。
+# 继续塞进 3 日路线，用户照着走会发现根本执行不了（例如成都模板里的九寨沟）。
+SEED_MAX_RADIUS_KM = 150.0
+
+
 def _build_seed_final_data(city: str, trip_days: int) -> Optional[Dict[str, Any]]:
-    """将热门城市种子地标展开为 trip_days 天的完整 route 节点（冷启动首屏兜底）。"""
+    """将热门城市种子地标展开为 trip_days 天的完整 route 节点（冷启动首屏兜底）。
+
+    两条硬规则：
+
+    * **不重复**：同一个地标在一次行程里只出现一次。此前节点不够就取模循环复用，
+      于是"3 日游"里故宫会连着出现两天 —— 用户照着走会发现第二天无处可去。
+    * **同城半径**：以模板首站为城市锚点，超过 ``SEED_MAX_RADIUS_KM`` 的景点剔除，
+      并在 ``seed_note`` 里写明。宁可在某天少排一个节点，也不拿跨城景点冒充市内行程。
+    """
     seed = HOT_CITY_SEED_ROUTES.get(city)
     if not seed:
         return None
     amap_key = os.getenv("AMAP_API_KEY")
-    nodes = seed["nodes"]
+    anchor = seed["nodes"][0][1]
+    available = []
+    dropped: List[str] = []
+    for name, lnglat, desc in seed["nodes"]:
+        try:
+            distance = float(haversine_km(anchor, lnglat))
+        except Exception:
+            distance = 0.0
+        if distance > SEED_MAX_RADIUS_KM:
+            dropped.append(name)
+            continue
+        available.append((name, lnglat, desc))
+    if not available:
+        return None
+
+    trip_days = max(1, int(trip_days))
+    # 轮转分配：每个地标只用一次；地标少于天数时，后面的天留空而不是重复。
+    day_counts = [0] * trip_days
+    for index in range(len(available)):
+        day_counts[index % trip_days] += 1
+
     route: List[Dict[str, Any]] = []
-    slot_idx = 0
+    slot = 0
     for day in range(1, trip_days + 1):
-        # 每天至少 1 个节点，不足则循环复用种子地标，保证天数完整
-        day_nodes = 2 if day <= 2 else max(1, len(nodes) - 2)
-        for _ in range(day_nodes):
-            name, lnglat, desc = nodes[slot_idx % len(nodes)]
-            slot_idx += 1
+        for position in range(day_counts[day - 1]):
+            name, lnglat, desc = available[slot]
+            slot += 1
             route.append({
                 "day": day,
                 "name": name,
@@ -2524,7 +2251,7 @@ def _build_seed_final_data(city: str, trip_days: int) -> Optional[Dict[str, Any]
                 "lnglat": list(lnglat),
                 "type": "风景",
                 "desc": desc,
-                "time": ["09:00", "11:00", "14:00", "17:30"][slot_idx % 4],
+                "time": ["09:00", "11:00", "14:00", "17:30"][position % 4],
                 "transport": "打车/自驾",
                 "tags": ["经典必游", "预生成模板"],
                 "cost_estimate": "暂无供应商数据",
@@ -2538,12 +2265,27 @@ def _build_seed_final_data(city: str, trip_days: int) -> Optional[Dict[str, Any]
                 "is_hotel": False,
                 "trust_reason": "热门城市预生成种子模板（首屏秒回）",
             })
-    return {
+
+    notes: List[str] = []
+    if dropped:
+        notes.append(
+            f"已剔除超出 {int(SEED_MAX_RADIUS_KM)}km 同城半径的地标：{'、'.join(dropped)}"
+        )
+    empty_days = sum(1 for count in day_counts if count == 0)
+    if empty_days:
+        notes.append(
+            f"可用地标仅 {len(available)} 个，{empty_days} 天未排景点（不重复使用同一地标）"
+        )
+    result: Dict[str, Any] = {
         "status": "seed_template",
         "negotiation_summary": seed["summary"],
         "route": route,
         "recommended_pois": [],
     }
+    if notes:
+        result["seed_note"] = "；".join(notes)
+        result["dropped_nodes"] = dropped
+    return result
 
 
 class SemanticItineraryCache:
@@ -2561,8 +2303,19 @@ class SemanticItineraryCache:
         self.ttl = int(os.getenv("CACHE_TTL", "86400"))  # 默认 24h
         # 缓存命中率排查开关（默认关）：打开后会打印参与哈希的键原文
         self.debug = str(os.getenv("SEMANTIC_CACHE_DEBUG") or "").strip() in {"1", "true", "on", "yes"}
-        self._mem: Dict[str, Dict[str, Any]] = {}
-        self._vec_index: Dict[str, Dict[str, Any]] = {}  # key -> {city, days, vector}
+        # 容量上限（默认 128 份方案）：以前 `_mem` 是裸 dict，且**从不判断 TTL** ——
+        # Redis 那份会给 `ex`，进程内存这份却永不过期，长跑进程会一直命中过期方案。
+        # 现在内存与向量索引都走有界 TTL 缓存：TTL 到期即失效，超限丢最久未用的。
+        try:
+            max_entries = int(os.getenv("SEMANTIC_CACHE_MAX_ENTRIES", "128") or 128)
+        except ValueError:
+            max_entries = 128
+        self._mem: BoundedTTLCache = register_cache(
+            BoundedTTLCache("semantic_cache", max_entries=max(1, max_entries), ttl_seconds=float(self.ttl))
+        )
+        self._vec_index: BoundedTTLCache = register_cache(
+            BoundedTTLCache("semantic_vectors", max_entries=max(1, max_entries), ttl_seconds=float(self.ttl))
+        )
 
     def _key(self, city: str, days: int, profile_text: str) -> str:
         # 👑 版本号参与哈希：修复生成逻辑后 bump 版本即可让旧缓存（缺美食/酒店）自动失效
@@ -2643,7 +2396,7 @@ class SemanticItineraryCache:
         key = self._key(city, days, profile_text)
         hit = self._mem.get(key) or await self._redis_get(key)
         if hit:
-            self._mem[key] = hit
+            self._mem.set(key, hit)  # 从 Redis 回填内存（同样按 TTL 过期）
             print(f"✅ [语义缓存] 精确命中 {city}/{days}天")
             return hit
 
@@ -2657,7 +2410,7 @@ class SemanticItineraryCache:
     async def store(self, city: str, days: int, profile_text: str, payload: Dict[str, Any]):
         days = int(days)
         key = self._key(city, days, profile_text)
-        self._mem[key] = payload
+        self._mem.set(key, payload)
         await self._redis_set(key, payload)
         # fire-and-forget 补充 embedding 向量索引（best-effort，不阻塞主推演流程）
         asyncio.ensure_future(self._index_embedding(key, city, days, profile_text))
@@ -2666,7 +2419,7 @@ class SemanticItineraryCache:
         try:
             vec = await self._embed(profile_text)
             if vec is not None:
-                self._vec_index[key] = {"city": city, "days": days, "vector": vec}
+                self._vec_index.set(key, {"city": city, "days": days, "vector": vec})
         except Exception as e:
             print(f"⚠️ [语义缓存] 向量索引建立跳过: {e}")
 
@@ -3122,8 +2875,8 @@ async def run_negotiate(msg: GatewayMessage):
             async for _e in emit_reasoning("地理精算 Agent", "claim", f"开启【臻选豪华】策略，为【{target_city}】排布 {trip_days} 天精品行程", f"识别到品质诉求关键词，预算模式 HIGH_LUXURY，日均 ¥{round(total_calc_budget / trip_days)}"):
                 yield _e
         else:
-            yield json.dumps({"token": f"[地理精算 Agent]: 启动多智能体【帕累托均衡博弈】模型，正在为【{target_city}】全员排布完整 {trip_days} 天（每日 {target_daily_count} 节点）高共识度路线...\n"}, ensure_ascii=False) + "\n"
-            async for _e in emit_reasoning("地理精算 Agent", "claim", f"启动【帕累托均衡博弈】，为【{target_city}】全员排布 {trip_days} 天高共识度路线", f"成员 {_member_count} 人，每日 {target_daily_count} 节点，预算模式 {budget_mode}"):
+            yield json.dumps({"token": f"[地理精算 Agent]: 启动专家智能体并行提案与成员协商，正在为【{target_city}】全员排布完整 {trip_days} 天（每日 {target_daily_count} 节点）高共识度路线...\n"}, ensure_ascii=False) + "\n"
+            async for _e in emit_reasoning("地理精算 Agent", "claim", f"启动专家智能体并行提案与成员协商，为【{target_city}】全员排布 {trip_days} 天高共识度路线", f"成员 {_member_count} 人，每日 {target_daily_count} 节点，预算模式 {budget_mode}"):
                 yield _e
 
         await asyncio.sleep(0.1)
@@ -3252,6 +3005,9 @@ async def run_negotiate(msg: GatewayMessage):
                 types="060400|060100",
                 limit=limits["shopping"],
             )
+            scenic: List[Dict[str, Any]]
+            cultural: List[Dict[str, Any]]
+            shopping: List[Dict[str, Any]]
             scenic, cultural, shopping = await asyncio.gather(
                 scenic_query, cultural_query, shopping_query, return_exceptions=True
             )
@@ -4029,7 +3785,8 @@ async def run_negotiate(msg: GatewayMessage):
             # optimization_audit.rejected 中明确记录淘汰原因，避免路线退化。
             _min_daytime_pool = trip_days * actual_daily_count
             if len(pareto_daytime) < _min_daytime_pool:
-                _normalize_candidate_name = lambda value: re.sub(r'[\\(（].*?[\\)）]', '', str(value or '')).strip()
+                def _normalize_candidate_name(value: Any) -> str:
+                    return re.sub(r'[\\(（].*?[\\)）]', '', str(value or '')).strip()
                 _frontier_names = {_normalize_candidate_name(p.get("name")) for p in pareto_daytime if isinstance(p, dict)}
                 for _candidate in daytime_pois:
                     _name = _normalize_candidate_name(_candidate.get("name")) if isinstance(_candidate, dict) else ""
@@ -4267,8 +4024,13 @@ async def run_negotiate(msg: GatewayMessage):
                     'hint': short_hint
                 })
 
-            yield json.dumps({"token": f"[时空调度体]: DBSCAN 空间降维与纳什博弈完成！正在交织生成覆盖完整 {trip_days} 天的高密路书...\n\n"}, ensure_ascii=False) + "\n"
-            async for _e in emit_reasoning("时空调度体", "claim", f"DBSCAN 空间降维与纳什博弈收敛，交织生成 {trip_days} 天高密路书", "按地理邻近聚类节点，均衡景点/美食/住宿三类配比"):
+            # 文案口径修正（2026-10-10）：这里以前对用户说"纳什博弈完成/收敛"，但这条链路上
+            # 实际跑的是 `NashEquilibriumSolver.resolve_conflicts` —— 它做的是**帕累托非支配
+            # 筛选**（多目标：fitness↑ / cost↓ / risk↓），全程没有计算任何纳什均衡。类名是历史
+            # 遗留，不该由它把一句不成立的话带到用户面前。DBSCAN 那半句是真的（紧接着的
+            # `GraphRouteOptimizer.optimize_and_sort` 确实做地理聚类 + TSP 近似），所以保留。
+            yield json.dumps({"token": f"[时空调度体]: DBSCAN 空间降维与帕累托前沿筛选完成！正在交织生成覆盖完整 {trip_days} 天的高密路书...\n\n"}, ensure_ascii=False) + "\n"
+            async for _e in emit_reasoning("时空调度体", "claim", f"地理聚类（DBSCAN）与非支配筛选（帕累托前沿）完成，交织生成 {trip_days} 天高密路书", "按地理邻近聚类节点，再用帕累托非支配排序保留 fitness 高、成本低、风险低的候选，并均衡景点/美食/住宿三类配比"):
                 yield _e
 
             team_members_text = "\n".join([f"- 成员【{m.get('name', '游客')}】({m.get('role', '常规')}): 诉求「{m.get('intent', '随心探索')}」" for m in room_members])
@@ -4316,7 +4078,7 @@ async def run_negotiate(msg: GatewayMessage):
 
             # 👑 严格保证天数输出、每日 5 节点、真实花费与干净外链的 Prompt
             system_prompt = f"""
-你是一个专业的多智能体团队旅行协同专家。当前任务：规划【{target_city}】完整【{trip_days}天】的深度团队行程。
+你是一个专业的团队旅行协同规划专家。当前任务：规划【{target_city}】完整【{trip_days}天】的深度团队行程。
 【重要警告：绝对禁止越界！】你安排的所有景点、餐厅、酒店必须严格属于【{target_city}】！
 
 同行房间成员画像与诉求 ({len(room_members)}人)：
@@ -4388,7 +4150,7 @@ async def run_negotiate(msg: GatewayMessage):
 }}
 """
         except Exception as e:
-            print(f"🔥 [算法计算崩溃 Traceback]:")
+            print("🔥 [算法计算崩溃 Traceback]:")
             traceback.print_exc()
             yield json.dumps({"token": f"\n[系统异常] 算法引擎计算失败: {str(e)}\n[FINAL_JSON]\n{{\"status\": \"error\", \"negotiation_summary\": \"算法计算异常\", \"route\": []}}\n"}, ensure_ascii=False) + "\n"
             return
@@ -4539,14 +4301,34 @@ async def run_negotiate(msg: GatewayMessage):
                     f"地点不得与已有天数重复，并严格按照底座数据中的真实花费输出 cost_estimate。"
                     f"请直接输出一个 JSON 数组（数组内为这些缺失天数的完整节点对象）。"
                 )
-                resp = await client.chat.completions.create(
+                _missing_started = time.monotonic()
+                try:
+                    resp = await client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=llm_cfg.temperature(),
+                        max_tokens=llm_cfg.max_tokens(),
+                    )
+                except Exception as _missing_err:
+                    record_llm_call(
+                        model=MODEL_NAME,
+                        label="missing_days",
+                        latency_ms=(time.monotonic() - _missing_started) * 1000.0,
+                        ok=False,
+                        error=type(_missing_err).__name__,
+                    )
+                    raise
+                _missing_prompt_tokens, _missing_completion_tokens = _llm_usage_tokens(resp)
+                record_llm_call(
                     model=MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=llm_cfg.temperature(),
-                    max_tokens=llm_cfg.max_tokens(),
+                    label="missing_days",
+                    latency_ms=(time.monotonic() - _missing_started) * 1000.0,
+                    ok=True,
+                    prompt_tokens=_missing_prompt_tokens,
+                    completion_tokens=_missing_completion_tokens,
                 )
                 content = (resp.choices[0].message.content if resp.choices else "") or ""
                 arr_match = re.search(r'\[[\s\S]*\]', content)
@@ -4567,6 +4349,8 @@ async def run_negotiate(msg: GatewayMessage):
             llm_call_succeeded = False
             last_llm_err: Optional[Exception] = None
             for attempt in range(LLM_MAX_RETRIES + 1):
+                _attempt_started = time.monotonic()
+                _first_token_at: Optional[float] = None
                 try:
                     if attempt > 0:
                         wait_s = min(2 ** attempt, 6)
@@ -4575,7 +4359,7 @@ async def run_negotiate(msg: GatewayMessage):
                     # 每次尝试前重置 full_response，避免前次失败残留干扰解析
                     full_response = ""
                     # 连接前提示，让日志实时反映阶段切换
-                    yield json.dumps({"token": f"\n[语言模型]: 正在接入 {MODEL_NAME} 进行多智能体协同推理（attempt {attempt+1}/{LLM_MAX_RETRIES+1}）...\n"}, ensure_ascii=False) + "\n"
+                    yield json.dumps({"token": f"\n[语言模型]: 正在接入 {MODEL_NAME} 生成主方案，随后由专家智能体并行提案、成员协商定稿（attempt {attempt+1}/{LLM_MAX_RETRIES+1}）...\n"}, ensure_ascii=False) + "\n"
                     await asyncio.sleep(0)
 
                     response = await client.chat.completions.create(
@@ -4597,6 +4381,8 @@ async def run_negotiate(msg: GatewayMessage):
                         if chunk.choices and len(chunk.choices) > 0:
                             delta = chunk.choices[0].delta
                             if delta and delta.content:
+                                if _first_token_at is None:
+                                    _first_token_at = time.monotonic()
                                 token = delta.content
                                 full_response += token
                                 token_count += 1
@@ -4605,10 +4391,22 @@ async def run_negotiate(msg: GatewayMessage):
                                 if token_count % 600 == 0:
                                     yield json.dumps({"token": f"\n[生成进度] 已输出 {token_count} tokens，正在编织完整 {trip_days} 天行程...\n"}, ensure_ascii=False) + "\n"
                     llm_call_succeeded = True
-                    # 👑 主推演耗时账（2026-10-05）：这一段现在是总时长里唯一的大头（44~69s / 占 6 成以上），
-                    #    所以必须能回答"是提示词太长、还是模型吐字太慢、还是有重试"：
-                    #    prompt 字符数 / 输出 token 数 / 吐字速度 / 这次是第几次尝试。
                     _llm_seconds = max(0.001, time.monotonic() - _llm_started)
+                    # 记一笔 LLM 账：流式拿不到 usage，token 数按实际收到的 chunk 数记，
+                    # prompt token 留空（不按字符数硬凑），成本因此只在非流式调用上可算。
+                    record_llm_call(
+                        model=MODEL_NAME,
+                        label="main_plan",
+                        latency_ms=(time.monotonic() - _attempt_started) * 1000.0,
+                        ok=True,
+                        streamed=True,
+                        completion_tokens=token_count,
+                        first_token_ms=(
+                            (_first_token_at - _attempt_started) * 1000.0 if _first_token_at is not None else None
+                        ),
+                    )
+                    # 👑 主推演耗时账（2026-10-05）：这一段现在是总时长里唯一的大头（44~69s / 占 6 成以上），
+                    #    所以必须能回答"是提示词太长、还是模型吐字太慢、还是有重试"。
                     print(
                         f"⏱️ [主推演] prompt={_prompt_chars} 字符（≈{_prompt_chars // 2} tokens）"
                         f"｜输出≈{token_count} tokens｜{_llm_seconds:.1f}s"
@@ -4620,12 +4418,28 @@ async def run_negotiate(msg: GatewayMessage):
                 except (BadRequestError,) as e:
                     # 平台侧业务错误（如欠费/参数错）：不重试
                     last_llm_err = e
+                    record_llm_call(
+                        model=MODEL_NAME,
+                        label="main_plan",
+                        latency_ms=(time.monotonic() - _attempt_started) * 1000.0,
+                        ok=False,
+                        streamed=True,
+                        error=type(e).__name__,
+                    )
                     print(f"⚠️ [LLM 业务错误]: {e}", flush=True)
                     yield json.dumps({"token": f"\n[系统告警] LLM 平台拒绝服务: {str(e)[:120]}\n"}, ensure_ascii=False) + "\n"
                     break
                 except Exception as e:
                     last_llm_err = e
                     err_name = type(e).__name__
+                    record_llm_call(
+                        model=MODEL_NAME,
+                        label="main_plan",
+                        latency_ms=(time.monotonic() - _attempt_started) * 1000.0,
+                        ok=False,
+                        streamed=True,
+                        error=err_name,
+                    )
                     print(f"⚠️ [LLM 第 {attempt+1} 次调用失败] {err_name}: {e}", flush=True)
                     yield json.dumps({"token": f"\n[连接自愈]: LLM 调用异常（{err_name}），正在重连...\n"}, ensure_ascii=False) + "\n"
                     continue
@@ -5446,10 +5260,32 @@ async def run_negotiate(msg: GatewayMessage):
                         ("intense", "特种兵暴走", "节奏紧凑、覆盖更多景点，适合打卡达人"),
                         ("niche", "小众探索", "偏爱文化与小众去处，避开热门人流"),
                     ]
-                    fairness_members = [
-                        {"id": str(member.get("id") or member.get("name") or f"member-{index}"), "interestTags": [str(member.get("intent") or "")]}
-                        for index, member in enumerate(room_members) if isinstance(member, dict)
-                    ]
+                    def _fairness_members_from_room() -> List[Dict[str, Any]]:
+                        """把房间成员转成 fairness 与成员协商共用的口径。
+
+                        此前这里只保留 `id + interestTags=[整句 intent]`：role、兴趣标签、
+                        是否愿意让步全部丢失，fairness 只能对所有成员给出同一条"未知偏好"
+                        分数，成员协商也就无从谈起。现在统一用 `member_interests` 抽取标签，
+                        两边看到的是同一组诉求。
+                        """
+                        rows: List[Dict[str, Any]] = []
+                        for index, member in enumerate(room_members):
+                            if not isinstance(member, dict):
+                                continue
+                            interests = member_interests(member)
+                            rows.append({
+                                "id": str(member.get("id") or member.get("name") or f"member-{index + 1}"),
+                                "name": str(member.get("name") or member.get("nickname") or f"成员 {index + 1}"),
+                                "role": str(member.get("role") or ""),
+                                "interests": interests,
+                                "interestTags": interests,
+                                "non_negotiable": bool(member.get("non_negotiable")),
+                                "tolerance": member.get("tolerance"),
+                                "concession_budget": member.get("concession_budget"),
+                            })
+                        return rows
+
+                    fairness_members = _fairness_members_from_room()
                     try:
                         plan_variants = []
                         for _i, (_st, _name, _desc) in enumerate(_variant_styles):
@@ -5460,10 +5296,6 @@ async def run_negotiate(msg: GatewayMessage):
                                 plan_variants.append({"id": f"variant_{_i + 1}", "name": _name, "style": _st, "desc": _desc, "route": _vr, "daily_balance": _variant_balance})
                         if plan_variants:
                             final_data["plan_variants"] = plan_variants
-                            fairness_members = [
-                                {"id": str(member.get("id") or member.get("name") or f"member-{index}"), "interestTags": [str(member.get("intent") or "")]}
-                                for index, member in enumerate(room_members) if isinstance(member, dict)
-                            ]
                             fair_routes = [llm_routes] + [variant["route"] for variant in plan_variants]
                             # 🔒 约束引擎：先按 L0 硬约束过滤不可行方案，再对可行子集做 maximin 公平选择
                             _planning_context = {
@@ -5491,20 +5323,76 @@ async def run_negotiate(msg: GatewayMessage):
                                 "conflict_summary": _constraint_resolution.get("conflict_summary", []),
                                 "selection_method": _selection_method,
                             }
+
+                            # 👥 真正的成员级协商（P1）：fairness_gate 只做群体层面的 maximin，
+                            #    这里让房间里的**每一位真实成员**独立排序、提出首选，再由协调者
+                            #    逐轮尝试"高满意度成员让位"的候选切换。协商只在硬约束筛过的
+                            #    可行方案之间进行，不会把已被 L0 淘汰的方案又拉回来。
+                            def _route_label(route_index: int) -> str:
+                                if route_index == 0:
+                                    return "AI 主方案"
+                                if 0 < route_index <= len(plan_variants):
+                                    return str(plan_variants[route_index - 1].get("name") or f"候选方案 {route_index}")
+                                return f"候选方案 {route_index}"
+
+                            _negotiation_scope = _report_route_indices or list(range(len(fair_routes)))
+                            try:
+                                _member_negotiation = negotiate_member_routes(
+                                    [fair_routes[i] for i in _negotiation_scope],
+                                    fairness_members,
+                                    candidate_labels=[_route_label(i) for i in _negotiation_scope],
+                                    max_rounds=2,
+                                )
+                                _local_index = int(_member_negotiation.get("selected_index") or 0)
+                                _negotiated_index = (
+                                    _negotiation_scope[_local_index]
+                                    if 0 <= _local_index < len(_negotiation_scope)
+                                    else selected_index
+                                )
+                                # 对外统一用"路线索引"，与 fairness.selected_variant_index 同一口径；
+                                # 局部索引另存，便于回溯协商是在哪个子集里发生的。
+                                _member_negotiation["local_selected_index"] = _local_index
+                                _member_negotiation["scope_indices"] = list(_negotiation_scope)
+                                _member_negotiation["selected_index"] = _negotiated_index
+                                if isinstance(_member_negotiation.get("final_candidate"), dict):
+                                    _member_negotiation["final_candidate"]["index"] = _negotiated_index
+                                if _negotiated_index != selected_index:
+                                    selected_index = _negotiated_index
+                                    _selection_method = "maximin_then_member_concession"
+                                    final_data["constraints_engine"]["selection_method"] = _selection_method
+                                final_data["member_negotiation"] = _member_negotiation
+                                print(
+                                    f"🤝 [成员协商] {_member_negotiation.get('status')}"
+                                    f"｜最终《{(_member_negotiation.get('final_candidate') or {}).get('name')}》"
+                                    f"｜异议 {len(_member_negotiation.get('dissenters_final') or [])} 人"
+                                    f"｜让步 {len(_member_negotiation.get('concessions') or [])} 次",
+                                    flush=True,
+                                )
+                            except Exception as _nego_err:
+                                # 协商失败绝不能连累主方案：如实标记 not_run，前端据此显示"未执行"。
+                                final_data["member_negotiation"] = {
+                                    "status": "not_run",
+                                    "method": "maximin_plus_member_concession",
+                                    "transcript": [f"成员协商未执行：{_nego_err}"],
+                                }
+                                print(f"⚠️ [成员协商] 未执行（不影响主方案）: {_nego_err}", flush=True)
+
                             if selected_index > 0:
                                 llm_routes = list(fair_routes[selected_index])
                                 final_data["route"] = llm_routes
                             selected_variant_index = selected_index - 1 if selected_index > 0 else None
-                            fairness_base = fair_selection.get("report") or fairness_report(llm_routes, fairness_members)
+                            # 协商可能改变最终方案，公平报告必须按**最终选中**的那条路重算，
+                            # 不能沿用 fair_selection 里旧方案的报告。
+                            fairness_base = fairness_report(fair_routes[selected_index], fairness_members)
                             _candidate_reports = []
                             for _report_index, _report in enumerate(fair_selection.get("reports", [])):
                                 _report_copy = dict(_report)
                                 _route_index = _report_route_indices[_report_index] if _report_index < len(_report_route_indices) else _report_index
-                                _report_copy["candidate_name"] = "AI 主方案" if _route_index == 0 else str(plan_variants[_route_index - 1].get("name") or f"候选方案 {_route_index}") if _route_index - 1 < len(plan_variants) else f"候选方案 {_route_index}"
+                                _report_copy["candidate_name"] = _route_label(_route_index)
                                 _report_copy["candidate_index"] = _route_index
                                 _candidate_reports.append(_report_copy)
                             _fairness_threshold = _fairness_limit_from_env()
-                            _fairness_exceeded = bool(fair_selection.get("threshold_exceeded", float(fairness_base.get("utility_stddev", 0)) > _fairness_threshold))
+                            _fairness_exceeded = float(fairness_base.get("utility_stddev", 0)) > _fairness_threshold
                             final_data["fairness"] = dict(
                                 fairness_base,
                                 selected_variant_index=selected_variant_index,
@@ -5528,6 +5416,24 @@ async def run_negotiate(msg: GatewayMessage):
                             print(f"🏆 [多方案] 已生成 {len(plan_variants)} 套差异化方案（{', '.join(v['style'] for v in plan_variants)}）", flush=True)
                     except Exception as _var_err:
                         print(f"⚠️ [多方案生成] 失败，仅返回主方案: {_var_err}", flush=True)
+
+                    # 单方案/多方案生成失败时也要留下成员协商记录：至少让每位成员对
+                    # 主方案给出首选与满意度，而不是让前端整块消失（消失本身无法区分
+                    # "没有分歧"和"根本没算"）。
+                    if not final_data.get("member_negotiation"):
+                        try:
+                            final_data["member_negotiation"] = negotiate_member_routes(
+                                [final_data.get("route") or llm_routes or []],
+                                fairness_members,
+                                candidate_labels=["AI 主方案"],
+                                max_rounds=2,
+                            )
+                        except Exception as _nego_err:
+                            final_data["member_negotiation"] = {
+                                "status": "not_run",
+                                "method": "maximin_plus_member_concession",
+                                "transcript": [f"成员协商未执行：{_nego_err}"],
+                            }
 
                     # Optional contextual exploration happens after hard
                     # constraints and fairness selection. A disabled bandit
@@ -5642,17 +5548,37 @@ async def run_negotiate(msg: GatewayMessage):
                                     """只生成该段的节点数组（越界天数由 core 丢弃）。"""
                                     if _time.monotonic() > _long_deadline:
                                         return []  # 超预算：如实记为"这一段没生成出来"
-                                    _resp = await asyncio.wait_for(
-                                        client.chat.completions.create(
+                                    _segment_started = time.monotonic()
+                                    try:
+                                        _resp = await asyncio.wait_for(
+                                            client.chat.completions.create(
+                                                model=MODEL_NAME,
+                                                messages=[
+                                                    {"role": "system", "content": _segment_system_prompt},
+                                                    {"role": "user", "content": segment_prompt(_target)},
+                                                ],
+                                                temperature=llm_cfg.temperature(),
+                                                max_tokens=llm_cfg.max_tokens(),
+                                            ),
+                                            timeout=45.0,
+                                        )
+                                    except Exception as _seg_err:
+                                        record_llm_call(
                                             model=MODEL_NAME,
-                                            messages=[
-                                                {"role": "system", "content": _segment_system_prompt},
-                                                {"role": "user", "content": segment_prompt(_target)},
-                                            ],
-                                            temperature=llm_cfg.temperature(),
-                                            max_tokens=llm_cfg.max_tokens(),
-                                        ),
-                                        timeout=45.0,
+                                            label="long_trip_segment",
+                                            latency_ms=(time.monotonic() - _segment_started) * 1000.0,
+                                            ok=False,
+                                            error=type(_seg_err).__name__,
+                                        )
+                                        raise
+                                    _seg_prompt_tokens, _seg_completion_tokens = _llm_usage_tokens(_resp)
+                                    record_llm_call(
+                                        model=MODEL_NAME,
+                                        label="long_trip_segment",
+                                        latency_ms=(time.monotonic() - _segment_started) * 1000.0,
+                                        ok=True,
+                                        prompt_tokens=_seg_prompt_tokens,
+                                        completion_tokens=_seg_completion_tokens,
                                     )
                                     _content = (_resp.choices[0].message.content if _resp.choices else "") or ""
                                     _match = re.search(r"\[[\s\S]*\]", _content)
@@ -5689,6 +5615,8 @@ async def run_negotiate(msg: GatewayMessage):
                                 _repaired: List[Dict[str, Any]] = []
                                 _repair_failed: List[int] = []
                                 for _target in _segment_targets[:2]:
+                                    _repair_started = time.monotonic()
+                                    _repair_recorded = False
                                     try:
                                         _seg_resp = await client.chat.completions.create(
                                             model=MODEL_NAME,
@@ -5699,6 +5627,16 @@ async def run_negotiate(msg: GatewayMessage):
                                             temperature=llm_cfg.temperature(),
                                             max_tokens=llm_cfg.max_tokens(),
                                         )
+                                        _repair_prompt_tokens, _repair_completion_tokens = _llm_usage_tokens(_seg_resp)
+                                        record_llm_call(
+                                            model=MODEL_NAME,
+                                            label="long_trip_repair",
+                                            latency_ms=(time.monotonic() - _repair_started) * 1000.0,
+                                            ok=True,
+                                            prompt_tokens=_repair_prompt_tokens,
+                                            completion_tokens=_repair_completion_tokens,
+                                        )
+                                        _repair_recorded = True
                                         _seg_content = (_seg_resp.choices[0].message.content if _seg_resp.choices else "") or ""
                                         _seg_match = re.search(r"\[[\s\S]*\]", _seg_content)
                                         _seg_nodes = json.loads(_seg_match.group(0)) if _seg_match else []
@@ -5718,7 +5656,15 @@ async def run_negotiate(msg: GatewayMessage):
                                                 "reasons": _target["reasons"],
                                             }
                                         )
-                                    except Exception:
+                                    except Exception as _repair_err:
+                                        if not _repair_recorded:
+                                            record_llm_call(
+                                                model=MODEL_NAME,
+                                                label="long_trip_repair",
+                                                latency_ms=(time.monotonic() - _repair_started) * 1000.0,
+                                                ok=False,
+                                                error=type(_repair_err).__name__,
+                                            )
                                         _repair_failed.append(int(_target["start_day"]))
                                 final_data["long_trip"] = {
                                     **summarize_segments(final_data, _long_context),
@@ -6042,7 +5988,6 @@ async def run_negotiate(msg: GatewayMessage):
                             try:
                                 from core.price_sources import (
                                     merge_observations,
-                                    parse_price_from_text,
                                     pending_price_report,
                                     pending_price_targets,
                                     price_coverage,
@@ -6240,7 +6185,6 @@ async def run_negotiate(msg: GatewayMessage):
                                     #    而其实一个搜索都还没发出去。
                                     #    现在改成顺序执行 + 共享 deadline：每个点用"剩余时间"作上限，
                                     #    第一个点慢一点也不会把后面的判死；预算用完的点如实标"没轮到"。
-                                    import time as _time
 
                                     _deadline = _time.monotonic() + float(_price_budget)
                                     # 单点上限要给得下**合并搜索**的开销（2026-10-07 实测修正）：
@@ -8437,7 +8381,7 @@ async def run_negotiate(msg: GatewayMessage):
             yield json.dumps({"token": f"\n[FINAL_JSON]\n{{\"status\": \"error\", \"negotiation_summary\": \"{friendly}\", \"route\": []}}\n"}, ensure_ascii=False) + "\n"
 
         except Exception as e:
-            print(f"🔥 [流式推演崩溃 Traceback]:")
+            print("🔥 [流式推演崩溃 Traceback]:")
             traceback.print_exc()
             yield json.dumps({"token": f"\n[FINAL_JSON]\n{{\"status\": \"error\", \"negotiation_summary\": \"{str(e)}\", \"route\": []}}\n"}, ensure_ascii=False) + "\n"
 
@@ -8454,7 +8398,8 @@ async def record_bandit_feedback(payload: Dict[str, Any]):
         planning_bandit.register(arm_id)
     try:
         if "reward" in payload and payload.get("reward") is not None:
-            reward = float(payload.get("reward"))
+            raw_reward: Any = payload.get("reward")
+            reward = float(raw_reward)
             if not 0.0 <= reward <= 1.0:
                 raise ValueError
         else:

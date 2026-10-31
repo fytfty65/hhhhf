@@ -167,7 +167,7 @@ def adult_ticket_price(entry: Mapping[str, Any]) -> Dict[str, Any]:
         named = [item for item in pool if core in _name_key(item.get("typeName"))]
         if named:
             pool = named
-    picked = None
+    picked: Optional[Dict[str, Any]] = None
     for item in pool:
         value = _to_float(item.get("qunarPrice"))
         if value is None:

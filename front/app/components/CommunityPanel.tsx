@@ -28,8 +28,10 @@ import {
   Tag,
   X,
 } from 'lucide-react';
-import { API_BASE, apiJson } from '../lib/utils';
+import { apiJson, assetUrl } from '../lib/apiClient';
+import { trackPlanningEvent } from '../lib/planningEvents';
 import { buildDiaryMarkdown } from '../lib/tripExport';
+import { useFocusTrap } from '../lib/useFocusTrap';
 import type { CommunityComment, CommunityPostItem, UserProfile } from '../types';
 
 type ViewMode = 'discover' | 'mine' | 'saved';
@@ -70,7 +72,7 @@ function postDate(value: string) {
 }
 
 function avatarOf(post: Pick<CommunityPostItem, 'author_avatar_url' | 'author_avatar' | 'author'>) {
-  if (post.author_avatar_url) return `${API_BASE}${post.author_avatar_url}`;
+  if (post.author_avatar_url) return assetUrl(post.author_avatar_url);
   return `https://api.dicebear.com/9.x/notionists/svg?seed=${encodeURIComponent(post.author_avatar || post.author || 'traveler')}&backgroundColor=fdeed8`;
 }
 
@@ -147,6 +149,8 @@ export default function CommunityPanel({
   const [activeTag, setActiveTag] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [composerOpen, setComposerOpen] = useState(false);
+  // 发布弹窗打开时把焦点锁在弹窗内，关闭后还给「发布分享」按钮
+  const composerDialogRef = useFocusTrap<HTMLDivElement>(composerOpen);
   const [title, setTitle] = useState('');
   const [city, setCity] = useState('');
   const [content, setContent] = useState('');
@@ -173,7 +177,7 @@ export default function CommunityPanel({
       if (viewMode === 'mine') params.set('user_id', String(currentUser.id));
       if (activeTag) params.set('tag', activeTag);
       const query = params.toString();
-      const data = await apiJson<PostsData>(`${API_BASE}/api/community/list${query ? `?${query}` : ''}`);
+      const data = await apiJson<PostsData>(`/api/community/list${query ? `?${query}` : ''}`);
       const next = Array.isArray(data.posts) ? data.posts : [];
       setPosts(next);
       setFavorited(new Set(next.filter((post) => Boolean(post.favorited)).map((post) => post.id)));
@@ -186,7 +190,7 @@ export default function CommunityPanel({
 
   const loadTags = useCallback(async () => {
     try {
-      const data = await apiJson<TagsData>(`${API_BASE}/api/community/tags`);
+      const data = await apiJson<TagsData>(`/api/community/tags`);
       setHotTags(Array.isArray(data.tags) ? data.tags : []);
     } catch {
       // 标签属于增强信息，失败时保留主内容流。
@@ -226,7 +230,7 @@ export default function CommunityPanel({
     setPublishing(true);
     try {
       const tags = composerTags.split(/[\s,#，]+/).map((tag) => tag.trim()).filter(Boolean).slice(0, 8);
-      await apiJson(`${API_BASE}/api/community/post`, {
+      await apiJson(`/api/community/post`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: currentUser.id, title: title.trim(), content: content.trim(), dest_city: city.trim(), tags }),
@@ -246,7 +250,7 @@ export default function CommunityPanel({
   const toggleLike = async (post: CommunityPostItem) => {
     setLikeBusy(post.id);
     try {
-      const data = await apiJson<{ likes?: number }>(`${API_BASE}/api/community/like`, {
+      const data = await apiJson<{ likes?: number }>(`/api/community/like`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: post.id }),
       });
       if (typeof data.likes === 'number') setPosts((current) => current.map((item) => item.id === post.id ? { ...item, likes: data.likes as number } : item));
@@ -260,16 +264,12 @@ export default function CommunityPanel({
   const toggleFavorite = async (post: CommunityPostItem) => {
     setFavoriteBusy(post.id);
     try {
-      const data = await apiJson<{ favorites?: number; favorited?: boolean }>(`${API_BASE}/api/community/favorite`, {
+      const data = await apiJson<{ favorites?: number; favorited?: boolean }>(`/api/community/favorite`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: post.id, user_id: currentUser.id }),
       });
       setFavorited((current) => { const next = new Set(current); if (data.favorited) next.add(post.id); else next.delete(post.id); return next; });
       if (typeof data.favorites === 'number') setPosts((current) => current.map((item) => item.id === post.id ? { ...item, favorites: data.favorites as number, favorited: Boolean(data.favorited) } : item));
-      void apiJson(`${API_BASE}/api/v1/planning/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event_type: 'plan_favorited', plan_id: post.id, payload: { module: 'community', favorited: Boolean(data.favorited) } }),
-      }).catch(() => {});
+      trackPlanningEvent({ event_type: 'plan_favorited', plan_id: post.id, payload: { module: 'community', favorited: Boolean(data.favorited) } });
     } catch (error) {
       setToast(error instanceof Error ? error.message : '收藏失败');
     } finally {
@@ -279,7 +279,7 @@ export default function CommunityPanel({
 
   const loadComments = async (postId: string) => {
     try {
-      const data = await apiJson<{ comments?: CommunityComment[] }>(`${API_BASE}/api/community/comments?post_id=${encodeURIComponent(postId)}`);
+      const data = await apiJson<{ comments?: CommunityComment[] }>(`/api/community/comments?post_id=${encodeURIComponent(postId)}`);
       setCommentsMap((current) => ({ ...current, [postId]: Array.isArray(data.comments) ? data.comments : [] }));
     } catch (error) {
       setToast(error instanceof Error ? error.message : '评论加载失败');
@@ -300,7 +300,7 @@ export default function CommunityPanel({
     const value = commentText.trim();
     if (!value) return;
     try {
-      await apiJson(`${API_BASE}/api/community/comment`, {
+      await apiJson(`/api/community/comment`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: postId, user_id: currentUser.id, content: value, parent_id: replyingTo?.id || '' }),
       });
       setCommentText(''); setReplyingTo(null);
@@ -320,7 +320,7 @@ export default function CommunityPanel({
       return;
     }
     try {
-      await apiJson(`${API_BASE}/api/user/trip`, {
+      await apiJson(`/api/user/trip`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: currentUser.id, title: post.title || `${city || '目的地'} 行程`, dest_city: city, content: post.content }),
       });
       setToast('已加入我的路书，正在打开规划工作区');
@@ -378,7 +378,7 @@ export default function CommunityPanel({
         </div>
       </div>
 
-      {composerOpen && <div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto border border-slate-200 bg-white p-5 shadow-2xl sm:p-6"><div className="flex items-center justify-between"><div><p className="text-[11px] font-black uppercase tracking-wider text-orange-500">Share your route</p><h2 id="composer-title" className="mt-1 text-lg font-black text-slate-900">发布到同行者社区</h2></div><button type="button" onClick={() => setComposerOpen(false)} className="inline-flex h-9 w-9 items-center justify-center text-slate-400 hover:bg-slate-100" title="关闭" aria-label="关闭"><X className="h-5 w-5" /></button></div><div className="mt-5 space-y-4"><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">标题</span><input value={title} maxLength={80} onChange={(event) => setTitle(event.target.value)} placeholder="例如：洛阳老城慢游 2 日路书" className="h-11 w-full border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-orange-400 focus:bg-white" /></label><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">目的地</span><input value={city} maxLength={40} onChange={(event) => setCity(event.target.value)} placeholder="例如：洛阳" className="h-11 w-full border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-orange-400 focus:bg-white" /></label><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">内容或路书 JSON</span><textarea value={content} maxLength={20000} onChange={(event) => setContent(event.target.value)} rows={6} placeholder="分享你的体验，或粘贴规划工作区导出的路书 JSON" className="w-full resize-y border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm leading-5 outline-none focus:border-orange-400 focus:bg-white" /></label><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">标签</span><input value={composerTags} maxLength={120} onChange={(event) => setComposerTags(event.target.value)} placeholder="亲子 美食 自驾（空格分隔）" className="h-11 w-full border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-orange-400 focus:bg-white" /></label><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" onClick={() => setComposerOpen(false)} className="min-h-11 px-4 text-sm font-bold text-slate-500 hover:bg-slate-100">取消</button><button type="button" onClick={() => void publish()} disabled={publishing || (!title.trim() && !content.trim())} className="inline-flex min-h-11 items-center justify-center gap-2 bg-orange-500 px-5 text-sm font-bold text-white hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400">{publishing && <RefreshCw className="h-4 w-4 animate-spin" />}发布分享</button></div></div></div></div>}
+      {composerOpen && <div ref={composerDialogRef} className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto border border-slate-200 bg-white p-5 shadow-2xl sm:p-6"><div className="flex items-center justify-between"><div><p className="text-[11px] font-black uppercase tracking-wider text-orange-500">Share your route</p><h2 id="composer-title" className="mt-1 text-lg font-black text-slate-900">发布到同行者社区</h2></div><button type="button" onClick={() => setComposerOpen(false)} className="inline-flex h-9 w-9 items-center justify-center text-slate-400 hover:bg-slate-100" title="关闭" aria-label="关闭"><X className="h-5 w-5" /></button></div><div className="mt-5 space-y-4"><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">标题</span><input value={title} maxLength={80} onChange={(event) => setTitle(event.target.value)} placeholder="例如：洛阳老城慢游 2 日路书" className="h-11 w-full border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-orange-400 focus:bg-white" /></label><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">目的地</span><input value={city} maxLength={40} onChange={(event) => setCity(event.target.value)} placeholder="例如：洛阳" className="h-11 w-full border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-orange-400 focus:bg-white" /></label><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">内容或路书 JSON</span><textarea value={content} maxLength={20000} onChange={(event) => setContent(event.target.value)} rows={6} placeholder="分享你的体验，或粘贴规划工作区导出的路书 JSON" className="w-full resize-y border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm leading-5 outline-none focus:border-orange-400 focus:bg-white" /></label><label className="block"><span className="mb-1.5 block text-xs font-bold text-slate-600">标签</span><input value={composerTags} maxLength={120} onChange={(event) => setComposerTags(event.target.value)} placeholder="亲子 美食 自驾（空格分隔）" className="h-11 w-full border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-orange-400 focus:bg-white" /></label><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" onClick={() => setComposerOpen(false)} className="min-h-11 px-4 text-sm font-bold text-slate-500 hover:bg-slate-100">取消</button><button type="button" onClick={() => void publish()} disabled={publishing || (!title.trim() && !content.trim())} className="inline-flex min-h-11 items-center justify-center gap-2 bg-orange-500 px-5 text-sm font-bold text-white hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400">{publishing && <RefreshCw className="h-4 w-4 animate-spin" />}发布分享</button></div></div></div></div>}
       {toast && <div className="fixed bottom-5 left-1/2 z-[200] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 border border-slate-700 bg-slate-900 px-4 py-3 text-xs font-bold text-white shadow-xl" role="status"><Check className="h-4 w-4 shrink-0 text-emerald-400" /><span className="truncate">{toast}</span></div>}
     </main>
   );

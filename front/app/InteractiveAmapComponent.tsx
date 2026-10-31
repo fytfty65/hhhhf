@@ -242,7 +242,6 @@ export default function InteractiveAmapComponent({
     map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
     
     let fallbackTimer: number | undefined;
-    let styleTimer: number | undefined;
     let graceTimer: number | undefined;
     let styleReady = false;
     let firstTileSeen = false;
@@ -305,7 +304,7 @@ export default function InteractiveAmapComponent({
     // A malformed WebGL context or a blocked style request can prevent the
     // `load` event altogether. Surface a recoverable state instead of leaving
     // an apparently dead canvas on screen.
-    styleTimer = window.setTimeout(() => {
+    const styleTimer = window.setTimeout(() => {
       if (!styleReady) activateFallback('地图引擎加载超时，已切换备用地图');
     }, MAP_TILE_TIMEOUT_MS + 2500);
     map.on('sourcedata', (event: any) => {
@@ -369,7 +368,6 @@ export default function InteractiveAmapComponent({
       mapInstance.current = null;
       tileFallbackRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapGeneration]);
 
   // MapLibre does not observe every parent transition (for example a
@@ -543,7 +541,6 @@ export default function InteractiveAmapComponent({
         }
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeDataStr, actualPathStr, phase, mapLoaded]);
 
   // ================= 4. 点击景点 2D 视角智能平移 (FlyTo) =================
@@ -562,7 +559,6 @@ export default function InteractiveAmapComponent({
         curve: 1.4
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPoiIndex, mapLoaded, routeDataStr]); 
 
   // ================= 5. Marker 图标与气泡注入 =================
@@ -588,8 +584,10 @@ export default function InteractiveAmapComponent({
       const isHovered = showPoiInfo === index;
 
       root.render(
-        <div 
-          className="relative cursor-pointer group flex flex-col items-center"
+        <button 
+          type="button"
+          aria-label={`查看 ${poi.name} 详情`}
+          className="relative cursor-pointer group flex flex-col items-center p-0 bg-transparent border-0"
           onClick={(e) => {
             e.stopPropagation();
             onPoiSelect(index);
@@ -621,7 +619,7 @@ export default function InteractiveAmapComponent({
           >
             <span className="text-xs font-black">{index + 1}</span>
           </div>
-        </div>
+        </button>
       );
 
       const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
@@ -630,7 +628,6 @@ export default function InteractiveAmapComponent({
 
       markersRef.current.push({ marker, root });
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPoiIndex, showPoiInfo, mapLoaded, markersDataStr, onPoiSelect]);
 
   const activeAlertCount = safetyInfo?.active_alerts?.length || 0;
@@ -699,10 +696,11 @@ export default function InteractiveAmapComponent({
         {/* 👑 方案 A 核心：3D 态势/安全雷达视角切换按钮 */}
         <button
           onClick={() => setShow3DGlobe(true)}
+          title="以 3D 地球视角查看全球风险与安全态势（原「3D 态势雷达」）"
           className="bg-gradient-to-r from-orange-700 via-orange-600 to-orange-500 text-white px-3.5 py-2.5 rounded-xl shadow-lg border border-orange-400/30 flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
         >
           <Globe2 className="w-3.5 h-3.5 text-orange-200 animate-spin-slow" />
-          <span>3D 态势雷达</span>
+          <span>全球风险概览</span>
         </button>
         </div>
 
@@ -803,7 +801,7 @@ export default function InteractiveAmapComponent({
               className="bg-gradient-to-r from-orange-500 to-amber-500 text-white px-3.5 py-2.5 rounded-xl shadow-md border border-orange-400/30 flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
           >
             <MessageSquareText className="w-3.5 h-3.5" />
-            <span>唤醒决策体</span>
+            <span>开始规划</span>
           </button>
         )}
       </div>

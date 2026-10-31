@@ -61,6 +61,10 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.route('**/api/v1/**', async route => route.fulfill({ json: { ok: true, success: true, data: {} } }));
   await page.route('**/api/auth/login', async route => route.fulfill({ json: { message: '登录成功', token: user.token, user } }));
   await page.route('**/api/auth/register', async route => route.fulfill({ json: { message: '注册成功', token: user.token, user } }));
+  // WebSocket 只接受一次性短时票据（不再把长期令牌拼进 URL），所以测试也要
+  // 提供票据端点，否则 socket 建不起来、工作区入口会被正确地挡住。
+  await page.route('**/api/auth/ws-ticket', async route => route.fulfill({ json: { ticket: 'e2e-ws-ticket', expires_in: 60 } }));
+  await page.route('**/api/auth/sessions', async route => route.fulfill({ json: { sessions: [] } }));
   await page.route('**/api/v1/room/create', async route => route.fulfill({ json: { room_id: 'ROOM-E2E', invite_code: 'ROOM-E2E', room_name: 'E2E 旅行房间' } }));
   await page.route('**/api/v1/room/join', async route => route.fulfill({ json: { room_id: 'ROOM-E2E', invite_code: 'ROOM-E2E', room_name: 'E2E 旅行房间' } }));
   await page.route('**/api/v1/budget/**', async route => route.fulfill({ json: { estimated_cost: 180, total: 180, per_day: 180, expenses: [] } }));
@@ -77,7 +81,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByTestId('auth-username').fill('e2e-user');
   await page.getByTestId('auth-password').fill('password123');
   await page.getByTestId('auth-submit').click();
-  await expect(page.getByText('开启下一段旅程协同推演')).toBeVisible();
+  await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible();
 
   // The product-level views must remain usable on a narrow phone, not merely
   // render at desktop width and hide overflow.
@@ -86,7 +90,8 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoHorizontalOverflow(page);
   await page.getByText('返回大厅', { exact: true }).click();
-  await page.getByRole('button', { name: /社区/ }).click();
+  // 社区卡片已改成可访问按钮（aria-label「进入同行者社区」），用精确名避免撞名
+  await page.getByRole('button', { name: '社区', exact: true }).click();
   await expect(page.getByText('同行者社区', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByText('返回大厅', { exact: true }).click();
@@ -105,11 +110,13 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByTestId('join-room-submit').click();
   await expect(page.getByTestId('room-code')).toHaveText('ROOM-E2E');
   await page.getByTestId('begin-plan').click();
-  await page.getByText('进入共识沙盘').click();
+  await page.getByText('查看规划方案').click();
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible();
   await page.locator('textarea').fill('去洛阳玩1天，想吃地道老字号，节奏不要太赶');
   await page.getByText('生成行程方案').click();
-  await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 15_000 });
+  // 主推演要在 mock WS 返回后走完预算/共识渲染；满负载时实测超过 15s，
+  // 与其余首屏等待（20s）对齐，避免把排队等待误判成"没出方案"。
+  await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 25_000 });
   await expect(page.getByText('如果这样调整，会发生什么？')).toBeVisible();
   await expect(page.getByText(/预估花销/).first()).toBeVisible();
   const closeBlackboard = page.getByTestId('close-blackboard');
@@ -130,7 +137,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await expect(page.getByRole('dialog', { name: '协作预算账本' })).toBeVisible();
   await page.getByRole('button', { name: '关闭预算账本' }).click();
 
-  await page.getByRole('button', { name: '3D 态势雷达' }).click();
+  await page.getByRole('button', { name: '全球风险概览' }).click();
   await expect(page.getByRole('dialog', { name: '全球风险地图' })).toBeVisible();
   const globeCanvas = page.getByRole('dialog', { name: '全球风险地图' }).locator('canvas').first();
   await expect(globeCanvas).toBeVisible();

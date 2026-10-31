@@ -59,13 +59,30 @@ var (
 	inFlight      int64
 )
 
+// prometheusPathOverflow counts observations folded into metricPathOverflow
+// because the per-path histogram cap was reached.
+var prometheusPathOverflow int
+
 func recordPrometheusLatency(method, path string, ms float64) {
 	promMu.Lock()
 	key := method + " " + path
 	h := pathHistogram[key]
 	if h == nil {
-		h = newLatencyHistogram()
-		pathHistogram[key] = h
+		// Cardinality guard: mirrors recordRequest, including the -1 headroom so
+		// the overflow bucket has a guaranteed slot, and the reserved-name check
+		// so a caller cannot mint the overflow label as a real path. The path
+		// argument is already the matched route pattern (see metricPath), so this
+		// is a second line of defence against a growing route table or a
+		// regression that passes the raw URL again.
+		if len(pathHistogram) >= maxMetricPaths-1 || path == metricPathOverflow {
+			prometheusPathOverflow++
+			key = method + " " + metricPathOverflow
+			h = pathHistogram[key]
+		}
+		if h == nil {
+			h = newLatencyHistogram()
+			pathHistogram[key] = h
+		}
 	}
 	h.observe(ms)
 	promMu.Unlock()
@@ -79,10 +96,13 @@ func prometheusLabelValue(value string) string {
 
 // PrometheusHandler renders the metrics in Prometheus text exposition format.
 //
-// Path labels are bounded: the gateway registers a fixed route table, so the
-// per-path series count cannot grow with user input. If that ever changes, the
-// label must be switched to the matched route pattern (c.FullPath()) rather than
-// the raw URL to avoid unbounded cardinality.
+// Path labels are bounded on purpose. An earlier version of this comment
+// claimed that was automatic ("the gateway registers a fixed route table"),
+// and that reasoning was wrong: the label was taken from c.Request.URL.Path
+// while LoggingMiddleware runs globally, so every unmatched 404/401 path minted
+// a new permanent series. The label is now the matched route pattern via
+// metricPath() and is additionally capped by maxMetricPaths. Do not
+// reintroduce a raw URL here.
 func PrometheusHandler(c *gin.Context) {
 	metricsMu.Lock()
 	total := requestsTotal
@@ -226,6 +246,21 @@ func PrometheusHandler(c *gin.Context) {
 		fmt.Fprintf(&b, "omniroute_gateway_request_duration_milliseconds_sum{%s} %g\n", labels, h.sum)
 		fmt.Fprintf(&b, "omniroute_gateway_request_duration_milliseconds_count{%s} %d\n", labels, h.total)
 	}
+
+	// Cardinality-guard visibility. A climbing overflow means the bounded path
+	// label cap was reached — either the route table genuinely grew past
+	// maxMetricPaths or something is trying to mint synthetic paths. Without
+	// this series the guard would silently swallow traffic.
+	promMu.Lock()
+	pathOverflow := prometheusPathOverflow
+	promMu.Unlock()
+	metricsMu.Lock()
+	requestOverflow := requestsDroppedFromPath
+	metricsMu.Unlock()
+	b.WriteString("# HELP omniroute_gateway_metric_path_overflow_total Requests folded into the overflow path label.\n")
+	b.WriteString("# TYPE omniroute_gateway_metric_path_overflow_total counter\n")
+	fmt.Fprintf(&b, "omniroute_gateway_metric_path_overflow_total{surface=\"histogram\"} %d\n", pathOverflow)
+	fmt.Fprintf(&b, "omniroute_gateway_metric_path_overflow_total{surface=\"counter\"} %d\n", requestOverflow)
 
 	// Process-level goroutine and DB-pool gauges are intentionally omitted: the
 	// gateway does not currently expose them and inventing a value would be

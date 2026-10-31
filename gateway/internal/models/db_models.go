@@ -232,12 +232,15 @@ type NodeAnnotationVote struct {
 
 // BudgetPlan 行程预算设置（智能预算管家）
 type BudgetPlan struct {
-	ID          string    `gorm:"primaryKey" json:"id"`                      // UUID
-	UserID      string    `gorm:"uniqueIndex:ux_budget_trip" json:"user_id"` // 归属用户
-	TripID      string    `gorm:"uniqueIndex:ux_budget_trip" json:"trip_id"` // 关联行程
-	TotalBudget float64   `json:"total_budget"`                              // 总预算金额
-	Currency    string    `gorm:"default:'CNY'" json:"currency"`             // 币种
-	CreatedAt   time.Time `json:"created_at"`
+	ID    string `gorm:"primaryKey" json:"id"`                      // UUID
+	UserID string `gorm:"uniqueIndex:ux_budget_trip" json:"user_id"` // 归属用户
+	TripID string `gorm:"uniqueIndex:ux_budget_trip" json:"trip_id"` // 关联行程
+	// Money is stored as integer minor units (cents for CNY/USD/EUR). The
+	// `_cents` suffix makes the precision explicit in every JSON payload; no
+	// float ever reaches the database.
+	TotalBudgetCents int64     `gorm:"column:total_budget_cents;not null;default:0" json:"total_budget_cents"`
+	Currency         string    `gorm:"default:'CNY'" json:"currency"` // ISO-4217 code
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // SafetyAlert 安全告警信息
@@ -248,14 +251,15 @@ type SafetyAlert struct {
 
 // ExpenseRecord 实际消费记录（预算管家与行程复盘数据源）
 type ExpenseRecord struct {
-	ID        string    `gorm:"primaryKey" json:"id"`          // UUID
-	UserID    string    `gorm:"index" json:"user_id"`          // 归属用户
-	TripID    string    `gorm:"index" json:"trip_id"`          // 关联行程
-	Category  string    `json:"category"`                      // 分类：餐饮/住宿/交通/门票/购物/其他
-	Amount    float64   `json:"amount"`                        // 金额（原始币种）
-	Currency  string    `gorm:"default:'CNY'" json:"currency"` // 币种
-	Note      string    `json:"note"`                          // 备注
-	CreatedAt time.Time `json:"created_at"`
+	ID       string `gorm:"primaryKey" json:"id"`          // UUID
+	UserID   string `gorm:"index" json:"user_id"`          // 归属用户
+	TripID   string `gorm:"index" json:"trip_id"`          // 关联行程
+	Category string `json:"category"`                      // 分类：餐饮/住宿/交通/门票/购物/其他
+	// Integer minor units, see BudgetPlan.TotalBudgetCents.
+	AmountCents int64     `gorm:"column:amount_cents;not null;default:0" json:"amount_cents"`
+	Currency    string    `gorm:"default:'CNY'" json:"currency"` // 币种
+	Note        string    `json:"note"`                          // 备注
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // PlanVariant 多方案投票：同一房间可保存多套不同风格的行程方案，供成员投票。
@@ -376,6 +380,9 @@ type TravelOrder struct {
 	UserID           string    `gorm:"index" json:"-"`
 	TripID           string    `gorm:"index" json:"trip_id"`
 	OrderType        string    `json:"order_type"`
+	// Money is stored in integer minor units with an explicit currency.
+	AmountCents      int64     `gorm:"column:amount_cents;not null;default:0" json:"amount_cents"`
+	Currency         string    `gorm:"default:'CNY'" json:"currency"`
 	Status           string    `gorm:"index" json:"status"`
 	IdempotencyKey   string    `gorm:"uniqueIndex" json:"-"`
 	CancellationNote string    `json:"cancellation_note,omitempty"`

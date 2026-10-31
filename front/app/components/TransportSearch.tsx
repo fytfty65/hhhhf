@@ -1,16 +1,16 @@
 'use client';
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useId, useState, useCallback, useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Plane, Train, Search, ArrowRight, ArrowUpDown, X,
-  Clock, MapPin, DollarSign, AlertCircle, RefreshCw,
+  MapPin, AlertCircle, RefreshCw,
   Filter, ChevronDown, ChevronUp, Loader2, Info,
 } from 'lucide-react';
 import type {
-  TransportSearchParams, TransportSearchResponse,
+  TransportSearchParams,
   FlightResult, TrainResult, TransportResult,
-  SortField, SortOrder, TransportFilterOptions,
+  SortField, TransportFilterOptions,
 } from '../types/transport';
 import {
   searchTransport, TransportApiError,
@@ -26,6 +26,9 @@ interface TransportSearchProps {
 
 export default function TransportSearch({ onClose }: TransportSearchProps) {
   // 表单状态
+  const fromId = useId();
+  const toId = useId();
+  const dateId = useId();
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [date, setDate] = useState('');
@@ -224,10 +227,11 @@ export default function TransportSearch({ onClose }: TransportSearchProps) {
         {/* 搜索表单 */}
         <div className="flex flex-wrap items-end gap-3">
           <div className="relative flex-1 min-w-[140px]">
-            <label className="block text-[11px] font-bold text-slate-500 mb-1">出发城市</label>
+            <label htmlFor={fromId} className="block text-[11px] font-bold text-slate-500 mb-1">出发城市</label>
             <div className="relative">
               <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
               <input
+                id={fromId}
                 type="text"
                 value={from}
                 onChange={(e) => handleFromChange(e.target.value)}
@@ -261,10 +265,11 @@ export default function TransportSearch({ onClose }: TransportSearchProps) {
           </button>
 
           <div className="relative flex-1 min-w-[140px]">
-            <label className="block text-[11px] font-bold text-slate-500 mb-1">目的城市</label>
+            <label htmlFor={toId} className="block text-[11px] font-bold text-slate-500 mb-1">目的城市</label>
             <div className="relative">
               <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
               <input
+                id={toId}
                 type="text"
                 value={to}
                 onChange={(e) => handleToChange(e.target.value)}
@@ -290,9 +295,10 @@ export default function TransportSearch({ onClose }: TransportSearchProps) {
           </div>
 
           <div className="flex-1 min-w-[140px]">
-            <label className="block text-[11px] font-bold text-slate-500 mb-1">出发日期</label>
+            <label htmlFor={dateId} className="block text-[11px] font-bold text-slate-500 mb-1">出发日期</label>
             <div className="relative">
               <input
+                id={dateId}
                 type="date"
                 value={date}
                 onChange={(e) => setDate(e.target.value)}

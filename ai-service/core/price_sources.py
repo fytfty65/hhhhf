@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import time
 import urllib.parse
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .candidate_index import intent_of, normalize_text
 from .plan_quality import cost_of, node_name, nodes_of
@@ -77,7 +77,8 @@ def make_observation(name: str, value: Optional[float], source: str, retrieved_a
 
 
 def _current_price_source(node: Mapping[str, Any]) -> str:
-    sources = node.get("data_sources") if isinstance(node.get("data_sources"), Mapping) else {}
+    raw_sources = node.get("data_sources")
+    sources: Mapping[str, Any] = raw_sources if isinstance(raw_sources, Mapping) else {}
     for field in ("cost_estimate", "cost", "price"):
         if field in sources:
             return str(sources.get(field) or "").strip().lower()

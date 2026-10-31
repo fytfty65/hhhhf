@@ -73,7 +73,6 @@ export default function BudgetForecastChart({ mode, perDay, dailyBudget }: Budge
     );
   }
 
-  const linePts = points.map((p, i) => `${xFor(i)},${yFor(p.cum)}`).join(' ');
   const areaPath = `M ${xFor(0)} ${padT + innerH} ${points.map((p, i) => `L ${xFor(i)} ${yFor(p.cum)}`).join(' ')} L ${xFor(points.length - 1)} ${padT + innerH} Z`;
   const budgetPath = hasBudget
     ? points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xFor(i)} ${yFor(p.budgetCum!)}`).join(' ')

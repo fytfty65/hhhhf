@@ -17,10 +17,83 @@ import (
 
 var DB *gorm.DB
 
+// Read is a separate connection pool for read-only queries. SQLite in WAL mode
+// allows concurrent readers alongside one writer, so reads do not have to queue
+// behind the single write connection. `Reader()` returns DB when no separate
+// pool exists (in-memory databases and tests), which keeps call sites safe.
+var Read *gorm.DB
+
+// readOwner records which write handle Read was opened for. Tests routinely
+// replace database.DB with a fresh in-memory handle; without this guard a reader
+// pool left over from an earlier InitDB call would keep querying the old
+// database and the test would silently assert against stale rows.
+var readOwner *gorm.DB
+
+// sqliteReadConns bounds the reader pool. SQLite readers are cheap but each one
+// is a file handle; four is enough to keep page loads and analytics from
+// serialising behind each other without exhausting handles on small hosts.
+const sqliteReadConns = 4
+
 // Increment this value when a schema change needs an explicit, auditable
 // migration step. Migrations are applied one version at a time so a partially
 // upgraded deployment can resume safely on the next start.
-const schemaVersion = 17
+const schemaVersion = 21
+
+// Reader returns the pool that read-only queries should use. Writes must go
+// through DB, which has exactly one connection.
+func Reader() *gorm.DB {
+	if Read != nil && readOwner == DB {
+		return Read
+	}
+	return DB
+}
+
+// sqliteBusyTimeoutMs is how long SQLite waits for the write lock before
+// returning SQLITE_BUSY. It must be set through the DSN rather than a one-off
+// `PRAGMA` statement: busy_timeout is a *per-connection* setting, so executing it
+// once through GORM only configures whichever pooled connection served that
+// statement, leaving every other connection with the default.
+const sqliteBusyTimeoutMs = 5000
+
+// sqliteDSN attaches the per-connection pragmas the gateway relies on.
+//
+// mattn/go-sqlite3 parses these query parameters itself and applies them inside
+// driver.Open, i.e. on every new pooled connection (see sqlite3.go:1199-1216 for
+// _busy_timeout and :1304-1315 for _journal_mode). Parameters the caller already
+// supplied win, so an explicit DB_PATH DSN can still override them.
+func sqliteDSN(path string) string {
+	pragmas := []string{
+		"_busy_timeout=" + strconv.Itoa(sqliteBusyTimeoutMs),
+		// WAL is what the concurrent read paths and the backup/retention loops
+		// were written against. It is persisted in the database file, so setting
+		// it per connection is cheap and idempotent.
+		"_journal_mode=WAL",
+		// Foreign keys must be enforced on *every* connection. SQLite defaults
+		// this to OFF per connection, so a one-off PRAGMA is not enough.
+		"_foreign_keys=1",
+	}
+	dsn := path
+	for _, pragma := range pragmas {
+		key := pragma[:strings.Index(pragma, "=")]
+		if strings.Contains(dsn, key+"=") {
+			continue // caller already specified it
+		}
+		if strings.Contains(dsn, "?") {
+			dsn += "&" + pragma
+		} else {
+			dsn += "?" + pragma
+		}
+	}
+	return dsn
+}
+
+// isMemoryDSN reports whether the DSN targets an in-memory database. An in-memory
+// SQLite database only exists while a connection is open, so its pool must not be
+// allowed to drop to zero idle connections between statements.
+func isMemoryDSN(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.Contains(lower, ":memory:") || strings.Contains(lower, "mode=memory")
+}
 
 func migrateSchema(tx *gorm.DB, version int) error {
 	switch version {
@@ -90,6 +163,21 @@ func migrateSchema(tx *gorm.DB, version int) error {
 		// ⚠️ 这套 schema 是**版本化**的：只改模型不会给既有库加列（v1 建表之后就不再 AutoMigrate），
 		// 必须像这里一样显式加一个版本，否则线上会出现"保存参考路线失败"（列不存在）。
 		return tx.AutoMigrate(&models.UserPreference{})
+	case 18:
+		// 设备会话与密码重置令牌：短期 access token + 轮换 refresh token、
+		// 单设备/全设备退出、改密与找回密码都依赖这两张表。
+		return tx.AutoMigrate(&models.DeviceSession{}, &models.PasswordResetToken{})
+	case 19:
+		// 金额从 REAL 迁移到整数分，并删除旧的浮点列。
+		return migrateMoneyToCents(tx)
+	case 20:
+		// 清理孤儿数据后重建相关表，真正打开外键约束（含删除策略）。
+		return migrateForeignKeys(tx)
+	case 21:
+		// 高频写入/读取路径的复合索引。此前这些表只有单列索引，按
+		// (user_id, created_at) / (event_type, created_at) 过滤并排序时会先回表
+		// 再排序；SQLite 单写模型下，这会把写锁持有时间放大。
+		return migrateCompositeIndexes(tx)
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}
@@ -106,15 +194,71 @@ func InitDB() error {
 		}
 	}
 	var err error
-	DB, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	DB, err = gorm.Open(sqlite.Open(sqliteDSN(dbPath)), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		return fmt.Errorf("open sqlite: %w", err)
 	}
+
+	// SQLite allows exactly one writer. With database/sql's defaults (unlimited
+	// open connections, 2 idle) concurrent writers contend for the write lock and
+	// surface as SQLITE_BUSY / 500s instead of queueing, and open file
+	// descriptors scale with concurrency. One connection serialises access in Go,
+	// where a bounded wait is far easier to reason about than an error the caller
+	// has to interpret.
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return fmt.Errorf("sqlite pool: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	if isMemoryDSN(dbPath) {
+		// Keep the single in-memory connection alive; closing it would discard
+		// the schema and every row.
+		sqlDB.SetMaxIdleConns(1)
+		sqlDB.SetConnMaxLifetime(0)
+	} else {
+		// A file-backed database survives connection churn, so idle connections
+		// are not needed. This also keeps backups (VACUUM INTO) from racing a
+		// lingering idle handle on Windows, where an open handle blocks deletes.
+		sqlDB.SetMaxIdleConns(0)
+	}
+
+	// WAL and busy_timeout are applied per connection by the DSN above. The
+	// journal_mode statement is kept as a belt-and-braces assertion for DSNs the
+	// caller supplied verbatim: WAL is durable in the file, so doing it once is
+	// sufficient here.
 	if err := DB.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
 		return err
 	}
-	if err := DB.Exec("PRAGMA busy_timeout=5000").Error; err != nil {
-		return err
+
+	// A second, read-only pool lets SELECTs run while the single write
+	// connection is busy. In-memory databases cannot do this: their schema only
+	// exists while the one open connection is alive, so Reader() falls back to DB
+	// there (and in every test that assigns database.DB directly).
+	if !isMemoryDSN(dbPath) {
+		Read, err = gorm.Open(sqlite.Open(sqliteDSN(dbPath)), &gorm.Config{
+			Logger: logger.Default.LogMode(logger.Silent),
+			// A ping during Open leaves one idle reader handle alive. On Windows
+			// that handle keeps the database file locked and test cleanup (or a
+			// backup) cannot delete it. The pool is therefore opened lazily and
+			// configured below to retain no idle connections.
+			DisableAutomaticPing: true,
+		})
+		if err != nil {
+			return fmt.Errorf("open sqlite reader: %w", err)
+		}
+		readSQL, err := Read.DB()
+		if err != nil {
+			return fmt.Errorf("sqlite reader pool: %w", err)
+		}
+		readSQL.SetMaxOpenConns(sqliteReadConns)
+		// No idle readers: SQLite lets readers coexist with the writer, but an
+		// idle handle still pins the file. Opening a connection per read burst is
+		// cheap; leaking a handle is not.
+		readSQL.SetMaxIdleConns(0)
+		readOwner = DB
+	} else {
+		Read = DB
+		readOwner = DB
 	}
 	if err := DB.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)").Error; err != nil {
 		return err
@@ -122,6 +266,20 @@ func InitDB() error {
 	var applied int64
 	DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&applied)
 	if applied < schemaVersion {
+		// v20 rebuilds every FK-bearing table. Keep a snapshot before any
+		// destructive DDL; an empty database needs none.
+		if applied > 0 && applied < 20 && !isMemoryDSN(dbPath) &&
+			!strings.EqualFold(strings.TrimSpace(os.Getenv("SKIP_MIGRATION_BACKUP")), "true") {
+			if _, err := Backup("backups/pre-fk-migration"); err != nil {
+				return fmt.Errorf("pre-migration backup: %w", err)
+			}
+		}
+		// SQLite can only change `foreign_keys` outside a transaction. The DSN
+		// turns it on per connection, but the table rebuild must run with it off
+		// so cleanup and copy order cannot fail midway.
+		if err := DB.Exec("PRAGMA foreign_keys=OFF").Error; err != nil {
+			return err
+		}
 		if err := DB.Transaction(func(tx *gorm.DB) error {
 			for version := int(applied) + 1; version <= schemaVersion; version++ {
 				if err := migrateSchema(tx, version); err != nil {
@@ -134,6 +292,18 @@ func InitDB() error {
 			return nil
 		}); err != nil {
 			return fmt.Errorf("apply schema migrations: %w", err)
+		}
+	}
+	// Assert enforcement on the serving connection. New connections receive it
+	// from the DSN as well.
+	if err := DB.Exec("PRAGMA foreign_keys=ON").Error; err != nil {
+		return err
+	}
+	if applied < schemaVersion {
+		if violations, err := ForeignKeyReport(); err != nil {
+			return fmt.Errorf("post-migration integrity check: %w", err)
+		} else if violations > 0 {
+			return fmt.Errorf("post-migration integrity check found %d violations", violations)
 		}
 	}
 	return nil

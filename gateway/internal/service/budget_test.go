@@ -35,23 +35,38 @@ func TestConvertUnknownCurrencyFallback(t *testing.T) {
 	}
 }
 
-func TestSummarizeBudgetAccuracy(t *testing.T) {
+func TestSummarizeBudgetAccuracyUsesIntegerCents(t *testing.T) {
 	expenses := []models.ExpenseRecord{
-		{Category: "餐饮", Amount: 100, Currency: "CNY"},
-		{Category: "交通", Amount: 10, Currency: "USD"},  // 10*7.2 = 72 CNY
-		{Category: "住宿", Amount: 200, Currency: "CNY"},
-		{Category: "门票", Amount: 0.05, Currency: "CNY"},
+		{Category: "餐饮", AmountCents: 10000, Currency: "CNY"},
+		{Category: "交通", AmountCents: 1000, Currency: "USD"}, // 10 USD = 72 CNY
+		{Category: "住宿", AmountCents: 20000, Currency: "CNY"},
+		{Category: "门票", AmountCents: 5, Currency: "CNY"},
 	}
-	// 已消费 = 100 + 72 + 200 + 0.05 = 372.05
-	s := SummarizeBudget(500, "CNY", expenses)
-	if s.Spent != 372.05 {
-		t.Fatalf("已消费应精确为 372.05，got %v", s.Spent)
+	// 已消费 = 10000 + 7200 + 20000 + 5 = 37205 分
+	s := SummarizeBudget(50000, "CNY", expenses)
+	if s.SpentCents != 37205 {
+		t.Fatalf("已消费应精确为 37205 分，got %d", s.SpentCents)
 	}
-	if s.Remaining != 127.95 {
-		t.Fatalf("剩余应精确为 127.95，got %v", s.Remaining)
+	if s.RemainingCents != 12795 {
+		t.Fatalf("剩余应精确为 12795 分，got %d", s.RemainingCents)
 	}
 	if s.ExpenseCount != 4 {
 		t.Fatalf("消费笔数应为 4，got %d", s.ExpenseCount)
+	}
+	if s.Precision != 2 || s.Currency != "CNY" {
+		t.Fatalf("响应应明确币种与精度，got %+v", s)
+	}
+}
+
+func TestConvertCents(t *testing.T) {
+	if got := ConvertCents(10000, "USD", "CNY"); got != 72000 {
+		t.Fatalf("100.00 USD 应为 72000 分 CNY，got %d", got)
+	}
+	if got := ConvertCents(72000, "CNY", "USD"); got != 10000 {
+		t.Fatalf("720.00 CNY 应为 10000 分 USD，got %d", got)
+	}
+	if got := ConvertCents(5, "CNY", "CNY"); got != 5 {
+		t.Fatalf("同币种不应改动，got %d", got)
 	}
 }
 
@@ -69,10 +84,10 @@ func TestOverrunLevel(t *testing.T) {
 
 func TestCategoryBreakdownPercentage(t *testing.T) {
 	expenses := []models.ExpenseRecord{
-		{Category: "餐饮", Amount: 50, Currency: "CNY"},
-		{Category: "交通", Amount: 50, Currency: "CNY"},
+		{Category: "餐饮", AmountCents: 5000, Currency: "CNY"},
+		{Category: "交通", AmountCents: 5000, Currency: "CNY"},
 	}
-	s := SummarizeBudget(200, "CNY", expenses)
+	s := SummarizeBudget(20000, "CNY", expenses)
 	if s.CategoryPct["餐饮"] != 50 || s.CategoryPct["交通"] != 50 {
 		t.Fatalf("分类占比应为各 50%%，got %v", s.CategoryPct)
 	}

@@ -54,12 +54,14 @@ export default function ExpandableConnectorNav({ pt, nextPt, travelDetails }: { 
 
   return (
     <div className="mt-8 mb-4 relative">
-      <div 
+      <button 
+        type="button"
+        aria-label={isOpen ? '收起路段详情' : '展开路段详情'}
         onClick={() => setIsOpen(!isOpen)}
-        className="absolute -left-[27px] top-2.5 w-5 h-5 bg-white border border-slate-300 rounded-full flex items-center justify-center z-10 text-slate-400 hover:border-orange-500 hover:text-orange-500 cursor-pointer shadow-2xs transition-colors"
+        className="absolute -left-[27px] top-2.5 w-5 h-5 p-0 bg-white border border-slate-300 rounded-full flex items-center justify-center z-10 text-slate-400 hover:border-orange-500 hover:text-orange-500 cursor-pointer shadow-2xs transition-colors"
       >
         <ArrowDown className="w-3 h-3" />
-      </div>
+      </button>
 
       <button
         onClick={() => setIsOpen(!isOpen)}

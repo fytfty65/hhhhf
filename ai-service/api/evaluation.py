@@ -11,7 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import APIRouter, Query
 
@@ -65,15 +65,17 @@ def evaluation_health(entries: list[dict[str, Any]], now: float | None = None) -
         }
     current = time.time() if now is None else float(now)
     latest = entries[-1]
+    raw_recorded_at: Any = latest.get("recorded_at")
     try:
-        recorded_at = float(latest.get("recorded_at"))
+        recorded_at = float(raw_recorded_at)
     except (TypeError, ValueError):
         recorded_at = 0
     age = max(0, int(current - recorded_at)) if recorded_at > 0 else None
     failures = 0
     for entry in reversed(entries):
         status = str(entry.get("status") or "")
-        callback = entry.get("callback") if isinstance(entry.get("callback"), dict) else {}
+        raw_callback = entry.get("callback")
+        callback: Mapping[str, Any] = raw_callback if isinstance(raw_callback, dict) else {}
         callback_failed = callback.get("accepted") is False and callback.get("skipped") is not True
         execution_failed = status in {"error", "blocked", "unavailable"}
         if execution_failed or callback_failed:

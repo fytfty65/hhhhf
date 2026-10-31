@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -55,6 +56,11 @@ func main() {
 	defer auditCleanupCancel()
 	qualityPushCancel := handlers.StartProviderQualityWebPushLoop(context.Background())
 	defer qualityPushCancel()
+	// Bounds the four usage-driven event tables. A no-op unless
+	// EVENT_RETENTION_ENABLED is set, so enabling it is an explicit operator
+	// decision rather than a silent deletion on upgrade.
+	eventRetentionCancel := handlers.StartEventRetentionCleanupLoop(context.Background())
+	defer eventRetentionCancel()
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("DB_AUTO_BACKUP")), "true") {
 		if path, err := database.Backup(""); err != nil {
 			log.Printf("数据库自动备份失败: %v", err)
@@ -81,8 +87,30 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	// Trusted proxies MUST be set explicitly. gin.New() defaults to
+	// trustedProxies = {"0.0.0.0/0", "::/0"} with ForwardedByClientIP=true, which
+	// means c.ClientIP() returns whatever the caller put in X-Forwarded-For (or
+	// X-Real-IP). Every IP-keyed control in this service — the login/register
+	// limiters in handlers/ratelimit.go, RoomRateLimitMiddleware, and the
+	// AIRateLimitMiddleware on the expensive AI proxy routes — is therefore
+	// bypassable by rotating a request header unless a real proxy topology is
+	// declared here. Default to trusting nothing (ClientIP() == the peer address)
+	// and require an explicit opt-in via TRUSTED_PROXIES for deployments that sit
+	// behind a reverse proxy or load balancer.
+	if err := configureTrustedProxies(r); err != nil {
+		log.Fatalf("TRUSTED_PROXIES 配置无效: %v", err)
+	}
+
 	// 3. 注册中间件（P3 可观测性：X-Request-ID + 结构化日志 + 延迟指标）
-	r.Use(api.RequestIDMiddleware(), api.LoggingMiddleware(), corsMiddleware())
+	//
+	// BodyLimitMiddleware comes first so the ceiling applies to every route,
+	// including the /metrics endpoints and the requests later middleware reads.
+	// AuthMiddleware buffers the body for its user_id/created_by probe, and its
+	// own size check only covers `Content-Type: application/json`; a request with
+	// any other content type previously streamed an unbounded body into the
+	// handler. This caps it at the transport layer, whatever the client claims in
+	// Content-Length (chunked requests included).
+	r.Use(handlers.BodyLimitMiddleware(), api.RequestIDMiddleware(), api.LoggingMiddleware(), corsMiddleware())
 
 	// 指标端点：需要访问令牌，无令牌时仅允许本机回环访问
 	r.GET("/metrics", api.MetricsGuardMiddleware(), api.MetricsHandler)
@@ -166,6 +194,41 @@ func startBackupLoop() {
 			}
 		}
 	}()
+}
+
+// configureTrustedProxies decides which peers may set the client-IP headers.
+//
+// Security rationale: the default gin engine trusts every proxy, so any caller
+// could choose its own client IP and defeat the login/register/room/AI rate
+// limiters. TRUSTED_PROXIES (comma-separated IPs or CIDRs) is the only way to
+// re-enable header trust, and it must describe the actual proxy tier.
+//
+//	unset            -> trust nobody; ClientIP() is the TCP peer (safe default)
+//	"10.0.0.0/8,..." -> trust exactly those CIDRs
+//
+// A malformed value is fatal rather than ignored: silently falling back would
+// leave an operator who intended to configure a proxy with either a broken
+// deployment or, worse, an unnoticed weakening.
+func configureTrustedProxies(r *gin.Engine) error {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if raw == "" {
+		log.Printf("TRUSTED_PROXIES 未设置：不信任任何转发头，客户端 IP 取 TCP 对端地址（按 IP 限流不可被 X-Forwarded-For 伪造）")
+		return r.SetTrustedProxies(nil)
+	}
+	parts := make([]string, 0, 8)
+	for _, item := range strings.Split(raw, ",") {
+		if candidate := strings.TrimSpace(item); candidate != "" {
+			parts = append(parts, candidate)
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Errorf("TRUSTED_PROXIES 已设置但没有任何有效条目")
+	}
+	if err := r.SetTrustedProxies(parts); err != nil {
+		return err
+	}
+	log.Printf("TRUSTED_PROXIES 已生效：信任 %d 个代理网段，客户端 IP 取自转发头", len(parts))
+	return nil
 }
 
 // corsMiddleware 只允许显式配置的前端来源，避免反射任意 Origin。

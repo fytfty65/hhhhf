@@ -51,10 +51,12 @@ func resetPrometheusState() {
 	requestsByPath = map[string]int{}
 	latencyByPath = map[string]float64{}
 	latencyCountByPath = map[string]int{}
+	requestsDroppedFromPath = 0
 	metricsMu.Unlock()
 
 	promMu.Lock()
 	pathHistogram = map[string]*latencyHistogram{}
+	prometheusPathOverflow = 0
 	promMu.Unlock()
 }
 
@@ -226,5 +228,155 @@ func TestLatencyBucketsCoverObservedRange(t *testing.T) {
 		if latencyBucketsMs[i] <= latencyBucketsMs[i-1] {
 			t.Fatalf("buckets must be strictly increasing at index %d", i)
 		}
+	}
+}
+
+// cardinalityTestRouter wires LoggingMiddleware exactly as main.go does, so these
+// tests exercise the real label-selection path rather than calling recordRequest
+// directly and assuming the caller passed something bounded.
+func cardinalityTestRouter() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(LoggingMiddleware())
+	r.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, "pong") })
+	return r
+}
+
+// TestUnmatchedPathsDoNotGrowMetricLabels is the regression test for the
+// unbounded-cardinality bug: the label used to be c.Request.URL.Path while
+// LoggingMiddleware ran globally, so an unauthenticated caller could add one
+// permanent series per unique junk URL. 5,000 distinct 404s must stay flat.
+func TestUnmatchedPathsDoNotGrowMetricLabels(t *testing.T) {
+	resetPrometheusState()
+	r := cardinalityTestRouter()
+	for i := 0; i < 5000; i++ {
+		res := httptest.NewRecorder()
+		r.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/junk/"+strconv.Itoa(i), nil))
+		if res.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for unmatched path, got %d", res.Code)
+		}
+	}
+
+	metricsMu.Lock()
+	pathLabels := len(requestsByPath)
+	statusLabels := len(requestsByStatus)
+	dropped := requestsDroppedFromPath
+	metricsMu.Unlock()
+
+	if pathLabels > maxMetricPaths {
+		t.Fatalf("path labels grew to %d, above the cap of %d", pathLabels, maxMetricPaths)
+	}
+	// 5,000 distinct junk paths must collapse into a single "unmatched" series.
+	if pathLabels != 1 {
+		t.Fatalf("expected all unmatched paths to collapse into 1 label, got %d", pathLabels)
+	}
+	// A fixed, tiny status set: only 404 for these requests.
+	if statusLabels != 1 {
+		t.Fatalf("expected 1 status label, got %d", statusLabels)
+	}
+	if dropped != 0 {
+		t.Fatalf("unmatched paths must collapse before the cap, not overflow it (dropped=%d)", dropped)
+	}
+
+	// The same collapse must hold for the Prometheus histograms, otherwise the
+	// text endpoint would still grow without bound.
+	promMu.Lock()
+	histograms := len(pathHistogram)
+	promMu.Unlock()
+	if histograms != 1 {
+		t.Fatalf("expected 1 histogram series for unmatched paths, got %d", histograms)
+	}
+}
+
+// TestPathLabelIsTheRoutePatternNotTheRawURL pins the fix itself: a matched
+// route with a variable segment must produce one stable label, not one per id.
+func TestPathLabelIsTheRoutePatternNotTheRawURL(t *testing.T) {
+	resetPrometheusState()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(LoggingMiddleware())
+	r.GET("/api/v1/trips/:id", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+
+	for _, id := range []string{"a", "b", "c", "d"} {
+		res := httptest.NewRecorder()
+		r.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/v1/trips/"+id, nil))
+	}
+
+	metricsMu.Lock()
+	defer metricsMu.Unlock()
+	if len(requestsByPath) != 1 {
+		t.Fatalf("expected 1 label for the route pattern, got %d: %v", len(requestsByPath), requestsByPath)
+	}
+	if _, ok := requestsByPath["GET /api/v1/trips/:id"]; !ok {
+		t.Fatalf("label must be the route pattern, got %v", requestsByPath)
+	}
+	if requestsTotal != 4 {
+		t.Fatalf("all 4 requests must be counted, got %d", requestsTotal)
+	}
+}
+
+// TestMetricPathCapFoldsIntoOverflow covers the second line of defence: if the
+// label cap is genuinely reached, traffic must land in the overflow bucket
+// instead of growing the maps, and the overflow must be counted (not silent).
+func TestMetricPathCapFoldsIntoOverflow(t *testing.T) {
+	resetPrometheusState()
+	for i := 0; i < maxMetricPaths+50; i++ {
+		recordRequest("GET", "/route/"+strconv.Itoa(i), 200, 1)
+		recordPrometheusLatency("GET", "/route/"+strconv.Itoa(i), 1)
+	}
+
+	metricsMu.Lock()
+	pathLabels := len(requestsByPath)
+	dropped := requestsDroppedFromPath
+	total := requestsTotal
+	metricsMu.Unlock()
+
+	if pathLabels > maxMetricPaths {
+		t.Fatalf("path labels exceeded the cap: %d > %d", pathLabels, maxMetricPaths)
+	}
+	if dropped == 0 {
+		t.Fatalf("expected overflow to be counted once the cap was reached")
+	}
+	if total != maxMetricPaths+50 {
+		t.Fatalf("total must count every request, got %d", total)
+	}
+
+	promMu.Lock()
+	histograms := len(pathHistogram)
+	overflow := prometheusPathOverflow
+	promMu.Unlock()
+	if histograms > maxMetricPaths {
+		t.Fatalf("histogram series exceeded the cap: %d > %d", histograms, maxMetricPaths)
+	}
+	if overflow == 0 {
+		t.Fatalf("expected histogram overflow to be counted")
+	}
+}
+
+// TestOverflowIsVisibleInPrometheusOutput ensures the guard cannot hide traffic:
+// the overflow counter is exported so a climbing value is alertable.
+func TestOverflowIsVisibleInPrometheusOutput(t *testing.T) {
+	resetPrometheusState()
+	recordRequest("GET", "/route/x", 200, 1)
+	body := renderPrometheus(t)
+	if !strings.Contains(body, "omniroute_gateway_metric_path_overflow_total") {
+		t.Fatalf("overflow series must be exported:\n%s", body)
+	}
+}
+
+// TestMetricStatusKeepsSignalledCodesAndBucketsTheRest keeps the status
+// dimension bounded without losing the codes operators actually alert on.
+func TestMetricStatusKeepsSignalledCodesAndBucketsTheRest(t *testing.T) {
+	for _, code := range []int{200, 401, 403, 429, 500, 503} {
+		if got := metricStatus(code); got != strconv.Itoa(code) {
+			t.Fatalf("status %d must be preserved, got %q", code, got)
+		}
+	}
+	// An invented code outside the signalled set collapses into its class bucket.
+	if got := metricStatus(299); got != "2xx" {
+		t.Fatalf("expected 2xx bucket for 299, got %q", got)
+	}
+	if got := metricStatus(418); got != "4xx" {
+		t.Fatalf("expected 4xx bucket for 418, got %q", got)
 	}
 }

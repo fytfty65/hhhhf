@@ -7,10 +7,10 @@
  * 仅搬运：props 签名、类名与文案逐字保留，未做任何行为改动。
  */
 
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { motion } from 'framer-motion';
 import { AlertCircle, ArrowRight, BrainCircuit, CheckCircle2, Lock, RefreshCw, User, Users } from 'lucide-react';
-import { API_BASE } from '../lib/utils';
+import { apiFetch, setAccessToken } from '../lib/apiClient';
 import OmniLogo from './OmniLogo';
 
 // =========================================================================
@@ -24,6 +24,120 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [loading, setLoading] = useState(false);
+  // 找回密码：请求令牌 -> 用令牌改密，两步都在这个门户里完成。
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetToken, setResetToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [resetRequested, setResetRequested] = useState(false);
+  const nicknameId = useId();
+  const usernameId = useId();
+  const passwordId = useId();
+  const resetTokenId = useId();
+  const newPasswordId = useId();
+
+  const requestPasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setSuccessMsg('');
+    setLoading(true);
+    try {
+      const res = await apiFetch('/api/auth/password/forgot', {
+        method: 'POST',
+        auth: false,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || data?.message || `请求失败 (HTTP ${res.status})`);
+      setResetRequested(true);
+      // 生产环境只提示"若账号存在已发送"；开发环境后端会直接返回令牌。
+      if (data?.reset_token) {
+        setResetToken(data.reset_token);
+        setSuccessMsg('开发环境已返回重置令牌，请设置新密码');
+      } else {
+        setSuccessMsg(data?.message || '如果账号存在，重置邮件已发送，请查收后填入令牌');
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || '找回密码请求失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitPasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setSuccessMsg('');
+    setLoading(true);
+    try {
+      const res = await apiFetch('/api/auth/password/reset', {
+        method: 'POST',
+        auth: false,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: resetToken.trim(), new_password: newPassword.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || data?.message || `重置失败 (HTTP ${res.status})`);
+      setResetOpen(false);
+      setResetRequested(false);
+      setResetToken('');
+      setNewPassword('');
+      setPassword('');
+      setSuccessMsg('密码已重置，请使用新密码登录');
+    } catch (err: any) {
+      setErrorMsg(err.message || '密码重置失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 免注册试用：用一次性随机账号注册并登录，直接进大厅。
+  // 试用账号是真实账号（能在房间里协作、保存行程），只是名字是随机的；
+  // 想跨设备同步时再注册正式账号即可。
+  const startTrial = async () => {
+    setErrorMsg('');
+    setSuccessMsg('');
+    setLoading(true);
+    const suffix = Math.random().toString(36).slice(2, 8) || String(Date.now()).slice(-6);
+    const credentials = {
+      username: `guest_${suffix}`,
+      password: `tour-${suffix}-${Date.now()}`,
+      nickname: `游客 ${suffix.slice(0, 4).toUpperCase()}`,
+    };
+    try {
+      const reg = await apiFetch('/api/auth/register', {
+        method: 'POST',
+        auth: false,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials),
+      });
+      const regText = await reg.text().catch(() => '');
+      let regData: any = {};
+      try { regData = JSON.parse(regText); } catch { regData = {}; }
+      if (!reg.ok) {
+        throw new Error(regData?.detail || regData?.message || regData?.error || `试用账号创建失败 (HTTP ${reg.status})`);
+      }
+
+      const login = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        auth: false,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials),
+      });
+      const loginText = await login.text().catch(() => '');
+      let data: any = null;
+      try { data = JSON.parse(loginText); } catch { data = null; }
+      if (!login.ok || !data?.user) {
+        throw new Error(data?.detail || data?.message || data?.error || `试用登录失败 (HTTP ${login.status})`);
+      }
+      setAccessToken(data.token);
+      onLoginSuccess({ ...data.user });
+    } catch (err: any) {
+      setErrorMsg(err.message || '试用入口暂时不可用，请稍后再试或直接注册');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,10 +145,11 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
     setSuccessMsg('');
     setLoading(true);
 
-    const endpoint = tab === 'login' ? `${API_BASE}/api/auth/login` : `${API_BASE}/api/auth/register`;
+    const endpoint = tab === 'login' ? '/api/auth/login' : '/api/auth/register';
     try {
-      const res = await fetch(endpoint, {
+      const res = await apiFetch(endpoint, {
         method: 'POST',
+        auth: false,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           username: username.trim(), 
@@ -69,7 +184,10 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
         return;
       }
 
-      onLoginSuccess({ ...data.user, token: data.token });
+      // Access token stays in memory; the refresh token arrived as an HttpOnly
+      // cookie and is never visible to JavaScript.
+      setAccessToken(data.token);
+      onLoginSuccess({ ...data.user });
     } catch (err: any) {
       setErrorMsg(err.message || '连接认证中枢失败，请检查网关服务与 API_BASE 配置');
     } finally {
@@ -179,13 +297,14 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               </motion.div>
             )}
 
+            {!resetOpen && (
             <form onSubmit={handleSubmit} className="space-y-4">
               {tab === 'register' && (
                 <div>
-                  <label className="text-xs font-bold text-slate-600 mb-1.5 block">旅行者昵称</label>
+                  <label htmlFor={nicknameId} className="text-xs font-bold text-slate-600 mb-1.5 block">旅行者昵称</label>
                   <div className="relative">
                     <User className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
-                    <input data-testid="auth-nickname"
+                    <input data-testid="auth-nickname" id={nicknameId}
                       type="text" 
                       required 
                       placeholder="例如：Felix / 丝路漫游者" 
@@ -198,10 +317,10 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               )}
 
               <div>
-                <label className="text-xs font-bold text-slate-600 mb-1.5 block">用户名 / 账号</label>
+                <label htmlFor={usernameId} className="text-xs font-bold text-slate-600 mb-1.5 block">用户名 / 账号</label>
                 <div className="relative">
                   <User className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
-                  <input data-testid="auth-username"
+                  <input data-testid="auth-username" id={usernameId}
                     type="text" 
                     required 
                     placeholder="输入您的账号名称" 
@@ -213,10 +332,10 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               </div>
 
               <div>
-                <label className="text-xs font-bold text-slate-600 mb-1.5 block">密码</label>
+                <label htmlFor={passwordId} className="text-xs font-bold text-slate-600 mb-1.5 block">密码</label>
                 <div className="relative">
                   <Lock className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
-                  <input data-testid="auth-password"
+                  <input data-testid="auth-password" id={passwordId}
                     type="password" 
                     required 
                     placeholder="输入密码" 
@@ -226,6 +345,13 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
                   />
                 </div>
               </div>
+
+              {tab === 'login' && (
+                <button type="button" data-testid="auth-forgot" onClick={() => { setResetOpen(true); setErrorMsg(''); setSuccessMsg(''); }}
+                  className="text-xs font-bold text-orange-600 hover:text-orange-700 underline underline-offset-4">
+                  忘记密码？
+                </button>
+              )}
 
               <button data-testid="auth-submit"
                 type="submit" 
@@ -239,6 +365,91 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
                 )}
               </button>
             </form>
+            )}
+
+            {/* 登录引导：第一次来可以先试用，不必先想账号密码 */}
+            <div className="mt-5">
+              <div className="flex items-center gap-3 text-[10px] font-bold text-slate-300">
+                <span className="h-px flex-1 bg-slate-200" />
+                或
+                <span className="h-px flex-1 bg-slate-200" />
+              </div>
+              <button
+                type="button"
+                data-testid="auth-trial"
+                onClick={startTrial}
+                disabled={loading}
+                className="mt-3 w-full py-3 rounded-2xl border border-slate-200 bg-white text-xs font-extrabold text-slate-700 transition-all hover:border-orange-200 hover:bg-orange-50/50 disabled:opacity-60 cursor-pointer"
+              >
+                先随便逛逛 · 免注册试用
+              </button>
+              <p className="mt-2 text-[11px] leading-5 font-medium text-slate-400">
+                试用会创建一个随机昵称的账号，直接进入大厅；行程保存在这台设备，注册正式账号后可跨设备同步。
+              </p>
+              {tab === 'login' && (
+                <p className="mt-2 text-[11px] font-medium text-slate-400">
+                  还没有账号？
+                  <button type="button" onClick={() => { setTab('register'); setErrorMsg(''); setSuccessMsg(''); }}
+                    className="ml-1 font-bold text-orange-600 underline underline-offset-2 hover:text-orange-700 cursor-pointer">
+                    30 秒快速注册
+                  </button>
+                </p>
+              )}
+            </div>
+
+            {resetOpen && (
+              <div className="space-y-4">
+                <div>
+                  <p className="text-sm font-black text-slate-800">找回密码</p>
+                  <p className="mt-1 text-xs font-medium leading-5 text-slate-500">
+                    先提交账号获取重置令牌；生产环境令牌会发送到绑定邮箱，开发环境直接显示。
+                  </p>
+                </div>
+                {!resetRequested ? (
+                  <form onSubmit={requestPasswordReset} className="space-y-4">
+                    <div>
+                      <label htmlFor={usernameId} className="text-xs font-bold text-slate-600 mb-1.5 block">用户名 / 账号</label>
+                      <div className="relative">
+                        <User className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
+                        <input id={usernameId} data-testid="reset-username" type="text" required
+                          placeholder="输入要找回的账号" value={username} onChange={(e) => setUsername(e.target.value)}
+                          className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs outline-none focus:border-orange-500 focus:bg-white transition-all font-medium text-slate-800" />
+                      </div>
+                    </div>
+                    <button type="submit" data-testid="reset-request" disabled={loading}
+                      className="w-full py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-2xl text-xs font-extrabold transition-all disabled:opacity-60">
+                      {loading ? '正在提交…' : '获取重置令牌'}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={submitPasswordReset} className="space-y-4">
+                    <div>
+                      <label htmlFor={resetTokenId} className="text-xs font-bold text-slate-600 mb-1.5 block">重置令牌</label>
+                      <input id={resetTokenId} data-testid="reset-token" type="text" required
+                        placeholder="粘贴邮件中的重置令牌" value={resetToken} onChange={(e) => setResetToken(e.target.value)}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs outline-none focus:border-orange-500 focus:bg-white transition-all font-medium text-slate-800" />
+                    </div>
+                    <div>
+                      <label htmlFor={newPasswordId} className="text-xs font-bold text-slate-600 mb-1.5 block">新密码</label>
+                      <div className="relative">
+                        <Lock className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
+                        <input id={newPasswordId} data-testid="reset-new-password" type="password" required
+                          placeholder="输入新密码" value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                          className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs outline-none focus:border-orange-500 focus:bg-white transition-all font-medium text-slate-800" />
+                      </div>
+                    </div>
+                    <button type="submit" data-testid="reset-submit" disabled={loading || !resetToken.trim() || !newPassword.trim()}
+                      className="w-full py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-2xl text-xs font-extrabold transition-all disabled:opacity-60">
+                      {loading ? '正在重置…' : '设置新密码'}
+                    </button>
+                  </form>
+                )}
+                <button type="button" onClick={() => { setResetOpen(false); setResetRequested(false); setErrorMsg(''); setSuccessMsg(''); }}
+                  className="w-full text-xs font-bold text-slate-500 hover:text-slate-800">
+                  返回登录
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </motion.div>
