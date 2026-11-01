@@ -1,8 +1,12 @@
 import { test, expect, Page } from '@playwright/test';
 
 // 这些断言覆盖证据层/专业层，需显式切到专业模式（普通模式默认只留主方案与旅中执行）。
+// 工作区默认「文档优先」会折叠地图；本 spec 要断言地图/雷达/瓦片，因此固定成平衡布局。
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('omni_experience_mode', 'pro'));
+  await page.addInitScript(() => {
+    localStorage.setItem('omni_experience_mode', 'pro');
+    localStorage.setItem('omni_map_layout', 'balanced');
+  });
 });
 
 /**
@@ -199,6 +203,23 @@ async function installMocks(
         expenses,
       } });
     }
+    // 效果指标：只回已落库的聚合事实（近 30 天），未知数据识别准确率明确 unavailable，
+    // 用来验证面板显示真实数字而不是“未采集”占位。
+    if (url.includes('/api/v1/planning/effect-metrics')) {
+      return route.fulfill({ json: {
+        ok: true,
+        success: true,
+        data: {
+          window_days: 30,
+          adoption: { status: 'available', generated: 10, adopted: 8, rate: 0.8 },
+          preservation: { status: 'available', samples: 4, mean: 0.86 },
+          user_edits: { status: 'available', total: 12, by_type: { plan_edited: 9, plan_swapped: 3 }, trips: 5 },
+          budget_overrun: { status: 'available', trips: 4, overruns: 1, rate: 0.25 },
+          risk_response: { status: 'available', notifications: 6, responded: 5, response_rate: 0.8333, median_seconds: 95 },
+          unknown_data_accuracy: { status: 'unavailable', samples: 0, reason: '需要人工标注真值' },
+        },
+      } });
+    }
     // Keep the professional diagnostics path deterministic without contacting
     // a live Gateway. This mirrors the bounded quality contract returned by
     // PlanningQualityHandler and exercises the release-gate summary in the UI.
@@ -274,16 +295,20 @@ async function reachDecision(page: Page) {
 }
 
 test.describe('refactor regression', () => {
-  test('术语用用户语言：高性价比面板主标题可读，品牌名只留副标题', async ({ page }) => {
-    // 评审意见（2026-10）：术语要用户化，但品牌化副标题可以保留。
-    // 面板主标题必须回答"这里能帮我做什么"，而不是拿内部代号当标题。
+  test('大厅用用户语言：不默认暴露内部概念词，偏好设置可读', async ({ page }) => {
+    // 评审意见（2026-10）：术语要用户化。普通用户默认路径不应出现
+    // 「主控体验 / 决策体 / 博弈裁决 / 协同网络 / 方案治理 / 专业诊断」这类内部概念。
     await installMocks(page);
     await page.goto('/');
-    await page.getByText('高性价比', { exact: true }).click();
-    await expect(page.getByRole('heading', { name: '预算与性价比' })).toBeVisible();
-    // 品牌名仍在，但只作为副标题出现，不再是主标题。
-    await expect(page.getByText('极客精算中枢').first()).toBeVisible();
-    // 解释文案里不再出现 maximin / 适应度函数这类内部术语。
+    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+
+    for (const term of ['主控体验', '决策体', '博弈裁决', '协同网络', '方案治理', '专业诊断']) {
+      await expect(page.getByText(term)).toHaveCount(0);
+    }
+
+    await page.getByTestId('lobby-edit-intent').click();
+    await expect(page.getByText('偏好设置', { exact: true })).toBeVisible();
+    await expect(page.getByText('必须满足什么').first()).toBeVisible();
     await expect(page.getByText(/maximin|适应度函数/)).toHaveCount(0);
   });
 
@@ -333,26 +358,38 @@ test.describe('refactor regression', () => {
     await expect(page.getByTestId('room-code')).toBeVisible();
   });
 
-  test('lobby keeps every entry point', async ({ page }) => {
+  test('lobby keeps the three-step entry and folds the rest into 更多', async ({ page }) => {
     await installMocks(page);
     await page.goto('/');
 
-    // Auth/room surface
     await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+
+    // 第 1 步：去哪、几天、几个人
+    await expect(page.getByTestId('lobby-destination')).toBeVisible();
+    await expect(page.getByTestId('lobby-days')).toBeVisible();
+    await expect(page.getByTestId('lobby-travelers')).toBeVisible();
+    await expect(page.getByTestId('lobby-budget-first')).toBeVisible();
+    // 第 2 步：必须满足什么
+    await expect(page.getByTestId('lobby-edit-intent')).toBeVisible();
+    // 第 3 步：生成方案
+    await expect(page.getByTestId('begin-plan')).toBeVisible();
+
+    // 加入房间 / 查看示例 仍在默认路径
     await expect(page.getByTestId('room-code')).toBeVisible();
     await expect(page.getByTestId('join-room-code')).toBeVisible();
     await expect(page.getByTestId('join-room-submit')).toBeVisible();
-    await expect(page.getByTestId('begin-plan')).toBeVisible();
-
-    // Three travel modes (TravelModeCard)
-    await expect(page.getByText('一人行')).toBeVisible();
-    await expect(page.getByText('亲友结伴')).toBeVisible();
-    await expect(page.getByText('高性价比')).toBeVisible();
-
-    // Preference profile card and lobby entry points
-    await expect(page.getByText('我的旅程诉求画像')).toBeVisible();
+    await expect(page.getByText('查看示例', { exact: true })).toBeVisible();
     await expect(page.getByText('打开交互式地图', { exact: true })).toBeVisible();
-    await expect(page.getByText('同行者社区')).toBeVisible();
+
+    // 其余入口收进「更多」
+    await page.getByTestId('lobby-more').click();
+    const moreMenu = page.getByTestId('lobby-more-menu');
+    await expect(moreMenu).toBeVisible();
+    for (const label of ['个人主页', '社区', '订票查询', '官方渠道', '灵感目的地图谱']) {
+      await expect(moreMenu.getByText(label, { exact: true })).toBeVisible();
+    }
+    await page.getByTestId('lobby-more').click();
+    await expect(moreMenu).toBeHidden();
 
     await noHorizontalOverflow(page);
   });
@@ -375,7 +412,9 @@ test.describe('refactor regression', () => {
     await page.goto('/');
     await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
 
-    await page.getByRole('button', { name: /个人主页/ }).click();
+    // 个人主页收进「更多」二级入口
+    await page.getByTestId('lobby-more').click();
+    await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
     await expect(page.getByText('我的路书', { exact: true })).toBeVisible({ timeout: 15_000 });
     await page.setViewportSize({ width: 390, height: 844 });
     await noHorizontalOverflow(page);
@@ -389,8 +428,9 @@ test.describe('refactor regression', () => {
     await page.goto('/');
     await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
 
-    // 卡片也变成了可访问按钮（aria-label「进入同行者社区」），必须用精确名把导航按钮区分开
-    await page.getByRole('button', { name: '社区', exact: true }).click();
+    // 社区收进「更多」二级入口
+    await page.getByTestId('lobby-more').click();
+    await page.getByTestId('lobby-more-menu').getByRole('button', { name: '社区' }).click();
     await expect(page.getByText('同行者社区', { exact: true })).toBeVisible({ timeout: 15_000 });
     await page.setViewportSize({ width: 390, height: 844 });
     await noHorizontalOverflow(page);
@@ -476,6 +516,39 @@ test.describe('refactor regression', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await noHorizontalOverflow(page);
     await page.setViewportSize({ width: 1280, height: 720 });
+  });
+
+  test('效果指标显示已落库的数字，没有真值的如实标注', async ({ page }) => {
+    // 壁垒不靠“用了多少 Agent”来说明：能算的给数字，算不出来的写明原因。
+    await installMocks(page, { governance: true });
+    await page.goto('/');
+    await expect(page.getByTestId('begin-plan')).toBeVisible({ timeout: 20_000 });
+    await reachDecision(page);
+
+    await page.getByTestId('workspace-layer-more').click();
+    await page.getByTestId('workspace-layer-professional').click();
+    const metrics = page.getByTestId('effect-metrics');
+    await expect(metrics).toBeVisible();
+
+    // 8 项指标都有明确口径，不再出现“未采集”这类空占位
+    await expect(metrics).not.toContainText('未采集');
+    await expect(metrics).toContainText('方案采纳率（30 天）');
+    await expect(metrics).toContainText('成员最低满意度');
+    await expect(metrics).toContainText('争议轮数减少');
+    await expect(metrics).toContainText('重规划保留节点');
+    await expect(metrics).toContainText('预算超支率（记账）');
+    await expect(metrics).toContainText('无法识别字段');
+    await expect(metrics).toContainText('风险响应时间（30 天）');
+    await expect(metrics).toContainText('用户修改次数（30 天）');
+
+    // 有样本的指标直接给数字：采纳 0.8 / 保留 0.86 / 超支 0.25 / 95 秒 → 2 分钟 / 12 次
+    await expect(metrics).toContainText('80%');
+    await expect(metrics).toContainText('86%（30 天）');
+    await expect(metrics).toContainText('25%');
+    await expect(metrics).toContainText('2 分钟');
+    await expect(metrics).toContainText('12 次');
+    // “未知数据识别准确率”缺真值时不能拿“无法识别字段比例”冒充
+    await expect(metrics).toContainText('不等同于');
   });
 
   test('map visualizer and radar keep working', async ({ page }) => {

@@ -190,7 +190,7 @@ export default function TransportSearch({ onClose }: TransportSearchProps) {
               <h2 className="text-lg font-black text-slate-800 dark:text-white">
                 {isFlight ? '航班订票查询' : '火车订票查询'}
               </h2>
-              <p className="text-xs text-slate-500">实时查询班次、价格与余票信息</p>
+              <p className="text-xs text-slate-500">查询班次、价格与余票信息（结果以官方页面为准）</p>
             </div>
           </div>
           {onClose && (

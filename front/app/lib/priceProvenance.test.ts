@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { priceProvenance, priceValueOf, officialProfileOf } from './priceProvenance.ts';
+import { priceProvenance, priceValueOf, officialProfileOf, priceFreshnessOf, priceUpdatedAtText, PRICE_FRESHNESS_LABELS } from './priceProvenance.ts';
 
 // 用的是**真实方案里的节点形状**（2026-10-07 的三条定向通道跑出来的结果）
 
@@ -76,6 +76,46 @@ test('没有价格（或暂无供应商数据）时返回 null，不渲染空标
   assert.equal(priceProvenance({ cost_estimate: '暂无供应商数据' }), null);
   assert.equal(priceProvenance({ cost_estimate: '' }), null);
   assert.equal(priceProvenance(null), null);
+});
+
+test('价格时效三态：没有价格是未知价，来源不可核实是估算价', () => {
+  assert.equal(priceFreshnessOf({ cost_estimate: '暂无供应商数据' }), 'unknown');
+  assert.equal(priceFreshnessOf({ cost_estimate: '' }), 'unknown');
+  assert.equal(priceFreshnessOf(null), 'unknown');
+  assert.equal(priceFreshnessOf({ cost_estimate: '¥45', data_sources: { cost_estimate: 'web' } }), 'estimated');
+  assert.equal(priceFreshnessOf({ cost_estimate: '¥28', data_sources: { cost_estimate: 'platform' } }), 'estimated');
+});
+
+test('可核实来源 + 24 小时内观测时间才算实时价，缺时间或过期都降级为估算价', () => {
+  const now = Date.parse('2026-10-31T12:00:00+08:00');
+  const official = (extra: Record<string, unknown>) => ({
+    cost_estimate: '¥30',
+    data_sources: { cost_estimate: 'web_page' },
+    ...extra,
+  });
+  assert.equal(priceFreshnessOf(official({ observed_at: '2026-10-31T11:00:00+08:00' }), now), 'live');
+  assert.equal(priceFreshnessOf(official({ observed_at: '2026-10-31T00:30:00+08:00' }), now), 'live');
+  assert.equal(priceFreshnessOf(official({ observed_at: '2026-10-30T11:00:00+08:00' }), now), 'estimated');
+  assert.equal(priceFreshnessOf(official({ observed_at: '2026-10-29T11:00:00+08:00' }), now), 'estimated');
+  assert.equal(priceFreshnessOf(official({}), now), 'estimated');
+  assert.equal(priceFreshnessOf(official({ observed_at: '不是时间' }), now), 'estimated');
+  // 观测时间在未来也不算实时价
+  assert.equal(priceFreshnessOf(official({ observed_at: '2026-11-01T12:00:00+08:00' }), now), 'estimated');
+});
+
+test('价格更新时间可读作 MM-DD HH:mm，缺失或非法时为空', () => {
+  assert.equal(priceUpdatedAtText({ observed_at: '2026-10-31T09:05:00+08:00' }), '10-31 09:05');
+  assert.equal(priceUpdatedAtText({ price_retrieved_at: '2026-10-31T09:05:00+08:00' }), '10-31 09:05');
+  assert.equal(priceUpdatedAtText({ fetched_at: '2026-10-31T09:05:00+08:00' }), '10-31 09:05');
+  assert.equal(priceUpdatedAtText({ cost_estimate: '¥30' }), '');
+  assert.equal(priceUpdatedAtText({ observed_at: '不是时间' }), '');
+  assert.equal(priceUpdatedAtText(null), '');
+});
+
+test('三态标签文案固定为 实时价 / 估算价 / 未知价', () => {
+  assert.equal(PRICE_FRESHNESS_LABELS.live, '实时价');
+  assert.equal(PRICE_FRESHNESS_LABELS.estimated, '估算价');
+  assert.equal(PRICE_FRESHNESS_LABELS.unknown, '未知价');
 });
 
 test('officialProfileOf 取文旅部名录登记的官网/官方预约入口', () => {

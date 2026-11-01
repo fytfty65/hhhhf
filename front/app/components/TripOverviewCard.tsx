@@ -16,7 +16,7 @@ export type BudgetBreakdown = {
 // 后端 budget_report.confidence 只有 high/medium/low 三档，这里直译成人话；
 // 读不懂的值不猜，显示「未标注」，避免把没有分级的数据说成可信。
 const CONFIDENCE: Record<string, { label: string; tone: string; hint: string }> = {
-  high: { label: '可信度：高', tone: 'text-emerald-700 bg-emerald-50', hint: '价格均来自供应商或可核来源' },
+  high: { label: '可信度：高', tone: 'text-emerald-700 bg-emerald-50', hint: '价格均来自官方或可核来源' },
   medium: { label: '可信度：中', tone: 'text-amber-700 bg-amber-50', hint: '部分价格为估算，或有节点未取到价格' },
   low: { label: '可信度：低', tone: 'text-rose-700 bg-rose-50', hint: '多数节点没取到价格，总额仅供参考' },
 };
@@ -72,7 +72,7 @@ export default function TripOverviewCard({
     ? '后端预算报告总额'
     : budgetEstimated > 0
       ? `按节点报价合计${unpricedCount > 0 ? `，${unpricedCount} 个节点未计价` : ''}`
-      : '供应商未返回价格';
+      : '未返回价格';
 
   const transportText = transportMinutes != null && transportMinutes > 0
     ? `${Math.floor(transportMinutes / 60) > 0 ? `${Math.floor(transportMinutes / 60)} 小时 ` : ''}${transportMinutes % 60} 分钟`
@@ -113,24 +113,24 @@ export default function TripOverviewCard({
     >
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-xl bg-white p-3">
-          <p className="flex items-center gap-1 text-[10px] font-bold text-stone-400"><MapPin className="h-3 w-3" />今日路线</p>
+          <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><MapPin className="h-3 w-3" />今日路线</p>
           <p className="mt-1 truncate text-sm font-black text-stone-800" title={routeText}>{routeText}</p>
-          <p className="mt-0.5 text-[10px] text-stone-400">{dayLabel} · {dayRoutes.length} 个节点 · 共 {totalDays} 天</p>
+          <p className="mt-0.5 text-xs text-stone-400">{dayLabel} · {dayRoutes.length} 个节点 · 共 {totalDays} 天</p>
         </div>
         <div className="rounded-xl bg-white p-3">
-          <p className="flex items-center gap-1 text-[10px] font-bold text-stone-400"><PiggyBank className="h-3 w-3" />总预算</p>
+          <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><PiggyBank className="h-3 w-3" />总预算</p>
           <p className={`mt-1 text-sm font-black ${hasVerifiedBudget ? 'text-stone-800' : 'text-amber-700'}`} data-testid="budget-total">{budgetText}</p>
-          <p className="mt-0.5 text-[10px] text-stone-400">{budgetHint}</p>
+          <p className="mt-0.5 text-xs text-stone-400">{budgetHint}</p>
         </div>
         <div className="rounded-xl bg-white p-3">
-          <p className="flex items-center gap-1 text-[10px] font-bold text-stone-400"><Clock3 className="h-3 w-3" />交通耗时</p>
+          <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><Clock3 className="h-3 w-3" />交通耗时</p>
           <p className={`mt-1 text-sm font-black ${transportMinutes != null && transportMinutes > 0 ? 'text-stone-800' : 'text-amber-700'}`}>{transportText}</p>
-          <p className="mt-0.5 text-[10px] text-stone-400">按已返回的分段交通耗时合计</p>
+          <p className="mt-0.5 text-xs text-stone-400">按已返回的分段交通耗时合计</p>
         </div>
         <div className="rounded-xl bg-white p-3">
-          <p className="flex items-center gap-1 text-[10px] font-bold text-stone-400"><ShieldAlert className="h-3 w-3" />风险提醒</p>
+          <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><ShieldAlert className="h-3 w-3" />风险提醒</p>
           <p className="mt-1 line-clamp-2 text-sm font-black text-stone-800" title={riskHeadline}>{riskHeadline}</p>
-          <p className="mt-0.5 line-clamp-2 text-[10px] text-stone-400">{riskDisclosure}</p>
+          <p className="mt-0.5 line-clamp-2 text-xs text-stone-400">{riskDisclosure}</p>
         </div>
       </div>
       {budgetBreakdown && confidenceInfo && (
@@ -140,44 +140,44 @@ export default function TripOverviewCard({
           aria-label="预算可信度"
         >
           <div className="rounded-xl bg-white p-3">
-            <p className="text-[10px] font-bold text-stone-400">可信度</p>
-            <p className={`mt-1 inline-flex rounded-md px-1.5 py-0.5 text-[11px] font-black ${confidenceInfo.tone}`} data-testid="budget-confidence">
+            <p className="text-xs font-bold text-stone-400">可信度</p>
+            <p className={`mt-1 inline-flex rounded-md px-1.5 py-0.5 text-xs font-black ${confidenceInfo.tone}`} data-testid="budget-confidence">
               {confidenceInfo.label}
             </p>
-            <p className="mt-1 text-[10px] text-stone-400">{confidenceInfo.hint}</p>
+            <p className="mt-1 text-xs text-stone-400">{confidenceInfo.hint}</p>
           </div>
           <div className="rounded-xl bg-white p-3">
-            <p className="text-[10px] font-bold text-stone-400">已确认</p>
+            <p className="text-xs font-bold text-stone-400">已确认</p>
             <p className="mt-1 text-sm font-black text-emerald-700" data-testid="budget-verified">
               {verified > 0 ? money(verified) : '暂无'}
             </p>
-            <p className="mt-0.5 text-[10px] text-stone-400">供应商/可核来源价格</p>
+            <p className="mt-0.5 text-xs text-stone-400">官方/可核来源价格</p>
           </div>
           <div className="rounded-xl bg-white p-3">
-            <p className="text-[10px] font-bold text-stone-400">待确认</p>
+            <p className="text-xs font-bold text-stone-400">待确认</p>
             <p className={`mt-1 text-sm font-black ${pending > 0 ? 'text-amber-700' : 'text-stone-500'}`} data-testid="budget-pending">
               {pending > 0 ? money(pending) : '暂无'}
             </p>
-            <p className="mt-0.5 text-[10px] text-stone-400">{unknownText}</p>
+            <p className="mt-0.5 text-xs text-stone-400">{unknownText}</p>
           </div>
           <div className="rounded-xl bg-white p-3">
-            <p className="text-[10px] font-bold text-stone-400">人均 / 日均</p>
+            <p className="text-xs font-bold text-stone-400">人均 / 日均</p>
             <p className="mt-1 text-sm font-black text-stone-800" data-testid="budget-per-person">
               {perPersonText}
             </p>
-            <p className="mt-0.5 text-[10px] text-stone-400">
+            <p className="mt-0.5 text-xs text-stone-400">
               日均 {perDayText} · 按 {people} 人、{days} 天分摊
             </p>
           </div>
         </div>
       )}
       {overrunText && (
-        <p data-testid="budget-overrun" className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] font-bold text-rose-700">
+        <p data-testid="budget-overrun" className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-700">
           {overrunText}
         </p>
       )}
       {isFallbackRoute && (
-        <p data-testid="overview-fallback-route-badge" className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-700">
+        <p data-testid="overview-fallback-route-badge" className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs font-bold text-amber-700">
           保底路线（系统兜底）：大模型暂不可用，当前方案由候选池合成。
         </p>
       )}
@@ -186,7 +186,7 @@ export default function TripOverviewCard({
           type="button"
           data-testid="overview-edit-trip"
           onClick={onEdit}
-          className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-stone-300 bg-white px-2.5 text-[11px] font-bold text-stone-700 transition-colors hover:bg-stone-50"
+          className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-stone-300 bg-white px-2.5 text-xs font-bold text-stone-700 transition-colors hover:bg-stone-50"
         >
           <Edit3 className="h-3.5 w-3.5" /> 修改行程
         </button>

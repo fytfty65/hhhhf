@@ -7,16 +7,21 @@
 // 用户看不出这是官方门票、票务平台的哪种票、还是网摘估算（"¥30"和"¥2999（其实是三日游）"看起来一样可信）。
 
 import { ExternalLink, ShieldCheck, Ticket, TriangleAlert, Info, Clock } from 'lucide-react';
-import { priceProvenance, officialProfileOf, type PriceProvenance } from '../lib/priceProvenance';
+import { priceProvenance, priceFreshnessOf, priceUpdatedAtText, PRICE_FRESHNESS_LABELS, officialProfileOf, type PriceProvenance } from '../lib/priceProvenance';
 import { nodeAnnotations, officialDetailFor, dayNotices } from '../lib/planAnnotations';
 import { trustOf, trustSummaryOf, TRUST_STYLES, type TrustState } from '../lib/factTrust';
 
-const KIND_STYLE: Record<string, string> = {
-  official: 'bg-emerald-50 text-emerald-700 border-emerald-200/80',
-  supplier: 'bg-sky-50 text-sky-700 border-sky-200/80',
-  platform: 'bg-amber-50 text-amber-700 border-amber-200/80',
-  estimate: 'bg-slate-50 text-slate-600 border-slate-200',
+// 价格时效统一三态：实时价 / 估算价 / 未知价（颜色跟着时效走，不再按来源混用）
+const FRESHNESS_STYLE: Record<string, string> = {
+  live: 'bg-emerald-50 text-emerald-700 border-emerald-200/80',
+  estimated: 'bg-amber-50 text-amber-700 border-amber-200/80',
   unknown: 'bg-rose-50 text-rose-700 border-rose-200/80',
+};
+
+const FRESHNESS_HINT: Record<string, string> = {
+  live: '24 小时内从可核实来源取到的价格',
+  estimated: '有价格，但来源不可核实，或更新时间超过 24 小时/缺失',
+  unknown: '没有拿到可核实价格',
 };
 
 function KindIcon({ kind }: { kind: string }) {
@@ -28,41 +33,54 @@ function KindIcon({ kind }: { kind: string }) {
 
 export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
   const info: PriceProvenance | null = priceProvenance(node);
+  const freshness = priceFreshnessOf(node);
+  const updatedText = priceUpdatedAtText(node);
   // 官方入口优先取节点上已铺平的字段，其次回退到方案级 official_profiles
   const inline = node && (node.official_booking || node.official_site)
     ? { booking: String(node.official_booking || ''), site: String(node.official_site || ''), name: String(node.official_name || '') }
     : officialProfileOf(plan, node?.name);
   const profile = inline;
-  if (!info && !profile) return null;
 
   const bookingUrl = profile?.booking || profile?.site || '';
+  const freshnessLabel = PRICE_FRESHNESS_LABELS[freshness];
 
   return (
     <span className="flex items-center gap-1.5 flex-wrap">
-      {info && (
-        <span
-          data-testid="price-provenance"
-          title={info.detail ? `${info.label}：${info.detail}` : info.label}
-          className={`flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold border whitespace-nowrap ${KIND_STYLE[info.kind] || KIND_STYLE.estimate}`}
-        >
-          <KindIcon kind={info.kind} />
-          <span className="whitespace-nowrap">{info.label}</span>
-          {info.detail && (
-            <span className="font-medium opacity-80 max-w-[200px] truncate">· {info.detail}</span>
-          )}
-          {info.url && (
-            <a
-              href={info.url}
-              target="_blank"
-              rel="noreferrer noopener"
-              onClick={(event) => event.stopPropagation()}
-              className="inline-flex items-center gap-0.5 whitespace-nowrap underline decoration-dotted hover:opacity-80"
-            >
-              来源<ExternalLink className="w-3 h-3" />
-            </a>
-          )}
-        </span>
-      )}
+      {/* 统一价格标记：实时价 / 估算价 / 未知价，并明确数据更新时间。
+          缺价格也照样标“未知价”，不让空值看起来像免费。 */}
+      <span
+        data-testid="price-provenance"
+        data-freshness={freshness}
+        title={[
+          `${freshnessLabel}：${FRESHNESS_HINT[freshness]}`,
+          info?.detail || '',
+        ].filter(Boolean).join('｜')}
+        className={`flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-bold border whitespace-nowrap ${FRESHNESS_STYLE[freshness] || FRESHNESS_STYLE.unknown}`}
+      >
+        <KindIcon kind={info?.kind || 'unknown'} />
+        <strong className="whitespace-nowrap">{freshnessLabel}</strong>
+        {info && <span className="whitespace-nowrap opacity-80">· {info.value}</span>}
+        {info && <span className="font-medium whitespace-nowrap opacity-80">· {info.label}</span>}
+        {info?.detail && (
+          <span className="font-medium opacity-80 max-w-[200px] truncate">· {info.detail}</span>
+        )}
+        {info && (
+          <span className="font-medium whitespace-nowrap opacity-75">
+            · {updatedText ? `更新于 ${updatedText}` : '更新时间未知'}
+          </span>
+        )}
+        {info?.url && (
+          <a
+            href={info.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            onClick={(event) => event.stopPropagation()}
+            className="inline-flex items-center gap-0.5 whitespace-nowrap underline decoration-dotted hover:opacity-80"
+          >
+            来源<ExternalLink className="w-3 h-3" />
+          </a>
+        )}
+      </span>
       {bookingUrl && (
         <a
           data-testid="official-booking"
@@ -71,7 +89,7 @@ export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
           rel="noreferrer noopener"
           onClick={(event) => event.stopPropagation()}
           title={profile?.name ? `官方登记：${profile.name}` : '官方预约入口'}
-          className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold border whitespace-nowrap bg-indigo-50 text-indigo-700 border-indigo-200/80 hover:bg-indigo-100"
+          className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-bold border whitespace-nowrap bg-indigo-50 text-indigo-700 border-indigo-200/80 hover:bg-indigo-100"
         >
           <Ticket className="w-3 h-3" />
           官方预约

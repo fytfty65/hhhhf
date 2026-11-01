@@ -77,6 +77,14 @@ import TripOverviewCard, { type BudgetBreakdown } from './TripOverviewCard';
 
 type WorkspaceLayer = 'plan' | 'evidence' | 'execution' | 'professional';
 type ExperienceMode = 'simple' | 'pro';
+// 地图抢不抢主体，取决于用户当下在做什么：默认文档优先，需要看空间关系时再切到平衡/地图。
+type MapLayout = 'doc' | 'balanced' | 'map';
+const MAP_LAYOUT_KEY = 'omni_map_layout';
+const MAP_LAYOUT_LABELS: Record<MapLayout, string> = {
+  doc: '文档优先',
+  balanced: '平衡',
+  map: '地图优先',
+};
 
 // 普通模式只保留"路线、预算、交通、风险、保存"；治理、模型评估、供应商质量
 // 这类专业信息收进专业模式的高级抽屉，避免一屏术语把普通用户挡在门外。
@@ -104,7 +112,7 @@ const FullRouteVisualizer = dynamic(
 );
 
 // ================= 工作区区域 =================
-export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, initialDestination, onBack, roomVotes, onRoomVote, roomConnection = 'idle', roomRetryAttempt = 0, roomRetryDelayMs = 0, onRetryRoom }: { mode: string, role: string, roomCode: string, roomMembers: RoomMember[], currentUser: UserProfile, initialDestination?: string | null, onBack: () => void, roomVotes: RoomVoteState, onRoomVote: (nodeName: string, vote: 'up' | 'down' | null) => void, roomConnection?: RoomConnectionState, roomRetryAttempt?: number, roomRetryDelayMs?: number, onRetryRoom?: () => void }) {
+export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, initialDestination, initialIntent, onBack, roomVotes, onRoomVote, roomConnection = 'idle', roomRetryAttempt = 0, roomRetryDelayMs = 0, onRetryRoom }: { mode: string, role: string, roomCode: string, roomMembers: RoomMember[], currentUser: UserProfile, initialDestination?: string | null, initialIntent?: string | null, onBack: () => void, roomVotes: RoomVoteState, onRoomVote: (nodeName: string, vote: 'up' | 'down' | null) => void, roomConnection?: RoomConnectionState, roomRetryAttempt?: number, roomRetryDelayMs?: number, onRetryRoom?: () => void }) {
   const [phase, setPhase] = useState<Phase>('drafting');
   // Keep the decision workspace focused. Advanced evidence and diagnostics are
   // still available, but are no longer rendered as a wall of panels by default.
@@ -112,6 +120,18 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
   const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false);
   // 默认普通模式：专业信息不消失，只是收进"专业"里按需展开。
   const [experienceMode, setExperienceMode] = useState<ExperienceMode>('simple');
+  // 普通用户默认「文档优先」：先读路线，地图需要时再展开。
+  const [mapLayout, setMapLayout] = useState<MapLayout>(() => {
+    try {
+      const saved = localStorage.getItem(MAP_LAYOUT_KEY);
+      if (saved === 'doc' || saved === 'balanced' || saved === 'map') return saved;
+    } catch {}
+    return 'doc';
+  });
+  const changeMapLayout = (next: MapLayout) => {
+    setMapLayout(next);
+    try { localStorage.setItem(MAP_LAYOUT_KEY, next); } catch {}
+  };
   // 普通模式默认只留今日概览；「查看依据」展开质量指标，「展开专业信息」展开行前清单等。
   const [showRouteEvidence, setShowRouteEvidence] = useState(false);
   const [showPlanDetails, setShowPlanDetails] = useState(false);
@@ -123,6 +143,9 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
   const [channelMetrics, setChannelMetrics] = useState<any | null>(null);
   const [featureSnapshot, setFeatureSnapshot] = useState<any | null>(null);
   const [qualitySummary, setQualitySummary] = useState<any | null>(null);
+  // 效果指标（近 30 天累计）：采纳率、预算超支率、风险响应时间、用户修改次数。
+  // 由网关从已落库事件/记账/通知聚合，算不出来时后端返回 insufficient_data。
+  const [effectMetrics, setEffectMetrics] = useState<any | null>(null);
   const [runtimeHealth, setRuntimeHealth] = useState<any | null>(null);
   const [evaluationAudit, setEvaluationAudit] = useState<any | null>(null);
   const [auditCleanupHealth, setAuditCleanupHealth] = useState<any | null>(null);
@@ -173,13 +196,14 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
       apiJson<any>('/api/v1/planning/providers/quality/trend?window_days=14'),
       apiJson<any>(`/api/v1/planning/features?trip_id=${encodeURIComponent(planningResourceId)}`),
       apiJson<any>(`/api/v1/planning/quality?trip_id=${encodeURIComponent(planningResourceId)}`),
+      apiJson<any>('/api/v1/planning/effect-metrics?window_days=30'),
       apiJson<any>(`/api/v1/planning/channels/metrics?trip_id=${encodeURIComponent(planningResourceId)}`),
       apiJson<any>('/api/v1/planning/models/runtime-health'),
       apiJson<any>(`/api/v1/planning/models/evaluation-audit?limit=8${auditVersionFilter ? `&version=${encodeURIComponent(auditVersionFilter)}` : ''}${auditSinceFilter ? `&since=${encodeURIComponent(new Date(`${auditSinceFilter}T00:00:00Z`).toISOString())}` : ''}`),
       apiJson<any>('/api/v1/planning/models/audit-cleanup-health'),
       apiJson<any>(`/api/v1/planning/models/evaluation-audit/summary?${auditVersionFilter ? `version=${encodeURIComponent(auditVersionFilter)}&` : ''}${auditSinceFilter ? `since=${encodeURIComponent(new Date(`${auditSinceFilter}T00:00:00Z`).toISOString())}` : ''}`),
       apiJson<any>(`/api/v1/planning/models/evaluation-audit/compare${auditSinceFilter ? `?since=${encodeURIComponent(new Date(`${auditSinceFilter}T00:00:00Z`).toISOString())}` : ''}`),
-    ]).then(([capabilityPayload, evaluationPayload, registryPayload, providerQualityPayload, providerQualityTrendPayload, featurePayload, qualityPayload, channelMetricsPayload, runtimeHealthPayload, evaluationAuditPayload, auditCleanupPayload, auditSummaryPayload, auditComparisonPayload]) => {
+    ]).then(([capabilityPayload, evaluationPayload, registryPayload, providerQualityPayload, providerQualityTrendPayload, featurePayload, qualityPayload, effectMetricsPayload, channelMetricsPayload, runtimeHealthPayload, evaluationAuditPayload, auditCleanupPayload, auditSummaryPayload, auditComparisonPayload]) => {
       if (!active) return;
       const capabilities = capabilityPayload?.data?.agents || capabilityPayload?.agents;
       const evaluation = evaluationPayload?.data?.agents || evaluationPayload?.agents;
@@ -191,6 +215,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
       setProviderQualityTrend(providerQualityTrendPayload?.data || providerQualityTrendPayload || null);
       setFeatureSnapshot(featurePayload?.data || featurePayload || null);
       setQualitySummary(qualityPayload?.data || qualityPayload || null);
+      setEffectMetrics(effectMetricsPayload?.data || effectMetricsPayload || null);
       setChannelMetrics(channelMetricsPayload?.data || channelMetricsPayload || null);
       setRuntimeHealth(runtimeHealthPayload?.data || runtimeHealthPayload || null);
       setEvaluationAudit(evaluationAuditPayload?.data || evaluationAuditPayload || null);
@@ -206,6 +231,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
       setProviderQualityTrend(null);
       setFeatureSnapshot(null);
       setQualitySummary(null);
+      setEffectMetrics(null);
       setChannelMetrics(null);
       setRuntimeHealth(null);
       setEvaluationAudit(null);
@@ -249,7 +275,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
   const [selectedPoiIndex, setSelectedPoiIndex] = useState<number | null>(0);
   const [activeDayIndex, setActiveDayIndex] = useState<number>(0);
 
-  const [userIntent, setUserIntent] = useState(initialDestination ? `去${initialDestination}玩3天` : '');
+  const [userIntent, setUserIntent] = useState(initialIntent || (initialDestination ? `去${initialDestination}玩3天` : ''));
   // 规划结果与行程执行状态收敛到独立 Store（见 app/lib/stores）。
   // WebSocket 流式消息只负责往 Store 里写，页面组件不再逐个 useState。
   const {
@@ -282,6 +308,76 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     replanBusy, setReplanBusy,
     swappingDay, setSwappingDay,
   } = useTripExecutionStore();
+
+  // 「效果指标」：壁垒不靠“用了多少 Agent”来说明，而是给能算出来的数字。
+  // 口径：只展示有真实数据支撑的指标；没有样本或没有真值的，如实写“样本不足/未采集”，
+  // 不把估算说成实测，也不把“未知字段比例”包装成“识别准确率”。
+  const negotiationRounds = Array.isArray((planGovernance as any)?.negotiation?.revision?.rounds)
+    ? ((planGovernance as any).negotiation.revision.rounds as any[])
+    : [];
+  const conflictReduction = (() => {
+    if (negotiationRounds.length === 0) return null;
+    const before = Number(negotiationRounds[0]?.conflicts_before?.length ?? 0);
+    const after = Number(negotiationRounds[negotiationRounds.length - 1]?.conflicts_after?.length ?? 0);
+    if (!Number.isFinite(before) || before <= 0) return null;
+    return Math.max(0, Math.round((1 - after / before) * 100));
+  })();
+  const adoptionRate = qualitySummary?.rates?.adoption != null
+    ? Math.round(Number(qualitySummary.rates.adoption) * 100)
+    : null;
+  const minSatisfaction = fairnessAudit?.minimum_satisfaction != null
+    ? Math.round(Number(fairnessAudit.minimum_satisfaction) * 100)
+    : null;
+  // 近 30 天累计口径来自网关 /planning/effect-metrics：只取已落库的事实。
+  // 后端在样本不足时返回 rate=null + status=insufficient_data，这里就显示“样本不足”。
+  const effectAdoptionRate = effectMetrics?.adoption?.rate != null
+    ? Math.round(Number(effectMetrics.adoption.rate) * 100)
+    : null;
+  const effectEditTotal = typeof effectMetrics?.user_edits?.total === 'number'
+    ? Number(effectMetrics.user_edits.total)
+    : null;
+  const effectOverrunRate = effectMetrics?.budget_overrun?.rate != null
+    ? Math.round(Number(effectMetrics.budget_overrun.rate) * 100)
+    : null;
+  const effectOverrunTrips = typeof effectMetrics?.budget_overrun?.trips === 'number'
+    ? Number(effectMetrics.budget_overrun.trips)
+    : null;
+  const effectRiskMedianSeconds = typeof effectMetrics?.risk_response?.median_seconds === 'number'
+    ? Number(effectMetrics.risk_response.median_seconds)
+    : null;
+  // 响应时间按量级换单位：秒 → 分钟 → 小时，不统一写成一大串秒数。
+  const effectRiskTimeText = (() => {
+    if (effectRiskMedianSeconds == null) return '暂无已处理提醒';
+    if (effectRiskMedianSeconds < 60) return `${Math.round(effectRiskMedianSeconds)} 秒`;
+    if (effectRiskMedianSeconds < 3600) return `${Math.round(effectRiskMedianSeconds / 60)} 分钟`;
+    return `${(effectRiskMedianSeconds / 3600).toFixed(1)} 小时`;
+  })();
+  const enumInvalidRate = Array.isArray(providerQuality?.providers) && providerQuality.providers.length > 0
+    ? Math.round(
+        (providerQuality.providers.reduce(
+          (sum: number, item: any) => sum + Number(item?.enum_invalid_ratio || 0),
+          0,
+        ) /
+          providerQuality.providers.length) *
+          100,
+      )
+    : null;
+  // 重规划保留节点比例：只在本次确实有重规划提案时才有分母（保留 + 受影响），
+  // 没有提案时写“重规划后显示”，不拿 0 当成 100%。
+  const preservationRate = (() => {
+    const preserved = Number(replanProposal?.data?.preserved_nodes);
+    const affected = Array.isArray(replanProposal?.action?.affected_nodes)
+      ? replanProposal.action.affected_nodes.length
+      : 0;
+    if (!Number.isFinite(preserved) || preserved + affected <= 0) return null;
+    return Math.round((preserved / (preserved + affected)) * 100);
+  })();
+  // 本次没有重规划提案时，退回近 30 天已落库的重规划保留率均值；
+  // 连历史样本都没有才显示“重规划后显示”，不拿 0 冒充 100%。
+  const effectPreservationRate = effectMetrics?.preservation?.mean != null
+    ? Math.round(Number(effectMetrics.preservation.mean) * 100)
+    : null;
+
   const [realPath, setRealPath] = useState<[number, number][]>([]);
   // 方案台账（meal_topup / lodging_geo_adjust / meal_geo_adjust / day_rebalance / official_profiles）：
   // 后端为"吃得着、住得近"做的结构性改动都记在这里，正文上要看得见（2026-10-07）
@@ -977,7 +1073,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
         } catch (err) {}
       };
 
-      ws.onerror = () => { setApiError("协同网络中断，请检查后端网关是否正常运行。"); setWsConnected(false); };
+      ws.onerror = () => { setApiError("房间连接中断，请检查后端网关是否正常运行。"); setWsConnected(false); };
       ws.onclose = () => {
         if (!isMounted) return;
         setWsConnected(false);
@@ -1064,7 +1160,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
       return;
     }
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      setApiError('协同网络正在连接，请稍候再点击“开始规划”');
+      setApiError('房间连接正在建立，请稍候再点击“开始规划”');
       return;
     }
 
@@ -1722,10 +1818,10 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
   const runtimeStatusLabel = (status: string) => status === 'healthy' ? '运行正常' : status === 'rollback_required' ? '已触发回滚' : '样本不足';
 
   return (
-    <motion.div key="workspace-root" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="h-screen w-full bg-white flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden font-sans text-slate-800">
+    <motion.div key="workspace-root" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="relative h-screen w-full bg-white flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden font-sans text-slate-800">
       
       {/* 左侧长图文游记与路径排版区 */}
-      <div className="w-full lg:w-[620px] xl:w-[700px] h-[56vh] lg:h-full min-h-[480px] lg:min-h-0 flex flex-col relative z-20 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white shadow-2xl shrink-0">
+      <div className={`w-full ${mapLayout === 'doc' ? 'lg:flex-1 h-auto lg:h-full' : mapLayout === 'map' ? 'lg:w-[380px] xl:w-[420px] h-[56vh] lg:h-full' : 'lg:w-[620px] xl:w-[700px] h-[56vh] lg:h-full'} min-h-[480px] lg:min-h-0 flex flex-col relative z-20 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white shadow-2xl shrink-0`}>
         <header className="px-5 sm:px-8 py-4 border-b border-slate-100 bg-white shadow-xs z-10">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -1764,9 +1860,15 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
               <button data-testid="save-trip" onClick={handleSaveTrip} className={`px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer ${tripSaved ? 'btn-success' : ''}`}>
                 {tripSaved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />} {tripSaved ? '已保存' : '保存到我的行程'}
               </button>
-              <button data-testid="open-diary" onClick={() => setShowDiary(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer"><BookOpen className="w-3.5 h-3.5"/> 行程日记</button>
-              <button data-testid="export-ics" onClick={downloadIcs} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出日历</button>
-              <button onClick={() => setShowBudget(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer" title="打开预算管家"><PiggyBank className="w-3.5 h-3.5"/> 预算账本</button>
+              {/* 普通模式只留“保存 + 更多”：导出、日记、预算账本收进菜单，
+                  首屏不再一次摆出整排按钮，视觉焦点回到路线本身。 */}
+              {experienceMode === 'pro' && (
+                <>
+                  <button data-testid="open-diary" onClick={() => setShowDiary(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer"><BookOpen className="w-3.5 h-3.5"/> 行程日记</button>
+                  <button data-testid="export-ics" onClick={downloadIcs} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出日历</button>
+                  <button onClick={() => setShowBudget(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer" title="打开预算管家"><PiggyBank className="w-3.5 h-3.5"/> 预算账本</button>
+                </>
+              )}
               </div>
               <button
                 data-testid="toggle-more-tools"
@@ -1802,6 +1904,13 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   <button onClick={() => setShowExpenseReport(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer" title="查看消费复盘"><TrendingDown className="w-3.5 h-3.5"/> 消费复盘</button>
                   <button onClick={() => setShowSatisfaction(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer" title="提交行程满意度"><Star className="w-3.5 h-3.5"/> 行程评价</button>
                   <button onClick={() => setShowBookingHub(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer" title="打开官方渠道"><ExternalLink className="w-3.5 h-3.5"/> 官方渠道</button>
+                  {experienceMode === 'simple' && (
+                    <>
+                      <button data-testid="open-diary" onClick={() => setShowDiary(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer"><BookOpen className="w-3.5 h-3.5"/> 行程日记</button>
+                      <button data-testid="export-ics" onClick={downloadIcs} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer"><Download className="w-3.5 h-3.5"/> 导出日历</button>
+                      <button onClick={() => setShowBudget(true)} className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer" title="打开预算管家"><PiggyBank className="w-3.5 h-3.5"/> 预算账本</button>
+                    </>
+                  )}
                   <button onClick={() => { setPhase('drafting'); setIntentsReady(false); setShowMoreTools(false); }} className="btn-accent col-span-2 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center justify-center gap-1.5 border shadow-2xs cursor-pointer">
                     <Wand2 className="w-3.5 h-3.5"/> 重新调整
                   </button>
@@ -1809,6 +1918,22 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
               )}
             </div>
           )}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-1.5" aria-label="地图布局">
+            <span className="text-[11px] font-bold text-slate-400">布局</span>
+            {(Object.keys(MAP_LAYOUT_LABELS) as MapLayout[]).map((key) => (
+              <button
+                key={key}
+                type="button"
+                data-testid={`map-layout-${key}`}
+                aria-pressed={mapLayout === key}
+                onClick={() => changeMapLayout(key)}
+                className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition-colors ${mapLayout === key ? 'border-orange-200 bg-orange-50 text-orange-700' : 'border-slate-200 bg-white text-slate-500 hover:border-orange-200 hover:text-orange-600'}`}
+              >
+                {MAP_LAYOUT_LABELS[key]}
+              </button>
+            ))}
+            {mapLayout === 'doc' && <span className="ml-auto hidden text-[11px] font-medium text-slate-400 sm:inline">地图已折叠，需要看空间关系时再展开</span>}
           </div>
           <div className="mt-4 grid grid-cols-3 gap-2" aria-label="规划进度">
             {([
@@ -1819,7 +1944,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
               const active = phase === key;
               const complete = (key === 'drafting' && phase !== 'drafting') || (key === 'deduction' && phase === 'decision');
               return <div key={key} className={`relative flex items-center gap-2 rounded-xl px-3 py-2 border transition-colors ${active ? 'bg-orange-50 border-orange-200 text-orange-700' : complete ? 'bg-stone-100 border-stone-200 text-stone-500' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>
-                <span className="font-mono text-[10px] font-black">{complete ? '✓' : index}</span><span className="text-[11px] font-bold truncate">{label}</span>
+                <span className="font-mono text-[11px] font-black">{complete ? '✓' : index}</span><span className="text-xs font-bold truncate">{label}</span>
               </div>;
             })}
           </div>
@@ -1866,7 +1991,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                 data-testid="toggle-route-evidence"
                 aria-expanded={showRouteEvidence}
                 onClick={() => setShowRouteEvidence((open) => !open)}
-                className="mt-2 inline-flex min-h-8 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 text-[11px] font-bold text-stone-600 transition-colors hover:bg-stone-50"
+                className="mt-2 inline-flex min-h-8 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 text-xs font-bold text-stone-600 transition-colors hover:bg-stone-50"
               >
                 {showRouteEvidence ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                 查看依据（覆盖率 / 共识指数 / 策略与采样）
@@ -1973,8 +2098,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   onClick={() => { setWorkspaceLayer(key); setShowWorkspaceMenu(false); }}
                   className={`min-h-10 flex-1 rounded-lg px-3 py-1.5 text-left transition-colors ${workspaceLayer === key ? 'bg-white text-stone-900 shadow-sm ring-1 ring-stone-200' : 'text-stone-500 hover:bg-white/70'}`}
                 >
-                  <span className="block text-[11px] font-black">{label}</span>
-                  <span className="mt-0.5 hidden truncate text-[9px] font-medium text-stone-400 sm:block">{hint}</span>
+                  <span className="block text-xs font-black">{label}</span>
+                  <span className="mt-0.5 hidden truncate text-[11px] font-medium text-stone-400 sm:block">{hint}</span>
                 </button>
               ))}
               {experienceMode === 'pro' && (
@@ -1986,8 +2111,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   onClick={() => setShowWorkspaceMenu((open) => !open)}
                   className={`min-h-10 rounded-lg px-3 py-1.5 text-left transition-colors ${workspaceLayer === 'professional' ? 'bg-white text-stone-900 shadow-sm ring-1 ring-stone-200' : 'text-stone-500 hover:bg-white/70'}`}
                 >
-                  <span className="flex items-center gap-1 text-[11px] font-black"><MoreHorizontal className="h-3.5 w-3.5" />更多</span>
-                  <span className="mt-0.5 hidden text-[9px] font-medium text-stone-400 sm:block">高级信息</span>
+                  <span className="flex items-center gap-1 text-xs font-black"><MoreHorizontal className="h-3.5 w-3.5" />更多</span>
+                  <span className="mt-0.5 hidden text-[11px] font-medium text-stone-400 sm:block">高级信息</span>
                 </button>
                 {showWorkspaceMenu && (
                   <div className="absolute right-0 top-full z-40 mt-2 w-52 rounded-xl border border-stone-200 bg-white p-1.5 shadow-xl">
@@ -1997,8 +2122,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                       onClick={() => { setWorkspaceLayer('professional'); setShowWorkspaceMenu(false); }}
                       className="w-full rounded-lg px-3 py-2 text-left hover:bg-stone-50"
                     >
-                      <span className="block text-[11px] font-black text-stone-800">方案检查</span>
-                      <span className="mt-0.5 block text-[10px] leading-4 text-stone-500">成员体验、策略依据与系统状态</span>
+                      <span className="block text-xs font-black text-stone-800">方案检查</span>
+                      <span className="mt-0.5 block text-[11px] leading-4 text-stone-500">成员体验、策略依据与系统状态</span>
                     </button>
                   </div>
                 )}
@@ -2012,7 +2137,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   aria-pressed={experienceMode === 'simple'}
                   title="只看路线、预算、交通、风险和保存"
                   onClick={() => changeExperienceMode('simple')}
-                  className={`min-h-8 rounded-lg px-2.5 text-[11px] font-bold transition-colors ${experienceMode === 'simple' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:bg-stone-50'}`}
+                  className={`min-h-8 rounded-lg px-2.5 text-xs font-bold transition-colors ${experienceMode === 'simple' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:bg-stone-50'}`}
                 >
                   普通
                 </button>
@@ -2020,9 +2145,9 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   type="button"
                   data-testid="experience-mode-pro"
                   aria-pressed={experienceMode === 'pro'}
-                  title="展开证据、方案检查与专业诊断"
+                  title="展开依据、方案对比与高级信息"
                   onClick={() => changeExperienceMode('pro')}
-                  className={`min-h-8 rounded-lg px-2.5 text-[11px] font-bold transition-colors ${experienceMode === 'pro' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:bg-stone-50'}`}
+                  className={`min-h-8 rounded-lg px-2.5 text-xs font-bold transition-colors ${experienceMode === 'pro' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:bg-stone-50'}`}
                 >
                   专业
                 </button>
@@ -2031,7 +2156,10 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           )}
         </header>
 
-        <div className="flex-1 overflow-y-auto bg-white custom-scrollbar relative">
+        {/* 文档优先布局下左栏会占满整屏；正文再宽就会一行 100+ 字，反而难读。
+            把阅读区限制在约 680px（中文正文 ~48 字/行）并居中：地图折叠时留给正文的空白
+            由两侧留白吸收，而不是把每行拉长。11px 的说明文字按一行 ~58 字也算得下。 */}
+        <div className="mx-auto w-full max-w-[680px] flex-1 overflow-y-auto bg-white custom-scrollbar relative">
           {/* 核对说明是"要读的内容"，不是工具栏：放进滚动区最上面，跟行程正文一起滚。
               以前它挂在 header 里，而 header 是 auto 高度、不可滚动，所以面板一长
               （预算核对/已作调整/行程规模/本次调整/价格核对/跨城怎么走/长途分段/还需要你留意
@@ -2121,7 +2249,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                       data-testid="toggle-plan-details"
                       aria-expanded={showPlanDetails}
                       onClick={() => setShowPlanDetails((open) => !open)}
-                      className="mb-3 inline-flex min-h-8 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 text-[11px] font-bold text-stone-600 transition-colors hover:bg-stone-50"
+                      className="mb-3 inline-flex min-h-8 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 text-xs font-bold text-stone-600 transition-colors hover:bg-stone-50"
                     >
                       {showPlanDetails ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                       展开专业信息（行前清单 / 文化背景 / 无障碍）
@@ -2145,6 +2273,26 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                       <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">最低成员体验</p><p className="mt-1 text-lg font-black text-slate-800">{fairnessAudit?.minimum_satisfaction != null ? `${Math.round(Number(fairnessAudit.minimum_satisfaction) * 100)}%` : '尚未评估'}</p><p className="mt-1 text-[10px] text-slate-400">越低的成员越需要优先照顾</p></div>
                       <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">路线是否均衡</p><p className={`mt-1 text-sm font-black ${fairnessAudit?.threshold_exceeded ? 'text-rose-600' : 'text-emerald-700'}`}>{fairnessAudit ? (fairnessAudit.threshold_exceeded ? '需要调整' : '当前可接受') : '尚未评估'}</p><p className="mt-1 text-[10px] text-slate-400">比较成员之间的体验差距</p></div>
                       <div className="rounded-lg bg-white p-3"><p className="text-[10px] text-slate-400">历史依据</p><p className="mt-1 text-sm font-black text-slate-800">{banditDecision ? (banditDecision.explored ? '正在试用新策略' : '优先使用稳定策略') : '样本不足'}</p><p className="mt-1 text-[10px] text-slate-400">样本不足时不会宣称“已经学会”</p></div>
+                    </div>
+                    {/* 效果指标：把“多智能体”叙事换成可核对的数字；算不出来的如实写样本不足/未采集。 */}
+                    <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3" data-testid="effect-metrics">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[10px] font-black text-slate-500">效果指标</p>
+                        <span className="text-[9px] text-slate-400">只展示能算出来的数；没有样本的如实标注</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px] sm:grid-cols-4">
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">方案采纳率（30 天）<span className="ml-1 font-black text-slate-800">{effectAdoptionRate != null ? `${effectAdoptionRate}%` : adoptionRate != null ? `${adoptionRate}%` : '样本不足'}</span></div>
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">成员最低满意度<span className="ml-1 font-black text-slate-800">{minSatisfaction != null ? `${minSatisfaction}%` : '尚未评估'}</span></div>
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">争议轮数减少<span className="ml-1 font-black text-slate-800">{conflictReduction != null ? `${conflictReduction}%` : negotiationRounds.length > 0 ? '本轮无分歧可减少' : '本轮无多轮协商'}</span></div>
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">重规划保留节点<span className="ml-1 font-black text-slate-800">{preservationRate != null ? `${preservationRate}%` : effectPreservationRate != null ? `${effectPreservationRate}%（30 天）` : '重规划后显示'}</span></div>
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">预算超支率（记账）<span className="ml-1 font-black text-slate-800">{effectOverrunRate != null ? `${effectOverrunRate}%` : effectOverrunTrips === 0 ? '还没有可比预算' : '样本不足'}</span></div>
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">无法识别字段<span className="ml-1 font-black text-slate-800">{enumInvalidRate != null ? `${enumInvalidRate}%` : '样本不足'}</span></div>
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">风险响应时间（30 天）<span className="ml-1 font-black text-slate-800">{effectRiskTimeText}</span></div>
+                        <div className="rounded bg-slate-50 px-2 py-1.5 text-slate-600">用户修改次数（30 天）<span className="ml-1 font-black text-slate-800">{effectEditTotal != null ? `${effectEditTotal} 次` : '暂无记录'}</span></div>
+                      </div>
+                      <p className="mt-2 text-[9px] leading-4 text-slate-400">
+                        累计指标只统计近 30 天已落库的事实：采纳率按“生成 → 采纳”事件，预算超支率按“设了预算且有记账”的行程实际支出对比，风险响应时间是通知从推送到你处理的中位数，用户修改次数只数你主动改方案（不含系统执行）。「无法识别字段」是供应商返回中未能识别、未参与决策的比例，不等同于“未知数据识别准确率”——后者需要标注真值后才能计算，样本不足时不编造。
+                      </p>
                     </div>
                     <div className="mt-3 rounded-xl border border-[#e9d8c5] bg-[#fff8ef] px-3 py-2.5 text-[11px] leading-5 text-[#6f4527]">
                       <span className="font-black">你可以直接这样调整：</span> 换成更省钱、减少每天节点、优先某位成员，或打开路线节点查看来源与替代项。技术指标只放在下面的“高级诊断”里，不影响普通使用。
@@ -2412,8 +2560,96 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
         onClose={() => setSecondaryPoi(null)}
       />
 
+      {/* 旅中风险推送中心：工作区级浮层，不随地图折叠而消失（只要地图能收起，风险按钮就不能一起消失） */}
+      <RiskPushCenter
+        city={targetCityInfo?.name || ''}
+        coordinate={targetCityInfo?.lnglat}
+        safetyInfo={safetyInfo}
+        weatherInfo={weatherInfo}
+        trafficInfo={trafficInfo}
+        userId={currentUser?.id}
+        roomCode={roomCode}
+        routeNodes={dynamicRoutes.map((node) => node.name).filter(Boolean)}
+        onOpenExecution={phase === 'decision' ? () => setWorkspaceLayer('execution') : undefined}
+        onRequestReplan={(item) => {
+          // 提醒里没有可直接确认的提案时，唯一诚实的动作是"带着这条风险回到需求页"：
+          // 由用户自己确认后再生成，前端不替用户改方案，也不编造受影响节点。
+          const affected = item.affectedNodes && item.affectedNodes.length > 0
+            ? `已收到的可能受影响节点：${item.affectedNodes.join('、')}。`
+            : '这条提醒没有给出受影响节点，请在需求里说明要调整哪些安排。';
+          setUserIntent(`因风险提醒“${item.title}”需要调整剩余行程：${item.detail} ${affected} 保持未完成节点不变，只对受影响的部分做最小修改。`);
+          setPhase('drafting');
+          setIntentsReady(false);
+        }}
+        onReplan={(proposal) => {
+          void (async () => {
+            const signals = Array.isArray(proposal?.changed_signals) ? proposal.changed_signals : [];
+            let actionText = '仅对受影响节点执行最小修改重规划';
+            try {
+              const response = await apiFetch('/api/v1/planning/emergency/evaluate', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: currentUser.id, trip_id: planningResourceId, destination: targetCityInfo?.name || '', changed_signals: signals, current_route: dynamicRoutes }),
+              });
+              const payload = await response.json();
+              const action = payload?.data?.actions?.[0] || payload?.actions?.[0];
+              if (action?.title) actionText = `${action.title}：${action.reason || ''}`;
+
+              if (!action || action.type === 'manual_review') {
+                setApiError(`${actionText}，请补充具体受影响节点后再重排`);
+                return;
+              }
+
+              // The evaluator is deterministic; submit its structured action
+              // directly to the minimal-perturbation endpoint. This keeps
+              // unaffected nodes intact and avoids a second LLM rewrite.
+              const replanResponse = await apiFetch('/api/v1/planning/replan', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  trip_id: planningResourceId,
+                  destination: targetCityInfo?.name || '',
+                  existing_route: dynamicRoutes,
+                  affected_nodes: action.affected_nodes || [],
+                  changed_signals: signals,
+                  replacement_kind: action.replacement_kind || 'DESTINATION',
+                  member_utilities: Object.values(teamSatisfaction).map((value) => Number(value)).filter((value) => Number.isFinite(value)),
+                }),
+              });
+              const replanPayload = await replanResponse.json();
+              if (!replanResponse.ok) {
+                throw new Error(replanPayload?.error?.message || replanPayload?.error || '结构化重规划失败');
+              }
+              const data = replanPayload?.data || replanPayload;
+              const candidateCount = Array.isArray(data?.replacement_candidates) ? data.replacement_candidates.length : 0;
+              setReplanProposal({
+                proposalId: proposal?.proposal_id || payload?.data?.proposal_id || payload?.proposal_id || '',
+                action: { ...action, trigger_types: proposal?.trigger_types || [], expires_at: proposal?.expires_at },
+                data,
+              });
+              setApiError(`${actionText}。已保留 ${data?.preserved_nodes ?? 0} 个节点，${candidateCount} 个替代候选待确认`);
+              return;
+            } catch { /* use the safe generic action text when the evaluator is unavailable */ }
+            setUserIntent(`风险中心确认：${actionText}。保留未受影响节点，不改变总目的地。`);
+            setApiError(`${actionText}，结构化服务暂不可用，请稍后重试`);
+          })();
+        }}
+        />
+
       {/* 右侧：地图与全视图渲染 */}
-      <div className="relative flex-1 min-h-[48vh] lg:min-h-0 bg-slate-100 overflow-hidden flex flex-col">
+      <div className={`relative bg-slate-100 overflow-hidden flex flex-col ${mapLayout === 'doc' ? 'w-full min-h-[56px] lg:w-14 lg:flex-none lg:min-h-0' : 'flex-1 min-h-[48vh] lg:min-h-0'}`}>
+        {mapLayout === 'doc' ? (
+          <button
+            type="button"
+            data-testid="expand-map"
+            onClick={() => changeMapLayout('balanced')}
+            className="group flex h-full w-full flex-row items-center justify-center gap-2 px-4 py-3 text-slate-500 transition-colors hover:bg-orange-50 hover:text-orange-600 lg:flex-col lg:px-0 lg:py-0"
+            title="展开地图"
+          >
+            <ChevronRight className="h-4 w-4 lg:rotate-180" />
+            <span className="text-xs font-bold lg:[writing-mode:vertical-rl]">展开地图</span>
+            <span className="hidden text-[11px] font-medium text-slate-400 lg:inline lg:[writing-mode:vertical-rl]">空间关系需要时再看</span>
+          </button>
+        ) : (
+          <>
         <FullRouteVisualizer 
           phase={phase}
           routes={currentDayRoutes}
@@ -2434,84 +2670,13 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           activePlanId={activePlanId}
           optimizationAudit={optimizationAudit}
           onSelectPlanVariant={handleSelectPlan}
+          simpleMode={experienceMode === 'simple'}
         />
 
-        {/* 旅中风险推送中心：轮询实时风险快照，天气/路况/安全事件变更时推送（含目的地风险订阅） */}
-        <RiskPushCenter
-          city={targetCityInfo?.name || ''}
-          coordinate={targetCityInfo?.lnglat}
-          safetyInfo={safetyInfo}
-          weatherInfo={weatherInfo}
-          trafficInfo={trafficInfo}
-          userId={currentUser?.id}
-          roomCode={roomCode}
-          routeNodes={dynamicRoutes.map((node) => node.name).filter(Boolean)}
-          onOpenExecution={phase === 'decision' ? () => setWorkspaceLayer('execution') : undefined}
-          onRequestReplan={(item) => {
-            // 提醒里没有可直接确认的提案时，唯一诚实的动作是"带着这条风险回到需求页"：
-            // 由用户自己确认后再生成，前端不替用户改方案，也不编造受影响节点。
-            const affected = item.affectedNodes && item.affectedNodes.length > 0
-              ? `已收到的可能受影响节点：${item.affectedNodes.join('、')}。`
-              : '这条提醒没有给出受影响节点，请在需求里说明要调整哪些安排。';
-            setUserIntent(`因风险提醒“${item.title}”需要调整剩余行程：${item.detail} ${affected} 保持未完成节点不变，只对受影响的部分做最小修改。`);
-            setPhase('drafting');
-            setIntentsReady(false);
-          }}
-          onReplan={(proposal) => {
-            void (async () => {
-              const signals = Array.isArray(proposal?.changed_signals) ? proposal.changed_signals : [];
-              let actionText = '仅对受影响节点执行最小修改重规划';
-              try {
-                const response = await apiFetch('/api/v1/planning/emergency/evaluate', {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ user_id: currentUser.id, trip_id: planningResourceId, destination: targetCityInfo?.name || '', changed_signals: signals, current_route: dynamicRoutes }),
-                });
-                const payload = await response.json();
-                const action = payload?.data?.actions?.[0] || payload?.actions?.[0];
-                if (action?.title) actionText = `${action.title}：${action.reason || ''}`;
-
-                if (!action || action.type === 'manual_review') {
-                  setApiError(`${actionText}，请补充具体受影响节点后再重排`);
-                  return;
-                }
-
-                // The evaluator is deterministic; submit its structured action
-                // directly to the minimal-perturbation endpoint. This keeps
-                // unaffected nodes intact and avoids a second LLM rewrite.
-                const replanResponse = await apiFetch('/api/v1/planning/replan', {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    trip_id: planningResourceId,
-                    destination: targetCityInfo?.name || '',
-                    existing_route: dynamicRoutes,
-                    affected_nodes: action.affected_nodes || [],
-                    changed_signals: signals,
-                    replacement_kind: action.replacement_kind || 'DESTINATION',
-                    member_utilities: Object.values(teamSatisfaction).map((value) => Number(value)).filter((value) => Number.isFinite(value)),
-                  }),
-                });
-                const replanPayload = await replanResponse.json();
-                if (!replanResponse.ok) {
-                  throw new Error(replanPayload?.error?.message || replanPayload?.error || '结构化重规划失败');
-                }
-                const data = replanPayload?.data || replanPayload;
-                const candidateCount = Array.isArray(data?.replacement_candidates) ? data.replacement_candidates.length : 0;
-                setReplanProposal({
-                  proposalId: proposal?.proposal_id || payload?.data?.proposal_id || payload?.proposal_id || '',
-                  action: { ...action, trigger_types: proposal?.trigger_types || [], expires_at: proposal?.expires_at },
-                  data,
-                });
-                setApiError(`${actionText}。已保留 ${data?.preserved_nodes ?? 0} 个节点，${candidateCount} 个替代候选待确认`);
-                return;
-              } catch { /* use the safe generic action text when the evaluator is unavailable */ }
-              setUserIntent(`风险中心确认：${actionText}。保留未受影响节点，不改变总目的地。`);
-              setApiError(`${actionText}，结构化服务暂不可用，请稍后重试`);
-            })();
-          }}
-        />
-
-        {/* 碳足迹与绿色交通评估（P5） */}
-        <CarbonFootprintPanel routes={dynamicRoutes} travelDetails={travelDetails} />
+        {/* 碳足迹与绿色交通评估（P5）：属于创新能力，只在专业模式里出现，不进普通用户的默认路径 */}
+        {experienceMode === 'pro' && (
+          <CarbonFootprintPanel routes={dynamicRoutes} travelDetails={travelDetails} />
+        )}
 
         <div className="absolute top-6 right-6 z-40 flex items-center gap-3 pointer-events-auto">
           <button 
@@ -2533,10 +2698,12 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
             )}
           </AnimatePresence>
         </div>
-        
+          </>
+        )}
+
         <AnimatePresence>
           {showBlackboard && (
-            <motion.div key="blackboard-drawer-panel" initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: "spring", damping: 25 }} className="absolute top-0 right-0 w-[420px] h-full bg-white/95 backdrop-blur-2xl shadow-2xl z-50 flex flex-col border-l border-slate-200">
+            <motion.div key="blackboard-drawer-panel" initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: "spring", damping: 25 }} className="fixed top-0 right-0 w-[420px] h-full bg-white/95 backdrop-blur-2xl shadow-2xl z-50 flex flex-col border-l border-slate-200">
               <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <div>
                   <h3 className="font-bold text-slate-800 flex items-center gap-2 text-sm"><BrainCircuit className="w-4 h-4 text-orange-500"/> 方案取舍记录</h3>
@@ -2554,7 +2721,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
 
         <AnimatePresence>
           {showPoster && (
-            <motion.div key="poster-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-8">
+            <motion.div key="poster-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-8">
               <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
                 <div className="flex items-center justify-between p-4 border-b border-slate-100">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2 text-sm"><Share2 className="w-4 h-4 text-orange-600"/> 行程海报</h3>
@@ -2581,7 +2748,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
         <TripDiaryModal open={showDiary} onClose={() => setShowDiary(false)} markdown={diaryMarkdown} city={targetCityInfo?.name || ''} onDownload={downloadDiary} todayDay={executionTodayDay ?? (totalDays[activeDayIndex] || 1)} />
 
         {showBudget && (
-          <div ref={budgetDialogRef} className="absolute inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="budget-panel-title">
+          <div ref={budgetDialogRef} className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="budget-panel-title">
             <div className="max-h-[90vh] w-full max-w-[520px] overflow-y-auto">
               <div className="mb-2 flex items-center justify-between rounded-xl bg-white px-4 py-3 shadow-lg">
                 <h3 id="budget-panel-title" className="text-sm font-black text-slate-800">协作预算账本</h3>
@@ -2593,11 +2760,11 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
         )}
         <ExpenseReportModal open={showExpenseReport} onClose={() => setShowExpenseReport(false)} userId={currentUser.id} tripId={planningResourceId} />
       <SatisfactionModal open={showSatisfaction} onClose={() => setShowSatisfaction(false)} userId={currentUser.id} tripId={planningResourceId} banditArmId={banditArmId} />
-        <BookingHub open={showBookingHub} destination={targetCityInfo?.name || initialDestination || ''} tripId={planningResourceId} onClose={() => setShowBookingHub(false)} />
+        <BookingHub open={showBookingHub} destination={targetCityInfo?.name || initialDestination || ''} tripId={planningResourceId} simpleMode={experienceMode === 'simple'} onClose={() => setShowBookingHub(false)} />
 
         <AnimatePresence>
           {feedbackPoi && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 z-[80] flex items-center justify-center bg-slate-950/45 p-4" onClick={() => setFeedbackPoi(null)}>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/45 p-4" onClick={() => setFeedbackPoi(null)}>
               <motion.div ref={poiFeedbackDialogRef} initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="poi-feedback-title">
                 <div className="flex items-start justify-between gap-3">
                   <div><h3 id="poi-feedback-title" className="text-sm font-black text-slate-900">告诉我们为何不喜欢</h3><p className="mt-1 text-xs text-slate-500">{feedbackPoi}</p></div>
@@ -2635,7 +2802,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-8"
+              className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-8"
               onClick={() => setPhotoModalOpen(false)}
             >
               <motion.div

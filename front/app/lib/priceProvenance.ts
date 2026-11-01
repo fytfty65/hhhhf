@@ -14,6 +14,28 @@
 
 export type PriceSourceKind = 'official' | 'supplier' | 'platform' | 'estimate' | 'unknown';
 
+/** 价格时效三态：实时价 / 估算价 / 未知价（与后端 freshness 口径一致） */
+export type PriceFreshness = 'live' | 'estimated' | 'unknown';
+
+export const PRICE_FRESHNESS_LABELS: Record<PriceFreshness, string> = {
+  live: '实时价',
+  estimated: '估算价',
+  unknown: '未知价',
+};
+
+/** 实时价的时效窗口：超过 24 小时的不再宣称“实时” */
+const LIVE_PRICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const UPDATED_AT_FIELDS = [
+  'observed_at',
+  'price_retrieved_at',
+  'price_updated_at',
+  'data_time',
+  'updated_at',
+  'collected_at',
+  'fetched_at',
+];
+
 export interface PriceProvenance {
   /** 展示用的价格（已去掉后端拼在字符串里的括号说明，如 "¥110（票务平台价，非官方）" → "¥110"） */
   value: string;
@@ -80,6 +102,47 @@ export function priceProvenance(node: any): PriceProvenance | null {
   }
   // 有价格但没标来源：如实说"来源未标注"，不要默认成可信
   return { value, kind: 'unknown', label: '来源未标注', detail, url, verified: false, rawSource };
+}
+
+/** 价格数据的更新时间原始值（没有就返回空字符串，绝不补默认时间） */
+export function priceUpdatedAtRaw(node: any): string {
+  if (!node || typeof node !== 'object') return '';
+  for (const field of UPDATED_AT_FIELDS) {
+    const value = node[field];
+    if (value === null || value === undefined || value === '') continue;
+    return String(value);
+  }
+  return '';
+}
+
+/** 价格数据更新时间的展示值：MM-DD HH:mm；拿不到时间返回空字符串 */
+export function priceUpdatedAtText(node: any): string {
+  const raw = priceUpdatedAtRaw(node);
+  if (!raw) return '';
+  const timestamp = new Date(raw);
+  if (Number.isNaN(timestamp.getTime())) return '';
+  // 手工格式化为 MM-DD HH:mm：不依赖运行环境的 ICU/locale（Node 与浏览器可能给出 10/31 或 10-31）
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(timestamp.getMonth() + 1)}-${pad(timestamp.getDate())} ${pad(timestamp.getHours())}:${pad(timestamp.getMinutes())}`;
+}
+
+/**
+ * 价格时效三态：
+ * - 未知价：没有任何可读价格；
+ * - 实时价：来源可核实（官方/供应商），且有 24 小时内的真实观测时间；
+ * - 估算价：有价格，但来源不可核实、或缺少/超过时效的观测时间。
+ * 缺时间不等于新鲜，绝不靠猜把估算价说成实时价。
+ */
+export function priceFreshnessOf(node: any, now: number = Date.now()): PriceFreshness {
+  const info = priceProvenance(node);
+  if (!info) return 'unknown';
+  if (!info.verified) return 'estimated';
+  const raw = priceUpdatedAtRaw(node);
+  if (!raw) return 'estimated';
+  const observed = new Date(raw).getTime();
+  if (Number.isNaN(observed)) return 'estimated';
+  const age = now - observed;
+  return age >= 0 && age <= LIVE_PRICE_WINDOW_MS ? 'live' : 'estimated';
 }
 
 /** 官方预约入口（文旅部名录登记的景区官网/官方预约平台；按节点名在 official_profiles 里查） */

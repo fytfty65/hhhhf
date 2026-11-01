@@ -31,6 +31,8 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
     }
   });
   await page.addInitScript(() => {
+    // 主链路要断言地图/雷达：工作区默认「文档优先」会折叠地图，这里固定成平衡布局。
+    localStorage.setItem('omni_map_layout', 'balanced');
     class MockWebSocket {
       static OPEN = 1;
       readyState = 0;
@@ -85,13 +87,15 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
 
   // The product-level views must remain usable on a narrow phone, not merely
   // render at desktop width and hide overflow.
-  await page.getByRole('button', { name: /个人主页/ }).click();
+  await page.getByTestId('lobby-more').click();
+  await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
   await expect(page.getByText('我的路书', { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoHorizontalOverflow(page);
   await page.getByText('返回大厅', { exact: true }).click();
-  // 社区卡片已改成可访问按钮（aria-label「进入同行者社区」），用精确名避免撞名
-  await page.getByRole('button', { name: '社区', exact: true }).click();
+  // 社区收进「更多」二级入口
+  await page.getByTestId('lobby-more').click();
+  await page.getByTestId('lobby-more-menu').getByRole('button', { name: '社区' }).click();
   await expect(page.getByText('同行者社区', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByText('返回大厅', { exact: true }).click();
@@ -133,6 +137,8 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   expect((await mapCanvas.screenshot()).byteLength).toBeGreaterThan(2_000);
   await page.getByRole('button', { name: '标准图' }).click();
 
+  // 普通模式主行只留「保存 + 更多」，预算账本在「更多」菜单里
+  await page.getByTestId('toggle-more-tools').click();
   await page.getByRole('button', { name: '预算账本' }).click();
   await expect(page.getByRole('dialog', { name: '协作预算账本' })).toBeVisible();
   await page.getByRole('button', { name: '关闭预算账本' }).click();
@@ -166,8 +172,11 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByTestId('export-json').click();
   await expect((await jsonDownload).suggestedFilename()).toContain('.json');
   const icsDownload = page.waitForEvent('download');
+  // 菜单点完即收起：每次操作前都要重新展开「更多」（普通模式主行只留保存）
+  await page.getByTestId('toggle-more-tools').click();
   await page.getByTestId('export-ics').click();
   await expect((await icsDownload).suggestedFilename()).toContain('.ics');
+  await page.getByTestId('toggle-more-tools').click();
   await page.getByTestId('open-diary').click();
   const diaryDownload = page.waitForEvent('download');
   await page.getByTestId('download-diary').click();

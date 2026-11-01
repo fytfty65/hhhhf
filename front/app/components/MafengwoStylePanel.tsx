@@ -26,9 +26,9 @@ import ScenarioSimulator from './ScenarioSimulator';
  */
 function weatherFreshnessLabel(weather: any): string {
   const fetchedAt = typeof weather?.fetched_at === 'string' ? weather.fetched_at : '';
-  if (!fetchedAt) return '供应商未提供采集时间';
+  if (!fetchedAt) return '未提供更新时间';
   const timestamp = new Date(fetchedAt);
-  if (Number.isNaN(timestamp.getTime())) return '供应商未提供采集时间';
+  if (Number.isNaN(timestamp.getTime())) return '未提供更新时间';
   const timeText = timestamp.toLocaleString('zh-CN', {
     month: '2-digit',
     day: '2-digit',
@@ -105,7 +105,7 @@ export default function MafengwoStylePanel({
                 <div className="p-2.5 bg-orange-500 text-white rounded-xl shadow-xs"><Sun className="w-5 h-5"/></div>
                 <div>
                   <h4 className="text-sm font-black text-slate-800">目的地气象：{weatherInfo.condition}</h4>
-                  <p className="text-xs text-slate-500 mt-0.5 font-medium">{trafficInfo?.advice || '暂无供应商路况数据，请在出行前重新获取'}</p>
+                  <p className="text-xs text-slate-500 mt-0.5 font-medium">{trafficInfo?.advice || '暂无路况数据，请在出行前重新获取'}</p>
                   <p className="text-[11px] text-slate-400 mt-1 font-medium" data-testid="weather-fetched-at">{weatherFreshnessLabel(weatherInfo)}</p>
                 </div>
               </div>
@@ -244,7 +244,7 @@ export default function MafengwoStylePanel({
                     <div className="flex items-center gap-2.5 flex-wrap">
                       <h3 className={`text-xl font-black transition-colors ${isSelected ? 'text-orange-500' : 'text-slate-800 group-hover:text-orange-500'}`}>{pt.name}</h3>
                       <span className="flex items-center gap-1 bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-xs font-bold border border-orange-100">
-                        ⭐ {pt.rating || '暂无供应商数据'}
+                        ⭐ {pt.rating || '暂无评分数据'}
                       </span>
 
                       {pt.cost && (
