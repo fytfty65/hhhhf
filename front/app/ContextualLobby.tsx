@@ -4,9 +4,10 @@ import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useState } from 'react';
 import {
-  Users, MapPin, Sparkles, Coffee, Camera, Car, PiggyBank, ArrowRight, Check,
-  Map as MapIcon, Compass, Headphones, TrendingDown, RefreshCw,
-  BrainCircuit, ExternalLink,
+  Users, MapPin, Sparkles, Coffee, Camera, Car, ArrowRight, Check,
+  Map as MapIcon, Compass,
+  RefreshCw, ChevronDown,
+  ExternalLink,
   User, LogOut, Edit3, Copy,
   MessageCircle,
   Train
@@ -27,6 +28,8 @@ import EditIntentModal from './components/EditIntentModal';
 import OmniLogo from './components/OmniLogo';
 import AuthPortalScreen from './components/AuthPortalScreen';
 import RoomConnectionStatus from './components/RoomConnectionStatus';
+// 顶部「服务状态」：真实健康检查，不再用一句「服务在线」概括所有能力
+import ServiceHealthIndicator from './components/ServiceHealthIndicator';
 
 // 个人主页与社区组件
 import ModernProfileScreen from './components/ProfileScreen';
@@ -38,8 +41,8 @@ import TransportSearch from './components/TransportSearch';
 // 目的地图谱数据（用于主页灵感目的地推荐）
 import { PROVINCE_DATA } from './data/provinceData';
 
-// 主控诉求与企业选择卡（自 ContextualLobby 拆分出来的展示型组件）
-import { TravelModeCard, PreferenceCard } from './components/SelectCards';
+// 偏好选择卡（自 ContextualLobby 拆分出来的展示型组件）
+import { PreferenceCard } from './components/SelectCards';
 
 // 全站评分最高的目的地（用于主页灵感目的地图谱卡片）
 const TOP_DESTINATIONS = Object.entries(PROVINCE_DATA)
@@ -62,7 +65,12 @@ const DestinationMap = dynamic(() => import('./DestinationMap'), {
 // 主入口：认证判断 -> 大厅界面 -> 多智能体决策工作区
 // =========================================================================
 export default function ContextualLobby() {
-  const [selectedMode, setSelectedMode] = useState<string>('coop');
+  // 首页只回答三件事：去哪、几天、几个人，以及必须满足什么。其余入口收进「更多」。
+  const [destination, setDestination] = useState('');
+  const [days, setDays] = useState(3);
+  const [travelers, setTravelers] = useState(2);
+  const [preferBudget, setPreferBudget] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showPreferenceModal, setShowPreferenceModal] = useState(false);
   const [showEditIntentModal, setShowEditIntentModal] = useState(false);
 
@@ -110,18 +118,31 @@ export default function ContextualLobby() {
     );
   }
 
+  // 出行方式由「几个人 + 是否优先控制预算」推导，不再让用户先选三种模式。
+  const selectedMode = preferBudget ? 'pvp' : travelers > 1 ? 'coop' : 'solo';
+
+  // 大厅收集的「去哪、几天、几人、必须满足什么」直接变成规划诉求，
+  // 进入工作区后仍可修改，不会锁死。
+  const lobbyIntent = [
+    destination.trim() ? `去${destination.trim()}玩${days}天` : '',
+    travelers > 1 ? `${travelers}人同行` : '1人出行',
+    preferBudget ? '优先控制预算' : '',
+    myIntent.trim() ? `必须满足：${myIntent.trim()}` : '',
+  ].filter(Boolean).join('，');
+
   const handleBeginPlan = () => {
     // The preference dialog is a local interaction and must remain usable while
     // the collaboration room is still bootstrapping. The workspace will show
     // a recoverable connection state if the room is not ready yet.
-    if (!roomReady) setRoomError('协作房间仍在同步，先完成偏好设置即可进入规划');
+    if (!roomReady) setRoomError('协作房间仍在同步，先确认偏好即可进入规划');
     setShowPreferenceModal(true);
   };
 
-  const handleStartPlanFromDestination = (destination: string) => {
-    setPlanDestination(destination);
+  const handleStartPlanFromDestination = (city: string) => {
+    setDestination(city);
+    setPlanDestination(city);
     setShowDestinationMap(false);
-    setShowPreferenceModal(true); // 复用现有「定制主控体验」流程
+    setShowPreferenceModal(true); // 复用「确认偏好」弹窗
   };
 
   // Opens the workspace once the collaboration socket is genuinely usable.
@@ -160,7 +181,7 @@ export default function ContextualLobby() {
     }
 
     setIsConnecting(true);
-    setRoomError('正在连接协同网络…');
+    setRoomError('正在连接协作房间…');
 
     // Wait for the readiness flag rather than for a fixed duration, but never
     // wait forever: a socket that cannot come up must surface an error.
@@ -176,7 +197,7 @@ export default function ContextualLobby() {
         enterWorkspace();
       } else {
         setIsConnecting(false);
-        setRoomError('协同网络连接超时，请检查网络后重试');
+        setRoomError('房间连接超时，请检查网络后重试');
       }
     };
 
@@ -196,117 +217,6 @@ export default function ContextualLobby() {
     setShowEditIntentModal(false);
   };
 
-  const renderRightPanel = () => {
-    switch (selectedMode) {
-      case 'solo':
-        return (
-          <motion.div key="solo-panel-mode" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.3 }} className="flex flex-col h-full">
-            <div className="p-7 pb-5 border-b border-slate-200/60 bg-white/50">
-              <h2 className="text-xl font-bold text-slate-800 mb-1 flex items-center gap-2"><Compass className="w-5 h-5 text-orange-600"/> 私人探索雷达</h2>
-              <p className="text-xs text-slate-500 font-medium">系统已屏蔽外界干扰，专注为您构建沉浸式路书</p>
-            </div>
-            <div className="p-6 flex-1 flex flex-col gap-4">
-              <div className="p-4 rounded-xl bg-white border border-slate-100 shadow-sm flex items-start gap-4">
-                <div className="p-2 bg-orange-50 rounded-lg text-orange-600"><Headphones className="w-5 h-5"/></div>
-                <div>
-                  <p className="text-sm font-bold text-slate-800">深度沉浸模式已就绪</p>
-                  <p className="text-xs text-slate-500 mt-1">智能规避拥挤旅行团，提升小众秘境与人文地标的推荐权重。</p>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        );
-      case 'pvp':
-        return (
-          <motion.div key="pvp-panel-mode" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.3 }} className="flex flex-col h-full">
-            <div className="p-7 pb-5 border-b border-slate-200/60 bg-white/50">
-              <h2 className="text-xl font-bold text-slate-800 mb-1 flex items-center gap-2"><TrendingDown className="w-5 h-5 text-orange-600"/> 预算与性价比</h2>
-              <p className="text-xs text-slate-500 font-medium"><span className="font-bold text-slate-400">极客精算中枢</span> · 为您挖掘全网更划算的组合</p>
-            </div>
-            <div className="p-6 flex-1 flex flex-col gap-4">
-              <div className="p-4 rounded-xl bg-gradient-to-br from-orange-50/50 to-white border border-orange-100 shadow-sm flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-bold text-slate-400 mb-1">当前测算状态</p>
-                  <p className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                    <TrendingDown className="w-4 h-4 text-orange-500" /> 全网比价引擎就绪，开始规划后自动拉取
-                  </p>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        );
-      case 'coop':
-      default:
-        return (
-          <motion.div key="coop-panel-mode" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.3 }} className="flex flex-col h-full">
-            <div className="p-7 pb-4 border-b border-slate-200/60 bg-white/50">
-              <div className="flex items-center justify-between mb-1">
-                <h2 className="text-xl font-bold text-slate-800">同行动态网络 ({roomMembers.length}人在线)</h2>
-                <span className="text-[10px] bg-stone-100 text-stone-500 font-bold px-2 py-0.5 rounded-full border border-stone-200">实时协同房间</span>
-              </div>
-              <p className="text-xs text-slate-500 mb-3 font-medium">基于真实房间号广播，多人跨屏实时协同</p>
-              <div className="mb-3">
-                <RoomConnectionStatus connection={roomConnection} retryAttempt={roomRetryAttempt} retryDelayMs={roomRetryDelayMs} memberCount={roomMembers.length} onRetry={retryRoomConnection} testId="room-status-coop" />
-              </div>
-              
-              <div className="bg-white rounded-xl p-3 border border-slate-200 shadow-sm mb-1">
-                <div className="flex justify-between items-center mb-1.5">
-                  <span className="text-xs font-bold text-slate-500">当前协作房间码（分享给好友即可同行）</span>
-                  <span data-testid="room-code" className="text-base font-black text-orange-600 font-mono tracking-wider flex items-center gap-1.5">
-                    {roomReady ? roomCode : '正在准备…'}
-                    <button onClick={copyRoomCode} className="p-1 hover:bg-orange-50 rounded-md transition-colors cursor-pointer" title="复制邀请码">
-                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 text-orange-500" />}
-                    </button>
-                  </span>
-                </div>
-                {roomError && <p className="text-[11px] text-rose-500 font-bold mb-2">{roomError}</p>}
-                <div className="flex gap-1.5 mt-2">
-                  <input data-testid="join-room-code"
-                    type="text" 
-                    placeholder="输入好友分享的房间码"
-                    value={inputRoomCode}
-                    onChange={(e) => setInputRoomCode(e.target.value)}
-                    className="flex-1 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:border-orange-500 font-mono uppercase font-bold text-slate-800"
-                  />
-                  <button data-testid="join-room-submit" onClick={joinRoom} disabled={!inputRoomCode.trim()} className="px-3.5 py-1.5 bg-slate-900 hover:bg-orange-500 disabled:bg-slate-300 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer disabled:cursor-not-allowed">
-                    加入房间
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="p-5 flex-1 flex flex-col gap-2.5 overflow-y-auto custom-scrollbar">
-              {roomMembers.map((member) => (
-                <div 
-                  key={member.id} 
-                  className={`p-3 rounded-2xl flex items-center justify-between border transition-all ${member.id === currentUser.id ? 'bg-orange-50/80 border-orange-200 shadow-2xs' : 'bg-white border-slate-100'}`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <img src={member.avatarUrl ? assetUrl(member.avatarUrl) : `https://api.dicebear.com/9.x/avataaars/svg?seed=${member.avatarSeed || member.name}&backgroundColor=fdeed8`} alt="avatar" className="w-9 h-9 rounded-full bg-slate-100 border border-slate-200 shrink-0 object-cover" />
-                    <div className="overflow-hidden">
-                      <div className="flex items-center gap-1.5">
-                        <p className="text-xs font-bold text-slate-800 truncate">{member.name} {member.id === currentUser.id && '(我)'}</p>
-                        <span className="text-[9px] text-orange-600 bg-orange-100/70 px-1.5 py-0.5 rounded font-bold shrink-0">{member.role}</span>
-                      </div>
-                      <p className="text-[10px] text-slate-400 truncate mt-0.5">{member.intent}</p>
-                    </div>
-                  </div>
-                  {member.id === currentUser.id && (
-                    <button 
-                      onClick={() => setShowEditIntentModal(true)} 
-                      className="p-1 hover:bg-orange-100 text-orange-600 rounded-lg transition-colors cursor-pointer shrink-0 ml-2" 
-                      title="调整我的诉求画像"
-                    >
-                      <Edit3 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </motion.div>
-        );
-    }
-  };
 
   if (showWorkspace) {
     return (
@@ -323,6 +233,7 @@ export default function ContextualLobby() {
         roomRetryDelayMs={roomRetryDelayMs}
         onRetryRoom={retryRoomConnection}
         initialDestination={planDestination}
+        initialIntent={lobbyIntent}
         onBack={() => setShowWorkspace(false)} 
       />
     );
@@ -361,58 +272,64 @@ export default function ContextualLobby() {
             initial={{ opacity: 0, scale: 0.98, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: -20, filter: "blur(8px)" }} transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
             className="relative z-10 w-full max-w-[1240px] min-h-[85vh] bg-white/70 backdrop-blur-3xl border border-white shadow-[0_8px_40px_rgba(0,0,0,0.04)] rounded-[2rem] flex flex-col overflow-hidden"
           >
-            <header className="px-10 py-5 flex justify-between items-center border-b border-slate-200/50 bg-white/40">
-              <div className="flex items-center gap-4">
-                <OmniLogo className="w-10 h-10 hover:scale-105 transition-transform" />
+            <header className="px-6 py-4 sm:px-10 sm:py-5 flex justify-between items-center border-b border-slate-200/50 bg-white/40">
+              <div className="flex items-center gap-3 sm:gap-4">
+                <OmniLogo className="w-9 h-9 sm:w-10 sm:h-10 hover:scale-105 transition-transform" />
                 <div>
-                  <h1 className="text-2xl font-black text-slate-800 tracking-tight">OmniRoute</h1>
-                  <p className="text-xs text-slate-500 font-semibold tracking-wide mt-0.5">从想法到可执行行程</p>
+                  <h1 className="text-xl sm:text-2xl font-black text-slate-800 tracking-tight">OmniRoute</h1>
+                  <p className="text-xs text-slate-500 font-semibold tracking-wide mt-0.5 hidden sm:block">从想法到可执行行程</p>
                 </div>
               </div>
-              
-              <div className="flex items-center gap-4">
-                <div className="hidden sm:flex items-center gap-2 px-3.5 py-1.5 bg-white border border-slate-100 rounded-full text-xs font-bold text-slate-600 shadow-sm">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  行程服务在线
+
+              <div className="flex items-center gap-2 sm:gap-3">
+                <ServiceHealthIndicator />
+
+                <div className="relative">
+                  <button
+                    type="button"
+                    data-testid="lobby-more"
+                    aria-expanded={showMoreMenu}
+                    onClick={() => setShowMoreMenu((value) => !value)}
+                    className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-bold text-slate-600 transition-colors hover:border-orange-200 hover:text-orange-600"
+                  >
+                    更多 <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
+                  </button>
+                  {showMoreMenu && (
+                    <div
+                      data-testid="lobby-more-menu"
+                      className="absolute right-0 top-full z-40 mt-2 flex w-56 flex-col gap-1 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl"
+                    >
+                      <button onClick={() => { setShowMoreMenu(false); setShowProfile(true); }} className="flex items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-600 hover:bg-orange-50 hover:text-orange-600">
+                        <User className="h-3.5 w-3.5" /> 个人主页
+                      </button>
+                      <button onClick={() => { setShowMoreMenu(false); setShowCommunity(true); }} className="flex items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-600 hover:bg-orange-50 hover:text-orange-600">
+                        <MessageCircle className="h-3.5 w-3.5" /> 社区
+                      </button>
+                      <button onClick={() => { setShowMoreMenu(false); setShowTransportSearch(true); }} className="flex items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-600 hover:bg-orange-50 hover:text-orange-600">
+                        <Train className="h-3.5 w-3.5" /> 订票查询
+                      </button>
+                      <button onClick={() => { setShowMoreMenu(false); setShowBookingHub(true); }} className="flex items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-600 hover:bg-orange-50 hover:text-orange-600">
+                        <ExternalLink className="h-3.5 w-3.5" /> 官方渠道
+                      </button>
+                      <button onClick={() => { setShowMoreMenu(false); setShowDestinationMap(true); }} className="flex items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-600 hover:bg-orange-50 hover:text-orange-600">
+                        <Compass className="h-3.5 w-3.5" /> 灵感目的地图谱
+                      </button>
+                      <div className="mt-1 border-t border-slate-100 px-3 py-2 text-[11px] leading-relaxed text-slate-400">
+                        3D 态势雷达、碳排放、AR 导览、高级信息与模型治理在规划工作区里按需展开。
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                <button 
-                  onClick={() => setShowProfile(true)}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 bg-orange-50 border border-orange-200 text-orange-600 rounded-full text-xs font-bold hover:bg-orange-100 transition-colors cursor-pointer"
-                >
-                  <User className="w-3.5 h-3.5" /> 个人主页
-                </button>
-
-                <button 
-                  onClick={() => setShowCommunity(true)}
-                  className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-bold text-slate-600 transition-colors hover:border-orange-200 hover:bg-orange-50 hover:text-orange-600 cursor-pointer"
-                >
-                  <MessageCircle className="w-3.5 h-3.5" /> 社区
-                </button>
-
-                <button 
-                  onClick={() => setShowTransportSearch(true)}
-                  className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-bold text-slate-600 transition-colors hover:border-orange-200 hover:bg-orange-50 hover:text-orange-600 cursor-pointer"
-                >
-                  <Train className="w-3.5 h-3.5" /> 订票查询
-                </button>
-
-                <button
-                  onClick={() => setShowBookingHub(true)}
-                  className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-bold text-slate-600 transition-colors hover:border-orange-200 hover:bg-orange-50 hover:text-orange-600 cursor-pointer"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" /> 官方渠道
-                </button>
-
-                <div className="flex items-center gap-3 bg-white border border-slate-200/80 px-3 py-1.5 rounded-2xl shadow-xs">
+                <div className="flex items-center gap-2 bg-white border border-slate-200/80 px-2 py-1.5 sm:gap-3 sm:px-3 rounded-2xl shadow-xs">
                   <div className="w-8 h-8 rounded-full overflow-hidden bg-orange-100 border border-orange-200">
                     <img src={currentUser.avatarUrl ? assetUrl(currentUser.avatarUrl) : `https://api.dicebear.com/9.x/avataaars/svg?seed=${currentUser.avatarSeed}&backgroundColor=fdeed8`} alt="avatar" className="w-full h-full object-cover" />
                   </div>
-                  <div className="text-left">
+                  <div className="text-left hidden sm:block">
                     <span className="text-xs font-black text-slate-800 block">{currentUser.nickname}</span>
-                    <span className="text-[10px] text-stone-400 font-bold">SQLite 认证就绪</span>
+                    <span className="text-[10px] text-stone-400 font-bold">已登录</span>
                   </div>
-                  <button 
+                  <button
                     onClick={signOut}
                     className="ml-1 p-1.5 hover:bg-rose-50 text-slate-400 hover:text-rose-500 rounded-lg transition-colors cursor-pointer"
                     title="退出登录"
@@ -423,118 +340,193 @@ export default function ContextualLobby() {
               </div>
             </header>
 
-            <main className="flex-1 p-8 sm:p-10 grid grid-cols-1 lg:grid-cols-12 gap-8 overflow-y-auto overflow-x-hidden">
-              <div className="lg:col-span-8 flex flex-col gap-6">
-                <div>
-                  <h2 className="text-3xl font-extrabold text-slate-800 mb-2 tracking-tight">开启下一段旅程协同规划</h2>
-                  <p className="text-slate-500 text-sm font-medium">邀请同行者加入同一个房间，一起确认节奏、预算和必去地点。</p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <TravelModeCard id="solo" title="一人行" desc="步调全由自己掌控，定制绝对自由的私人路书。" icon={<MapPin className="w-6 h-6" />} color="text-slate-500" selected={selectedMode === 'solo'} onClick={() => setSelectedMode('solo')} />
-                  <TravelModeCard id="coop" title="亲友结伴" desc="把每个人的偏好放在同一张行程里，减少来回争论。" icon={<Users className="w-6 h-6" />} color="text-slate-500" selected={selectedMode === 'coop'} onClick={() => setSelectedMode('coop')} />
-                  <TravelModeCard id="pvp" title="高性价比" desc="精打细算，利用算法匹配最优的体验成本比。" icon={<PiggyBank className="w-6 h-6" />} color="text-slate-500" selected={selectedMode === 'pvp'} onClick={() => setSelectedMode('pvp')} />
-                </div>
-
-                {/* 我的当前诉求设定卡片 */}
-                <div className="bg-white/80 backdrop-blur-md rounded-2xl p-6 shadow-sm border border-slate-100 flex items-center justify-between">
-                  <div className="flex items-start gap-4">
-                    <div className="p-3 bg-orange-50 rounded-xl shrink-0 text-orange-500">
-                      <Sparkles className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <h3 className="text-base font-extrabold text-slate-800">我的旅程诉求画像</h3>
-                        <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-md font-bold">{selectedRole}</span>
-                      </div>
-                      <p className="text-xs text-slate-500 leading-relaxed font-medium">{myIntent}</p>
-                    </div>
-                  </div>
-                  <button onClick={() => setShowEditIntentModal(true)} className="px-3.5 py-2 bg-slate-50 hover:bg-orange-50 text-slate-600 hover:text-orange-600 rounded-xl text-xs font-bold border border-slate-200 transition-colors flex items-center gap-1.5 cursor-pointer">
-                    <Edit3 className="w-3.5 h-3.5" /> 修改诉求
-                  </button>
-                </div>
-
-                <div className="bg-white/80 backdrop-blur-md rounded-2xl p-6 shadow-sm border border-slate-100 flex items-start gap-4">
-                  <div className="p-3 bg-orange-50 rounded-xl shrink-0">
-                    <BrainCircuit className="w-6 h-6 text-orange-500" />
-                  </div>
+            <main className="flex-1 px-5 py-6 sm:px-10 sm:py-8 overflow-y-auto overflow-x-hidden">
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+                <section className="flex flex-col gap-4 lg:col-span-8">
                   <div>
-                    <h3 className="text-base font-extrabold text-slate-800 mb-1.5">
-                      {selectedMode === 'solo' && "专注自我，深度探索"}
-                      {selectedMode === 'coop' && '什么是“基于房间的多人协同规划”？'}
-                      {selectedMode === 'pvp' && "极致性价比是如何做到的？"}
-                    </h3>
-                    <p className="text-xs text-slate-600 leading-relaxed font-medium">
-                      {selectedMode === 'solo' && "系统会减少社交与分享类内容，按单人偏好模型为你排序路线。"}
-                      {selectedMode === 'coop' && `同一房间码 [${roomCode}] 内的所有真实在线成员，会各自提出偏好与首选方案；系统会优先保证最不满意的那位成员也不至于吃亏，并把每位成员的让步与最终满意度逐条记录。专家建议同时给出交通、住宿、餐饮等提案。`}
-                      {selectedMode === 'pvp' && "比价引擎会根据距离、评价、交通成本构建价格网络，逐项裁剪掉不必要的开销。"}
+                    <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 tracking-tight">开启下一段旅程协同规划</h2>
+                    <p className="mt-1 text-sm font-medium text-slate-500">
+                      三步就能开始：先确定去哪、几天、几个人，再写清必须满足的条件，最后生成方案。
                     </p>
                   </div>
-                </div>
-              </div>
 
-              <div className="lg:col-span-4 flex flex-col h-full bg-white/60 backdrop-blur-md rounded-3xl shadow-sm border border-slate-200 overflow-hidden relative">
-                <AnimatePresence mode="wait">
-                  {renderRightPanel()}
-                </AnimatePresence>
+                  <div className="rounded-3xl border border-slate-200 bg-white/80 p-5 shadow-sm sm:p-6">
+                    <div className="mb-4 flex items-center gap-3">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500 text-xs font-black text-white">1</span>
+                      <div>
+                        <h3 className="text-sm font-extrabold text-slate-800">去哪、几天、几个人</h3>
+                        <p className="text-xs font-medium text-slate-500">先给规划一个确定的起点</p>
+                      </div>
+                    </div>
+
+                    <label className="block">
+                      <span className="mb-1.5 flex items-center gap-1.5 text-xs font-bold text-slate-600"><MapPin className="h-3.5 w-3.5 text-orange-500" /> 目的地</span>
+                      <input
+                        data-testid="lobby-destination"
+                        value={destination}
+                        onChange={(event) => setDestination(event.target.value)}
+                        placeholder="例如：成都、西安、洛阳"
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-orange-500"
+                      />
+                    </label>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {['北京', '上海', '成都', '西安', '杭州', '洛阳'].map((city) => (
+                        <button
+                          key={city}
+                          type="button"
+                          onClick={() => setDestination(city)}
+                          className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition-colors ${destination === city ? 'border-orange-300 bg-orange-50 text-orange-700' : 'border-slate-200 bg-white text-slate-500 hover:border-orange-200 hover:text-orange-600'}`}
+                        >
+                          {city}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+                        <span className="text-xs font-bold text-slate-600">几天</span>
+                        <div className="mt-2 flex items-center justify-between">
+                          <button type="button" aria-label="减少天数" onClick={() => setDays((value) => Math.max(1, value - 1))} className="h-8 w-8 rounded-lg border border-slate-200 bg-white text-sm font-black text-slate-600 hover:border-orange-300 hover:text-orange-600">−</button>
+                          <span data-testid="lobby-days" className="text-lg font-black text-slate-800">{days} 天</span>
+                          <button type="button" aria-label="增加天数" onClick={() => setDays((value) => Math.min(15, value + 1))} className="h-8 w-8 rounded-lg border border-slate-200 bg-white text-sm font-black text-slate-600 hover:border-orange-300 hover:text-orange-600">+</button>
+                        </div>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+                        <span className="flex items-center gap-1.5 text-xs font-bold text-slate-600"><Users className="h-3.5 w-3.5 text-orange-500" /> 同行人数</span>
+                        <div className="mt-2 flex items-center justify-between">
+                          <button type="button" aria-label="减少人数" onClick={() => setTravelers((value) => Math.max(1, value - 1))} className="h-8 w-8 rounded-lg border border-slate-200 bg-white text-sm font-black text-slate-600 hover:border-orange-300 hover:text-orange-600">−</button>
+                          <span data-testid="lobby-travelers" className="text-lg font-black text-slate-800">{travelers} 人</span>
+                          <button type="button" aria-label="增加人数" onClick={() => setTravelers((value) => Math.min(10, value + 1))} className="h-8 w-8 rounded-lg border border-slate-200 bg-white text-sm font-black text-slate-600 hover:border-orange-300 hover:text-orange-600">+</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <label className="mt-3 flex items-center gap-2 text-xs font-bold text-slate-600">
+                      <input type="checkbox" data-testid="lobby-budget-first" checked={preferBudget} onChange={(event) => setPreferBudget(event.target.checked)} className="h-4 w-4 accent-orange-500" />
+                      尽量控制预算
+                    </label>
+
+                    <div className="my-5 h-px bg-slate-100" />
+
+                    <div className="mb-3 flex items-center gap-3">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500 text-xs font-black text-white">2</span>
+                      <div>
+                        <h3 className="text-sm font-extrabold text-slate-800">必须满足什么</h3>
+                        <p className="text-xs font-medium text-slate-500">不写清楚，方案只能靠猜</p>
+                      </div>
+                    </div>
+                    <div className="flex items-start justify-between gap-3 rounded-2xl bg-slate-50 p-4">
+                      <div className="min-w-0">
+                        <span className="inline-flex rounded-md bg-orange-100 px-2 py-0.5 text-xs font-bold text-orange-700">{selectedRole}</span>
+                        <p className="mt-1.5 text-xs font-medium leading-relaxed text-slate-600">{myIntent}</p>
+                      </div>
+                      <button
+                        type="button"
+                        data-testid="lobby-edit-intent"
+                        onClick={() => setShowEditIntentModal(true)}
+                        className="flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-600 transition-colors hover:border-orange-200 hover:text-orange-600"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" /> 修改
+                      </button>
+                    </div>
+
+                    <div className="my-5 h-px bg-slate-100" />
+
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex items-center gap-3">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500 text-xs font-black text-white">3</span>
+                        <div>
+                          <h3 className="text-sm font-extrabold text-slate-800">生成方案</h3>
+                          <p className="text-xs font-medium text-slate-500">生成后仍可修改、对比和导出</p>
+                        </div>
+                      </div>
+                      <button
+                        data-testid="begin-plan"
+                        onClick={handleBeginPlan}
+                        className="flex items-center justify-center gap-2 rounded-2xl bg-orange-500 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-orange-200/50 transition-all hover:-translate-y-0.5 hover:bg-orange-600"
+                      >
+                        生成方案 <ArrowRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <aside className="flex flex-col gap-4 lg:col-span-4">
+                  <div className="rounded-3xl border border-slate-200 bg-white/80 p-5 shadow-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="flex items-center gap-2 text-base font-extrabold text-slate-800"><Users className="h-4 w-4 text-orange-500" /> 加入房间</h3>
+                      <span data-testid="room-code" className="flex items-center gap-1.5 font-mono text-sm font-black tracking-wider text-orange-600">
+                        {roomReady ? roomCode : '准备中…'}
+                        <button onClick={copyRoomCode} className="rounded-md p-1 transition-colors hover:bg-orange-50" title="复制房间码">
+                          {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 text-orange-500" />}
+                        </button>
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs font-medium text-slate-500">把房间码发给同行好友，一起确认节奏、预算和必去地点。</p>
+                    <div className="mt-3">
+                      <RoomConnectionStatus connection={roomConnection} retryAttempt={roomRetryAttempt} retryDelayMs={roomRetryDelayMs} memberCount={roomMembers.length} onRetry={retryRoomConnection} testId="room-status-lobby-home" />
+                    </div>
+                    {roomError && <p className="mt-2 text-[11px] font-bold text-rose-500">{roomError}</p>}
+                    <div className="mt-3 flex gap-1.5">
+                      <input
+                        data-testid="join-room-code"
+                        type="text"
+                        placeholder="输入好友分享的房间码"
+                        value={inputRoomCode}
+                        onChange={(event) => setInputRoomCode(event.target.value)}
+                        className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs font-bold uppercase text-slate-800 outline-none focus:border-orange-500"
+                      />
+                      <button data-testid="join-room-submit" onClick={joinRoom} disabled={!inputRoomCode.trim()} className="shrink-0 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-bold text-white transition-colors hover:bg-orange-500 disabled:cursor-not-allowed disabled:bg-slate-300">
+                        加入
+                      </button>
+                    </div>
+                    {roomMembers.length > 0 && (
+                      <ul className="mt-3 space-y-1.5">
+                        {roomMembers.map((member) => (
+                          <li key={member.id} className="flex items-center justify-between rounded-xl border border-slate-100 bg-white px-2.5 py-2">
+                            <div className="min-w-0">
+                              <p className="truncate text-xs font-bold text-slate-800">{member.name}{member.id === currentUser.id ? '（我）' : ''}</p>
+                              <p className="truncate text-[11px] font-medium text-slate-500">{member.role} · {member.intent}</p>
+                            </div>
+                            {member.id === currentUser.id && (
+                              <button onClick={() => setShowEditIntentModal(true)} className="shrink-0 rounded-lg p-1 text-orange-600 hover:bg-orange-100" title="调整我的条件">
+                                <Edit3 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    aria-label="打开灵感目的地图谱"
+                    onClick={() => setShowDestinationMap(true)}
+                    className="group rounded-3xl border border-slate-200 bg-white/80 p-5 text-left shadow-sm transition-all hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50"
+                  >
+                    <div className="mb-2 flex items-center justify-between">
+                      <h3 className="flex items-center gap-2 text-base font-extrabold text-slate-800"><Compass className="h-4 w-4 text-orange-500" /> 查看示例</h3>
+                      <span className="rounded-full border border-orange-100 bg-orange-50 px-2 py-0.5 text-[10px] font-black text-orange-700">{Object.keys(PROVINCE_DATA).length} 个目的地</span>
+                    </div>
+                    <p className="text-xs font-medium leading-relaxed text-slate-500">还没想好去哪？打开灵感目的地图谱，看看热门目的地的玩法，再一键开始规划。</p>
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {TOP_DESTINATIONS.map((city) => (
+                        <span key={city} className="rounded-full bg-orange-50 px-2.5 py-1 text-[11px] font-bold text-orange-700 transition-colors group-hover:bg-orange-100">{shortenRegionName(city)}</span>
+                      ))}
+                    </div>
+                    <span className="mt-3 inline-flex items-center gap-1 text-[11px] font-bold text-orange-600">打开交互式地图 <ArrowRight className="h-3 w-3 transition-transform group-hover:translate-x-0.5" /></span>
+                  </button>
+                </aside>
               </div>
             </main>
 
-            {/* ============ 主页底部板块：灵感目的地 / 社区入口 / 进化日志 ============ */}
-            <div className="px-8 sm:px-10 pb-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-              <button type="button" aria-label="打开灵感目的地图谱" onClick={() => setShowDestinationMap(true)} className="group w-full text-left bg-white/60 backdrop-blur-md border border-slate-200/70 rounded-2xl p-5 cursor-pointer hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <Compass className="w-4 h-4 text-orange-500" />
-                    <h3 className="text-sm font-extrabold text-slate-800">灵感目的地图谱</h3>
-                  </div>
-                  <span className="text-[10px] font-black text-orange-700 bg-orange-50 border border-orange-100 px-2 py-0.5 rounded-full">{Object.keys(PROVINCE_DATA).length} 目的地</span>
-                </div>
-                <p className="text-[11px] text-slate-500 font-medium leading-relaxed mb-3">交互式全国目的地地图：搜索筛选、点击标记看景点详情、一键开启智能规划。</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {TOP_DESTINATIONS.map(c => (
-                    <span key={c} className="text-[11px] bg-orange-50 text-orange-700 px-2.5 py-1 rounded-full font-bold group-hover:bg-orange-100 transition-colors">{shortenRegionName(c)}</span>
-                  ))}
-                </div>
-                <span className="inline-flex items-center gap-1 text-[11px] text-orange-600 font-bold mt-3">打开交互式地图 <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" /></span>
-              </button>
-
-              <button type="button" aria-label="进入同行者社区" onClick={() => setShowCommunity(true)} className="w-full text-left bg-white/60 backdrop-blur-md border border-slate-200/70 rounded-2xl p-5 cursor-pointer hover:border-orange-300 hover:shadow-md transition-all">
-                <div className="flex items-center gap-2 mb-3">
-                  <MessageCircle className="w-4 h-4 text-orange-500" />
-                  <h3 className="text-sm font-extrabold text-slate-800">同行者社区</h3>
-                </div>
-                <p className="text-xs text-slate-500 leading-relaxed font-medium">分享满意行程，点赞、评论、回复，让高质量路书被更多旅行者借鉴。</p>
-                <span className="inline-flex items-center gap-1 text-[11px] text-orange-600 font-bold mt-3">进入社区 <ArrowRight className="w-3 h-3" /></span>
-              </button>
-
-              <div className="bg-white/60 backdrop-blur-md border border-slate-200/70 rounded-2xl p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <BrainCircuit className="w-4 h-4 text-orange-600" />
-                  <h3 className="text-sm font-extrabold text-slate-800">偏好学习记录</h3>
-                </div>
-                {[
-                  '融合全网评价与真实反馈，路线持续自我修正',
-                  '社区高质量行程作为软引导，辅助方案生成',
-                  '成员让位受各自预算约束，协商逐轮留痕'
-                ].map((t, i) => (
-                  <div key={i} className="flex items-start gap-2 mb-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-orange-400 mt-1.5 shrink-0"></span>
-                    <p className="text-[11px] text-slate-500 font-medium leading-relaxed">{t}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <footer className="p-6 sm:p-8 border-t border-slate-200/50 bg-white/30 flex justify-between items-center">
-              <span className="text-xs text-slate-400 font-bold hidden sm:inline">
-                当前协同房间：<strong className="text-slate-700 font-mono">{roomCode}</strong>（将此房间码分享给同行好友即可同屏规划）
+            <footer className="flex flex-wrap items-center gap-3 border-t border-slate-200/50 bg-white/30 px-5 py-4 sm:px-10">
+              <span className="hidden text-xs font-bold text-slate-500 sm:inline">
+                当前房间：<strong className="font-mono text-slate-700">{roomCode}</strong>
               </span>
-              <Link href="/capabilities" className="mr-3 text-[11px] font-bold text-slate-400 underline-offset-2 hover:text-orange-600 hover:underline">能力与数据来源</Link>
-              <button data-testid="begin-plan" onClick={handleBeginPlan} className="ml-auto px-8 py-3.5 bg-orange-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-3 hover:bg-orange-600 shadow-lg shadow-orange-200/50 hover:-translate-y-0.5 transition-all duration-300 cursor-pointer">
-                下一步：定制主控体验 <ArrowRight className="w-4 h-4" />
-              </button>
+              <Link href="/capabilities" className="text-[11px] font-bold text-slate-400 underline-offset-2 hover:text-orange-600 hover:underline">能力与数据来源</Link>
+              <p className="ml-auto text-[11px] font-medium text-slate-400">生成方案后仍可逐项修改，不会锁死行程</p>
             </footer>
           </motion.div>
         )}
@@ -558,9 +550,9 @@ export default function ContextualLobby() {
           <motion.div key="auth-modal-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-slate-950/45 backdrop-blur-md z-[100] flex items-center justify-center p-4">
             <motion.div key="auth-modal-dialog" initial={{ scale: 0.96, y: 18 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: -18 }} className="bg-white rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl border border-white/60">
               <div className="border-b border-slate-100 bg-slate-50 px-6 py-5 sm:px-8">
-                <div className="mb-2 flex items-center gap-2 text-xs font-black text-orange-600"><Sparkles className="h-4 w-4" /> 主控体验配置</div>
+                <div className="mb-2 flex items-center gap-2 text-xs font-black text-orange-600"><Sparkles className="h-4 w-4" /> 第 2 步 · 必须满足什么</div>
                 <h3 className="text-2xl font-extrabold text-slate-900">这趟旅程，你最期待什么？</h3>
-                <p className="mt-1 text-xs sm:text-sm text-slate-500 font-medium">选择一个主偏好，进入沙盘后仍可随时调整，不会锁死行程。</p>
+                <p className="mt-1 text-xs sm:text-sm text-slate-500 font-medium">选一个主偏好，进入规划后仍可随时调整，不会锁死行程。</p>
               </div>
               <div className="grid grid-cols-1 gap-3 px-6 py-5 sm:grid-cols-2 sm:px-8">
                 <PreferenceCard id="foodie" icon={<Coffee/>} title="寻味探索" desc="美食驱动，为您匹配地道餐馆。" selected={selectedRole === '寻味探索'} onClick={() => setSelectedRole('寻味探索')} color="border-orange-500 bg-orange-50/80 text-orange-600" />

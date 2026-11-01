@@ -196,24 +196,26 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
   };
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center p-4 sm:p-8 font-sans bg-slate-50 relative overflow-hidden">
-      <div className="absolute top-[-10%] left-[-10%] w-[45%] h-[45%] rounded-full bg-orange-400/15 blur-[140px] pointer-events-none" />
-      <div className="absolute bottom-[-10%] right-[-10%] w-[45%] h-[45%] rounded-full bg-amber-400/15 blur-[140px] pointer-events-none" />
+    <div className="min-h-screen w-full flex items-center justify-center px-4 pb-24 pt-4 sm:p-8 font-sans bg-slate-50 relative overflow-hidden">
+      <div className="absolute top-[-10%] left-[-10%] w-[45%] h-[45%] rounded-full bg-orange-400/10 blur-[140px] pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[45%] h-[45%] rounded-full bg-amber-400/10 blur-[140px] pointer-events-none" />
 
       <motion.div 
         initial={{ opacity: 0, scale: 0.96, y: 15 }} 
         animate={{ opacity: 1, scale: 1, y: 0 }} 
         transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-        className="relative z-10 w-full max-w-[1050px] min-h-[620px] bg-white/80 backdrop-blur-3xl border border-white shadow-[0_12px_50px_rgba(0,0,0,0.06)] rounded-[2.5rem] grid grid-cols-1 lg:grid-cols-12 overflow-hidden"
+        className="relative z-10 w-full max-w-[1050px] lg:min-h-[620px] bg-white/80 backdrop-blur-3xl border border-white shadow-[0_12px_50px_rgba(0,0,0,0.06)] rounded-[2rem] sm:rounded-[2.5rem] grid grid-cols-1 lg:grid-cols-12 overflow-hidden"
       >
-        {/* 左侧品牌与特色介绍 */}
-        <div className="lg:col-span-6 p-10 sm:p-12 bg-gradient-to-br from-orange-500/10 via-amber-500/5 to-transparent border-r border-slate-100 flex flex-col justify-between">
+        {/* 左侧品牌与特色介绍：仅桌面端显示。
+            小屏以前品牌介绍独占首屏，登录和试用都被压到折叠线下；
+            移动端改为表单列顶部的紧凑品牌头，让登录 CTA 直接出现在首屏。 */}
+        <div className="hidden lg:flex lg:col-span-6 p-10 sm:p-12 bg-gradient-to-br from-orange-500/8 via-amber-500/5 to-transparent border-r border-slate-100 flex-col justify-between">
           <div>
             <div className="flex items-center gap-3.5 mb-8">
               <OmniLogo className="w-11 h-11" />
               <div>
                 <h1 className="text-2xl font-black text-slate-900 tracking-tight">OmniRoute</h1>
-                <p className="text-[10px] text-slate-500 font-semibold tracking-wide mt-0.5">从想法到可执行行程</p>
+                <p className="text-xs text-slate-500 font-semibold tracking-wide mt-0.5">从想法到可执行行程</p>
               </div>
             </div>
 
@@ -231,7 +233,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-slate-800">多人偏好一起考虑</h4>
-                  <p className="text-[11px] text-slate-400 font-medium">把节奏、预算和必去地点放进同一份方案</p>
+                  <p className="text-xs text-slate-400 font-medium">把节奏、预算和必去地点放进同一份方案</p>
                 </div>
               </div>
 
@@ -241,27 +243,35 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-slate-800">同行者实时协作</h4>
-                  <p className="text-[11px] text-slate-400 font-medium">用房间码加入，在同一处查看和调整行程</p>
+                  <p className="text-xs text-slate-400 font-medium">用房间码加入，在同一处查看和调整行程</p>
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="pt-6 mt-6 border-t border-slate-200/60 flex items-center justify-between text-[11px] text-slate-400 font-bold">
-            <span>SQLite 用户数据持久化安全存储</span>
-            <span>v2.4 Pro</span>
+          <div className="pt-6 mt-6 border-t border-slate-200/60 flex items-center justify-between text-xs text-slate-400 font-bold">
+            <span>行程保存在账号中，可跨设备同步</span>
+            <span>随时可导出</span>
           </div>
         </div>
 
         {/* 右侧登录 / 注册表单 */}
-        <div className="lg:col-span-6 p-8 sm:p-12 flex flex-col justify-center bg-white/50">
+        <div className="lg:col-span-6 p-6 sm:p-10 lg:p-12 flex flex-col justify-center bg-white/50">
           <div className="max-w-sm w-full mx-auto">
+            {/* 移动端紧凑品牌头：不再让品牌介绍独占首屏，登录与试用直接可见 */}
+            <div className="lg:hidden mb-6 flex items-center gap-3">
+              <OmniLogo className="w-10 h-10" />
+              <div>
+                <p className="text-xl font-black text-slate-900 tracking-tight">OmniRoute</p>
+                <p className="text-xs text-slate-500 font-semibold mt-0.5">从想法到可执行行程</p>
+              </div>
+            </div>
             <div className="text-left mb-6">
               <h3 className="text-2xl font-black text-slate-800">
                 {tab === 'login' ? '旅行者登录' : '创建新账号'}
               </h3>
               <p className="text-xs text-slate-400 mt-1 font-medium">
-                {tab === 'login' ? '请输入您的账号密码进入协同中枢' : '注册账号以保存您的个性化偏好与行程'}
+                {tab === 'login' ? '登录后继续规划和管理你的行程' : '注册账号以保存您的个性化偏好与行程'}
               </p>
             </div>
 
@@ -369,7 +379,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
 
             {/* 登录引导：第一次来可以先试用，不必先想账号密码 */}
             <div className="mt-5">
-              <div className="flex items-center gap-3 text-[10px] font-bold text-slate-300">
+              <div className="flex items-center gap-3 text-xs font-bold text-slate-300">
                 <span className="h-px flex-1 bg-slate-200" />
                 或
                 <span className="h-px flex-1 bg-slate-200" />
@@ -383,11 +393,11 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               >
                 先随便逛逛 · 免注册试用
               </button>
-              <p className="mt-2 text-[11px] leading-5 font-medium text-slate-400">
+              <p className="mt-2 text-xs leading-5 font-medium text-slate-400">
                 试用会创建一个随机昵称的账号，直接进入大厅；行程保存在这台设备，注册正式账号后可跨设备同步。
               </p>
               {tab === 'login' && (
-                <p className="mt-2 text-[11px] font-medium text-slate-400">
+                <p className="mt-2 text-xs font-medium text-slate-400">
                   还没有账号？
                   <button type="button" onClick={() => { setTab('register'); setErrorMsg(''); setSuccessMsg(''); }}
                     className="ml-1 font-bold text-orange-600 underline underline-offset-2 hover:text-orange-700 cursor-pointer">
