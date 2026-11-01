@@ -161,6 +161,9 @@ func RegisterRoutes(r *gin.Engine) {
 		// statement instead of one write-lock round trip per event.
 		apiGroup.POST("/planning/events/batch", handlers.RecordPlanningEventsBatchHandler)
 		apiGroup.GET("/planning/quality", handlers.PlanningQualityHandler)
+		// 效果指标：采纳率、重规划保留率、预算超支率、风险响应时间、用户修改次数。
+		// 只从已落库事实聚合，算不出来的返回 unavailable。
+		apiGroup.GET("/planning/effect-metrics", handlers.PlanningEffectMetricsHandler)
 		apiGroup.GET("/planning/dataset/export", handlers.ExportPlanningDatasetHandler)
 		apiGroup.GET("/planning/providers/health", handlers.PlanningProviderHealthHandler)
 		apiGroup.GET("/planning/providers/registry", handlers.ProviderRegistryHandler)
