@@ -11,8 +11,8 @@ const PARTICLES = Array.from({ length: 18 }, (_, index) => ({
 }));
 
 export default function SeasonParticles({ season, enabled }: { season: Season; enabled: boolean }) {
-  const kind = season === 'spring' ? 'petal' : season === 'autumn' ? 'leaf' : season === 'winter' ? 'snow' : 'none';
-  if (!enabled || kind === 'none') return null;
+  const kind = season === 'spring' ? 'petal' : season === 'autumn' ? 'leaf' : season === 'winter' ? 'snow' : 'firefly';
+  if (!enabled) return null;
   return (
     <div className="season-particles" data-kind={kind} aria-hidden="true">
       {PARTICLES.map((particle, index) => <span key={index} style={{ left: particle.left, width: particle.size, height: particle.size, '--delay': particle.delay, '--dur': particle.duration, '--sway': particle.sway } as React.CSSProperties} />)}

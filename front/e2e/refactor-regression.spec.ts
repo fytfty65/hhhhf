@@ -306,7 +306,7 @@ test.describe('refactor regression', () => {
     // 「主控体验 / 决策体 / 博弈裁决 / 协同网络 / 方案治理 / 专业诊断」这类内部概念。
     await installMocks(page);
     await page.goto('/');
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible({ timeout: 20_000 });
 
     for (const term of ['主控体验', '决策体', '博弈裁决', '协同网络', '方案治理', '专业诊断']) {
       await expect(page.getByText(term)).toHaveCount(0);
@@ -356,7 +356,7 @@ test.describe('refactor regression', () => {
     await installMocks(page, { loggedOut: true });
     await page.goto('/');
     await expect(page.getByTestId('auth-trial')).toBeVisible();
-    await expect(page.getByText('先随便逛逛 · 免注册试用')).toBeVisible();
+    await expect(page.getByText('先以游客身份看看')).toBeVisible();
 
     await page.getByTestId('auth-trial').click();
     // 试用 = 注册随机账号 + 自动登录 + 自动建房，直接落到大厅
@@ -368,7 +368,7 @@ test.describe('refactor regression', () => {
     await installMocks(page);
     await page.goto('/');
 
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible({ timeout: 20_000 });
 
     // 第 1 步：去哪、几天、几个人
     await expect(page.getByTestId('lobby-destination')).toBeVisible();
@@ -416,7 +416,7 @@ test.describe('refactor regression', () => {
   test('profile screen reachable and reversible', async ({ page }) => {
     await installMocks(page);
     await page.goto('/');
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible({ timeout: 20_000 });
 
     // 个人主页收进「更多」二级入口
     await page.getByTestId('lobby-more').click();
@@ -426,7 +426,7 @@ test.describe('refactor regression', () => {
     await noHorizontalOverflow(page);
     await page.getByText('返回大厅', { exact: true }).click();
     await page.setViewportSize({ width: 1280, height: 720 });
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible();
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible();
   });
 
   test('个人旅行特征图谱只渲染自己的特征，并标注仅自己可见', async ({ page }) => {
@@ -459,7 +459,7 @@ test.describe('refactor regression', () => {
     );
 
     await page.goto('/');
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible({ timeout: 20_000 });
     await page.getByTestId('lobby-more').click();
     await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
 
@@ -496,7 +496,7 @@ test.describe('refactor regression', () => {
     // 同时它既不能转正也不会过期。这里固定住「如实说明 + 一键转正」的行为。
     await installMocks(page, { guest: true });
     await page.goto('/');
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible({ timeout: 20_000 });
 
     await page.getByTestId('lobby-more').click();
     await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
@@ -522,7 +522,7 @@ test.describe('refactor regression', () => {
   test('community screen reachable and reversible', async ({ page }) => {
     await installMocks(page);
     await page.goto('/');
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible({ timeout: 20_000 });
 
     // 社区收进「更多」二级入口
     await page.getByTestId('lobby-more').click();
@@ -532,7 +532,7 @@ test.describe('refactor regression', () => {
     await noHorizontalOverflow(page);
     await page.getByText('返回大厅', { exact: true }).click();
     await page.setViewportSize({ width: 1280, height: 720 });
-    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible();
+    await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible();
   });
 
   test('destination map opens, renders and closes', async ({ page }) => {
@@ -982,4 +982,35 @@ test.describe('refactor regression', () => {
     await expect(page.getByTestId('room-sync')).toHaveAttribute('data-connection', 'connected');
     await expect(page.getByTestId('room-offline-banner')).toHaveCount(0);
   });
+});
+
+test('travel journal theme keeps downstream pages readable in both modes', async ({ page }) => {
+  test.setTimeout(120_000);
+  await installMocks(page, { governance: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  await expect(page.getByTestId('begin-plan')).toBeVisible();
+  const capture = async (name: string) => {
+    if (name === 'workspace') await page.locator('.journey-workspace-header').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `../work/journey-review/${name}-day.png`, fullPage: true, animations: 'disabled' });
+    await page.getByRole('button', { name: '切换到暗色模式' }).click();
+    await expect(page.locator('html')).toHaveClass(/dark/);
+    if (name === 'workspace') await page.locator('.journey-workspace-header').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `../work/journey-review/${name}-night.png`, fullPage: true, animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await noHorizontalOverflow(page);
+    await page.screenshot({ path: `../work/journey-review/${name}-mobile.png`, fullPage: true, animations: 'disabled' });
+    await page.getByRole('button', { name: '切换到亮色模式' }).click();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  };
+  await capture('lobby');
+  for (const [label, title, name] of [['个人主页', '我的路书', 'profile'], ['社区', '同行者社区', 'community']]) {
+    await page.getByTestId('lobby-more').click();
+    await page.getByTestId('lobby-more-menu').getByRole('button', { name: label, exact: true }).click();
+    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    await capture(name);
+    await page.getByText('返回大厅', { exact: true }).click();
+  }
+  await reachDecision(page);
+  await capture('workspace');
 });

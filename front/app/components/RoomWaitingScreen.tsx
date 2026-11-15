@@ -62,7 +62,7 @@ export default function RoomWaitingScreen({
     .slice(0, 6);
 
   return (
-    <div data-testid="member-waiting-screen" className="min-h-screen w-full bg-slate-50">
+    <div data-testid="member-waiting-screen" className="journey-waiting min-h-screen w-full bg-slate-50">
       <div className="mx-auto flex min-h-screen w-full max-w-5xl flex-col px-4 py-6 sm:px-8 sm:py-10">
         {/* 顶部：品牌 + 房间码 */}
         <header className="flex flex-wrap items-center justify-between gap-3">

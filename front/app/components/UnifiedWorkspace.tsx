@@ -1987,13 +1987,14 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
   const runtimeStatusLabel = (status: string) => status === 'healthy' ? '运行正常' : status === 'rollback_required' ? '已触发回滚' : '样本不足';
 
   return (
-    <motion.div key="workspace-root" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="relative h-screen w-full bg-white flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden font-sans text-slate-800">
+    <motion.div key="workspace-root" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="journey-workspace relative h-screen w-full bg-white flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden font-sans text-slate-800">
       
       {/* 左侧长图文游记与路径排版区 */}
       {/* 桌面（≥lg）把 header 和正文放进同一个滚动容器：从标题往下读时头部自然滚走，
           不再常驻 200px；移动端仍保持「头部固定 + 正文自己滚动」，避免溢出遮挡下方地图。 */}
       <div className={`w-full ${mapLayout === 'doc' ? 'lg:flex-1 h-auto lg:h-full' : mapLayout === 'map' ? 'lg:w-[380px] xl:w-[420px] h-[56vh] lg:h-full' : 'lg:w-[620px] xl:w-[700px] h-[56vh] lg:h-full'} min-h-[480px] lg:min-h-0 flex flex-col relative z-20 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white shadow-2xl shrink-0 lg:overflow-y-auto custom-scrollbar`}>
-        <header className="px-5 sm:px-8 py-4 border-b border-slate-100 bg-white shadow-xs z-10">
+        <header className="journey-workspace-header px-5 sm:px-8 py-4 border-b border-slate-100 bg-white shadow-xs z-10">
+          <p className="interior-eyebrow workspace-eyebrow">JOURNEY STUDIO <span>/ 行程编辑室</span></p>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -2328,7 +2329,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           )}
           {phase === 'decision' && (
             <div className="mt-4 flex flex-wrap items-center gap-2">
-              <nav className="flex min-w-0 flex-1 items-center gap-1 rounded-xl border border-stone-200 bg-stone-50 p-1" aria-label="工作区层级">
+              <nav className="workspace-section-nav flex min-w-0 flex-1 items-center gap-1 rounded-xl border border-stone-200 bg-stone-50 p-1" aria-label="工作区层级">
               {layerTabs.map(([key, label, hint]) => (
                 <button
                   key={key}

@@ -1,5 +1,7 @@
 'use client';
 
+import { JourneyLobbyHero } from './components/JourneyEditorial';
+
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
@@ -453,7 +455,7 @@ export default function ContextualLobby() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 sm:p-8 font-sans bg-slate-50/50 relative overflow-hidden">
+    <div className="journey-lobby min-h-screen flex items-center justify-center p-4 sm:p-8 font-sans bg-slate-50/50 relative overflow-hidden">
       {/* 环境光球：backgroundColor 随目的地平滑过渡（成都=竹青/暖红…），极慢漂移 */}
       <div
         aria-hidden="true"
@@ -471,7 +473,7 @@ export default function ContextualLobby() {
           <motion.div 
             key="lobby-main-card-wrapper"
             initial={{ opacity: 0, scale: 0.98, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: -20, filter: "blur(8px)" }} transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            className="relative z-10 w-full max-w-[1240px] min-h-[85vh] bg-white/70 backdrop-blur-3xl border border-white shadow-[0_8px_40px_rgba(0,0,0,0.04)] rounded-[2rem] flex flex-col overflow-hidden"
+            className="journey-lobby-sheet relative z-10 w-full max-w-[1240px] min-h-[85vh] bg-white/70 backdrop-blur-3xl border border-white shadow-[0_8px_40px_rgba(0,0,0,0.04)] rounded-[2rem] flex flex-col overflow-hidden"
           >
             <header className="px-6 py-4 sm:px-10 sm:py-5 flex justify-between items-center border-b border-slate-200/50 bg-white/40">
               <div className="flex items-center gap-3 sm:gap-4">
@@ -547,10 +549,11 @@ export default function ContextualLobby() {
             </header>
 
             <main className="flex-1 px-5 py-6 sm:px-10 sm:py-8 overflow-y-auto overflow-x-hidden">
+              <JourneyLobbyHero onExplore={() => setShowDestinationMap(true)} />
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
                 <section className="flex flex-col gap-4 lg:col-span-8">
                   <div>
-                    <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 tracking-tight">开启下一段旅程协同规划</h2>
+                    <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 tracking-tight">把下一段旅程，安排妥当。</h2>
                     <p className="mt-1 text-sm font-medium text-slate-500">
                       三步就能开始：先确定去哪、几天、几个人，再写清必须满足的条件，最后生成方案。
                     </p>

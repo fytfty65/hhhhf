@@ -23,16 +23,22 @@ export default function SeasonControls({ season, mode, motionEnabled, onSeasonCh
           </button>
         ))}
       </div>
+      <label className="season-mode-label">
+        <span>场景模式</span>
+        <select aria-label="场景模式" value={mode} onChange={(event) => {
+          const next = event.target.value as SeasonMode;
+          onModeChange(next);
+          if (next === 'demo') onMotionChange(true);
+        }}>
+          <option value="date">随日期变换</option>
+          <option value="demo">四季循环 · 24 秒</option>
+          <option value="manual">手动选季</option>
+        </select>
+      </label>
       <label className="motion-toggle">
         <input type="checkbox" checked={motionEnabled} onChange={(event) => onMotionChange(event.target.checked)} />
-        <span>{motionEnabled ? '动态场景' : '静止场景'}</span>
+        <span>{motionEnabled ? '动态开启' : '动态暂停'}</span>
       </label>
-      <button className="season-mode" type="button" aria-pressed={mode === 'date'} onClick={() => onModeChange('date')}>
-        跟随日期
-      </button>
-      <button className="season-mode" type="button" aria-pressed={mode === 'demo'} onClick={() => onModeChange(mode === 'demo' ? 'manual' : 'demo')}>
-        {mode === 'demo' ? '暂停演示' : '演示四季'}
-      </button>
     </div>
   );
 }

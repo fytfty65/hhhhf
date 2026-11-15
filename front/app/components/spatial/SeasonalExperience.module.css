@@ -19,3 +19,15 @@
 @keyframes lightPulse { from { opacity:.28; } to { opacity:.56; } }
 @media(max-width:767px) { .scene { max-height:1000px; } .poster { background-position:center top; } .layerBackground,.layerSubject,.layerFog,.layerForeground,.layerLight,.layerDetail { inset:-8px; } .layers::after { background:linear-gradient(180deg, transparent 50%, rgba(5,12,16,.35)); } .atmosphere { background:linear-gradient(0deg,#17232c 0%,transparent 65%); } }
 @media(prefers-reduced-motion:reduce) { .arriving { animation:none; } .layerFog,.layerLight { animation:none; } }
+.scene { background:#23333d; }
+.poster { inset:-12px; transform:translate3d(var(--scene-x,0px),var(--scene-y,0px),0); transition:transform .65s ease-out; }
+.mist { position:absolute; inset:35% -20% -20% 30%; pointer-events:none; background:radial-gradient(ellipse at 35% 65%,#e1eaf52b,transparent 55%),radial-gradient(ellipse at 80% 40%,#fff2 0%,transparent 48%); filter:blur(20px); animation:clouds 32s ease-in-out infinite alternate; }
+.sunlight { position:absolute; inset:0; background:radial-gradient(ellipse at 85% 20%,#ffe9ac26,transparent 48%); mix-blend-mode:screen; animation:breathe 12s ease-in-out infinite alternate; }
+.scene[data-season='winter'] .sunlight { background:radial-gradient(ellipse at 85% 20%,#a4c6ff26,transparent 48%); }
+.scene[data-season='autumn'] .sunlight { background:radial-gradient(ellipse at 85% 20%,#ffc15a30,transparent 48%); }
+.scene[data-motion='false'] .mist,.scene[data-motion='false'] .sunlight { animation:none; }
+.scene[data-motion='false'] .poster { transition:none; transform:none; }
+@keyframes clouds { from { transform:translate3d(-3%,1%,0); opacity:.4; } to { transform:translate3d(5%,-3%,0); opacity:.85; } }
+@keyframes breathe { from { opacity:.45; } to { opacity:.9; } }
+@media(max-width:767px) { .poster { background-position:35% center; } }
+@media(prefers-reduced-motion:reduce) { .mist,.sunlight { animation:none; } .poster { transition:none; transform:none; } }

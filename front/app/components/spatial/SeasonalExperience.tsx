@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Season } from '../../lib/season';
 import PaintedLandscape from './PaintedLandscape';
-import LayeredSeasonScene from './LayeredSeasonScene';
 import { seasonAssets } from './seasonAssets';
 import styles from './SeasonalExperience.module.css';
 
@@ -22,7 +21,7 @@ export default function SeasonalExperience({ season, motionEnabled, onDisplayedS
   const [frame, setFrame] = useState<Frame | null>(null);
   const [previous, setPrevious] = useState<Frame | null>(null);
   const [failed, setFailed] = useState(false);
-  const [layeredReady, setLayeredReady] = useState(false);
+  const host = useRef<HTMLDivElement>(null);
   const frameRef = useRef<Frame | null>(null);
   const callback = useRef(onDisplayedSeason);
   callback.current = onDisplayedSeason;
@@ -38,14 +37,31 @@ export default function SeasonalExperience({ season, motionEnabled, onDisplayedS
   }, []);
 
   useEffect(() => {
+    if (!motionEnabled || mobile || !matchMedia('(pointer: fine)').matches) return;
+    let raf = 0;
+    const move = (event: PointerEvent) => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        host.current?.style.setProperty('--scene-x', `${(event.clientX / innerWidth - .5) * 14}px`);
+        host.current?.style.setProperty('--scene-y', `${(event.clientY / innerHeight - .5) * 10}px`);
+      });
+    };
+    window.addEventListener('pointermove', move, { passive: true });
+    return () => {
+      window.removeEventListener('pointermove', move);
+      cancelAnimationFrame(raf);
+      host.current?.style.setProperty('--scene-x', '0px');
+      host.current?.style.setProperty('--scene-y', '0px');
+    };
+  }, [motionEnabled, mobile]);
+
+  useEffect(() => {
     if (!frameRef.current) callback.current?.(season);
     if (mobile === null) return;
     statusCallback.current?.('loading');
-    setLayeredReady(false);
+
     let cancelled = false;
-    const candidates = mobile
-      ? seasonAssets[season].mobileCandidates ?? [seasonAssets[season].mobile]
-      : seasonAssets[season].desktopCandidates ?? [seasonAssets[season].desktop];
+    const candidates = [mobile ? seasonAssets[season].mobile : seasonAssets[season].desktop];
     let image: HTMLImageElement | null = null;
     let url = candidates[candidates.length - 1];
     setFailed(false);
@@ -94,11 +110,12 @@ export default function SeasonalExperience({ season, motionEnabled, onDisplayedS
   }, [frame, previous, motionEnabled]);
 
   return (
-    <div className={styles.scene} aria-hidden="true" data-season={frame?.season ?? season} data-asset-status={failed ? 'fallback' : frame ? 'ready' : 'loading'} data-motion={motionEnabled}>
+    <div ref={host} className={styles.scene} aria-hidden="true" data-season={frame?.season ?? season} data-asset-status={failed ? 'fallback' : frame ? 'ready' : 'loading'} data-motion={motionEnabled}>
       {!frame && <PaintedLandscape controlledSeason={season} autoRotate={false} motionEnabled={false} />}
       {previous && <div className={styles.poster} style={{ backgroundImage: `url("${previous.url}")` }} />}
-      {frame && <div key={frame.url} className={`${styles.poster} ${styles.arriving} ${layeredReady ? styles.posterCovered : ''}`} style={{ backgroundImage: `url("${frame.url}")` }} />}
-      {frame && !previous && <LayeredSeasonScene season={frame.season} mobile={mobile ?? false} enabled={motionEnabled} onReady={() => setLayeredReady(true)} />}
+      {frame && <div key={frame.url} className={`${styles.poster} ${styles.arriving} `} style={{ backgroundImage: `url("${frame.url}")` }} />}
+      <div className={styles.mist} />
+      <div className={styles.sunlight} />
       <div className={styles.atmosphere} />
     </div>
   );

@@ -235,7 +235,7 @@ export default function InteractiveAmapComponent({
           }
         },
         layers: [
-          { id: 'map-background', type: 'background', paint: { 'background-color': '#dbe7f2' } },
+          { id: 'map-background', type: 'background', paint: { 'background-color': '#fff8ef', 'background-opacity': 0 } },
           // Keep a provider-independent underlay visible from the first frame.
           // Esri street map is the first fallback (reachable on networks where
           // OSM times out); OSM stays as the last resort and is only revealed

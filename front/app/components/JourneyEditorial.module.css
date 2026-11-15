@@ -1,0 +1,311 @@
+.editorial {
+  position:relative;
+  background:#f6f4ec;
+  color:#243c33;
+  padding:70px max(6vw,24px) 28px;
+}
+
+.heading {
+  display:flex;
+  justify-content:space-between;
+  gap:20px;
+  border-bottom:1px solid #243c3329;
+  padding-bottom:22px;
+  font-size: 12px;
+  letter-spacing:2px;
+}
+
+.heading span {
+  color:#4f6053;
+}
+
+.intro {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:40px;
+  padding:60px 0;
+}
+
+.intro h2 {
+  font-family:'Songti SC',SimSun,serif;
+  font-size:clamp(32px,3.7vw,54px);
+  line-height:1.45;
+  font-weight:400;
+}
+
+.intro p {
+  color:#4f6053;
+  font-size: 16px;
+  line-height:2.2;
+}
+
+.intro a {
+  display:flex;
+  align-items:center;
+  gap:30px;
+  border-bottom:1px solid #243c33;
+  padding:16px 0;
+  font-size: 16px;
+}
+
+.chapters {
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  border-block:1px solid #243c3329;
+}
+
+.chapters article {
+  padding:32px 36px 40px;
+  border-right:1px solid #243c3329;
+}
+
+.chapters article:first-child {
+  padding-left:0;
+}
+
+.chapters article:last-child {
+  border:0;
+}
+
+.chapterTop {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  margin-bottom:36px;
+}
+
+.chapterTop span {
+  font-family:Georgia,serif;
+  color:#67745f;
+  font-size: 32px;
+  font-style:italic;
+}
+
+.chapters h3 {
+  font-size: 19px;
+  font-weight:500;
+  margin-bottom:14px;
+}
+
+.chapters p {
+  color:#4f6053;
+  font-size: 16px;
+  line-height:2;
+  max-width:320px;
+}
+
+.closing {
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:space-between;
+  gap:20px;
+  padding-top:28px;
+  font-size: 12px;
+  letter-spacing:1px;
+  color:#4f6053;
+}
+
+.closing a {
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.editorial a:focus-visible,.lobbyHero button:focus-visible {
+  outline:2px solid #bc743d;
+  outline-offset:6px;
+}
+
+.lobbyHero {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  position:relative;
+  isolation:isolate;
+  overflow:hidden;
+  margin-bottom:28px;
+  padding:38px 42px;
+  border-radius:22px;
+  color:#fff9ed;
+  background:#213f35;
+}
+
+.lobbyHero::before {
+  content:'';
+  position:absolute;
+  inset:0;
+  z-index:-1;
+  background:linear-gradient(90deg,#18362ff5,#18362fa3),url('/hero/v5/summer.webp') center 48%/cover;
+}
+
+.lobbyCopy>p {
+  display:flex;
+  gap:9px;
+  align-items:center;
+  color:#d5dfbd;
+  font-size: 12px;
+  letter-spacing:2.3px;
+}
+
+.lobbyCopy h2 {
+  font-family:'Songti SC',SimSun,serif;
+  font-size:clamp(28px,3vw,42px);
+  font-weight:400;
+  margin:15px 0;
+}
+
+.lobbyCopy em {
+  font-style:normal;
+  color:#e9d5aa;
+}
+
+.lobbyCopy>span {
+  font-size: 14px;
+  color:#d6dfd5;
+}
+
+.lobbyCopy button {
+  display:flex;
+  align-items:center;
+  gap:22px;
+  margin-top:24px;
+  border-bottom:1px solid #d5dfbd60;
+  padding-bottom:8px;
+  color:#f3e4c4;
+  font-size: 14px;
+  cursor:pointer;
+}
+
+.routeArt {
+  position:relative;
+  width:40%;
+  color:#e9d5aa;
+  transform:rotate(-6deg);
+}
+
+.routeArt svg {
+  width:100%;
+}
+
+.routeLabel {
+  font-size: 12px;
+  letter-spacing:2px;
+}
+
+.routeStart,.routeEnd {
+  position:absolute;
+  font-size: 12px;
+  bottom:0;
+}
+
+.routeEnd {
+  right:0;
+  bottom:52%;
+}
+
+.stamp {
+  position:absolute;
+  right:16%;
+  bottom:-24px;
+  width:72px;
+  height:72px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  text-align:center;
+  border:1px solid #e9d5aa70;
+  border-radius:50%;
+  font-size: 23px;
+  font-family:Georgia,serif;
+  transform:rotate(18deg);
+}
+
+.stamp b {
+  font:7px Arial;
+  letter-spacing:1px;
+}
+
+.routeLine {
+  animation:travel 30s linear infinite;
+}
+
+@keyframes travel {
+  to {
+    stroke-dashoffset:-240;
+  }
+
+}
+
+:global(.dark) .editorial {
+  background:#182b25;
+  color:#eee9dc;
+}
+
+:global(.dark) .intro p,:global(.dark) .chapters p {
+  color:#b1beb5;
+}
+
+@media(max-width:760px) {
+  .intro {
+    flex-wrap:wrap;
+    padding:35px 0;
+    gap:24px;
+  }
+
+  .intro h2 {
+    width:100%;
+  }
+
+  .chapters {
+    grid-template-columns:1fr;
+  }
+
+  .chapters article,.chapters article:first-child {
+    padding:24px 0;
+    border-right:0;
+    border-bottom:1px solid #243c3329;
+  }
+
+  .chapterTop {
+    margin-bottom:18px;
+  }
+
+  .heading span,.closing>span:last-child {
+    display:none;
+  }
+
+  .editorial {
+    padding-top:40px;
+  }
+
+  .lobbyHero {
+    padding:26px 24px;
+  }
+
+  .routeArt {
+    display:none;
+  }
+
+  .lobbyCopy>span {
+    line-height:1.8;
+    display:block;
+  }
+
+}
+
+@media(prefers-reduced-motion:reduce) {
+  .routeLine {
+    animation:none;
+  }
+
+}
+
+/* Night palette applies to every editorial detail, not just the canvas. */
+:global(.dark) .heading,
+:global(.dark) .chapters,
+:global(.dark) .chapters article { border-color: #bdcdb32c; }
+:global(.dark) .heading span,
+:global(.dark) .chapterTop span,
+:global(.dark) .closing { color: #b8c6b7; }
+:global(.dark) .intro a { border-color: #bdcdb370; }

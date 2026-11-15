@@ -1,8 +1,9 @@
-import './globals.css' // 引入全局样式（如 Tailwind）
+import './globals.css'
+import './journey-system.css' // 引入全局样式（如 Tailwind）
 import ThemeToggle from './components/ThemeToggle'
 
 export const metadata = {
-  title: 'OmniRoute Dashboard',
+  title: 'OmniRoute · 与你一起，走向远方',
   description: '结伴旅行路线协同与规划中枢',
 }
 
@@ -61,7 +62,7 @@ export default function RootLayout({
         />
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
-      <body>
+      <body className="journey-ui">
         {children}
         <ThemeToggle />
         {process.env.NODE_ENV === 'production' && (

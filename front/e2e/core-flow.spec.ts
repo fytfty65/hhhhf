@@ -83,7 +83,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByTestId('auth-username').fill('e2e-user');
   await page.getByTestId('auth-password').fill('password123');
   await page.getByTestId('auth-submit').click();
-  await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible();
+  await expect(page.getByText('把下一段旅程，安排妥当。')).toBeVisible();
 
   // The product-level views must remain usable on a narrow phone, not merely
   // render at desktop width and hide overflow.

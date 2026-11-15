@@ -15,7 +15,7 @@ export default function DynamicBudgetCard({ summary, budgetData }: { summary?: s
   const total = budgetData?.total_budget || 0;
 
   return (
-    <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-emerald-50 to-emerald-100 border border-emerald-200 dark:bg-slate-800 dark:border-slate-700 shadow-xs">
+    <div className="mb-6 p-4 rounded-2xl bg-paper-card border border-line shadow-xs">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <div className={`p-1.5 rounded-lg font-bold text-xs text-white ${

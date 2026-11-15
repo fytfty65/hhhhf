@@ -577,7 +577,7 @@ export default function UserTraitGraphCard({
         {/* 右上角：协同交集模式切换器 + 隐私标识 */}
         <div className="flex flex-wrap items-center gap-2.5">
           {roomSharedAvailable && (
-            <div className="inline-flex p-1 rounded-full bg-[#F4F2EE] border border-stone-200/70">
+            <div className="inline-flex p-1 rounded-full bg-paper-hover border border-stone-200/70">
               <button
                 type="button"
                 onClick={() => setRoomCompareMode(false)}
@@ -594,7 +594,7 @@ export default function UserTraitGraphCard({
                 onClick={() => setRoomCompareMode(true)}
                 className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
                   roomCompareMode
-                    ? 'bg-[#F97316] text-white shadow-xs shadow-orange-500/25'
+                    ? 'bg-accent text-white shadow-xs shadow-orange-500/25'
                     : 'text-stone-600 hover:text-orange-600'
                 }`}
               >
@@ -611,7 +611,7 @@ export default function UserTraitGraphCard({
             </div>
           )}
 
-          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-stone-200/80 bg-[#FAF8F5] px-3 py-1.5 text-xs font-semibold text-stone-600">
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-stone-200/80 bg-paper-hover px-3 py-1.5 text-xs font-semibold text-stone-600">
             <Lock className="h-3.5 w-3.5 text-orange-500" />
             仅自己可见
           </span>
@@ -620,7 +620,7 @@ export default function UserTraitGraphCard({
 
       {/* 加载态 */}
       {loading && (
-        <div className="mt-6 rounded-2xl bg-[#FAF8F5] border border-stone-200/60 flex flex-col items-center justify-center gap-3 py-20">
+        <div className="mt-6 rounded-2xl bg-paper-hover border border-stone-200/60 flex flex-col items-center justify-center gap-3 py-20">
           <div className="w-10 h-10 rounded-2xl bg-orange-500/10 flex items-center justify-center text-orange-500">
             <RefreshCw className="h-5 w-5 animate-spin" />
           </div>
@@ -662,7 +662,7 @@ export default function UserTraitGraphCard({
       {/* 空状态 */}
       {!loading && !error && isEmpty && (
         <div
-          className="mt-6 rounded-2xl border border-dashed border-stone-200 bg-[#FAF8F5] px-6 py-14 text-center"
+          className="mt-6 rounded-2xl border border-dashed border-stone-200 bg-paper-hover px-6 py-14 text-center"
           data-testid="trait-graph-empty"
         >
           <div className="mx-auto w-12 h-12 rounded-2xl bg-orange-50 border border-orange-200/60 flex items-center justify-center text-orange-500">
@@ -691,7 +691,7 @@ export default function UserTraitGraphCard({
           {/* 顶部指标条与分段过滤器 */}
           <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-wrap items-center gap-2.5">
-              <div className="flex items-center gap-2 rounded-xl bg-[#FAF8F5] border border-stone-200/70 px-3.5 py-1.5">
+              <div className="flex items-center gap-2 rounded-xl bg-paper-hover border border-stone-200/70 px-3.5 py-1.5">
                 <Layers className="w-3.5 h-3.5 text-orange-500" />
                 <span className="text-xs text-stone-500">偏好节点</span>
                 <strong className="text-sm font-extrabold text-stone-900 tabular-nums">
@@ -699,7 +699,7 @@ export default function UserTraitGraphCard({
                 </strong>
               </div>
 
-              <div className="flex items-center gap-2 rounded-xl bg-[#FAF8F5] border border-stone-200/70 px-3.5 py-1.5">
+              <div className="flex items-center gap-2 rounded-xl bg-paper-hover border border-stone-200/70 px-3.5 py-1.5">
                 <Activity className="w-3.5 h-3.5 text-orange-500" />
                 <span className="text-xs text-stone-500">行为样本</span>
                 <strong className="text-sm font-extrabold text-stone-900 tabular-nums">
@@ -726,7 +726,7 @@ export default function UserTraitGraphCard({
             {/* 分类筛选与画布缩放器 */}
             <div className="flex flex-wrap items-center gap-2">
               <div
-                className="inline-flex p-1 rounded-xl bg-[#F4F2EE] border border-stone-200/60"
+                className="inline-flex p-1 rounded-xl bg-paper-hover border border-stone-200/60"
                 role="group"
                 aria-label="按节点类型筛选"
               >
@@ -808,7 +808,7 @@ export default function UserTraitGraphCard({
           <div className="mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_316px] lg:items-stretch lg:h-[560px]">
             {/* 左侧 SVG 星图容器 */}
             <div
-              className="relative min-w-0 overflow-hidden rounded-2xl border border-stone-200/80 bg-[#FAF8F5] shadow-inner flex flex-col justify-between"
+              className="relative min-w-0 overflow-hidden rounded-2xl border border-stone-200/80 bg-paper-hover shadow-inner flex flex-col justify-between"
             >
               {/* 画布左上角动态图例说明 */}
               <div className="pointer-events-none absolute top-3.5 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold">
@@ -1171,7 +1171,7 @@ export default function UserTraitGraphCard({
 
               {/* 分类为空浮层 */}
               {filtered.length === 0 && (
-                <div className="absolute inset-0 flex items-center justify-center bg-[#FAF8F5]/60 backdrop-blur-[2px]">
+                <div className="absolute inset-0 flex items-center justify-center bg-paper-hover/60 backdrop-blur-[2px]">
                   <p className="rounded-xl bg-white border border-stone-200/80 shadow-xs px-4 py-2 text-xs font-bold text-stone-500">
                     该分类下暂无关联记录
                   </p>
@@ -1201,7 +1201,7 @@ export default function UserTraitGraphCard({
 
             {/* 右侧：Bento 风格洞察、权重微调与节点剔除面板 */}
             <aside
-              className="min-w-0 min-h-0 rounded-2xl border border-stone-200/80 bg-[#FAF8F5] p-5 flex flex-col justify-between lg:overflow-y-auto lg:overscroll-contain"
+              className="min-w-0 min-h-0 rounded-2xl border border-stone-200/80 bg-paper-hover p-5 flex flex-col justify-between lg:overflow-y-auto lg:overscroll-contain"
               aria-live="polite"
               data-testid="trait-graph-inspector"
             >
@@ -1307,7 +1307,7 @@ export default function UserTraitGraphCard({
                     </div>
 
                     {active.edge?.note && (
-                      <div className="rounded-xl bg-[#FAF8F5] border border-stone-200/60 px-3 py-2 text-xs leading-relaxed text-stone-600">
+                      <div className="rounded-xl bg-paper-hover border border-stone-200/60 px-3 py-2 text-xs leading-relaxed text-stone-600">
                         “{active.edge.note}”
                       </div>
                     )}

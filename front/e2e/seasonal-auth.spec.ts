@@ -13,7 +13,9 @@ test.beforeEach(async ({ page }) => {
     }
   });
   await page.addInitScript(() => {
-    localStorage.setItem('omni_season_preferences', JSON.stringify({ season: 'autumn', mode: 'manual', motionEnabled: false }));
+    if (!localStorage.getItem('omni_season_preferences')) {
+      localStorage.setItem('omni_season_preferences', JSON.stringify({ season: 'autumn', mode: 'manual', motionEnabled: false }));
+    }
   });
 });
 
@@ -46,7 +48,7 @@ test('mobile registration and reset remain reachable without horizontal overflow
 });
 
 test('failed season assets do not interrupt the form', async ({ page }) => {
-  await page.route('**/hero/v1/**', route => route.abort());
+  await page.route('**/hero/v5/**', route => route.abort());
   await page.goto('/');
   await page.getByTestId('auth-username').fill('still-usable');
   await page.getByRole('button', { name: '冬', exact: true }).click();
@@ -60,7 +62,7 @@ test('failed season assets do not interrupt the form', async ({ page }) => {
 
 test('failed target preserves displayed season and retry commits it', async ({ page }) => {
   let failWinter = true;
-  await page.route('**/hero/v1/**', route => route.request().url().includes('winter') && failWinter
+  await page.route('**/hero/v5/**', route => route.request().url().includes('winter') && failWinter
     ? route.abort() : route.fulfill({ contentType: 'image/svg+xml', body: fixturePoster }));
   await page.goto('/');
   await expect(page.locator('[data-asset-status]')).toHaveAttribute('data-asset-status', 'ready');
@@ -76,7 +78,7 @@ test('failed target preserves displayed season and retry commits it', async ({ p
 test('late image decode cannot override the latest requested season', async ({ page }) => {
   let releaseWinter: (() => void) | undefined;
   const winterGate = new Promise<void>(resolve => { releaseWinter = resolve; });
-  await page.route('**/hero/v1/**', async route => {
+  await page.route('**/hero/v5/**', async route => {
     if (route.request().url().includes('winter')) await winterGate;
     await route.fulfill({ contentType: 'image/svg+xml', body: fixturePoster });
   });
@@ -92,15 +94,15 @@ test('late image decode cannot override the latest requested season', async ({ p
 
 test('demo uses a fresh 24-second interval after input focus pauses it', async ({ page }) => {
   await page.clock.install();
-  await page.route('**/hero/v1/**', route => route.fulfill({ contentType: 'image/svg+xml', body: fixturePoster }));
+  await page.route('**/hero/v5/**', route => route.fulfill({ contentType: 'image/svg+xml', body: fixturePoster }));
   await page.goto('/');
   await expect(page.getByRole('button', { name: '秋', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.getByRole('checkbox').check();
-  await page.getByRole('button', { name: '演示四季' }).click();
+  await page.getByRole('combobox', { name: '场景模式' }).selectOption('demo');
   await page.getByTestId('auth-username').focus();
   await page.clock.fastForward(48_000);
   await expect(page.getByRole('button', { name: '秋', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await page.getByRole('heading', { name: '旅行者登录' }).click();
+  await page.getByRole('heading', { name: '好久不见。' }).click();
   await page.clock.fastForward(23_000);
   await expect(page.getByRole('button', { name: '秋', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.clock.fastForward(1_000);
@@ -154,4 +156,26 @@ test('reduced motion keeps scene static and controls keyboard accessible', async
   await page.keyboard.press('Enter');
   await expect(winter).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('[data-asset-status]')).toHaveAttribute('data-motion', 'false');
+});
+
+test('scene modes persist and night mode styles the entire portal', async ({ page }) => {
+  await page.goto('/');
+  const mode = page.getByRole('combobox', { name: '场景模式' });
+  await mode.selectOption('date');
+  await expect(page.getByText('随日期 · 当季风景', { exact: false })).toBeVisible();
+  await mode.selectOption('demo');
+  await expect(page.getByRole('checkbox')).toBeChecked();
+  await page.reload();
+  await expect(mode).toHaveValue('demo');
+  await page.getByRole('button', { name: '冬', exact: true }).click();
+  await expect(mode).toHaveValue('manual');
+  await page.getByRole('button', { name: '切换到暗色模式' }).click();
+  await expect(page.locator('html')).toHaveClass(/dark/);
+  await expect(page.getByTestId('auth-username')).toHaveCSS('color-scheme', 'dark');
+  const results = await new AxeBuilder({ page }).withRules(['color-contrast', 'label', 'button-name']).analyze();
+  expect(results.violations.map(item => ({ rule: item.id, nodes: item.nodes.map(node => node.target) }))).toEqual([]);
+  await page.screenshot({ path: '../work/seasonal-review/portal-night.png', fullPage: true });
+  await page.getByRole('button', { name: '切换到亮色模式' }).click();
+  await expect(page.getByTestId('auth-username')).toHaveCSS('color-scheme', 'light');
+  await page.screenshot({ path: '../work/seasonal-review/portal-day.png', fullPage: true });
 });

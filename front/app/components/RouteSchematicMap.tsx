@@ -65,7 +65,7 @@ export default function RouteSchematicMap({
       >
         <defs>
           <pattern id="schematic-grid" width="40" height="40" patternUnits="userSpaceOnUse">
-            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#cbd5e1" strokeWidth="0.5" />
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="var(--line)" strokeWidth="0.5" />
           </pattern>
         </defs>
         <rect width="640" height="420" fill="url(#schematic-grid)" />
@@ -86,10 +86,10 @@ export default function RouteSchematicMap({
             <g key={`${point.name}-${point.index}`}>
               <circle cx={point.x} cy={point.y} r="9" fill={color} opacity="0.18" />
               <circle cx={point.x} cy={point.y} r="5" fill={color} />
-              <text x={point.x + 11} y={point.y + 4} fontSize="11" fontWeight="700" fill="#334155">
+              <text x={point.x + 11} y={point.y + 4} fontSize="11" fontWeight="700" fill="var(--ink)">
                 {point.index + 1}. {point.name}
               </text>
-              <text x={point.x + 11} y={point.y + 17} fontSize="9" fill="#94a3b8">
+              <text x={point.x + 11} y={point.y + 17} fontSize="9" fill="var(--ink-3)">
                 D{point.day}
               </text>
             </g>
@@ -98,7 +98,7 @@ export default function RouteSchematicMap({
       </svg>
 
       {/* 说明卡片：压在地图顶部控制条之下（top-[13.5rem]），避开左上角那一列按钮 */}
-      <div className="absolute left-4 top-[13.5rem] z-20 max-w-[calc(100%-2rem)] rounded-xl border border-slate-200 bg-white/92 px-3 py-2 shadow-sm backdrop-blur">
+      <div className="absolute left-4 top-[13.5rem] z-20 max-w-[calc(100%-2rem)] rounded-xl border border-slate-200 bg-paper-card px-3 py-2 shadow-sm backdrop-blur">
         <div className="flex items-baseline gap-2">
           <span className="text-[11px] font-bold tracking-wide text-slate-700">
             {isSequence ? '行程顺序示意图' : '路线相对位置示意图'}
@@ -140,7 +140,7 @@ export default function RouteSchematicMap({
 
       {!hasAnyNode && (
         <div className="absolute inset-0 flex items-center justify-center">
-          <div className="rounded-xl border border-slate-200 bg-white/92 px-4 py-3 text-center shadow-sm backdrop-blur">
+          <div className="rounded-xl border border-slate-200 bg-paper-card px-4 py-3 text-center shadow-sm backdrop-blur">
             <p className="text-xs font-bold text-slate-600">这一版还没有可画的行程节点</p>
             <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
               左栏先推演一版方案，节点会自动出现在这里；底图恢复后地图也会自动回来

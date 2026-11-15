@@ -178,7 +178,7 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
             return (
               <div
                 key={idx}
-                className="relative bg-slate-50/80 border border-slate-100 hover:border-orange-200 rounded-xl p-3 transition-all group"
+                className="relative bg-paper-hover border border-line hover:border-orange-200 rounded-xl p-3 transition-all group"
               >
                 <div className="flex items-center gap-3">
                   <div className="relative shrink-0">

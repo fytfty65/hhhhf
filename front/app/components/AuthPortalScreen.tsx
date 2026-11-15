@@ -1,10 +1,10 @@
 'use client';
 
 import React, { useId, useState } from 'react';
-import { motion, useReducedMotion } from 'framer-motion';
-import { AlertCircle, ArrowRight, CheckCircle2, Lock, RefreshCw, User } from 'lucide-react';
+import { AlertCircle, ArrowRight, CheckCircle2, Compass, Lock, RefreshCw, User } from 'lucide-react';
 import { apiFetch, setAccessToken } from '../lib/apiClient';
 import OmniLogo from './OmniLogo';
+import JourneyEditorial from './JourneyEditorial';
 import SeasonalExperience from './spatial/SeasonalExperience';
 import SeasonControls from './spatial/SeasonControls';
 import SeasonParticles from './spatial/SeasonParticles';
@@ -15,7 +15,6 @@ import styles from './AuthPortalScreen.module.css';
 /** Seasonal sign-in portal. Authentication contracts and test ids stay stable. */
 export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (user: any) => void }) {
   const [tab, setTab] = useState<'login' | 'register'>('login');
-  const reducedMotion = useReducedMotion() ?? false;
   const [displayedSeason, setDisplayedSeason] = useState<Season>('spring');
   const [inputFocused, setInputFocused] = useState(false);
   const [assetStatus, setAssetStatus] = useState<'loading' | 'ready' | 'fallback'>('loading');
@@ -167,6 +166,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
 
   return (
     <div className={styles.portal} data-season={displayedSeason}>
+      <div className={styles.stage}>
       <div className={styles.landscape}>
         <SeasonalExperience season={season} motionEnabled={effectiveMotion} onDisplayedSeason={setDisplayedSeason} onAssetStatus={setAssetStatus} retryToken={assetRetry} />
         <SeasonParticles season={displayedSeason} enabled={effectiveMotion} />
@@ -178,16 +178,18 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
           <div><p className={styles.brandName}>OmniRoute</p><p className={styles.brandTagline}>云上驿站 · 一起出发</p></div>
         </div>
         <nav className={styles.nav} aria-label="主导航">
-          <a href="#portal-story">01 首页</a><a href="#portal-login">02 登录</a><a href="#portal-season">03 四季</a>
+          <a href="#portal-story">旅程序章</a><a href="#journey-guide">关于同行</a><a href="#portal-season">四季灵感</a>
         </nav>
         <div className={styles.headerActions}><span className={styles.collaboration}><span />开放体验 · {SEASON_LABELS[displayedSeason].name}</span><a className={styles.talkButton} href="#portal-login">开始规划 <ArrowRight size={14} /></a></div>
       </header>
       <main className={styles.main}>
         <section id="portal-story" className={styles.story} aria-labelledby="portal-headline">
-          <p className={styles.eyebrow}>TRAVELER · COLLABORATION · CONSENSUS</p>
-          <h1 id="portal-headline" className={styles.headline}>把四季走成<br /><em>我们的旅程。</em></h1>
+          <p className={styles.eyebrow}>A WORLD TO EXPLORE. A JOURNEY TO SHARE.</p>
+          <h1 id="portal-headline" className={styles.headline}>把向往的远方，<br />走成<em>我们的故事。</em></h1>
           <p className={styles.description}>把目的地、时间、预算和同行人的期待，<br />汇成一份可以继续修改和执行的行程。</p>
-          <div className={styles.seasonCaption}><span className={styles.seasonIndicator} /><span>四季流转 · {SEASON_LABELS[displayedSeason].name} · {SEASON_LABELS[displayedSeason].hint}</span></div>
+          <a href="#portal-login" className={styles.storyAction}>开启下一段旅程 <ArrowRight size={17} /></a>
+          <div className={styles.seasonCaption}><span className={styles.seasonIndicator} /><span>{mode === 'date' ? '随日期 · 当季风景' : mode === 'demo' ? (effectiveMotion ? '四季循环 · 每 24 秒换景' : '四季循环 · 已暂停') : '手动选季'} · {SEASON_LABELS[displayedSeason].name}</span></div>
+          <div id="portal-season" className={styles.controls}><SeasonControls season={displayedSeason} mode={mode} motionEnabled={motionEnabled} onSeasonChange={setSeason} onModeChange={setMode} onMotionChange={setMotionEnabled} /></div>
         </section>
         <section id="portal-login" className={styles.panel} aria-label="旅行者账号"
           onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) setInputFocused(true); }}
@@ -196,18 +198,15 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
           }}>
           <div className={styles.panelInner}>
             <div className={styles.panelHeading}>
-              <p className={styles.welcome}>YOUR NEXT CHAPTER</p>
-              <h2>{tab === 'login' ? '旅行者登录' : '创建新账号'}</h2>
-              <p>{tab === 'login' ? '登录后继续规划和管理你的行程' : '注册账号以保存您的个性化偏好与行程'}</p>
+              <div className={styles.accountMark}><Compass size={22} strokeWidth={1.25} /><span>OmniRoute <i>/ 旅行者账号</i></span></div>
+              <h2>{tab === 'login' ? '好久不见。' : '认识一下。'}</h2>
+              <p>{tab === 'login' ? '登录，接着安排你的下一次出发。' : '创建账号，和朋友一起把行程安排好。'}</p>
             </div>
             <div className={styles.tabs}>
-              <motion.span aria-hidden="true" className={styles.tabIndicator} initial={false}
-                animate={{ x: tab === 'login' ? '0%' : '100%' }}
-                transition={reducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 480, damping: 38 }} />
               <button data-testid="auth-login-tab" className={styles.tab} aria-pressed={tab === 'login'}
-                onClick={() => { setTab('login'); setErrorMsg(''); setSuccessMsg(''); }}>账号登录</button>
+                onClick={() => { setTab('login'); setErrorMsg(''); setSuccessMsg(''); }}>登录</button>
               <button data-testid="auth-register-tab" className={styles.tab} aria-pressed={tab === 'register'}
-                onClick={() => { setTab('register'); setErrorMsg(''); setSuccessMsg(''); }}>快速注册</button>
+                onClick={() => { setTab('register'); setErrorMsg(''); setSuccessMsg(''); }}>注册</button>
             </div>
             {errorMsg && <div className={styles.error} role="alert"><AlertCircle size={16} /><span>{errorMsg}</span></div>}
             {successMsg && <div className={styles.success} role="status"><CheckCircle2 size={16} /><span>{successMsg}</span></div>}
@@ -215,11 +214,11 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               <form onSubmit={handleSubmit} className={styles.form}>
                 {tab === 'register' && <div>
                   <label htmlFor={nicknameId}>旅行者昵称</label>
-                  <div className={styles.field}><User size={16} /><input data-testid="auth-nickname" id={nicknameId} type="text" required autoComplete="nickname" placeholder="例如：Felix / 丝路漫游者" value={nickname} onChange={(e) => setNickname(e.target.value)} /></div>
+                  <div className={styles.field}><User size={16} /><input data-testid="auth-nickname" id={nicknameId} type="text" required autoComplete="nickname" placeholder="朋友怎么称呼你" value={nickname} onChange={(e) => setNickname(e.target.value)} /></div>
                 </div>}
                 <div>
                   <label htmlFor={usernameId}>用户名 / 账号</label>
-                  <div className={styles.field}><User size={16} /><input data-testid="auth-username" id={usernameId} type="text" required autoComplete="username" placeholder="输入您的账号名称" value={username} onChange={(e) => setUsername(e.target.value)} /></div>
+                  <div className={styles.field}><User size={16} /><input data-testid="auth-username" id={usernameId} type="text" required autoComplete="username" placeholder="你的用户名" value={username} onChange={(e) => setUsername(e.target.value)} /></div>
                 </div>
                 <div>
                   <label htmlFor={passwordId}>密码</label>
@@ -227,16 +226,14 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
                 </div>
                 {tab === 'login' && <button type="button" data-testid="auth-forgot" className={styles.textButton} onClick={() => { setResetOpen(true); setErrorMsg(''); setSuccessMsg(''); }}>忘记密码？</button>}
                 <button data-testid="auth-submit" type="submit" disabled={loading} className={styles.primaryButton}>
-                  {loading ? <><RefreshCw size={16} className="animate-spin" /> 正在验证凭证...</> : <>{tab === 'login' ? '立即登录并进入大厅' : '注册并开启探索'} <ArrowRight size={16} /></>}
+                  {loading ? <><RefreshCw size={16} className="animate-spin" /> 请稍候…</> : <>{tab === 'login' ? '登录' : '创建账号'} <ArrowRight size={16} /></>}
                 </button>
               </form>
             )}
-            <div className={styles.trial}>
-              <div className={styles.divider}><span />或<span /></div>
-              <button type="button" data-testid="auth-trial" onClick={startTrial} disabled={loading} className={styles.trialButton}>先随便逛逛 · 免注册试用</button>
-              <p>试用会创建临时游客账号，行程保存在该账号下；请勿依赖游客入口长期保存或跨设备找回行程。</p>
-              {tab === 'login' && <p>还没有账号？ <button type="button" className={styles.textButton} onClick={() => { setTab('register'); setErrorMsg(''); setSuccessMsg(''); }}>30 秒快速注册</button></p>}
-            </div>
+            {!resetOpen && <div className={styles.trial}>
+              <button type="button" data-testid="auth-trial" onClick={startTrial} disabled={loading} className={styles.trialButton}>先以游客身份看看 <ArrowRight size={14} /></button>
+              <details className={styles.guestNote}><summary>关于游客模式</summary><p>会为你创建临时账号。行程仅保存在该账号下，不支持跨设备找回；长期保存行程请注册账号。</p></details>
+            </div>}
             {resetOpen && <div className={styles.reset}>
               <div><h3>找回密码</h3><p>先提交账号获取重置令牌；生产环境令牌会发送到绑定邮箱，开发环境直接显示。</p></div>
               {!resetRequested ? (
@@ -257,10 +254,12 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
         </section>
       </main>
       <footer className={styles.footer}>
-        <div id="portal-season" className={styles.controls}><SeasonControls season={displayedSeason} mode={mode} motionEnabled={motionEnabled} onSeasonChange={setSeason} onModeChange={setMode} onMotionChange={setMotionEnabled} /></div>
+        <span className={styles.footerNote}>山川有时，同行有你。</span>
         <div className={styles.footerMeta}><span className={styles.openDot} />当前开放 · {SEASON_LABELS[displayedSeason].hint}<span className={styles.scrollHint}>向下探索 <i /></span></div>
         {assetStatus === 'fallback' ? <button type="button" className={styles.textButton} onClick={() => setAssetRetry(value => value + 1)}>场景暂未加载 · 重试</button> : <p className={styles.footerNote}>与四季同行 · {SEASON_LABELS[displayedSeason].name}</p>}
       </footer>
+      </div>
+      <JourneyEditorial />
     </div>
   );
 }
