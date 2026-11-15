@@ -782,9 +782,11 @@ export default function InteractiveAmapComponent({
       {/* 👑 顶部控制面板（包含图层、路况、WorldMonitor 状态卡与 3D 态势雷达切换按钮）。
           sm 及以上与左上返回按钮、右上动作条统一抬到 top-6 同一基线，实现左右水平对齐；
           宽度在 globals.css 中为右侧动作条预留车道，换行也不会遮挡。
-          小屏（<640px）动作条占满首行，控制面板退到第二行避免重叠。 */}
-      <div className="map-control-dock spatial-dock absolute top-[8.5rem] left-4 right-auto sm:top-6 sm:left-[4.75rem] z-30 pointer-events-auto">
-        <div className="map-control-group map-control-group-primary">
+          小屏（<640px）动作条占满首行，控制面板退到第二行避免重叠。
+          毛玻璃材质只包裹 .map-control-group-primary（spatial-capsule），
+          其余按钮各自成独立药丸，避免整条底板被拉宽、换行后下方留出大片空白。 */}
+      <div className="map-control-dock absolute top-[8.5rem] left-4 right-auto sm:top-6 sm:left-[4.75rem] z-30 pointer-events-auto">
+        <div className="map-control-group map-control-group-primary spatial-capsule">
         <button
           onClick={() => setMapStyle(prev => prev === 'normal' ? 'satellite' : 'normal')}
           className="bg-white/95 backdrop-blur-md px-3.5 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:text-orange-500 shadow-md flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
@@ -812,13 +814,15 @@ export default function InteractiveAmapComponent({
           <span>{perspectiveOn ? '平面导航' : '透视沙盘'}</span>
         </button>
 
-        {/* 👑 方案 A 核心：3D 态势/安全雷达视角切换按钮 */}
+        {/* 👑 方案 A 核心：3D 态势/安全雷达视角切换按钮。
+            与「开始规划」同为入口按钮，但只保留一个实心橙主 CTA，
+            这里改成白底橙字的强调态，避免同一栏两个橙色实心按钮互相抢焦点。 */}
         <button
           onClick={() => setShow3DGlobe(true)}
           title="以 3D 地球视角查看全球风险与安全态势（原「3D 态势雷达」）"
-          className="bg-gradient-to-r from-orange-700 via-orange-600 to-orange-500 text-white px-3.5 py-2.5 rounded-xl shadow-lg border border-orange-400/30 flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
+          className="bg-white/95 backdrop-blur-md text-orange-600 border border-orange-200 hover:bg-orange-50 hover:border-orange-300 px-3.5 py-2.5 rounded-xl shadow-md flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
         >
-          <Globe2 className="w-3.5 h-3.5 text-orange-200 animate-spin-slow" />
+          <Globe2 className="w-3.5 h-3.5 text-orange-500" />
           <span>全球风险概览</span>
         </button>
         </div>
