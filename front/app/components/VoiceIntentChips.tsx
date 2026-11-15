@@ -11,17 +11,17 @@ export default function VoiceIntentChips({ parsed }: { parsed: VoiceIntent | nul
   return (
     <div className="flex flex-wrap items-center gap-1.5 mb-3">
       {parsed.city && (
-        <span className="flex items-center gap-1 bg-orange-50 border border-orange-200 text-orange-700 px-2 py-0.5 rounded-full text-[11px] font-bold">
+        <span className="flex items-center gap-1 border border-line-soft bg-paper-hover px-2 py-0.5 text-[11px] font-semibold text-ink-2 rounded-md">
           <MapPin className="w-3 h-3" /> 目的地 · {parsed.city}
         </span>
       )}
       {parsed.days > 0 && (
-        <span className="flex items-center gap-1 bg-orange-50 border border-orange-200 text-orange-800 px-2 py-0.5 rounded-full text-[11px] font-bold">
+        <span className="flex items-center gap-1 border border-line-soft bg-paper-hover px-2 py-0.5 text-[11px] font-semibold text-ink-2 rounded-md">
           <CalendarDays className="w-3 h-3" /> {parsed.days} 天
         </span>
       )}
       {parsed.tags.map((t) => (
-        <span key={t} className="flex items-center gap-1 bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-0.5 rounded-full text-[11px] font-bold">
+        <span key={t} className="flex items-center gap-1 border border-line-soft bg-paper-hover px-2 py-0.5 text-[11px] font-semibold text-ink-2 rounded-md">
           <Tag className="w-3 h-3" /> {t}
         </span>
       ))}

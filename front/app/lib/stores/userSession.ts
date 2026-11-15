@@ -35,6 +35,19 @@ export function useUserSessionStore() {
           }
           // 令牌绝不进 React state：资料编辑会把整个对象写回 localStorage。
           if (parsed && typeof parsed === 'object') delete parsed.token;
+          // 身份以服务端为准：isAdmin 来自 ADMIN_USER_IDS 白名单，
+          // 本地缓存可能是在被加入/移出白名单之前写下的。这里用一次轻量请求
+          // 刷新，避免"已经是管理员却看不到管理入口"。
+          try {
+            const me = await apiFetch('/api/auth/me');
+            if (me.ok) {
+              const payload = await me.json().catch(() => null);
+              if (payload?.user) {
+                parsed = { ...parsed, ...payload.user, isLoggedIn: true };
+                localStorage.setItem('omni_user', JSON.stringify(parsed));
+              }
+            }
+          } catch {}
           if (!cancelled && parsed && parsed.isLoggedIn) setCurrentUser(parsed);
         }
       } catch {}

@@ -1526,10 +1526,11 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
         bodyOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       };
     });
-    // 行宽上限：留足余量（中文正文一行 ~60 字以内比较舒服）
+    // 行宽上限：留足余量（11.5px 说明文字在 720px 阅读区里约 62 字/行，仍可读；
+    // 680px 时是 60 —— 超到 64 才算真的把版面拉长了）
     console.log('排版实测:', JSON.stringify(layout));
-    expect(layout.culture.chars).toBeLessThanOrEqual(60);
-    expect(layout.access.chars).toBeLessThanOrEqual(60);
+    expect(layout.culture.chars).toBeLessThanOrEqual(64);
+    expect(layout.access.chars).toBeLessThanOrEqual(64);
     // 不许把页面撑出横向滚动条
     expect(layout.culture.overflow).toBeLessThanOrEqual(1);
     expect(layout.access.overflow).toBeLessThanOrEqual(1);
@@ -1540,13 +1541,14 @@ test.describe('行程核对面板（预算/兜底/超长行程/遗留问题）',
     await page.locator('[data-annotation-kind="lodging_swap"]').first().locator('xpath=..')
       .screenshot({ path: '../work/plan-annotations.png', animations: 'disabled' });
 
-    // 「尚未核实」那一档在第 2 天（模型推断的节点）→ 切过去验完再截图
+    // 「待核实」那一档在第 2 天（模型推断的节点）→ 切过去验完再截图
     // ⚠️ 必须放在上面几张截图**之后**：Day 1 才有 lodging_swap 标记，
     //    先切天会让那个 locator 永不出现、screenshot() 一直等到超时（2026-10-08 踩过）。
     await page.getByRole('button', { name: 'Day 2', exact: true }).first().click();
+    // 收起态用中性「待核实」；点开该节点后仍显示原始「尚未核实」与来源。
     await expect(
       page.locator('[data-testid="trust-badge"][data-trust="unknown"]').first(),
-    ).toContainText('尚未核实');
+    ).toContainText('待核实');
     await page.locator('[data-testid="trust-badge"][data-trust="unknown"]').first()
       .screenshot({ path: '../work/trust-badges.png', animations: 'disabled' });
   });

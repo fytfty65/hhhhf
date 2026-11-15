@@ -294,8 +294,9 @@ export default function FullRouteVisualizer({
           onWakeAgent={onWakeAgent}
         />
 
-        {/* 👑 彻底解决遮挡问题：动作条置于右上角，图层优先级升至 z-50，高亮“返回大厅”按钮 */}
-        <div className="visualizer-action-dock absolute top-4 right-4 sm:top-6 sm:right-6 z-50 flex items-center gap-2 pointer-events-auto flex-wrap justify-end">
+        {/* 👑 彻底解决遮挡问题：动作条置于右上角，图层优先级升至 z-50，高亮“返回大厅”按钮；
+            spatial-dock 提供一体化毛玻璃胶囊材质，布局/换行仍由 visualizer-action-dock 负责 */}
+        <div className="visualizer-action-dock spatial-dock absolute top-4 right-4 sm:top-6 sm:right-6 z-50 flex items-center gap-2 pointer-events-auto flex-wrap justify-end">
           {/* 普通模式不展示“方案取舍”这种专业裁决入口，避免地图上出现内部术语 */}
           {!simpleMode && (
             <button

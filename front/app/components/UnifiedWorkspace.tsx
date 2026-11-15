@@ -9,7 +9,8 @@ import {
   ChevronDown, ChevronRight,
   Save, Shuffle,
   Star, BookOpen,
-  Share2, Download, MoreHorizontal
+  Share2, Download, MoreHorizontal,
+  AlertTriangle, Users
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { WS_BASE, apiFetch, apiJson, getAuthToken, fetchWsTicket } from '../lib/utils';
@@ -19,6 +20,7 @@ import { officialFieldsFor } from '../lib/priceProvenance';
 import { trackPlanningEvent } from '../lib/planningEvents';
 import { usePlanResultStore } from '../lib/stores/planResult';
 import { useTripExecutionStore } from '../lib/stores/tripExecution';
+import { readWorkspaceSnapshot, writeWorkspaceSnapshot } from '../lib/workspaceSnapshot';
 import { useFocusTrap } from '../lib/useFocusTrap';
 import type { Phase, RoomMember, UserProfile } from '../types';
 
@@ -35,6 +37,9 @@ import DraftingPanel from './DraftingPanel';
 // 马蜂窝风行程面板（自 ContextualLobby 拆分出来的展示型组件）
 import MafengwoStylePanel from './MafengwoStylePanel';
 import SpecialistInsightsPanel from './SpecialistInsightsPanel';
+// 房主建议箱：聚合成员在节点上提的修改建议
+import RoomSuggestionInbox from './RoomSuggestionInbox';
+import type { RoomComment } from '../lib/stores/roomCollaboration';
 
 // 预算核对 / 已作调整 / 行程规模 说明面板（字段来自 final_route.payload）。
 // 按需加载：只在决策阶段出现，没必要进首屏包（实测直接 import 会让首屏 JS +6.5KB）。
@@ -112,8 +117,13 @@ const FullRouteVisualizer = dynamic(
 );
 
 // ================= 工作区区域 =================
-export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, initialDestination, initialIntent, onBack, roomVotes, onRoomVote, roomConnection = 'idle', roomRetryAttempt = 0, roomRetryDelayMs = 0, onRetryRoom }: { mode: string, role: string, roomCode: string, roomMembers: RoomMember[], currentUser: UserProfile, initialDestination?: string | null, initialIntent?: string | null, onBack: () => void, roomVotes: RoomVoteState, onRoomVote: (nodeName: string, vote: 'up' | 'down' | null) => void, roomConnection?: RoomConnectionState, roomRetryAttempt?: number, roomRetryDelayMs?: number, onRetryRoom?: () => void }) {
-  const [phase, setPhase] = useState<Phase>('drafting');
+export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, currentUser, initialDestination, initialIntent, onBack, roomVotes, onRoomVote, roomConnection = 'idle', roomRetryAttempt = 0, roomRetryDelayMs = 0, onRetryRoom, isHost = true, followHost = true, onFollowHostChange, onBroadcastPlan, roomComments = [], onNodeComment, onAckNodeComment }: { mode: string, role: string, roomCode: string, roomMembers: RoomMember[], currentUser: UserProfile, initialDestination?: string | null, initialIntent?: string | null, onBack: () => void, roomVotes: RoomVoteState, onRoomVote: (nodeName: string, vote: 'up' | 'down' | null) => void, roomConnection?: RoomConnectionState, roomRetryAttempt?: number, roomRetryDelayMs?: number, onRetryRoom?: () => void, isHost?: boolean, followHost?: boolean, onFollowHostChange?: (next: boolean) => void, onBroadcastPlan?: (payload: any) => void, roomComments?: RoomComment[], onNodeComment?: (nodeName: string, day: number | undefined, text: string) => boolean, onAckNodeComment?: (id: string, status: 'adopted' | 'dismissed') => void }) {
+  // 刷新恢复：上一轮已经出过方案时，直接用快照进入决策页，不再退回诉求页重来。
+  // 快照只在本标签页内有效，且目的地对不上时由 readWorkspaceSnapshot 丢弃。
+  const [restoredSnapshot] = useState(() =>
+    readWorkspaceSnapshot(currentUser?.id, roomCode, initialDestination ?? null),
+  );
+  const [phase, setPhase] = useState<Phase>(restoredSnapshot ? 'decision' : 'drafting');
   // Keep the decision workspace focused. Advanced evidence and diagnostics are
   // still available, but are no longer rendered as a wall of panels by default.
   const [workspaceLayer, setWorkspaceLayer] = useState<WorkspaceLayer>('plan');
@@ -132,6 +142,10 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     setMapLayout(next);
     try { localStorage.setItem(MAP_LAYOUT_KEY, next); } catch {}
   };
+  // 房间里还有别人 = 房主在场：成员不单独跑推演，方案统一由房主生成后同步过来。
+  // 房主离线时（房间里只有自己）才允许成员自己规划，避免把人锁死在一个空房间里。
+  const hostInRoom = roomMembers.some((member) => String(member.id) !== String(currentUser.id));
+  const memberFollowsHost = !isHost && hostInRoom;
   // 普通模式默认只留今日概览；「查看依据」展开质量指标，「展开专业信息」展开行前清单等。
   const [showRouteEvidence, setShowRouteEvidence] = useState(false);
   const [showPlanDetails, setShowPlanDetails] = useState(false);
@@ -413,11 +427,18 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
 
   const wsRef = useRef<WebSocket | null>(null);
   const autoSavedRef = useRef(false);
+  // 自动落库只认权威的 final_route：流式 token 阶段路线是逐点长出来的，
+  // 此时保存会把路书写成「1 天 1 个节点」。
+  const finalRouteRef = useRef<any[] | null>(null);
+  const [routeFinalTick, setRouteFinalTick] = useState(0);
   const decisionEventRecordedRef = useRef(false);
   const lastTokenTimeRef = useRef<number>(Date.now());
   const [wsConnected, setWsConnected] = useState(false);
   const [deductionTimeout, setDeductionTimeout] = useState(false);
   const [deductionError, setDeductionError] = useState<string | null>(null);
+  // 降级原因：final_route 到达后会清掉 deductionError（否则错误面板会一直挂着），
+  // 但「为什么这轮是保底路线」必须留在决策页，不能让用户以为这是正常推演结果。
+  const [fallbackReason, setFallbackReason] = useState<string | null>(null);
   // 规划等待体验：真实开始时间用于显示「已用时」，不编造剩余时间。
   const [deductionStartedAt, setDeductionStartedAt] = useState<number | null>(null);
   const [deductionTick, setDeductionTick] = useState(0);
@@ -447,6 +468,69 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
   // 合并后没落实的项：结果里点名没换的那些，可一键只补做它们（已换好的不再动）。
   const [combinedRetry, setCombinedRetry] = useState<OverageOption[] | null>(null);
   const combinedRequestRef = useRef<{ options: OverageOption[]; before: ScopedRouteNode[]; budget: number | null } | null>(null);
+
+  // 把快照写回工作台：只恢复"方案本身 + 当前视图"，等待中的进度条、弹窗都不恢复。
+  const snapshotAppliedRef = useRef(false);
+  useEffect(() => {
+    if (snapshotAppliedRef.current) return;
+    snapshotAppliedRef.current = true;
+    const snapshot = restoredSnapshot;
+    if (!snapshot) return;
+    setDynamicRoutes(snapshot.dynamicRoutes);
+    setPlanVariants(
+      Array.isArray(snapshot.planVariants) && snapshot.planVariants.length > 0
+        ? snapshot.planVariants
+        : [{ id: 'primary', name: 'AI 主方案', style: 'primary', desc: '', nodes: snapshot.dynamicRoutes }],
+    );
+    setActivePlanId(snapshot.activePlanId || 'primary');
+    setPlanLedgers(snapshot.planLedgers || {});
+    setIsFallbackRoute(Boolean(snapshot.isFallbackRoute));
+    if (snapshot.targetCityInfo) setTargetCityInfo(snapshot.targetCityInfo);
+    if (snapshot.budgetData) setBudgetData(snapshot.budgetData);
+    if (snapshot.planGovernance) setPlanGovernance(snapshot.planGovernance);
+    // 证据/专业层在普通模式下没有入口，恢复到会卡在空视图，这里只认主方案与旅中执行。
+    if (snapshot.workspaceLayer === 'plan' || snapshot.workspaceLayer === 'execution') {
+      setWorkspaceLayer(snapshot.workspaceLayer);
+    }
+    if (Number.isFinite(snapshot.activeDayIndex) && snapshot.activeDayIndex >= 0) {
+      setActiveDayIndex(Math.floor(snapshot.activeDayIndex));
+    }
+    setPhase('decision');
+    // 只在挂载时恢复一次：之后 WebSocket 推来的新方案才是唯一事实。
+  }, []);
+
+  // 方案生成后写入快照，刷新时直接复原。没有方案时不写，避免覆盖上一次的有效快照。
+  useEffect(() => {
+    if (phase !== 'decision' || dynamicRoutes.length === 0) return;
+    writeWorkspaceSnapshot(currentUser?.id, roomCode, {
+      destination: targetCityInfo?.name || initialDestination || '',
+      dynamicRoutes,
+      planVariants,
+      activePlanId,
+      planLedgers,
+      isFallbackRoute,
+      targetCityInfo,
+      budgetData,
+      planGovernance,
+      workspaceLayer,
+      activeDayIndex,
+    });
+  }, [
+    phase,
+    dynamicRoutes,
+    planVariants,
+    activePlanId,
+    planLedgers,
+    isFallbackRoute,
+    targetCityInfo,
+    budgetData,
+    planGovernance,
+    workspaceLayer,
+    activeDayIndex,
+    currentUser?.id,
+    roomCode,
+    initialDestination,
+  ]);
 
   // 收口：新方案回来（成功/空路线/报错）时把等待态换成如实核对结果。
   // 只认后端 budget_report 里的数字；没给数字就说无法确认，不替它宣布"压进预算"。
@@ -764,12 +848,24 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
       } catch {
         ticket = '';
       }
-      if (!isMounted || !ticket) return;
+      if (!isMounted) return;
+      if (!ticket) {
+        // 取票失败（token 刚好过期、网关重启中）不能就此停住：调用方会一直
+        // 停在「房间连接正在建立」，再点开始规划也没有任何反应。
+        reconnectTimer = setTimeout(connect, 2500);
+        return;
+      }
       ws = new WebSocket(`${WS_BASE}/ws?room_id=${encodeURIComponent(roomCode || 'OMNI-88')}&ticket=${encodeURIComponent(ticket)}&user_id=${encodeURIComponent(currentUser.id)}`);
       
       ws.onopen = () => {
         setApiError(null);
         setWsConnected(true);
+        // 成员进入工作台时先向房主要一次已有方案（房主端由大厅常驻连接回应）。
+        if (!isHost) {
+          try {
+            ws?.send(JSON.stringify({ type: 'room_plan_request', payload: {} }));
+          } catch {}
+        }
       };
       
       ws.onmessage = (event) => {
@@ -936,6 +1032,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
               const errMsg = msg.payload || "规划服务异常";
               setApiError(errMsg);
               setDeductionError(errMsg);
+              // 保留原因：即便随后收到保底 final_route，决策页也要能说明这次为什么降级。
+              setFallbackReason(errMsg);
               // 局部调整失败：把等待态收掉并如实告知“没拿到新方案”，
               // 不能让进度文案停在那里冒充还在进行。
               if (scopedPlanRef.current) {
@@ -960,7 +1058,10 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                 setRiskAlert(alert);
                 if (alert.perturbation) setWorkspaceLayer('execution');
               }
-            } else if (msg.type === "final_route") {
+            } else if (msg.type === "final_route" || msg.type === "room_plan") {
+              // room_plan 是房主广播给房间的同一份方案：成员直接复用，不再各自推演。
+              const isSharedPlan = msg.type === "room_plan";
+              if (isSharedPlan && isHost) return; // 自己的广播回显，已经应用过了
               if (deductionDismissedRef.current) return;
               const fd = msg.payload || {};
               const fr = Array.isArray(fd.route) ? fd.route : [];
@@ -1043,6 +1144,11 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                 setPlanVariants([{ id: 'primary', name: 'AI 主方案', style: 'primary', desc: '', nodes: mapped }, ..._vs]);
                 setActivePlanId('primary');
                 setPlanSwitchNotice('');
+                // 到这一步才是完整路线：交给自动落库，避免用流式中间态写路书。
+                finalRouteRef.current = mapped;
+                setRouteFinalTick((tick) => tick + 1);
+                // 房主把这份方案同步给房间里的其他成员（成员端不再重复调用 AI）。
+                if (!isSharedPlan && isHost) onBroadcastPlan?.(fd);
               }
               // 带回了 final_route 但没有路线：同样是"没拿到新方案"，不能停在等待态。
               if (fr.length === 0 && scopedPlanRef.current) {
@@ -1159,6 +1265,10 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
       setApiError('请先描述目的地、天数或本次旅行的重点诉求');
       return;
     }
+    if (memberFollowsHost) {
+      setApiError('方案由房主统一生成，房主开始规划后会自动同步到这里');
+      return;
+    }
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setApiError('房间连接正在建立，请稍候再点击“开始规划”');
       return;
@@ -1173,6 +1283,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     setDeductionTimeout(false);
     setDeductionStartedAt(Date.now());
     deductionDismissedRef.current = false;
+    // 新一轮规划：上一次的降级原因不再适用。
+    setFallbackReason(null);
     // 新的一次完整规划：上一次超支替代方案的结论不再适用，先清掉。
     overageRequestRef.current = null;
     setOveragePending(null);
@@ -1239,6 +1351,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     setDeductionError(null);
     setDeductionTimeout(false);
     setIsFallbackRoute(false);
+    setFallbackReason(null);
     setSpecialistRuntime(null);
     setOptimizationAudit(null);
     setStreamedText("");
@@ -1331,6 +1444,42 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     };
     // what 传 null：局部调整有自己的进度提示，不再复用「已按你的要求换…」那条文案
     sendIncrementInstruction(buildScopedInstruction(scope), null);
+  };
+
+  /**
+   * 房主采纳一条成员建议：范围按「第 X 天」处理，把成员原话作为调整意图，
+   * 走与手动局部调整相同的流程；结果由 room_plan 自动同步给所有成员。
+   */
+  const handleAdoptSuggestion = (comment: RoomComment) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setApiError('连接正在恢复中，请 2 秒后再点一次');
+      return;
+    }
+    const day = Math.max(1, Math.round(Number(comment.day) || 1));
+    const scope: ScopedScope = { kind: 'day', day };
+    setScopedReport(null);
+    setOverageResult(null);
+    setBudgetResult(null);
+    combinedRequestRef.current = null;
+    setCombinedPending(null);
+    setCombinedResult(null);
+    setCombinedRetry(null);
+    setPendingScope(scope);
+    deductionDismissedRef.current = false;
+    scopedPlanRef.current = {
+      scope,
+      before: dynamicRoutes.map((node: any) => ({
+        day: node.day,
+        name: node.name,
+        type: node.type,
+        tags: node.tags,
+        category: node.category,
+        is_hotel: node.is_hotel,
+        transport: node.transport,
+      })),
+    };
+    sendIncrementInstruction(`第 ${day} 天「${comment.node_name}」的调整建议：${comment.text}。其它天与其它节点保持原样。`, null);
+    onAckNodeComment?.(comment.id, 'adopted');
   };
 
   /**
@@ -1443,6 +1592,10 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
    * 而且**回传的是意图**，实际换成了谁由后端如实报回来（找不到那一家就如实说没换成）。
    */
   const sendIncrementInstruction = (instruction: string, what: string | null) => {
+    if (memberFollowsHost) {
+      setApiError("方案由房主统一调整，房主改完后会自动同步到这里");
+      return;
+    }
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setApiError("连接正在恢复中，请 2 秒后再点一次");
       return;
@@ -1473,15 +1626,24 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     );
   };
 
-  // 推演失败/超时后重试：重置状态并重新发送 agent_negotiate
+  // 推演失败/超时后重试：重置状态并重新发送 agent_negotiate。
+  // 决策页的「重新尝试智能规划」也复用这条路径，所以要显式回到 deduction 阶段。
   const handleRetryDeduction = () => {
+    if (memberFollowsHost) {
+      setApiError("方案由房主统一生成，房主开始规划后会自动同步到这里");
+      return;
+    }
     if (!wsRef.current) {
       setApiError("连接已断开，请刷新页面重试");
       return;
     }
     setDeductionError(null);
     setDeductionTimeout(false);
+    setFallbackReason(null);
     setStreamedText("");
+    setPhase('deduction');
+    setIntentsReady(true);
+    setShowBlackboard(true);
     setDeductionStartedAt(Date.now());
     deductionDismissedRef.current = false;
     lastTokenTimeRef.current = Date.now();
@@ -1523,17 +1685,21 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     setStreamedText('');
     setDeductionError(null);
     setDeductionTimeout(false);
+    setFallbackReason(null);
     setDeductionStartedAt(null);
   };
 
   const persistTripRoutes = async (routesToSave: any[]) => {
     if (!routesToSave || routesToSave.length === 0) return false;
     const cityName = targetCityInfo?.name || '';
-    const title = `${cityName || '我的行程'}${totalDays.length}日行程`;
+    // 天数必须按"这次要保存的路线"算：用界面上的 totalDays 会拿到上一版/流式中间态的天数，
+    // 路书标题就会被写成「1日行程」。
+    const savedDays = Array.from(new Set(routesToSave.map((node: any) => Number(node?.day) || 1))).sort((a, b) => a - b);
+    const title = `${cityName || '我的行程'}${savedDays.length}日行程`;
     const content = JSON.stringify({
       summary: consensusSummary,
       city: cityName,
-      days: totalDays,
+      days: savedDays,
       routes: routesToSave,
       // 带上关联键：网关侧事件（采纳/到访/重规划）才能与 ai-service 的推演事件串成一条轨迹
       ...(planCorrelationId ? { correlation_id: planCorrelationId } : {}),
@@ -1542,7 +1708,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
       const res = await apiFetch('/api/user/trip', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: currentUser.id, title, dest_city: cityName, content, days: totalDays.length, travelers: roomMembers.length > 0 ? roomMembers.length : 1 })
+        body: JSON.stringify({ user_id: currentUser.id, title, dest_city: cityName, content, days: savedDays.length, travelers: roomMembers.length > 0 ? roomMembers.length : 1 })
       });
       const rawText = await res.text();
       let data: any = null;
@@ -1663,15 +1829,18 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
   const downloadDiary = () => downloadTextFile(`${targetCityInfo?.name || '行程'}_旅行日记.md`, diaryMarkdown, 'text/markdown;charset=utf-8');
   const downloadJson = () => downloadTextFile(`${targetCityInfo?.name || '行程'}_路书.json`, JSON.stringify({ city: targetCityInfo?.name || '', routes: dynamicRoutes }, null, 2), 'application/json;charset=utf-8');
 
-  // 👑 自动保存到“我的路书”：首次生成完整路线后静默落库，无需手动点击。
+  // 👑 自动保存到“我的路书”：拿到权威的完整路线后静默落库，无需手动点击。
   // 注意：这里直接调 persistTripRoutes 而**不是** handleSaveTrip —— 自动落库不等于"用户采纳"，
   // 采纳只在用户真的点了「保存到我的行程」或切换方案时才记录。
+  // 也不能用 phase/dynamicRoutes 触发：流式阶段 setPhase('decision') 时路线只有一个节点，
+  // 会被保存成「1 天 1 个节点」的路书（这正是历史上所有路书只有 1 天的原因）。
   useEffect(() => {
-    if (phase === 'decision' && dynamicRoutes.length > 0 && !autoSavedRef.current) {
-      autoSavedRef.current = true;
-      void persistTripRoutes(dynamicRoutes);
-    }
-  }, [phase, dynamicRoutes]);
+    const routes = finalRouteRef.current;
+    if (!routes || routes.length === 0 || autoSavedRef.current) return;
+    autoSavedRef.current = true;
+    finalRouteRef.current = null;
+    void persistTripRoutes(routes);
+  }, [routeFinalTick]);
 
   const [secondaryPoi, setSecondaryPoi] = useState<any | null>(null);
   const handleSinglePoiSwap = (poiName: string) => {
@@ -1821,12 +1990,49 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
     <motion.div key="workspace-root" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="relative h-screen w-full bg-white flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden font-sans text-slate-800">
       
       {/* 左侧长图文游记与路径排版区 */}
-      <div className={`w-full ${mapLayout === 'doc' ? 'lg:flex-1 h-auto lg:h-full' : mapLayout === 'map' ? 'lg:w-[380px] xl:w-[420px] h-[56vh] lg:h-full' : 'lg:w-[620px] xl:w-[700px] h-[56vh] lg:h-full'} min-h-[480px] lg:min-h-0 flex flex-col relative z-20 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white shadow-2xl shrink-0`}>
+      {/* 桌面（≥lg）把 header 和正文放进同一个滚动容器：从标题往下读时头部自然滚走，
+          不再常驻 200px；移动端仍保持「头部固定 + 正文自己滚动」，避免溢出遮挡下方地图。 */}
+      <div className={`w-full ${mapLayout === 'doc' ? 'lg:flex-1 h-auto lg:h-full' : mapLayout === 'map' ? 'lg:w-[380px] xl:w-[420px] h-[56vh] lg:h-full' : 'lg:w-[620px] xl:w-[700px] h-[56vh] lg:h-full'} min-h-[480px] lg:min-h-0 flex flex-col relative z-20 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white shadow-2xl shrink-0 lg:overflow-y-auto custom-scrollbar`}>
         <header className="px-5 sm:px-8 py-4 border-b border-slate-100 bg-white shadow-xs z-10">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h2 className="text-2xl font-black text-slate-800 tracking-tight">{targetCityInfo ? targetCityInfo.name + '全景路线规划' : '规划您的行程'}</h2>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <h2 className="text-2xl font-black text-slate-800 tracking-tight">{targetCityInfo ? targetCityInfo.name + '全景路线规划' : '规划您的行程'}</h2>
+              {/* 决策页已是终态：布局收成标题右侧的一枚紧凑胶囊，不再单占一行 */}
+              {phase === 'decision' && (
+                <div className="flex shrink-0 items-center gap-0.5 rounded-full border border-slate-200 bg-white p-0.5" role="group" aria-label="地图布局">
+                  {(Object.keys(MAP_LAYOUT_LABELS) as MapLayout[]).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      data-testid={`map-layout-${key}`}
+                      aria-pressed={mapLayout === key}
+                      onClick={() => changeMapLayout(key)}
+                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold transition-colors ${mapLayout === key ? 'bg-orange-50 text-orange-700' : 'text-slate-500 hover:bg-stone-50 hover:text-orange-600'}`}
+                    >
+                      {MAP_LAYOUT_LABELS[key]}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <p className="text-xs text-slate-400 font-semibold mt-0.5">路线、预算与出行依据集中在这里</p>
+            {/* 跟随房主：成员随时可以看到当前状态并一键切换，不必回到大厅。 */}
+            {!isHost && roomCode && (
+              <div data-testid="follow-host-bar" className="mt-1.5 flex flex-wrap items-center gap-2">
+                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold ${followHost ? 'bg-emerald-50 text-emerald-700' : 'bg-stone-100 text-stone-500'}`}>
+                  <Users className="h-3 w-3" />
+                  {followHost ? '正在跟随房主' : '未跟随房主'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onFollowHostChange?.(!followHost)}
+                  className="text-[11px] font-bold text-orange-600 hover:underline"
+                >
+                  {followHost ? '取消跟随' : '跟随房主'}
+                </button>
+              </div>
+            )}
             {/* 目的地是兜底来的 → 必须如实说，不能让用户以为这是自己要的城市。
                 走克制的一行小字（不是大色块），与页面既有语气一致。 */}
             {targetCityInfo?.resolution === 'fallback_default' && (
@@ -1919,6 +2125,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
             </div>
           )}
           </div>
+          {/* 决策页布局已收进标题行，步骤条也已完成使命：两者都不再占用头部高度 */}
+          {phase !== 'decision' && (
           <div className="mt-3 flex flex-wrap items-center gap-1.5" aria-label="地图布局">
             <span className="text-[11px] font-bold text-slate-400">布局</span>
             {(Object.keys(MAP_LAYOUT_LABELS) as MapLayout[]).map((key) => (
@@ -1935,6 +2143,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
             ))}
             {mapLayout === 'doc' && <span className="ml-auto hidden text-[11px] font-medium text-slate-400 sm:inline">地图已折叠，需要看空间关系时再展开</span>}
           </div>
+          )}
+          {phase !== 'decision' && (
           <div className="mt-4 grid grid-cols-3 gap-2" aria-label="规划进度">
             {([
               ['drafting', '01', '描述需求'],
@@ -1942,12 +2152,42 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
               ['decision', '03', '确认行程'],
             ] as const).map(([key, index, label]) => {
               const active = phase === key;
-              const complete = (key === 'drafting' && phase !== 'drafting') || (key === 'deduction' && phase === 'decision');
+              const complete = key === 'drafting' && phase !== 'drafting';
               return <div key={key} className={`relative flex items-center gap-2 rounded-xl px-3 py-2 border transition-colors ${active ? 'bg-orange-50 border-orange-200 text-orange-700' : complete ? 'bg-stone-100 border-stone-200 text-stone-500' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>
                 <span className="font-mono text-[11px] font-black">{complete ? '✓' : index}</span><span className="text-xs font-bold truncate">{label}</span>
               </div>;
             })}
           </div>
+          )}
+          {/* 降级必须说清楚，而不只是状态栏里一个小标签：
+              用户看到的是「方案已生成」，如果不说原因，会把候选池合成当成智能体推演结果。 */}
+          {phase === 'decision' && isFallbackRoute && (
+            <div
+              data-testid="fallback-route-notice"
+              role="status"
+              className="mt-3 rounded-lg border border-warn bg-warn-soft px-4 py-3"
+            >
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warn" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold text-warn">本轮是保底路线，不是多智能体推演结果</p>
+                  <p className="mt-1 break-words text-xs leading-5 text-ink-2">
+                    {fallbackReason || 'AI 规划服务当前不可用，路线已改由真实候选 POI 合成。'}
+                  </p>
+                  <p className="mt-1 text-[11px] leading-4 text-ink-3">
+                    行程仍可查看、编辑与执行；服务恢复后可重新尝试智能规划。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRetryDeduction}
+                  className="shrink-0 rounded-md border border-line bg-paper-card px-2.5 py-1.5 text-[11px] font-bold text-ink-2 transition-colors hover:border-warn hover:text-warn"
+                >
+                  重新尝试
+                </button>
+              </div>
+            </div>
+          )}
           {phase === 'decision' && experienceMode === 'simple' && (
             <div>
               <TripOverviewCard
@@ -1960,8 +2200,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                 budgetBreakdown={budgetBreakdown}
                 memberCount={roomMembers.length || 1}
                 transportMinutes={overviewTransportMinutes}
-                riskHeadline={riskAlert?.perturbation?.headline || riskAlert?.changes?.[0] || '暂无新的风险提醒'}
-                riskDisclosure={riskAlert ? (riskAlert.perturbation?.disclosure || '已收到风险变更，确认前不会改动行程') : '未收到新的天气、路况或安全变更'}
+                riskHeadline={riskAlert?.perturbation?.headline || riskAlert?.changes?.[0] || '本次行程未触发风险提醒'}
+                riskDisclosure={riskAlert ? (riskAlert.perturbation?.disclosure || '已收到风险变更，确认前不会改动行程') : '天气、路况与安全均未触发提醒'}
                 isFallbackRoute={isFallbackRoute}
                 onEdit={() => { setPhase('drafting'); setIntentsReady(false); }}
               />
@@ -1994,7 +2234,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                 className="mt-2 inline-flex min-h-8 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 text-xs font-bold text-stone-600 transition-colors hover:bg-stone-50"
               >
                 {showRouteEvidence ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                查看依据（覆盖率 / 共识指数 / 策略与采样）
+                为什么这样安排
               </button>
             </div>
           )}
@@ -2156,10 +2396,12 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           )}
         </header>
 
-        {/* 文档优先布局下左栏会占满整屏；正文再宽就会一行 100+ 字，反而难读。
-            把阅读区限制在约 680px（中文正文 ~48 字/行）并居中：地图折叠时留给正文的空白
-            由两侧留白吸收，而不是把每行拉长。11px 的说明文字按一行 ~58 字也算得下。 */}
-        <div className="mx-auto w-full max-w-[680px] flex-1 overflow-y-auto bg-white custom-scrollbar relative">
+        {/* 文档优先布局下的阅读宽度要分阶段给（2026-11-02 实测 1024 宽屏）：
+            · 写需求（drafting）是**表单**，不是长文 —— 680px 会把整页挤成中间一条，
+              左右各空出 170px 的空白；表单按两栏铺开更舒服，所以放到 1240px；
+            · 读方案（decision）仍是正文，限制在 880px（中文 ~55 字/行），
+              只是把外边距收窄一点，别让首屏看着像"两边被裁掉了"。 */}
+        <div className={`mx-auto w-full flex-1 overflow-y-auto bg-white custom-scrollbar relative lg:flex-none lg:overflow-visible ${phase === 'drafting' ? 'max-w-[1240px]' : phase === 'deduction' ? 'max-w-[860px]' : 'max-w-[880px]'}`}>
           {/* 核对说明是"要读的内容"，不是工具栏：放进滚动区最上面，跟行程正文一起滚。
               以前它挂在 header 里，而 header 是 auto 高度、不可滚动，所以面板一长
               （预算核对/已作调整/行程规模/本次调整/价格核对/跨城怎么走/长途分段/还需要你留意
@@ -2187,6 +2429,13 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                 <div className="px-4 pt-4 sm:px-8">
                   <ReferenceRoutePanel />
                 </div>
+                {/* 房主在场时成员不能单独规划：方案由房主统一生成后同步过来 */}
+                {memberFollowsHost && (
+                  <div data-testid="follow-waiting-notice" className="mx-4 mt-4 flex items-center gap-2 rounded-xl border border-orange-200 bg-orange-50/70 px-3 py-2.5 text-xs font-semibold text-orange-700 sm:mx-8">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    方案由房主统一生成，完成后会自动同步到这里。
+                  </div>
+                )}
                 <DraftingPanel 
                   key="workspace-drafting-panel"
                   activeMode={activeMode} 
@@ -2200,6 +2449,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   apiError={apiError} 
                   historyLength={incrementalHistory.length}
                   roomMembers={roomMembers}
+                  compact={mapLayout !== 'doc'}
                 />
               </>
             )}
@@ -2489,6 +2739,14 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   // 但此前只发给审计接口、用户一个字段都看不到（等于没做）。
                   proposals={specialistRuntime?.proposals}
                 />}
+                {workspaceLayer === 'plan' && isHost && (
+                  <RoomSuggestionInbox
+                    comments={roomComments}
+                    busy={pendingScope != null || swappingDay != null}
+                    onAdopt={handleAdoptSuggestion}
+                    onDismiss={(id) => onAckNodeComment?.(id, 'dismissed')}
+                  />
+                )}
                 {workspaceLayer === 'plan' && (
                   <ScopedAdjustPanel
                     days={totalDays.length}
@@ -2525,6 +2783,8 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   nodeVotes={nodeVotes}
                   peerVoteCounts={peerVoteCounts}
                   onVote={handleVote}
+                  roomComments={roomComments}
+                  onNodeComment={onNodeComment}
                   wsConnected={wsConnected}
                   currentUser={currentUser}
                   onApplyScenario={({ budgetLimit, paceLimit, riskTolerance }: { budgetLimit: number; paceLimit: number; riskTolerance: number }) => {
@@ -2678,7 +2938,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           <CarbonFootprintPanel routes={dynamicRoutes} travelDetails={travelDetails} />
         )}
 
-        <div className="absolute top-6 right-6 z-40 flex items-center gap-3 pointer-events-auto">
+        <div className="spatial-dock absolute top-6 right-6 z-40 flex items-center gap-3 pointer-events-auto">
           <button 
             onClick={() => setShowBlackboard(!showBlackboard)} 
             className="bg-white/90 backdrop-blur-md p-2.5 rounded-xl shadow-lg text-slate-700 hover:text-orange-500 border border-slate-200/80 transition-all hover:scale-105 cursor-pointer flex items-center gap-1.5 text-xs font-bold"

@@ -164,6 +164,9 @@ export async function fetchRiskSnapshot(
           baseline: options.baseline,
         },
         retries: 0,
+        // 该接口要串行拉取天气/路况/安全三类上游，正常也要 10 秒左右；
+        // 默认 12 秒会把“稍慢”误判成服务不可用，留足余量。
+        timeoutMs: 25_000,
       });
     } catch (error) {
       // A non-OK response means "no usable snapshot right now" — callers keep

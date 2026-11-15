@@ -31,10 +31,17 @@ function KindIcon({ kind }: { kind: string }) {
   return <TriangleAlert className="w-3 h-3" />;
 }
 
-export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
+export function PriceProvenanceChip({ node, plan, soft = false }: { node: any; plan?: any; soft?: boolean }) {
   const info: PriceProvenance | null = priceProvenance(node);
   const freshness = priceFreshnessOf(node);
   const updatedText = priceUpdatedAtText(node);
+  // 行程正文只给一句中性提示（待报价）；原始「未知价」与原因留在悬停提示里，
+  // 免得一屏里每个没取到价的节点都挂一个红色告警。
+  const softUnknown = soft && freshness === 'unknown';
+  const freshnessLabel = softUnknown ? '待报价' : PRICE_FRESHNESS_LABELS[freshness];
+  const freshnessStyle = softUnknown
+    ? 'bg-stone-50 text-stone-600 border-stone-200'
+    : FRESHNESS_STYLE[freshness] || FRESHNESS_STYLE.unknown;
   // 官方入口优先取节点上已铺平的字段，其次回退到方案级 official_profiles
   const inline = node && (node.official_booking || node.official_site)
     ? { booking: String(node.official_booking || ''), site: String(node.official_site || ''), name: String(node.official_name || '') }
@@ -42,7 +49,6 @@ export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
   const profile = inline;
 
   const bookingUrl = profile?.booking || profile?.site || '';
-  const freshnessLabel = PRICE_FRESHNESS_LABELS[freshness];
 
   return (
     <span className="flex items-center gap-1.5 flex-wrap">
@@ -52,19 +58,19 @@ export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
         data-testid="price-provenance"
         data-freshness={freshness}
         title={[
-          `${freshnessLabel}：${FRESHNESS_HINT[freshness]}`,
+          `${PRICE_FRESHNESS_LABELS[freshness]}：${FRESHNESS_HINT[freshness]}`,
           info?.detail || '',
         ].filter(Boolean).join('｜')}
-        className={`flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-bold border whitespace-nowrap ${FRESHNESS_STYLE[freshness] || FRESHNESS_STYLE.unknown}`}
+        className={`flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-bold border whitespace-nowrap ${freshnessStyle}`}
       >
-        <KindIcon kind={info?.kind || 'unknown'} />
+        {softUnknown ? <Info className="w-3 h-3" /> : <KindIcon kind={info?.kind || 'unknown'} />}
         <strong className="whitespace-nowrap">{freshnessLabel}</strong>
         {info && <span className="whitespace-nowrap opacity-80">· {info.value}</span>}
         {info && <span className="font-medium whitespace-nowrap opacity-80">· {info.label}</span>}
         {info?.detail && (
           <span className="font-medium opacity-80 max-w-[200px] truncate">· {info.detail}</span>
         )}
-        {info && (
+        {info && (updatedText || !soft) && (
           <span className="font-medium whitespace-nowrap opacity-75">
             · {updatedText ? `更新于 ${updatedText}` : '更新时间未知'}
           </span>
@@ -105,10 +111,14 @@ export function PriceProvenanceChip({ node, plan }: { node: any; plan?: any }) {
  * 为什么要单独一个组件：后端已经给每条事实标了四态，但用户看到的仍然只是"¥30"。
  * 这个徽章把"这条信息到底可不可信、该不该去官方渠道再确认"直接摆在数字旁边。
  */
-export function TrustBadge({ node }: { node: any; factKind?: string }) {
+export function TrustBadge({ node, soft = false }: { node: any; factKind?: string; soft?: boolean }) {
   const view = trustOf(node);
   if (!view) return null;
-  const style = TRUST_STYLES[view.state as TrustState] || TRUST_STYLES.unknown;
+  // 折叠态把「尚未核实」收成「待核实」并去掉来源尾巴：展开后仍显示完整四态与来源。
+  const softUnknown = soft && view.state === 'unknown';
+  const style = softUnknown
+    ? 'bg-stone-50 text-stone-600 border-stone-200'
+    : TRUST_STYLES[view.state as TrustState] || TRUST_STYLES.unknown;
   return (
     <span
       data-testid="trust-badge"
@@ -118,13 +128,15 @@ export function TrustBadge({ node }: { node: any; factKind?: string }) {
     >
       {view.state === 'verified' ? (
         <ShieldCheck className="w-3 h-3" />
-      ) : view.state === 'stale' ? (
+      ) : view.state === 'stale' || softUnknown ? (
         <Clock className="w-3 h-3" />
       ) : (
         <TriangleAlert className="w-3 h-3" />
       )}
-      <span className="whitespace-nowrap">{view.label}</span>
-      <span className="font-medium opacity-80 whitespace-nowrap">· {view.sourceLabel}</span>
+      <span className="whitespace-nowrap">{softUnknown ? '待核实' : view.label}</span>
+      {!softUnknown && (
+        <span className="font-medium opacity-80 whitespace-nowrap">· {view.sourceLabel}</span>
+      )}
     </span>
   );
 }
@@ -147,7 +159,9 @@ export function TrustSummaryBar({ plan }: { plan?: any }) {
         <span
           key={state}
           data-trust-count={state}
-          className={`px-2 py-0.5 rounded-lg border whitespace-nowrap ${TRUST_STYLES[state]}`}
+          className={`px-2 py-0.5 rounded-lg border whitespace-nowrap ${
+            state === 'unknown' ? 'bg-stone-50 text-stone-600 border-stone-200' : TRUST_STYLES[state]
+          }`}
         >
           {state === 'verified'
             ? '已核实'
@@ -155,7 +169,7 @@ export function TrustSummaryBar({ plan }: { plan?: any }) {
               ? '估算'
               : state === 'stale'
                 ? '信息较旧'
-                : '尚未核实'}{' '}
+                : '待核实'}{' '}
           {summary.counts[state]}
         </span>
       ))}

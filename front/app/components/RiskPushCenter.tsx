@@ -19,7 +19,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
-import { apiJson } from '../lib/apiClient';
+import { apiJson, ApiRequestError } from '../lib/apiClient';
 import { fetchRiskSnapshot } from '../lib/riskSnapshot';
 import { normalizeRiskNotification, parseRiskTimestamp } from '../lib/riskNotifications';
 import {
@@ -36,6 +36,16 @@ import { enqueueRiskNotificationAction, loadRiskInboxCache, removeRiskNotificati
 import { disableWebPushSubscription, requestWebPushSubscription, webPushCapability, type WebPushState } from '../lib/webPush';
 
 const POLL_INTERVAL_MS = 30000;
+
+// 风险接口本身就要串行拉多个上游，偶尔慢一拍是正常的。
+// 不要把技术化的「请确认服务已启动」直接甩给用户。
+function riskSyncErrorMessage(error: unknown): string {
+  if (error instanceof ApiRequestError) {
+    if (error.code === 'REQUEST_TIMEOUT') return '本次风险数据同步超时，系统会自动重试';
+    if (error.code === 'NETWORK_UNAVAILABLE') return '网络暂时不可用，正在显示上次的风险结果';
+  }
+  return error instanceof Error ? error.message : '风险数据同步失败，请稍后重试';
+}
 
 export interface RiskChange {
   type: string;
@@ -404,9 +414,9 @@ export default function RiskPushCenter({
       }
       appendChanges(changes);
       if (subscribed && userId) await loadInbox();
-      setStatusMessage((message) => message.includes('失败') || message.includes('不可用') ? '' : message);
+      setStatusMessage((message) => /失败|不可用|超时/.test(message) ? '' : message);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : '风险数据同步失败，请稍后重试');
+      setStatusMessage(riskSyncErrorMessage(error));
     } finally {
       setPolling(false);
       setLastSync(Date.now());
@@ -417,7 +427,7 @@ export default function RiskPushCenter({
     if (!enabled || !userId) return;
     let cancelled = false;
     loadInbox().catch((error) => {
-      if (!cancelled) setStatusMessage(error instanceof Error ? error.message : '风险通知读取失败');
+      if (!cancelled) setStatusMessage(riskSyncErrorMessage(error));
     });
     return () => { cancelled = true; };
   }, [enabled, userId, loadInbox]);
@@ -458,7 +468,7 @@ export default function RiskPushCenter({
         if (cancelled) return;
         setSubscribed(list.some((s: any) => s?.city === city));
       } catch (error) {
-        if (!cancelled) setStatusMessage(error instanceof Error ? error.message : '订阅状态读取失败');
+        if (!cancelled) setStatusMessage(riskSyncErrorMessage(error));
       }
     })();
     return () => {
@@ -628,7 +638,21 @@ export default function RiskPushCenter({
 
             {/* 列表 */}
             <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
-              {statusMessage && <div className="border-b border-orange-100 bg-orange-50 px-4 py-2 text-[11px] font-bold leading-relaxed text-orange-800">{statusMessage}</div>}
+              {statusMessage && (
+                <div className="flex items-center gap-2 border-b border-orange-100 bg-orange-50 px-4 py-2 text-[11px] font-bold leading-relaxed text-orange-800">
+                  <span className="min-w-0 flex-1">{statusMessage}</span>
+                  {/超时|失败|不可用/.test(statusMessage) && (
+                    <button
+                      type="button"
+                      onClick={() => { void poll(); }}
+                      disabled={polling}
+                      className="shrink-0 rounded-md border border-orange-300 bg-white px-2 py-0.5 text-[10px] font-bold text-orange-700 transition-colors hover:bg-orange-100 disabled:opacity-50"
+                    >
+                      {polling ? '同步中…' : '重试'}
+                    </button>
+                  )}
+                </div>
+              )}
               {items.length === 0 ? (
                 <div className="py-10 flex flex-col items-center gap-2 text-center">
                   <CheckCircle2 className="w-8 h-8 text-emerald-500" />

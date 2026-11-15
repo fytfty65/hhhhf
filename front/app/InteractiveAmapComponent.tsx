@@ -7,11 +7,12 @@ import dynamic from 'next/dynamic';
 // 必须改成命名空间导入。这是 6.x 升级里我们唯一的破坏性改动（已验证）。
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { 
-  ArrowLeft, 
-  Map as MapIcon, 
-  Compass, 
-  MessageSquareText, 
+import {
+  ArrowLeft,
+  Box,
+  Map as MapIcon,
+  Compass,
+  MessageSquareText,
   Navigation,
   ShieldCheck,
   ShieldAlert,
@@ -37,6 +38,24 @@ import {
   OSM_TILES,
   validLngLat,
 } from './lib/mapTiles';
+
+// MapLibre 6 用 `import.meta.url` 相对推导 worker 地址；经 Next 打包后该地址落在
+// `/_next/static/chunks/` 下，而 worker 文件并不在那里 —— worker 启动失败后，
+// 栅格底图（主线程解码）和 DOM 标记照常显示，但 GeoJSON 路线/文字箭头一块都不画，
+// 线上"有编号点、没有橙色连线"就是这么来的。用构建器能识别的 `new URL(...)`
+// 让 worker 产物随包输出，再把真实地址交给 MapLibre（全局只设置一次）。
+let workerUrlConfigured = false;
+const configureMapLibreWorker = () => {
+  if (workerUrlConfigured || typeof window === 'undefined') return;
+  try {
+    maplibregl.setWorkerUrl(
+      new URL('maplibre-gl/dist/maplibre-gl-worker.mjs', import.meta.url).href,
+    );
+    workerUrlConfigured = true;
+  } catch (error) {
+    console.warn('[map] 无法定位 MapLibre worker，路线连线可能无法渲染', error);
+  }
+};
 
 // 👑 SSR 安全导入：动态加载 3D 地球组件，彻底解决 Next.js Window 对象未定义报错
 const WorldSafetyGlobe = dynamic(() => import('./components/WorldSafetyGlobe'), {
@@ -129,7 +148,8 @@ export default function InteractiveAmapComponent({
   const renderRoute = activeNodes.filter((point) => validLngLat(point.lnglat));
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<maplibregl.Map | null>(null);
-  const markersRef = useRef<{ marker: maplibregl.Marker; root: Root }[]>([]);
+  const markersRef = useRef<{ marker: maplibregl.Marker; root: Root; el: HTMLDivElement }[]>([]);
+  const routeLayerWarnedRef = useRef(false);
 
   const [mapStyle, setMapStyle] = useState<'normal' | 'satellite'>('normal');
   const [showTraffic, setShowTraffic] = useState(false);
@@ -145,6 +165,11 @@ export default function InteractiveAmapComponent({
   const [tileRetrying, setTileRetrying] = useState(false);
   const [mapEngineError, setMapEngineError] = useState('');
   const [mapGeneration, setMapGeneration] = useState(0);
+  // 2.5D 透视沙盘开关：默认仍是平面导航（尊重原「强制 2D」的产品决策），
+  // 打开后统一接管初始化 / flyTo / fitBounds 的 pitch 与 bearing（共 4 处）。
+  // ref 与 state 同步写：ref 供相机相关 effect 无副作用读取，state 只驱动按钮态。
+  const [perspectiveOn, setPerspectiveOn] = useState(false);
+  const perspectiveRef = useRef(false);
   const tileFallbackRef = useRef(false);
   const tileErrorCountRef = useRef(0);
   const mapStyleRef = useRef(mapStyle);
@@ -160,6 +185,7 @@ export default function InteractiveAmapComponent({
 
     let map: maplibregl.Map;
     try {
+      configureMapLibreWorker();
       map = new maplibregl.Map({
       container: mapContainer.current,
       style: {
@@ -224,8 +250,10 @@ export default function InteractiveAmapComponent({
       },
       center: renderRoute.length > 0 ? renderRoute[0].lnglat : [104.0665, 30.5722],
       zoom: 12,
-      pitch: 0,   // 👑 强制 2D 视角，绝不倾斜
-      bearing: 0,  // 👑 正北方向，无旋转角度
+      // 默认仍是 2D 平面视角（正北、无倾角）；用户点「透视沙盘」进入 2.5D，
+      // 且重试重建地图（mapGeneration 变化）时如实恢复当前视角档位，不偷偷拍平。
+      pitch: perspectiveRef.current ? 50 : 0,
+      bearing: perspectiveRef.current ? -16 : 0,
       // MapLibre v5 会默认自动添加一个带 "MapLibre" 自定义归属的 AttributionControl，
       // 下方显式 addControl 再加一个会导致右下角两个归属 pill 堆叠，这里关掉默认控件。
       attributionControl: false
@@ -418,25 +446,33 @@ export default function InteractiveAmapComponent({
       if (map.getLayer('layer-fallback-satellite')) map.setLayoutProperty('layer-fallback-satellite', 'visibility', 'none');
     }
 
-    if (showTraffic && !map.getLayer('traffic-layer')) {
-      map.addSource('amap-traffic', {
-        type: 'raster',
-        tiles: ['/amap-traffic?v=1.0&t=1&x={x}&y={y}&z={z}'],
-        tileSize: 256,
-        maxzoom: 18,
-        attribution: AMAP_ATTRIBUTION,
-      });
-      map.addLayer({
-        id: 'traffic-layer',
-        type: 'raster',
-        source: 'amap-traffic',
-        minzoom: 5,
-        maxzoom: 22,
-        paint: { 'raster-opacity': 0.85 }
-      });
-    } else if (!showTraffic && map.getLayer('traffic-layer')) {
+    if (showTraffic) {
+      if (!map.getSource('amap-traffic')) {
+        map.addSource('amap-traffic', {
+          type: 'raster',
+          tiles: ['/amap-traffic?v=1.0&t=1&x={x}&y={y}&z={z}'],
+          tileSize: 256,
+          maxzoom: 18,
+          attribution: AMAP_ATTRIBUTION,
+        });
+      }
+      if (!map.getLayer('traffic-layer')) {
+        // 路况是栅格层，必须压在路线之下；插入到路线最底层（casing）之前。
+        // 若路线图层还没建好，则追加到末尾 —— 之后路线图层会追加到它上面。
+        const beforeRoute = ['route-layer-casing', 'route-layer-inner', 'route-layer-arrows']
+          .find((id) => map.getLayer(id));
+        map.addLayer({
+          id: 'traffic-layer',
+          type: 'raster',
+          source: 'amap-traffic',
+          minzoom: 5,
+          maxzoom: 22,
+          paint: { 'raster-opacity': 0.85 }
+        }, beforeRoute);
+      }
+    } else if (map.getLayer('traffic-layer')) {
       map.removeLayer('traffic-layer');
-      map.removeSource('amap-traffic');
+      if (map.getSource('amap-traffic')) map.removeSource('amap-traffic');
     }
   }, [mapStyle, showTraffic, mapLoaded, tileFallback]);
 
@@ -455,8 +491,8 @@ export default function InteractiveAmapComponent({
       map.flyTo({
         center: renderRoute[0].lnglat,
         zoom: 14,
-        pitch: 0,
-        bearing: 0,
+        pitch: perspectiveRef.current ? 50 : 0,
+        bearing: perspectiveRef.current ? -16 : 0,
         duration: 1500
       });
     } else {
@@ -475,7 +511,13 @@ export default function InteractiveAmapComponent({
         validActualPath.forEach(pt => bounds.extend(pt));
       }
       if (!bounds.isEmpty()) {
-        map.fitBounds(bounds, { padding: 90, maxZoom: 15, pitch: 0, bearing: 0, duration: 2000 });
+        map.fitBounds(bounds, {
+          padding: 90,
+          maxZoom: 15,
+          pitch: perspectiveRef.current ? 45 : 0,
+          bearing: perspectiveRef.current ? -16 : 0,
+          duration: 2000
+        });
       }
     }
 
@@ -492,13 +534,9 @@ export default function InteractiveAmapComponent({
       geometry: { type: 'LineString', coordinates: finalCoordinates }
     };
 
-    if (map.getSource('route-source')) {
-      (map.getSource('route-source') as maplibregl.GeoJSONSource).setData(routeGeoJSON);
-    } else {
-      map.addSource('route-source', { type: 'geojson', data: routeGeoJSON });
-      
+    const routeLayers: maplibregl.AddLayerObject[] = [
       // 1. 底层马路包边（暗橙色）
-      map.addLayer({
+      {
         id: 'route-layer-casing',
         type: 'line',
         source: 'route-source',
@@ -507,10 +545,9 @@ export default function InteractiveAmapComponent({
           'line-color': phase === 'deduction' ? '#b45309' : '#c2410c',
           'line-width': phase === 'deduction' ? 6 : 10,
         }
-      });
-
+      },
       // 2. 亮色高线核心（活力橙）
-      map.addLayer({
+      {
         id: 'route-layer-inner',
         type: 'line',
         source: 'route-source',
@@ -520,48 +557,103 @@ export default function InteractiveAmapComponent({
           'line-width': phase === 'deduction' ? 3 : 6,
           'line-dasharray': phase === 'drafting' ? [2, 2] : [1]
         }
-      });
-
+      },
       // 3. 沿着轨迹自适应旋转指示箭头
-      map.addLayer({
+      {
         id: 'route-layer-arrows',
         type: 'symbol',
         source: 'route-source',
         layout: {
           'symbol-placement': 'line',
           'symbol-spacing': 60,
-          'text-field': '▶', 
+          'text-field': '▶',
           'text-size': 12,
-          'text-keep-upright': false 
+          'text-keep-upright': false
         },
         paint: {
           'text-color': '#ffffff',
           'text-halo-color': '#f97316',
           'text-halo-width': 1.5
         }
-      });
-    }
+      }
+    ];
+
+    // 幂等 + 自愈：无论 style 何时就绪、无论 source/图层是否被移除过，
+    // 只要缺 route-source 或任一 route-layer-* 就补上（source 存在时只更新数据）。
+    // style 尚未就绪时 addSource/addLayer 会抛 "Style is not done loading."，
+    // 这里短暂重试；真的失败才 warn 一次，不吞掉错误。
+    let retryTimer: number | undefined;
+    let cancelled = false;
+    let dataSynced = false;
+    const syncRouteLayers = (attempt: number) => {
+      if (cancelled) return;
+      try {
+        const source = map.getSource('route-source') as maplibregl.GeoJSONSource | undefined;
+        if (!source) {
+          map.addSource('route-source', { type: 'geojson', data: routeGeoJSON });
+          dataSynced = true;
+        } else if (!dataSynced) {
+          source.setData(routeGeoJSON);
+          dataSynced = true;
+        }
+
+        for (const layer of routeLayers) {
+          if (map.getLayer(layer.id)) continue;
+          // 保持 casing → inner → arrows 的叠加顺序（补录被移除的图层时尤其重要）。
+          const above: string[] = layer.id === 'route-layer-casing'
+            ? ['route-layer-inner', 'route-layer-arrows']
+            : layer.id === 'route-layer-inner'
+              ? ['route-layer-arrows']
+              : [];
+          const beforeId = above.find((id) => map.getLayer(id));
+          map.addLayer(layer, beforeId);
+        }
+      } catch (error) {
+        if (attempt < 3) {
+          retryTimer = window.setTimeout(() => syncRouteLayers(attempt + 1), 600);
+          return;
+        }
+        if (!routeLayerWarnedRef.current) {
+          routeLayerWarnedRef.current = true;
+          console.warn('[map] 路线图层添加失败，连线可能不显示', error);
+        }
+      }
+    };
+    syncRouteLayers(0);
+    // style 一旦被替换/重载（图层与 source 被清空），重新补齐，避免"线突然消失"。
+    const onStyleData = () => syncRouteLayers(0);
+    map.on('styledata', onStyleData);
+
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      map.off('styledata', onStyleData);
+    };
   }, [routeDataStr, actualPathStr, phase, mapLoaded]);
 
-  // ================= 4. 点击景点 2D 视角智能平移 (FlyTo) =================
+  // ================= 4. 点击景点智能平移 (FlyTo)：透视档自动带 2.5D 运镜 =================
   useEffect(() => {
     if (!mapLoaded || !mapInstance.current || selectedPoiIndex === null) return;
-    
+
     const parsedRoutes = JSON.parse(routeDataStr);
     const targetLngLat = parsedRoutes[selectedPoiIndex];
     if (targetLngLat) {
       mapInstance.current.flyTo({
         center: targetLngLat,
         zoom: 15,
-        pitch: 0,   
-        bearing: 0, 
+        pitch: perspectiveRef.current ? 55 : 0,
+        bearing: perspectiveRef.current ? (selectedPoiIndex % 2 === 0 ? 18 : -18) : 0,
         speed: 1.2,
         curve: 1.4
       });
     }
-  }, [selectedPoiIndex, mapLoaded, routeDataStr]); 
+  }, [selectedPoiIndex, mapLoaded, routeDataStr]);
 
-  // ================= 5. Marker 图标与气泡注入 =================
+  // ================= 5. Marker 2.5D 立柱图钉与悬停信息牌 =================
+  // 重建治理：Marker 只随路线数据（markersDataStr）创建/销毁一次；选中与悬停
+  // 态改为在已挂载 DOM 上直接切换 data-active / data-hovered（CSS 消费），
+  // 不再整批 unmount/remount —— 之前每次 hover 都会重建全部 createRoot，
+  // 节点一多就掉帧。图钉仍是真实 <button>，键盘可聚焦、aria-label 不变。
   useEffect(() => {
     if (!mapLoaded || !mapInstance.current) return;
     const map = mapInstance.current;
@@ -579,15 +671,12 @@ export default function InteractiveAmapComponent({
     currentRoute.forEach((poi, index) => {
       const el = document.createElement('div');
       const root = createRoot(el);
-      
-      const isSelected = selectedPoiIndex === index;
-      const isHovered = showPoiInfo === index;
 
       root.render(
-        <button 
+        <button
           type="button"
           aria-label={`查看 ${poi.name} 详情`}
-          className="relative cursor-pointer group flex flex-col items-center p-0 bg-transparent border-0"
+          className="map-pin relative cursor-pointer group flex flex-col items-center p-0 bg-transparent border-0"
           onClick={(e) => {
             e.stopPropagation();
             onPoiSelect(index);
@@ -596,29 +685,21 @@ export default function InteractiveAmapComponent({
           onMouseEnter={() => setShowPoiInfo(index)}
           onMouseLeave={() => setShowPoiInfo(null)}
         >
-          <AnimatePresence>
-            {isHovered && (
-              <motion.div
-                key={`marker-hover-${index}`}
-                initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
-                className="absolute bottom-full mb-3 bg-slate-900/95 backdrop-blur text-white p-3 rounded-xl shadow-2xl border border-slate-700 w-56 z-50 pointer-events-none"
-              >
-                <div className="font-bold text-sm mb-1 text-orange-400 truncate">{poi.name}</div>
-                <div className="text-xs text-slate-300 line-clamp-2 leading-relaxed">{poi.desc}</div>
-                {poi.transport && (
-                  <div className="mt-2 text-[11px] text-orange-300 font-bold flex items-center gap-1 border-t border-slate-800 pt-1.5">
-                    <Navigation className="w-3 h-3"/> {poi.transport}
-                  </div>
-                )}
-              </motion.div>
+          <div data-pin-tip className="map-pin-tip">
+            <div className="font-bold text-sm mb-1 text-orange-400 truncate">{poi.name}</div>
+            <div className="text-xs text-slate-300 line-clamp-2 leading-relaxed">{poi.desc}</div>
+            {poi.transport && (
+              <div className="mt-2 text-[11px] text-orange-300 font-bold flex items-center gap-1 border-t border-slate-800 pt-1.5">
+                <Navigation className="w-3 h-3"/> {poi.transport}
+              </div>
             )}
-          </AnimatePresence>
-
-          <div 
-            className={`w-9 h-9 rounded-full border-2 flex items-center justify-center shadow-xl transition-all duration-300 ${isSelected ? 'bg-orange-500 border-white text-white ring-4 ring-orange-300/80 scale-125 z-30' : 'bg-white border-orange-500 text-orange-600 hover:scale-110'}`}
-          >
-            <span className="text-xs font-black">{index + 1}</span>
           </div>
+
+          <span data-pin-badge className="map-pin-badge w-9 h-9">
+            <span className="text-xs font-black">{index + 1}</span>
+          </span>
+          <span aria-hidden="true" className="map-pin-stem" />
+          <span aria-hidden="true" className="map-pin-halo" />
         </button>
       );
 
@@ -626,9 +707,22 @@ export default function InteractiveAmapComponent({
         .setLngLat(poi.lnglat)
         .addTo(map);
 
-      markersRef.current.push({ marker, root });
+      markersRef.current.push({ marker, root, el });
     });
-  }, [selectedPoiIndex, showPoiInfo, mapLoaded, markersDataStr, onPoiSelect]);
+  }, [mapLoaded, markersDataStr, onPoiSelect]);
+
+  // 选中/悬停态同步：只写 data 属性与 z-index，绝不重建 Marker。
+  useEffect(() => {
+    markersRef.current.forEach(({ el }, index) => {
+      const button = el.firstElementChild as HTMLElement | null;
+      if (!button) return;
+      const active = selectedPoiIndex === index;
+      const hovered = showPoiInfo === index;
+      button.setAttribute('data-active', active ? 'true' : 'false');
+      button.setAttribute('data-hovered', hovered ? 'true' : 'false');
+      el.style.zIndex = active ? '30' : '';
+    });
+  }, [selectedPoiIndex, showPoiInfo, markersDataStr]);
 
   const activeAlertCount = safetyInfo?.active_alerts?.length || 0;
   const isHighRisk = safetyInfo?.risk_level === 'HIGH';
@@ -639,6 +733,20 @@ export default function InteractiveAmapComponent({
   const trafficSummary = (trafficInfo?.description || trafficInfo?.advice)
     ? String(trafficInfo.description || trafficInfo.advice)
     : '暂无供应商路况数据，请在出行前重新获取';
+
+  // 2.5D 透视沙盘：一次切换同步接管所有相机场次（初始化/fitBounds/flyTo 读
+  // perspectiveRef），地图用 easeTo 平滑过渡到 50° 俯仰 + 轻微偏航。
+  const applyMapPerspective = (on: boolean) => {
+    setPerspectiveOn(on);
+    perspectiveRef.current = on;
+    const map = mapInstance.current;
+    if (!map) return;
+    try {
+      map.easeTo({ pitch: on ? 50 : 0, bearing: on ? -16 : 0, duration: 900 });
+    } catch {
+      // 相机动画失败时保持当前视角即可，不影响路线与图钉。
+    }
+  };
 
   const retryMapTiles = () => {
     setTileRetrying(true);
@@ -675,22 +783,33 @@ export default function InteractiveAmapComponent({
           sm 及以上与左上返回按钮、右上动作条统一抬到 top-6 同一基线，实现左右水平对齐；
           宽度在 globals.css 中为右侧动作条预留车道，换行也不会遮挡。
           小屏（<640px）动作条占满首行，控制面板退到第二行避免重叠。 */}
-      <div className="map-control-dock absolute top-[8.5rem] left-4 right-auto sm:top-6 sm:left-[4.75rem] z-30 pointer-events-auto">
+      <div className="map-control-dock spatial-dock absolute top-[8.5rem] left-4 right-auto sm:top-6 sm:left-[4.75rem] z-30 pointer-events-auto">
         <div className="map-control-group map-control-group-primary">
-        <button 
-          onClick={() => setMapStyle(prev => prev === 'normal' ? 'satellite' : 'normal')} 
+        <button
+          onClick={() => setMapStyle(prev => prev === 'normal' ? 'satellite' : 'normal')}
           className="bg-white/95 backdrop-blur-md px-3.5 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:text-orange-500 shadow-md flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer"
         >
           <MapIcon className="w-3.5 h-3.5" />
           <span>{mapStyle === 'normal' ? '卫星图' : '标准图'}</span>
         </button>
 
-        <button 
-          onClick={() => setShowTraffic(!showTraffic)} 
+        <button
+          onClick={() => setShowTraffic(!showTraffic)}
           className={`backdrop-blur-md px-3.5 py-2.5 rounded-xl border shadow-md flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer ${showTraffic ? 'bg-orange-500 border-orange-500 text-white' : 'bg-white/95 border-slate-200 text-slate-700 hover:text-orange-500'}`}
         >
           <Compass className="w-3.5 h-3.5" />
           <span>{showTraffic ? '关闭路况' : '实时路况'}</span>
+        </button>
+
+        {/* 👑 2.5D 透视沙盘开关：默认平面导航，开启后初始化/fitBounds/flyTo 全部带俯仰与偏航 */}
+        <button
+          onClick={() => applyMapPerspective(!perspectiveOn)}
+          aria-pressed={perspectiveOn}
+          title="在平面导航与 2.5D 透视沙盘之间切换"
+          className={`backdrop-blur-md px-3.5 py-2.5 rounded-xl border shadow-md flex items-center gap-1.5 text-xs font-bold transition-all shrink-0 cursor-pointer ${perspectiveOn ? 'bg-orange-500 border-orange-500 text-white' : 'bg-white/95 border-slate-200 text-slate-700 hover:text-orange-500'}`}
+        >
+          <Box className="w-3.5 h-3.5" />
+          <span>{perspectiveOn ? '平面导航' : '透视沙盘'}</span>
         </button>
 
         {/* 👑 方案 A 核心：3D 态势/安全雷达视角切换按钮 */}
@@ -718,7 +837,7 @@ export default function InteractiveAmapComponent({
               }`}
             >
               {isHighRisk ? <ShieldAlert className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
-              <span>WorldMonitor {safetyInfo.cii_score !== undefined ? `CII:${safetyInfo.cii_score}` : '风控网'}</span>
+              <span>{safetyInfo.cii_score !== undefined ? `风险指数 ${safetyInfo.cii_score}` : '实时风险'}</span>
               {activeAlertCount > 0 && (
                 <span className="bg-white/20 text-white px-1.5 py-0.5 rounded-full text-[10px]">
                   {activeAlertCount}
@@ -738,7 +857,7 @@ export default function InteractiveAmapComponent({
                   <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                     <div className="flex items-center gap-2">
                       <Activity className="w-4 h-4 text-orange-400" />
-                      <span className="font-bold text-sm text-orange-400">WorldMonitor 安全情报</span>
+                      <span className="font-bold text-sm text-orange-400">实时风险提示</span>
                     </div>
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
                       isHighRisk ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'

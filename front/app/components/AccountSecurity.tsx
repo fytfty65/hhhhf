@@ -126,7 +126,7 @@ export default function AccountSecurity({ className = '' }: { className?: string
   };
 
   return (
-    <section className={`${className}`} aria-labelledby="security-heading">
+    <section className={`${className}`} aria-labelledby="security-heading" data-testid="account-security">
       <div className="flex items-center justify-between gap-2">
         <h2 id="security-heading" className="inline-flex items-center gap-2 text-sm font-black text-slate-900">
           <ShieldCheck className="h-4 w-4 text-orange-500" /> 账号安全

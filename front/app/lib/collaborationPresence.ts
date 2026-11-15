@@ -1,6 +1,8 @@
 // 模块 8 · 协作增强（光标同步 + 头像悬浮）纯函数层（前端）
 // 与服务端 gateway/internal/service/presence.go 逻辑镜像，用于本地即时合并/过期清理。
 
+import { generatedAvatarUrl } from './avatarArt.ts';
+
 export interface NodePresence {
   userId: string;
   name: string;
@@ -64,11 +66,10 @@ export function presenceForNode(list: NodePresence[], nodeKey: string): NodePres
   return list.filter((p) => p.nodeKey === nodeKey);
 }
 
-/** 生成成员头像 URL：优先 avatarUrl（相对路径补 base），缺失回退 DiceBear 种子头像。 */
+/** 生成成员头像 URL：优先 avatarUrl（相对路径补 base），缺失回退本地生成头像。 */
 export function presenceAvatarUrl(p: NodePresence, base = ''): string {
   const url = String(p.avatarUrl || '').trim();
   if (url.startsWith('http') || url.startsWith('data:')) return url;
   if (url) return base + url;
-  const seed = encodeURIComponent(p.avatarSeed || p.name || p.userId);
-  return `https://api.dicebear.com/9.x/avataaars/svg?seed=${seed}&backgroundColor=fdeed8`;
+  return generatedAvatarUrl(p.avatarSeed || p.userId, p.name);
 }

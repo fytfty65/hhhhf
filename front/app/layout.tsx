@@ -6,24 +6,20 @@ export const metadata = {
   description: '结伴旅行路线协同与规划中枢',
 }
 
-// 首屏防闪烁：根据 localStorage（手动覆盖）/ 系统偏好设置 .dark 类，并实时跟随系统变化
+// 首屏防闪烁：默认浅色（暖纸设计是为浅色打磨的），只有用户手动选择深色才加 .dark。
+// 不再跟随系统偏好——系统深色 + 未适配完全的页面会出现大块突兀的浅色/深色拼接。
 const themeInitScript = `
 (function () {
   var KEY = 'theme';
   function apply() {
     try {
-      var t = localStorage.getItem(KEY);
-      var isDark = t ? t === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var isDark = localStorage.getItem(KEY) === 'dark';
       document.documentElement.classList.toggle('dark', isDark);
+      // 让原生控件（日期选择器、滚动条、输入框）跟着主题走，避免深色下出现浅色控件。
+      document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
     } catch (e) {}
   }
   apply();
-  // 系统主题变化：仅在没有手动覆盖时跟随
-  try {
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
-      if (!localStorage.getItem(KEY)) apply();
-    });
-  } catch (e) {}
   // 跨标签页手动切换同步
   window.addEventListener('storage', function (e) {
     if (e.key === KEY) apply();

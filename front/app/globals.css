@@ -448,8 +448,8 @@ html, body, #__next {
    their own lanes and repeated content stays aligned. */
 .profile-page,
 .community-page {
-  background-color: #f8f5ef;
-  background-image: linear-gradient(rgba(120, 83, 45, .025) 1px, transparent 1px), linear-gradient(90deg, rgba(120, 83, 45, .025) 1px, transparent 1px);
+  background-color: var(--paper);
+  background-image: linear-gradient(rgba(120, 83, 45, .02) 1px, transparent 1px), linear-gradient(90deg, rgba(120, 83, 45, .02) 1px, transparent 1px);
   background-size: 28px 28px;
 }
 
@@ -466,14 +466,15 @@ html, body, #__next {
 
 .profile-page .profile-panel,
 .community-page .community-panel {
-  background: rgba(255, 253, 248, .94);
-  border-color: rgba(120, 83, 45, .14);
-  box-shadow: 0 14px 34px rgba(120, 83, 45, .07);
+  background: var(--paper-card);
+  border-color: var(--line);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(28, 25, 23, .04);
 }
 
 .profile-page .profile-hero {
   border-radius: 1.25rem;
-  border-color: rgba(120, 83, 45, .16);
+  border-color: var(--line);
 }
 
 .profile-page .profile-trip-browser {
@@ -513,16 +514,7 @@ html, body, #__next {
 }
 
 .profile-hero::after {
-  content: '';
-  position: absolute;
-  width: 18rem;
-  height: 18rem;
-  right: -7rem;
-  top: -10rem;
-  border-radius: 999px;
-  background: rgba(251, 146, 60, .08);
-  pointer-events: none;
-  z-index: -1;
+  display: none;
 }
 
 .profile-stats {
@@ -542,10 +534,11 @@ html, body, #__next {
   gap: 1rem;
   margin-top: 1rem;
   padding: 1rem 1.15rem;
-  border: 1px solid rgba(251, 146, 60, .24);
-  border-left: 3px solid #f97316;
-  background: linear-gradient(110deg, rgba(255, 247, 237, .96), rgba(255, 255, 255, .96));
-  box-shadow: 0 12px 28px rgba(15, 23, 42, .05);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: 14px;
+  background: var(--paper-card);
+  box-shadow: 0 1px 2px rgba(28, 25, 23, .04);
 }
 
 .profile-next-step-copy {
@@ -554,25 +547,25 @@ html, body, #__next {
 
 .profile-kicker,
 .community-kicker {
-  color: #ea580c;
-  font-size: .66rem;
-  font-weight: 900;
-  letter-spacing: .16em;
+  color: var(--ink-3);
+  font-size: .68rem;
+  font-weight: 600;
+  letter-spacing: .06em;
   line-height: 1.2;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 .profile-next-step-copy h2 {
   margin-top: .25rem;
-  color: #0f172a;
+  color: var(--ink);
   font-size: .98rem;
-  font-weight: 900;
+  font-weight: 800;
   line-height: 1.35;
 }
 
 .profile-next-step-copy p {
   margin-top: .2rem;
-  color: #64748b;
+  color: var(--ink-2);
   font-size: .75rem;
   line-height: 1.5;
 }
@@ -581,9 +574,9 @@ html, body, #__next {
   display: flex;
   align-items: center;
   gap: .55rem;
-  color: #64748b;
+  color: var(--ink-3);
   font-size: .68rem;
-  font-weight: 800;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -593,7 +586,7 @@ html, body, #__next {
   height: 3rem;
   place-items: center;
   border-radius: 999px;
-  background: conic-gradient(#f97316 var(--profile-progress, 72%), #fed7aa 0);
+  background: conic-gradient(var(--ink) var(--profile-progress, 72%), var(--line) 0);
   position: relative;
 }
 
@@ -602,12 +595,12 @@ html, body, #__next {
   position: absolute;
   inset: 4px;
   border-radius: inherit;
-  background: #fff7ed;
+  background: var(--paper-card);
 }
 
 .profile-progress-ring span {
   position: relative;
-  color: #c2410c;
+  color: var(--ink);
   font-size: .78rem;
   font-weight: 900;
 }
@@ -623,17 +616,19 @@ html, body, #__next {
   justify-content: center;
   gap: .45rem;
   padding: .65rem .9rem;
-  border: 1px solid #f97316;
-  background: #f97316;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
   color: white;
   font-size: .73rem;
-  font-weight: 900;
+  font-weight: 700;
   white-space: nowrap;
   transition: background .2s ease, transform .2s ease;
 }
 
 .profile-next-step-action:hover {
-  background: #ea580c;
+  background: var(--accent-ink);
+  border-color: var(--accent-ink);
   transform: translateY(-1px);
 }
 
@@ -645,13 +640,13 @@ html, body, #__next {
   display: flex;
   align-items: center;
   gap: .85rem;
-  color: #64748b;
+  color: var(--ink-3);
 }
 
 .community-hero-metrics > div:not(.community-live) {
   min-width: 4.6rem;
   padding-left: .85rem;
-  border-left: 1px solid #e2e8f0;
+  border-left: 1px solid var(--line);
 }
 
 .community-hero-metrics strong,
@@ -660,16 +655,16 @@ html, body, #__next {
 }
 
 .community-hero-metrics strong {
-  color: #0f172a;
+  color: var(--ink);
   font-size: 1.1rem;
-  font-weight: 900;
+  font-weight: 800;
   line-height: 1.1;
 }
 
 .community-hero-metrics span {
   margin-top: .2rem;
   font-size: .64rem;
-  font-weight: 800;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -678,7 +673,7 @@ html, body, #__next {
   align-items: center;
   gap: .4rem;
   padding-left: .85rem;
-  border-left: 1px solid #e2e8f0;
+  border-left: 1px solid var(--line);
 }
 
 .community-panel {
@@ -690,8 +685,8 @@ html, body, #__next {
 }
 
 .community-page article.community-panel:hover {
-  border-color: rgba(251, 146, 60, .42);
-  box-shadow: 0 14px 32px rgba(15, 23, 42, .08);
+  border-color: var(--line);
+  box-shadow: 0 4px 14px rgba(28, 25, 23, .06);
   transform: translateY(-1px);
 }
 
@@ -709,8 +704,9 @@ html, body, #__next {
 }
 
 .dark .profile-next-step {
-  background: linear-gradient(110deg, rgba(67, 38, 18, .72), rgba(28, 25, 23, .92));
-  border-color: rgba(251, 146, 60, .38);
+  background: var(--paper-card);
+  border-color: var(--line);
+  border-left-color: var(--accent);
 }
 
 .dark .profile-next-step-copy h2,
@@ -719,11 +715,11 @@ html, body, #__next {
 }
 
 .dark .profile-progress-ring::before {
-  background: #3a271b;
+  background: var(--paper-card);
 }
 
 .dark .profile-hero::after {
-  background: rgba(251, 146, 60, .12);
+  display: none;
 }
 
 @media (max-width: 700px) {
@@ -981,4 +977,928 @@ html, body, #__next {
   background: var(--paper-card);
   border-color: var(--line);
   color: var(--ink-2);
+}
+
+/* 个人旅行特征图谱：只做入场与呼吸动效，悬停缩放交给组件内联 transform。 */
+@keyframes trait-node-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes trait-edge-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes trait-pulse {
+  0%, 100% { opacity: .16; }
+  50% { opacity: .05; }
+}
+
+.trait-node-body {
+  animation: trait-node-in .32s ease both;
+  transition: transform .18s ease;
+}
+.trait-node-g { cursor: pointer; }
+.trait-node-g:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+.trait-edge-line { animation: trait-edge-in .35s ease both; }
+.trait-pulse-ring { animation: trait-pulse 3.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .trait-node-body,
+  .trait-edge-line,
+  .trait-pulse-ring { animation: none; }
+  .trait-node-body { transition: none; }
+}
+
+/* ==========================================================================
+   暖橙空间沙盘 · 空间光学体系（Phase 1）
+   延续上面的设计纪律：中性层承担 90%，accent 只给主 CTA 与品牌节点；
+   所有材质一律由语义令牌派生（亮/暗自动切换），不引入任何外部资源。
+   JS 动效入口统一由 SpatialTilt 组件开关（hover+fine-pointer 才启用），
+   这里的 CSS 只消费它写入的 --tilt-nx / --tilt-ny / --glare-x / --glare-y。
+   ========================================================================== */
+
+/* 1. 悬浮玻璃舱（通用）：需要时用于包裹任意浮层卡，材质与登录主卡一致 */
+.surface-float {
+  background: linear-gradient(
+    145deg,
+    rgba(255, 253, 248, 0.92) 0%,
+    rgba(248, 245, 239, 0.84) 100%
+  );
+  backdrop-filter: blur(16px) saturate(120%);
+  -webkit-backdrop-filter: blur(16px) saturate(120%);
+  border: 1px solid rgba(120, 83, 45, 0.13);
+  box-shadow:
+    0 40px 80px -48px rgba(28, 25, 23, 0.28),
+    0 12px 32px -20px rgba(28, 25, 23, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+.dark .surface-float {
+  background: linear-gradient(
+    145deg,
+    rgba(28, 25, 23, 0.86) 0%,
+    rgba(18, 16, 13, 0.8) 100%
+  );
+  border-color: rgba(214, 207, 196, 0.14);
+  box-shadow:
+    0 40px 80px -48px rgba(0, 0, 0, 0.6),
+    0 12px 32px -20px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(231, 229, 228, 0.10);
+}
+
+/* 2. 子卡片浮起态：大厅表单浮岛、房间卡（Phase 2 使用） */
+.surface-raised {
+  background: var(--paper-raised);
+  border: 1px solid var(--line-soft);
+  box-shadow:
+    0 10px 25px -8px rgba(28, 25, 23, 0.07),
+    0 2px 6px -2px rgba(28, 25, 23, 0.04),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+  transform-style: preserve-3d;
+  transition:
+    transform 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.35s ease;
+}
+.dark .surface-raised {
+  box-shadow:
+    0 10px 25px -8px rgba(0, 0, 0, 0.42),
+    0 2px 6px -2px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 0 rgba(231, 229, 228, 0.1);
+}
+.surface-raised:hover {
+  transform: translateY(-3px);
+  border-color: var(--line);
+  box-shadow:
+    0 18px 32px -12px rgba(194, 65, 12, 0.14),
+    0 8px 16px -6px rgba(28, 25, 23, 0.07),
+    inset 0 1.5px 0 0 rgba(255, 255, 255, 0.95);
+}
+
+/* 3. 3D 物理主按钮：只给页面级主 CTA（登录提交），工作台工具栏不受影响。
+   质感来自「实心橙面 + 3px 物理底座 + 顶部内高光」，不再用大范围暖色光雾。 */
+.btn-cta-3d {
+  --cta-base: #9a3412; /* 物理底座厚度 */
+  background: linear-gradient(180deg, #f97316 0%, #ea580c 100%);
+  border: 1px solid rgba(154, 52, 18, 0.55);
+  box-shadow:
+    0 3px 0 0 var(--cta-base),
+    0 14px 22px -14px rgba(234, 88, 12, 0.45),
+    inset 0 1px 1px rgba(255, 255, 255, 0.35);
+  transition:
+    transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.16s cubic-bezier(0.34, 1.56, 0.64, 1),
+    filter 0.16s ease;
+}
+.btn-cta-3d:hover:not(:disabled) {
+  transform: translateY(-1.5px);
+  filter: saturate(1.04) brightness(1.02);
+  box-shadow:
+    0 4px 0 0 var(--cta-base),
+    0 18px 28px -16px rgba(234, 88, 12, 0.5),
+    inset 0 1px 1px rgba(255, 255, 255, 0.4);
+}
+.btn-cta-3d:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow:
+    0 1px 0 0 var(--cta-base),
+    0 6px 10px -8px rgba(234, 88, 12, 0.35),
+    inset 0 2px 3px rgba(0, 0, 0, 0.18);
+}
+.btn-cta-3d:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+.btn-cta-3d:disabled {
+  transform: none;
+  opacity: 0.6;
+  filter: saturate(0.8);
+  cursor: not-allowed;
+  box-shadow: 0 3px 0 0 var(--cta-base);
+}
+.dark .btn-cta-3d {
+  --cta-base: #7c2d12;
+  background: linear-gradient(180deg, #f97316 0%, #ea580c 100%);
+  box-shadow:
+    0 3px 0 0 var(--cta-base),
+    0 14px 22px -12px rgba(0, 0, 0, 0.55),
+    inset 0 1px 1px rgba(255, 255, 255, 0.3);
+}
+
+/* 4. 输入框聚焦抬升 + 暖橙呼吸光晕 */
+.spatial-field {
+  transition:
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.2s ease,
+    box-shadow 0.3s ease,
+    background-color 0.2s ease;
+}
+.spatial-field:focus {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow:
+    0 8px 18px -8px rgba(194, 65, 12, 0.28),
+    0 0 0 3.5px rgba(194, 65, 12, 0.13);
+}
+.dark .spatial-field:focus {
+  box-shadow:
+    0 8px 18px -8px rgba(0, 0, 0, 0.5),
+    0 0 0 3.5px rgba(234, 88, 12, 0.18);
+}
+
+/* 5. 鼠标跟随 3D 视差容器（SpatialTilt）：CSS 只消费变量，动效开关在 JS */
+.spatial-tilt {
+  transform: perspective(1200px)
+    rotateX(calc(var(--tilt-ny, 0) * var(--tilt-max, 4.5) * -1deg))
+    rotateY(calc(var(--tilt-nx, 0) * var(--tilt-max, 4.5) * 1deg))
+    scale3d(var(--tilt-lift, 1), var(--tilt-lift, 1), 1);
+  transform-style: preserve-3d;
+  will-change: transform;
+  transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.spatial-tilt[data-tilt-active='true'] {
+  transition: transform 0.09s linear;
+}
+.spatial-tilt-glare {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  border-radius: inherit;
+  background: radial-gradient(
+    560px circle at calc(var(--glare-x, 50) * 1%) calc(var(--glare-y, 50) * 1%),
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(251, 146, 60, 0.05) 42%,
+    transparent 68%
+  );
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+.spatial-tilt:hover .spatial-tilt-glare {
+  opacity: 1;
+}
+.dark .spatial-tilt-glare {
+  background: radial-gradient(
+    560px circle at calc(var(--glare-x, 50) * 1%) calc(var(--glare-y, 50) * 1%),
+    rgba(251, 146, 60, 0.09) 0%,
+    rgba(251, 146, 60, 0.04) 40%,
+    transparent 66%
+  );
+}
+
+/* ==========================================================================
+   暖橙空间沙盘 · 登录门户「四季山河」沉浸式首屏
+   - 背景是程序化生成的四季山野（纯 SVG / CSS 变量，零外部资源、CSP 无感）；
+   - 春樱 → 夏绿 → 秋金 → 冬雪 交叉淡化循环，用结构化的天空/山峦/日光/飞鸟
+     代替任何模糊光斑——不再有"一团光晕"；
+   - 左侧品牌叙事直接浮在场景上，右侧是玻璃登录面板（可配极轻的 2° 视差）。
+   ========================================================================== */
+.auth-hero {
+  background: #f6f1e8; /* 兜底：场景首帧前的暖纸底 */
+}
+.seasonal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.season-layer {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 2.4s ease;
+}
+.season-layer[data-active='true'] {
+  opacity: 1;
+}
+.season-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* 四季色板：天空落在图层背景，山峦/日光通过 CSS 变量喂给 SVG 路径 */
+.season-layer[data-season='spring'] {
+  --far: #e3ceb8;
+  --mid: #cbb095;
+  --near: #b3947b;
+  --sun: #ffe7c2;
+  --sun-strong: #ffd9a3;
+  --sun-core: #ffefd7;
+  background: linear-gradient(180deg, #f6e3d2 0%, #fbf2e5 55%, #fdf8f0 100%);
+}
+.season-layer[data-season='summer'] {
+  --far: #c3d5c4;
+  --mid: #a3bfa9;
+  --near: #7fa487;
+  --sun: #fff0cc;
+  --sun-strong: #ffe6ad;
+  --sun-core: #fff7df;
+  background: linear-gradient(180deg, #d7e7de 0%, #eef3e8 55%, #f7f5ec 100%);
+}
+.season-layer[data-season='autumn'] {
+  --far: #e4c09a;
+  --mid: #cfa074;
+  --near: #b07f52;
+  --sun: #ffdf9e;
+  --sun-strong: #ffd27a;
+  --sun-core: #ffefc9;
+  background: linear-gradient(180deg, #f4d3ab 0%, #f9e3c8 50%, #fbf0df 100%);
+}
+.season-layer[data-season='winter'] {
+  --far: #c9d6e2;
+  --mid: #a9bccc;
+  --near: #8a9fb2;
+  --sun: #eef3f9;
+  --sun-strong: #e2ebf4;
+  --sun-core: #f7fafc;
+  background: linear-gradient(180deg, #d8e4ee 0%, #edf2f6 55%, #f6f8fa 100%);
+}
+
+/* 飘落粒子：春瓣 / 秋叶 / 冬雪（夏天空白），只在允许动态时播放 */
+.season-particles {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.season-particles span {
+  position: absolute;
+  top: -6%;
+  opacity: 0;
+  animation: season-fall var(--dur, 28s) linear var(--delay, 0s) infinite;
+}
+.season-particles[data-kind='petal'] span {
+  border-radius: 62% 38% 55% 45%;
+  background: #f0b5a6;
+}
+.season-particles[data-kind='leaf'] span {
+  border-radius: 42% 58% 50% 50%;
+  background: #d98a4a;
+}
+.season-particles[data-kind='snow'] span {
+  border-radius: 9999px;
+  background: #ffffff;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.65);
+}
+@keyframes season-fall {
+  0% { opacity: 0; transform: translate3d(0, -6vh, 0) rotate(0deg); }
+  10% { opacity: 0.6; }
+  85% { opacity: 0.4; }
+  100% { opacity: 0; transform: translate3d(var(--sway, -4vw), 106vh, 0) rotate(310deg); }
+}
+/* 飞鸟与热气球：极慢漂移，给场景一点呼吸 */
+.seasonal-drift {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.seasonal-drift .birds {
+  animation: birds-drift 26s ease-in-out infinite alternate;
+}
+.seasonal-drift .balloon {
+  animation: balloon-bob 13s ease-in-out infinite alternate;
+}
+@keyframes birds-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(36px); }
+}
+@keyframes balloon-bob {
+  from { transform: translateY(0); }
+  to { transform: translateY(-10px); }
+}
+
+/* Three.js 四季远景的承载层：天空用 4 层交叉淡化，画布透明叠加 3D 山野 */
+.vista3d {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.vista-sky {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 2.6s ease;
+}
+.vista-sky[data-active='true'] {
+  opacity: 1;
+}
+.vista-sky[data-season='spring'] {
+  background: linear-gradient(180deg, #f0dcc4 0%, #faeada 42%, #fdf7ef 100%);
+}
+.vista-sky[data-season='summer'] {
+  background: linear-gradient(180deg, #c3d8cb 0%, #e6eee2 45%, #f6f4ea 100%);
+}
+.vista-sky[data-season='autumn'] {
+  background: linear-gradient(180deg, #ecc08b 0%, #f6d9b6 45%, #faf0e0 100%);
+}
+.vista-sky[data-season='winter'] {
+  background: linear-gradient(180deg, #c3d2df 0%, #e2eaf2 48%, #f4f8fb 100%);
+}
+.vista-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* 手绘式场景：SVG 铺满，天空在最底层由 .vista-sky 交叉淡化 */
+.painted-svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.painted-cloud-a { animation: painted-cloud-drift 38s ease-in-out infinite alternate; }
+.painted-cloud-b { animation: painted-cloud-drift 52s ease-in-out infinite alternate-reverse; }
+.painted-cloud-c { animation: painted-cloud-drift 44s ease-in-out infinite alternate; }
+.painted-balloon { animation: painted-balloon-drift 46s ease-in-out infinite alternate; }
+.painted-birds { animation: painted-birds-drift 60s ease-in-out infinite alternate; }
+@keyframes painted-cloud-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(60px); }
+}
+@keyframes painted-balloon-drift {
+  from { transform: translate(0, 0); }
+  to { transform: translate(46px, -14px); }
+}
+@keyframes painted-birds-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(-44px); }
+}
+.painted-layer { will-change: transform; }
+.painted-layer-far {
+  transform: translate3d(calc(var(--px, 0) * 5px), calc(var(--py, 0) * 3px), 0);
+}
+.painted-layer-mid {
+  transform: translate3d(calc(var(--px, 0) * 9px), calc(var(--py, 0) * 5px), 0);
+}
+.painted-layer-near {
+  transform: translate3d(calc(var(--px, 0) * 14px), calc(var(--py, 0) * 8px), 0);
+}
+.painted-layer-foreground {
+  transform: translate3d(calc(var(--px, 0) * 22px), calc(var(--py, 0) * 12px), 0);
+}
+.painted-layer-far,
+.painted-layer-mid,
+.painted-layer-near,
+.painted-layer-foreground {
+  transition: transform 0.4s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .painted-cloud-a,
+  .painted-cloud-b,
+  .painted-cloud-c,
+  .painted-balloon,
+  .painted-birds { animation: none; }
+  .painted-layer { transition: none; }
+}
+/* 摄影背景层：public/hero/ 下四季图就位时自动启用（四季交叉淡化） */
+.photo-hero {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.photo-hero-layer {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  transition: opacity 2.4s ease;
+}
+.photo-hero-layer[data-active='true'] {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .photo-hero-layer { transition: none; }
+}
+/* 左半屏轻纱：左侧叙事文字与对岸山体（或照片）之间的对比度保障 */
+.auth-hero-scrim {
+  background:
+    radial-gradient(ellipse at 50% 42%, transparent 55%, rgba(40, 32, 24, 0.08) 100%),
+    linear-gradient(90deg, rgba(250, 247, 240, 0.72) 0%, rgba(250, 247, 240, 0.44) 30%, rgba(250, 247, 240, 0) 60%),
+    linear-gradient(180deg, rgba(250, 247, 240, 0.28) 0%, rgba(250, 247, 240, 0) 20%),
+    linear-gradient(0deg, rgba(250, 247, 240, 0.42) 0%, rgba(250, 247, 240, 0) 24%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .vista-sky { transition: none; }
+}
+
+/* 登录面板：近白玻璃 + 清晰白描边，浮在场景之上（不是发光体） */
+.auth-panel {
+  background: rgba(255, 252, 246, 0.86);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 1.5rem;
+  box-shadow:
+    0 32px 80px -40px rgba(28, 25, 23, 0.55),
+    0 12px 28px -18px rgba(28, 25, 23, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+.dark .auth-panel {
+  background: rgba(24, 21, 18, 0.86);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 32px 80px -40px rgba(0, 0, 0, 0.7),
+    0 12px 28px -18px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* 左侧品牌叙事 */
+.auth-overline {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #a08a72;
+}
+.auth-headline {
+  margin-top: 1rem;
+  font-size: clamp(2.2rem, 4.2vw, 3.4rem);
+  line-height: 1.1;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  color: #241f19;
+}
+.auth-serif-accent {
+  font-family: Georgia, 'Songti SC', 'SimSun', serif;
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: #c2410c;
+}
+.auth-sub {
+  margin-top: 1.1rem;
+  max-width: 26rem;
+  font-size: 0.95rem;
+  line-height: 1.7;
+  font-weight: 500;
+  color: #6b5a48;
+}
+.auth-point {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+.auth-point-icon {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  color: #c2410c;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.auth-point-icon-emerald { color: #059669; }
+.auth-point h3 {
+  font-size: 13px;
+  font-weight: 800;
+  color: #2a241e;
+}
+.auth-point p {
+  margin-top: 0.15rem;
+  font-size: 12px;
+  font-weight: 500;
+  color: #7b6a56;
+}
+.dark .auth-point-icon {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* 动态减免：粒子与漂移停播（场景仍保持当前季节，不闪动） */
+@media (prefers-reduced-motion: reduce) {
+  .season-particles { display: none; }
+  .season-layer { transition: none; }
+  .seasonal-drift .birds,
+  .seasonal-drift .balloon { animation: none; }
+}
+
+/* 「成都 3 天」迷你路线条：半透明玻璃 + 细网格 + 描边航线 + 站点图钉 */
+.route-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  background: rgba(255, 252, 246, 0.72);
+  backdrop-filter: blur(10px) saturate(120%);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+  padding: 0.9rem 1rem 0.85rem;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 18px 40px -30px rgba(28, 25, 23, 0.4);
+}
+.dark .route-card {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(24, 21, 18, 0.66);
+  box-shadow:
+    inset 0 1px 0 rgba(231, 229, 228, 0.06),
+    0 18px 40px -30px rgba(0, 0, 0, 0.55);
+}
+/* 极淡地图网格：中心加权、四周淡出 */
+.route-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(120, 83, 45, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 83, 45, 0.05) 1px, transparent 1px);
+  background-size: 26px 26px;
+  -webkit-mask-image: radial-gradient(ellipse at 50% 42%, #000 22%, transparent 82%);
+  mask-image: radial-gradient(ellipse at 50% 42%, #000 22%, transparent 82%);
+  pointer-events: none;
+}
+.dark .route-card::before {
+  background-image:
+    linear-gradient(rgba(214, 207, 196, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(214, 207, 196, 0.05) 1px, transparent 1px);
+}
+.route-canvas {
+  position: relative;
+  height: 64px;
+}
+.route-canvas svg {
+  display: block;
+  width: 100%;
+  height: 64px;
+}
+.route-station {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.route-station-dot {
+  display: flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  border: 2px solid #fff;
+  box-shadow: 0 3px 8px -1px rgba(15, 23, 42, 0.22);
+}
+.route-station-name {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 800;
+  color: #44403c;
+  white-space: nowrap;
+}
+.route-station-time {
+  margin-top: 1px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #a8a29e;
+  font-variant-numeric: tabular-nums;
+}
+.dark .route-station-name { color: #e7e5e4; }
+.dark .route-station-time { color: #78716c; }
+
+/* 进页播放一次的流光脉冲（沿航线扫过一次，扫完停在航线外，不无限循环） */
+.route-flow-dash {
+  stroke-dasharray: 26 240;
+  animation: route-flow-slide 2.4s cubic-bezier(0.45, 0, 0.25, 1) 0.5s 1 both;
+}
+@keyframes route-flow-slide {
+  from { stroke-dashoffset: 266; }
+  to { stroke-dashoffset: -266; }
+}
+
+/* 统一动态减免：视差归零、流光不再播放 */
+@media (prefers-reduced-motion: reduce) {
+  .route-flow-dash { animation: none; opacity: 0; }
+  .spatial-tilt { transform: none !important; transition: none; }
+  .spatial-tilt-glare { display: none; }
+  .surface-raised,
+  .btn-cta-3d,
+  .spatial-field { transition: none; }
+  .surface-raised:hover,
+  .btn-cta-3d:hover:not(:disabled),
+  .btn-cta-3d:active:not(:disabled),
+  .spatial-field:focus { transform: none; }
+}
+
+/* ==========================================================================
+   暖橙空间沙盘 · Phase 2（大厅与协同反馈）
+   只做三件事：表单浮岛材质、步进器/光球的受控动效、真实 WS 更新的一次性波纹。
+   持续动画只有两处且都极慢（环境光球漂移 44s），其余动效全部由真实事件触发一次。
+   ========================================================================== */
+
+/* 1. 静态玻璃面板：大厅表单容器、房间卡容器（不悬浮、不抢交互） */
+.spatial-panel {
+  background: var(--paper-card);
+  border: 1px solid var(--line);
+  box-shadow:
+    0 16px 40px -20px rgba(28, 25, 23, 0.13),
+    0 3px 10px -3px rgba(28, 25, 23, 0.05),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 0 rgba(194, 65, 12, 0.04);
+}
+.dark .spatial-panel {
+  box-shadow:
+    0 16px 40px -20px rgba(0, 0, 0, 0.46),
+    0 3px 10px -3px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 0 rgba(231, 229, 228, 0.1),
+    inset 0 -1px 0 0 rgba(234, 88, 12, 0.08);
+}
+
+/* 2. 步进器浮雕键：带底座厚度，按压物理下沉 */
+.stepper-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.6rem;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  color: var(--ink-2);
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow:
+    0 2px 0 0 var(--line),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+  transition:
+    transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+.stepper-key:hover {
+  color: var(--accent);
+  border-color: rgba(194, 65, 12, 0.35);
+  transform: translateY(-1px) scale(1.05);
+  box-shadow:
+    0 3px 0 0 rgba(120, 83, 45, 0.3),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.95);
+}
+.stepper-key:active {
+  transform: translateY(1px);
+  box-shadow:
+    0 0 0 0 var(--line),
+    inset 0 1px 2px rgba(28, 25, 23, 0.14);
+}
+.stepper-key:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* 3. 步进数字 3D 翻页容器（数字由组件内 framer-motion 驱动） */
+.lobby-flip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4rem;
+  perspective: 320px;
+}
+.lobby-flip-card {
+  display: inline-block;
+  backface-visibility: hidden;
+}
+
+/* 4. 目的地情绪光球：颜色随目的地过渡（background-color 可平滑过渡），
+      漂移动画极慢且只在 no-preference 下运行 */
+.ambient-orb {
+  transition: background-color 0.9s ease;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ambient-orb {
+    animation: orb-drift 44s ease-in-out infinite alternate;
+  }
+}
+@keyframes orb-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(4%, 6%, 0) scale(1.08); }
+  to { transform: translate3d(-3%, 8%, 0) scale(1.04); }
+}
+
+/* 5. 房间声呐雷达底纹：围绕房间码的静态同心圆（无持续动画，诚实克制） */
+.sonar-field {
+  background: repeating-radial-gradient(
+    circle at center,
+    rgba(16, 185, 129, 0.16) 0 1.5px,
+    transparent 1.5px 26px
+  );
+  border-radius: 9999px;
+  -webkit-mask-image: radial-gradient(circle at center, black 30%, transparent 72%);
+  mask-image: radial-gradient(circle at center, black 30%, transparent 72%);
+}
+
+/* 6. 协同更新波纹：由 roomMembers 真实变化触发一次（key 重放），不常驻 */
+.room-ripple {
+  animation: room-ripple-once 1.15s cubic-bezier(0.22, 1, 0.36, 1) 1 both;
+}
+@keyframes room-ripple-once {
+  0% {
+    opacity: 0;
+    box-shadow: inset 0 0 0 0 rgba(16, 185, 129, 0.32);
+    border: 1.5px solid rgba(16, 185, 129, 0.35);
+  }
+  30% { opacity: 1; }
+  100% {
+    opacity: 0;
+    box-shadow: inset 0 0 16px 6px rgba(16, 185, 129, 0);
+    border: 1.5px solid rgba(16, 185, 129, 0);
+  }
+}
+
+/* 7. 成员头像 3D 浮环：静态白环 + 悬停时品牌橙描边 */
+.lobby-member-ring {
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.92),
+    0 3px 8px -2px rgba(28, 25, 23, 0.2);
+  transition: box-shadow 0.25s ease;
+}
+.lobby-member:hover .lobby-member-ring {
+  box-shadow:
+    0 0 0 2px rgba(251, 146, 60, 0.55),
+    0 4px 10px -2px rgba(194, 65, 12, 0.28);
+}
+.dark .lobby-member-ring {
+  box-shadow:
+    0 0 0 2px rgba(28, 25, 23, 0.9),
+    0 3px 8px -2px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-orb { animation: none; }
+  .stepper-key,
+  .lobby-member-ring { transition: none; }
+  .stepper-key:hover,
+  .stepper-key:active { transform: none; }
+  .room-ripple { animation: none; opacity: 0; }
+}
+
+/* ==========================================================================
+   暖橙空间沙盘 · Phase 3（规划工作台：悬浮玻璃坞 + 2.5D 图钉）
+   - .spatial-dock：一体化毛玻璃胶囊坞，收拢地图上的散落按钮；
+     只提供材质与内边距，布局/换行规则仍由 .map-control-dock /
+     .visualizer-action-dock 等既有类负责（不破坏车道预留）。
+   - .map-pin-*：地图图钉升级为「徽章 + 发光立柱 + 呼吸底晕」的 2.5D 造型，
+     仍是真实 <button>（键盘可聚焦、aria-label 不变）；
+     选中/悬停态由组件直接切换 data-active / data-hovered，不重建 Marker。
+   ========================================================================== */
+.spatial-dock {
+  background: linear-gradient(145deg, rgba(255, 253, 248, 0.92), rgba(248, 245, 239, 0.85));
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 1.25rem;
+  padding: 0.375rem;
+  gap: 0.375rem;
+  box-shadow:
+    0 12px 32px -12px rgba(28, 25, 23, 0.2),
+    0 2px 8px -2px rgba(28, 25, 23, 0.08),
+    inset 0 1.5px 0 0 rgba(255, 255, 255, 0.95),
+    inset 0 -1px 0 0 rgba(194, 65, 12, 0.05);
+}
+.dark .spatial-dock {
+  background: linear-gradient(145deg, rgba(28, 25, 23, 0.88), rgba(18, 16, 13, 0.82));
+  border-color: rgba(214, 207, 196, 0.14);
+  box-shadow:
+    0 12px 32px -12px rgba(0, 0, 0, 0.5),
+    0 2px 8px -2px rgba(0, 0, 0, 0.32),
+    inset 0 1.5px 0 0 rgba(231, 229, 228, 0.12),
+    inset 0 -1px 0 0 rgba(234, 88, 12, 0.1);
+}
+
+/* 图钉徽章：默认白底橙字，选中实心橙 + 光环，悬停轻微放大 */
+.map-pin-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  border: 2px solid rgba(234, 88, 12, 0.85);
+  background: #ffffff;
+  color: #ea580c;
+  box-shadow: 0 4px 10px -2px rgba(15, 23, 42, 0.35);
+  transition:
+    transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.2s ease,
+    color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.25s ease;
+}
+.map-pin[data-hovered='true'] .map-pin-badge {
+  transform: scale(1.1);
+}
+.map-pin[data-active='true'] .map-pin-badge {
+  background: #f97316;
+  color: #ffffff;
+  border-color: #ffffff;
+  transform: scale(1.22);
+  box-shadow:
+    0 0 0 4px rgba(253, 186, 116, 0.55),
+    0 8px 18px -4px rgba(234, 88, 12, 0.55);
+}
+
+/* 立柱：垂直于地图平面的发光短柱，随徽章同色联动 */
+.map-pin-stem {
+  width: 3px;
+  height: 24px;
+  margin-top: -2px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, rgba(249, 115, 22, 0.95), rgba(234, 88, 12, 0.2));
+  box-shadow: 0 0 6px rgba(249, 115, 22, 0.45);
+  transition: opacity 0.2s ease;
+}
+.map-pin[data-active='true'] .map-pin-stem {
+  background: linear-gradient(180deg, rgba(251, 146, 60, 1), rgba(234, 88, 12, 0.35));
+  box-shadow: 0 0 9px rgba(251, 146, 60, 0.65);
+}
+
+/* 底晕：落在地图上的椭圆光斑（静态，不闪烁） */
+.map-pin-halo {
+  position: absolute;
+  bottom: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 26px;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at center, rgba(249, 115, 22, 0.4), transparent 70%);
+  pointer-events: none;
+}
+
+/* 悬停信息牌：预渲染常驻 DOM，透明度与位移由 data-hovered / data-active 驱动 */
+.map-pin-tip {
+  position: absolute;
+  bottom: calc(100% + 14px);
+  left: 50%;
+  transform: translate(-50%, 8px);
+  width: 14rem;
+  z-index: 50;
+  opacity: 0;
+  pointer-events: none;
+  background: rgba(15, 23, 42, 0.95);
+  color: #ffffff;
+  border: 1px solid #334155;
+  border-radius: 0.9rem;
+  padding: 0.75rem;
+  box-shadow: 0 18px 40px -12px rgba(2, 6, 23, 0.6);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.map-pin[data-hovered='true'] .map-pin-tip,
+.map-pin[data-active='true'] .map-pin-tip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .map-pin-badge,
+  .map-pin-tip { transition: none; }
+  .map-pin[data-hovered='true'] .map-pin-badge,
+  .map-pin[data-active='true'] .map-pin-badge { transform: none; }
 }

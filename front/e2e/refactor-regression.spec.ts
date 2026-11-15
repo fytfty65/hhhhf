@@ -46,8 +46,10 @@ const user = {
 // 留空则完全不带该字段（模拟旧后端），用于验证"没有字段时不显示任何提示"。
 async function installMocks(
   page: Page,
-  options: { governance?: boolean; cityResolution?: string; budgetStatus?: 'ok' | 'at_risk'; planningSlow?: boolean; loggedOut?: boolean; noTodayExpense?: boolean } = {},
+  options: { governance?: boolean; cityResolution?: string; budgetStatus?: 'ok' | 'at_risk'; planningSlow?: boolean; loggedOut?: boolean; noTodayExpense?: boolean; guest?: boolean } = {},
 ) {
+  // 临时账号用例需要 localStorage 里的身份带上 isGuest，否则个人主页不会渲染转正面板。
+  const identity = options.guest ? { ...user, isGuest: true } : user;
   // 执行状态在 mock 里真实累积：点「标记到访」后再次 GET 能读到，才能验证「今天」随进度推进。
   const executionStates: Record<string, { node_key: string; status: string; delay_minutes?: number; updated_at?: string }> = {};
   await page.addInitScript((payload) => {
@@ -149,7 +151,7 @@ async function installMocks(
     }
     (window as unknown as { WebSocket: unknown }).WebSocket = MockWebSocket;
   }, {
-    user,
+    user: identity,
     governance: Boolean(options.governance),
     cityResolution: options.cityResolution ?? '',
     budgetStatus: options.budgetStatus ?? 'ok',
@@ -256,6 +258,10 @@ async function installMocks(
   // 实时连接改用一次性票据；没有这个端点，工作区入口会被（正确地）挡住。
   await page.route('**/api/auth/ws-ticket', (route) =>
     route.fulfill({ json: { ticket: 'e2e-ws-ticket', expires_in: 60 } }),
+  );
+  // 临时账号原地转正：账号 ID 不变，因此响应里只需回显新的用户名。
+  await page.route('**/api/auth/upgrade', (route) =>
+    route.fulfill({ json: { message: '已转为正式账号', user: { ...user, username: 'upgraded-user', nickname: '转正后的我', isGuest: false } } }),
   );
   await page.route('**/api/user/**', (route) => route.fulfill({ json: { ok: true, user, trips: [] } }));
   await page.route('**/api/community/**', (route) => route.fulfill({ json: { ok: true, posts: [], tags: [] } }));
@@ -421,6 +427,96 @@ test.describe('refactor regression', () => {
     await page.getByText('返回大厅', { exact: true }).click();
     await page.setViewportSize({ width: 1280, height: 720 });
     await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible();
+  });
+
+  test('个人旅行特征图谱只渲染自己的特征，并标注仅自己可见', async ({ page }) => {
+    await installMocks(page);
+    // 只返回当前账号的数据：接口本身不接受 user_id，这里连别人的节点都不给。
+    await page.route('**/api/v1/user/preference/graph', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            graph_version: 'user-trait-graph-v1',
+            owner_scope: 'self_only',
+            empty: false,
+            sample_count: 6,
+            confidence: 'medium',
+            disclosures: ['只包含当前登录账号自己的偏好与反馈，其他用户的数据不会进入这张图。'],
+            nodes: [
+              { id: 'self', label: '你', kind: 'self', weight: 1, evidence_count: 0, source: 'session' },
+              { id: 'nature', label: '自然', kind: 'dimension', weight: 0.6, evidence_count: 6, source: 'user_preference' },
+              { id: 'tag:自然风光', label: '自然风光', kind: 'tag', weight: 1, evidence_count: 0, source: 'user_preference' },
+              { id: 'fb:九寨沟', label: '九寨沟', kind: 'feedback', weight: 2, evidence_count: 2, source: 'feedback_log' },
+            ],
+            edges: [
+              { from: 'self', to: 'nature', relation: 'composition_weight', weight: 0.6, evidence_count: 6, source: 'user_preference' },
+              { from: 'self', to: 'tag:自然风光', relation: 'likes', weight: 1, evidence_count: 0, source: 'user_preference' },
+              { from: 'self', to: 'fb:九寨沟', relation: 'feedback_up', weight: 2, evidence_count: 2, source: 'feedback_log' },
+            ],
+          },
+        },
+      }),
+    );
+
+    await page.goto('/');
+    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+    await page.getByTestId('lobby-more').click();
+    await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
+
+    const card = page.getByTestId('user-trait-graph');
+    await expect(card).toBeVisible();
+    await expect(card.getByText('仅自己可见')).toBeVisible();
+    await expect(page.getByTestId('trait-graph-svg')).toBeVisible();
+    await expect(page.getByTestId('trait-graph-confidence')).toHaveText('样本积累中');
+    await expect(page.getByText('九寨沟', { exact: true })).toBeVisible();
+    await expect(page.getByText(/其他用户的数据不会进入这张图/)).toBeVisible();
+    await noHorizontalOverflow(page);
+
+    // 交互 1：点选节点后，右侧详情固定展示它的来源与依据。
+    await card.getByTestId('trait-node-feedback').click();
+    const inspector = page.getByTestId('trait-graph-inspector');
+    await expect(inspector.getByText('九寨沟', { exact: true })).toBeVisible();
+    await expect(inspector.getByText('反馈记录')).toBeVisible();
+
+    // 交互 2：按类型筛选时，画布只留对应节点。
+    await card.getByRole('button', { name: '标签 1', exact: true }).click();
+    await expect(card.getByTestId('trait-node-dimension')).toHaveCount(0);
+    await expect(card.getByTestId('trait-node-tag')).toHaveCount(1);
+    await card.getByRole('button', { name: '全部 3', exact: true }).click();
+
+    // 等入场动画结束再截图，避免截到连线的淡入中间态；用更大的视口方便核对细节。
+    await page.waitForTimeout(600);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await card.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: '../work/user-trait-graph.png', fullPage: false });
+  });
+
+  test('临时账号在个人主页可以原地转正，且数据提示不再声称「只在这台设备」', async ({ page }) => {
+    // 评审意见：试用账号的数据其实在服务端，旧文案却写「行程保存在这台设备」；
+    // 同时它既不能转正也不会过期。这里固定住「如实说明 + 一键转正」的行为。
+    await installMocks(page, { guest: true });
+    await page.goto('/');
+    await expect(page.getByText('开启下一段旅程协同规划')).toBeVisible({ timeout: 20_000 });
+
+    await page.getByTestId('lobby-more').click();
+    await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
+    await expect(page.getByText('我的路书', { exact: true })).toBeVisible({ timeout: 15_000 });
+
+    const panel = page.getByTestId('guest-account-panel');
+    await expect(panel).toBeVisible();
+    // 说明三件事：服务端保存、登录态只在本浏览器、超期会被清理。
+    await expect(panel.getByText(/行程确实保存在服务端/)).toBeVisible();
+    await expect(panel.getByText(/登录态只在这台设备的浏览器/)).toBeVisible();
+    await expect(panel.getByText(/30 天未使用的临时账号会被自动清理/)).toBeVisible();
+
+    await panel.getByPlaceholder(/例如 alice/).fill('alice');
+    await panel.getByPlaceholder('至少 6 位').fill('secret123');
+    await panel.getByRole('button', { name: /保留全部数据并转正/ }).click();
+
+    // 转正后临时账号面板消失，并给出「数据仍在」的确认反馈。
+    await expect(panel).toHaveCount(0);
+    await expect(page.getByText('已转为正式账号，行程与偏好都保留在原账号上')).toBeVisible();
+    await expect(page.getByTestId('account-security')).toBeVisible();
   });
 
   test('community screen reachable and reversible', async ({ page }) => {
@@ -705,10 +801,10 @@ test.describe('refactor regression', () => {
     const overview = page.getByTestId('trip-overview');
     const credibility = page.getByTestId('budget-credibility');
     await expect(credibility).toBeVisible();
-    await expect(page.getByTestId('budget-confidence')).toHaveText('可信度：中');
+    await expect(page.getByTestId('budget-confidence')).toHaveText('预算把握：中');
     await expect(page.getByTestId('budget-verified')).toHaveText('¥980');
     await expect(page.getByTestId('budget-pending')).toHaveText('¥120');
-    await expect(credibility.getByText('1 个节点未取价')).toBeVisible();
+    await expect(credibility.getByText('1 个节点待估算')).toBeVisible();
     // 合计 = 已确认 980 + 待确认 120；人均/日均按 1 人、2 天分摊
     await expect(page.getByTestId('budget-total')).toHaveText('¥1,100');
     await expect(page.getByTestId('budget-per-person')).toHaveText('¥1,100');

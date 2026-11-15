@@ -28,6 +28,10 @@
 
 const isDev = process.env.NODE_ENV !== 'production';
 
+// 是否为"没有 TLS 的部署"（公网 IP + http:80）。只影响 CSP 的
+// upgrade-insecure-requests，见下方 contentSecurityPolicy。
+const allowInsecureHttp = process.env.NEXT_PUBLIC_ALLOW_INSECURE_HTTP === '1';
+
 // 网关来源（CSP 用）。必须定义在 IMG_HOSTS 之前：早先这里犯过 const 的 TDZ 坑
 // （白名单在其下方定义，引用到就"整个 next.config 加载即抛错"→ 单测/build/E2E 全红）。
 // 远程部署时 CSP 必须放行**真实的**网关来源，否则现象与 2026-09-19 瓦片事故一样：
@@ -68,7 +72,6 @@ const IMG_HOSTS = [
   // 跨源取图同样受 img-src 管，漏了就是"图全被拦、只剩占位"——这个坑已经踩过两次。
   // 网关来源来自 API_IMG_TARGETS（定义在本文件**上方**，避开了早先那个 const TDZ 坑）。
   ...API_IMG_TARGETS,
-  'https://api.dicebear.com',
   'https://unpkg.com',
   'https://cdn.jsdelivr.net',
 ];
@@ -121,12 +124,30 @@ function contentSecurityPolicy() {
     // browsers.
     "frame-ancestors 'none'",
   ]
-    .concat(isDev ? [] : ['upgrade-insecure-requests'])
+    // 纯 HTTP 部署（例如直接以公网 IP:80 对外、没有 TLS）必须关掉这条指令：
+    // 它会把页面里所有 http:// 子请求升级成 https://，而这台机器没有 443 证书，
+    // 结果是"页面能开、所有接口静默失败"（控制台只见 net::ERR_CONNECTION_REFUSED）。
+    // 默认仍然开启，只有部署方显式声明 NEXT_PUBLIC_ALLOW_INSECURE_HTTP=1 时才跳过。
+    .concat(isDev || allowInsecureHttp ? [] : ['upgrade-insecure-requests'])
     .join('; ');
 }
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // 部署期细节 1：构建到独立目录。
+  // 服务器只有 1.7G 内存，`next build` 直接写 front/.next 会覆盖正在运行的服务读取的
+  // 产物，构建期间表现为整站 500/无响应。改由 OMNI_DIST_DIR 指到 .next-build，
+  // 构建成功后再由 deploy.sh 整体 mv 切换，构建失败则线上完全不受影响。
+  distDir: process.env.OMNI_DIST_DIR || '.next',
+
+  // 部署期细节 2：线上跳过 TypeScript 全量检查。
+  // 这台机器跑一次 tsc 要 20 分钟（编译只要 50 秒），期间 CPU/内存被打满。
+  // 类型检查改为 deploy.ps1 在**本机**执行作为发布闸门，服务器只做编译。
+  // 本地/CI 不设这个环境变量，行为与以前完全一致。
+  typescript: {
+    ignoreBuildErrors: process.env.OMNI_SKIP_TYPECHECK === '1',
+  },
+
   // 添加 rewrites 配置
   async rewrites() {
     return [

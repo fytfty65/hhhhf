@@ -8,6 +8,12 @@ export interface UserProfile {
   avatarUrl?: string;
   signature?: string;
   token?: string;
+  // 免注册试用创建的临时账号。它能正常建房、协作、保存行程，
+  // 但登录态只存在于当前浏览器，且长期不用会被服务端清理。
+  isGuest?: boolean;
+  // 服务端 ADMIN_USER_IDS 白名单算出的管理员身份，只用来决定是否展示管理入口。
+  // 权限判断始终在服务端，这里改 true 不会获得任何额外能力。
+  isAdmin?: boolean;
   isLoggedIn: boolean;
 }
 

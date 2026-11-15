@@ -87,17 +87,17 @@ test('presenceForNode 返回聚焦指定节点的成员', () => {
   assert.deepEqual(presenceForNode(list, '故宫').map((p) => p.userId), ['u1', 'u3']);
 });
 
-test('presenceAvatarUrl http/data 直通，相对路径补 base，缺失走 DiceBear', () => {
+test('presenceAvatarUrl http/data 直通，相对路径补 base，缺失走本地生成头像', () => {
   assert.equal(presenceAvatarUrl(mk({ avatarUrl: 'http://x/a.png' }), ''), 'http://x/a.png');
   assert.equal(presenceAvatarUrl(mk({ avatarUrl: 'data:image/png;base64,xx' }), ''), 'data:image/png;base64,xx');
   assert.equal(presenceAvatarUrl(mk({ avatarUrl: '/uploads/a.png' }), 'https://api.test'), 'https://api.test/uploads/a.png');
   assert.match(
     presenceAvatarUrl(mk({ avatarUrl: '', avatarSeed: 's1', name: '小明' }), ''),
-    /dicebear\.com\/9\.x\/avataaars\/svg\?seed=s1/,
+    /^data:image\/svg\+xml/,
   );
 });
 
-test('presenceAvatarUrl 无 seed 时回退到 name', () => {
+test('presenceAvatarUrl 无 seed 时用 name 首字生成头像', () => {
   const url = presenceAvatarUrl(mk({ avatarUrl: '', avatarSeed: '', name: '小红' }), '');
-  assert.match(url, /seed=%E5%B0%8F%E7%BA%A2/);
+  assert.match(url, /%E5%B0%8F%3C%2Ftext%3E/);
 });

@@ -9,7 +9,7 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AlertCircle, BrainCircuit, CheckCircle2, Clock, ExternalLink, Footprints, Hotel, MapPin, PiggyBank, RefreshCw, RotateCw, ShieldCheck, Split, Sun, ThumbsDown, ThumbsUp, Wand2 } from 'lucide-react';
+import { AlertCircle, BrainCircuit, CheckCircle2, Clock, ExternalLink, Footprints, Hotel, MapPin, MessageCircle, PiggyBank, RefreshCw, RotateCw, ShieldCheck, Split, Sun, ThumbsDown, ThumbsUp, Wand2 } from 'lucide-react';
 import { getCleanPhotoUrl } from '../lib/lobbyUtils';
 import PoiImage from './PoiImage';
 import PriceProvenanceChip, { PlanAnnotationList, OfficialDetailBlock, DayNoticeList, TrustBadge, TrustSummaryBar } from './PriceProvenance';
@@ -18,6 +18,8 @@ import ExpandableConnectorNav from './ExpandableConnectorNav';
 import TeamPresenceBar from './TeamPresenceBar';
 import ConsensusExplainability from './ConsensusExplainability';
 import ScenarioSimulator from './ScenarioSimulator';
+import NodeSuggestionThread from './NodeSuggestionThread';
+import type { RoomComment } from '../lib/stores/roomCollaboration';
 
 /**
  * 天气是外部供应商数据，必须能说清"什么时候取到的、是不是缓存"。
@@ -48,9 +50,12 @@ export default function MafengwoStylePanel({
   onSwapPoi, onMarkVisited, visitedNodes = [], roomCode, roomMembers, teamSatisfaction, arbitrationRecords, nodeVotes, peerVoteCounts, onVote,
   wsConnected = true, fairnessAudit, memberNegotiation,
   safetyInfo, safetyBrief, briefLoading, onGenerateSafetyBrief, targetCity,
-  onPhotoClick, currentUser, onApplyScenario, onSecondaryPlan, planLedgers
+  onPhotoClick, currentUser, onApplyScenario, onSecondaryPlan, planLedgers,
+  roomComments = [], onNodeComment
 }: any) {
   const [showWeatherForecast, setShowWeatherForecast] = useState(false);
+  // 当前展开「写建议」的节点名；同一时间只展开一个，避免页面被输入框塞满。
+  const [suggestNode, setSuggestNode] = useState('');
 
   return (
     <div className="pt-2 pb-32 font-sans">
@@ -105,7 +110,7 @@ export default function MafengwoStylePanel({
                 <div className="p-2.5 bg-orange-500 text-white rounded-xl shadow-xs"><Sun className="w-5 h-5"/></div>
                 <div>
                   <h4 className="text-sm font-black text-slate-800">目的地气象：{weatherInfo.condition}</h4>
-                  <p className="text-xs text-slate-500 mt-0.5 font-medium">{trafficInfo?.advice || '暂无路况数据，请在出行前重新获取'}</p>
+                  <p className="text-xs text-slate-500 mt-0.5 font-medium">{trafficInfo?.advice || '路况可在出行前重新获取'}</p>
                   <p className="text-[11px] text-slate-400 mt-1 font-medium" data-testid="weather-fetched-at">{weatherFreshnessLabel(weatherInfo)}</p>
                 </div>
               </div>
@@ -207,6 +212,9 @@ export default function MafengwoStylePanel({
             const isSelected = selectedPoiIndex === idx;
             const peerVotes = peerVoteCounts?.[pt.name];
             const hasPeerVotes = Boolean(peerVotes && (peerVotes.up > 0 || peerVotes.down > 0));
+            // 这个节点上的建议：成员和房主都能看到，房主在顶部建议箱统一处理。
+            const nodeComments = (roomComments || []).filter((item: RoomComment) => item.node_name === pt.name);
+            const openSuggestionCount = nodeComments.filter((item: RoomComment) => item.status === 'open').length;
 
             const fallbackImg = getCleanPhotoUrl(pt.map_image || '');
 
@@ -243,9 +251,11 @@ export default function MafengwoStylePanel({
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2.5 flex-wrap">
                       <h3 className={`text-xl font-black transition-colors ${isSelected ? 'text-orange-500' : 'text-slate-800 group-hover:text-orange-500'}`}>{pt.name}</h3>
-                      <span className="flex items-center gap-1 bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-xs font-bold border border-orange-100">
-                        ⭐ {pt.rating || '暂无评分数据'}
-                      </span>
+                      {pt.rating && (
+                        <span className="flex items-center gap-1 bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-xs font-bold border border-orange-100">
+                          ⭐ {pt.rating}
+                        </span>
+                      )}
 
                       {pt.cost && (
                         <span className="flex items-center gap-1 bg-emerald-50 text-emerald-700 px-2.5 py-0.5 rounded-lg text-xs font-bold border border-emerald-200/80 shadow-2xs">
@@ -255,12 +265,14 @@ export default function MafengwoStylePanel({
                       )}
 
                       {/* 价格出处：官方价 / 票务平台价（哪种票）/ 网摘估算 + 来源链接 + 官方预约入口
-                          （2026-10-07：后端已带回这些字段，不渲染出来等于没做） */}
-                      <PriceProvenanceChip node={pt} />
+                          （2026-10-07：后端已带回这些字段，不渲染出来等于没做）
+                          行程正文用中性「待报价」，原始「未知价」与判断依据留在悬停提示里。 */}
+                      <PriceProvenanceChip node={pt} soft />
 
-                      {/* 事实可信度四态（P3）：已核实 / 估算 / 信息较旧 / 尚未核实
-                          —— 紧挨着花销显示，让用户知道"这个数字该不该信、要不要去官方再确认" */}
-                      <TrustBadge node={pt} />
+                      {/* 事实可信度四态（P3）：已核实 / 估算 / 信息较旧 / 待核实
+                          —— 紧挨着花销显示，让用户知道"这个数字该不该信、要不要去官方再确认"
+                          四态与来源仍写在悬停提示中，界面只保留中性字样。 */}
+                      <TrustBadge node={pt} soft />
                     </div>
 
                     <div className="flex items-center gap-1.5">
@@ -274,6 +286,17 @@ export default function MafengwoStylePanel({
                           <ThumbsDown className="w-3 h-3 text-rose-500" />{peerVotes.down}
                         </span>
                       )}
+                      <button
+                        type="button"
+                        data-testid={`node-suggestion-${idx}`}
+                        onClick={(e) => { e.stopPropagation(); setSuggestNode(suggestNode === pt.name ? '' : pt.name); }}
+                        className={`p-1.5 rounded-lg border text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer ${suggestNode === pt.name ? 'bg-orange-500 text-white border-orange-500' : 'bg-slate-50 hover:bg-orange-50 text-slate-500 hover:text-orange-600 border-slate-200'}`}
+                        title="给这个节点提一条建议"
+                      >
+                        <MessageCircle className="w-3 h-3" />
+                        {openSuggestionCount > 0 ? openSuggestionCount : null}
+                      </button>
+
                       <button
                         data-testid={`vote-up-${idx}`}
                         onClick={(e) => { e.stopPropagation(); onVote(pt.name, 'up'); }}
@@ -470,6 +493,15 @@ export default function MafengwoStylePanel({
                     </div>
                   )}
                 </div>
+
+                <NodeSuggestionThread
+                  comments={nodeComments}
+                  open={suggestNode === pt.name}
+                  day={Number(pt.day) || totalDays[activeDayIndex] || 1}
+                  nodeName={pt.name}
+                  onToggle={() => setSuggestNode(suggestNode === pt.name ? '' : pt.name)}
+                  onSubmit={(nodeName: string, day: number, text: string) => (onNodeComment ? onNodeComment(nodeName, day, text) : false)}
+                />
 
                 {idx < routes.length - 1 && (
                   <ExpandableConnectorNav 

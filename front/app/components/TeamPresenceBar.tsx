@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { assetUrl } from '../lib/apiClient';
+import { generatedAvatarUrl } from '../lib/avatarArt';
 import type { ActivityEvt } from '../types';
 import { Activity, Check, Copy, Radio, Scale, Users } from 'lucide-react';
 
@@ -65,7 +66,7 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
   const getSatBar = (s: number) =>
     s >= 78 ? 'from-emerald-400 to-emerald-500' : s >= 65 ? 'from-amber-400 to-orange-400' : 'from-rose-400 to-rose-500';
 
-  // 👑 头像渲染：优先使用用户上传的真实头像，没有时再用 DiceBear 生成
+  // 👑 头像渲染：优先使用用户上传的真实头像，没有时用本地生成的墨色首字母头像
   const getAvatarUrl = (m: any) => {
     let url = m.avatarUrl || m.avatar_url || '';
     // 如果成员是当前用户本人且没有头像，用 currentUser 的兜底
@@ -77,7 +78,7 @@ export default function TeamPresenceBar({ members = [], teamSatisfaction = {}, r
       url = assetUrl(url);
     }
     if (url) return url;
-    return `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(m.avatarSeed || m.name)}&backgroundColor=fdeed8`;
+    return generatedAvatarUrl(m.avatarSeed || m.id || m.name, m.name);
   };
 
   return (

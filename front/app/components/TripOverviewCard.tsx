@@ -2,7 +2,7 @@
 
 import { MapPin, PiggyBank, Clock3, ShieldAlert, Edit3 } from 'lucide-react';
 
-// 预算可信度：来自后端 budget_report 的「已确认/待确认/未取价」三档口径。
+// 预算把握：来自后端 budget_report 的「已核价/待估算/未取价」三档口径。
 // 只有后端真的给了金额才渲染这一块，缺字段不画空壳。
 export type BudgetBreakdown = {
   confidence: string | null;
@@ -16,16 +16,17 @@ export type BudgetBreakdown = {
 // 后端 budget_report.confidence 只有 high/medium/low 三档，这里直译成人话；
 // 读不懂的值不猜，显示「未标注」，避免把没有分级的数据说成可信。
 const CONFIDENCE: Record<string, { label: string; tone: string; hint: string }> = {
-  high: { label: '可信度：高', tone: 'text-emerald-700 bg-emerald-50', hint: '价格均来自官方或可核来源' },
-  medium: { label: '可信度：中', tone: 'text-amber-700 bg-amber-50', hint: '部分价格为估算，或有节点未取到价格' },
-  low: { label: '可信度：低', tone: 'text-rose-700 bg-rose-50', hint: '多数节点没取到价格，总额仅供参考' },
+  high: { label: '预算把握：高', tone: 'text-emerald-700 bg-emerald-50', hint: '价格均来自官方或可核来源' },
+  medium: { label: '预算把握：中', tone: 'text-amber-700 bg-amber-50', hint: '部分价格为估算，个别节点待估算' },
+  low: { label: '预算把握：低', tone: 'text-rose-700 bg-rose-50', hint: '多数节点还没定价，总额仅供参考' },
 };
 
 const money = (value: number) => `¥${Math.round(value).toLocaleString()}`;
 
 // 今日概览：普通模式首屏只回答四个问题——今天去哪、总共多少钱、要花多少时间在路上、
 // 有没有需要处理的风险。其余指标（覆盖率、共识指数、策略臂、采样分布）收进「查看依据」。
-// 所有数字都来自真实数据；拿不到就如实写「暂无」，不补零、不估算。
+// 所有数字都来自真实数据；拿不到不补零、不编造，但也不把「未估计」当主文案：
+// 能用已知报价给下限就写「¥x 起」，完全没有才写「待报价 / 待返回」，且用中性色而非警示橙。
 export default function TripOverviewCard({
   dayLabel,
   dayRoutes,
@@ -62,48 +63,73 @@ export default function TripOverviewCard({
       ? stops[0]
       : `${stops[0]} → ${stops[stops.length - 1]}`;
 
-  const hasVerifiedBudget = Number.isFinite(budgetTotal) && (budgetTotal as number) > 0;
-  const budgetText = hasVerifiedBudget
-    ? `¥${Math.round(budgetTotal as number).toLocaleString()}`
-    : budgetEstimated > 0
-      ? `估算 ¥${Math.round(budgetEstimated).toLocaleString()}`
-      : '未给出预算';
-  const budgetHint = hasVerifiedBudget
-    ? '后端预算报告总额'
-    : budgetEstimated > 0
-      ? `按节点报价合计${unpricedCount > 0 ? `，${unpricedCount} 个节点未计价` : ''}`
-      : '未返回价格';
-
-  const transportText = transportMinutes != null && transportMinutes > 0
-    ? `${Math.floor(transportMinutes / 60) > 0 ? `${Math.floor(transportMinutes / 60)} 小时 ` : ''}${transportMinutes % 60} 分钟`
-    : '暂无交通耗时数据';
-
-  // 预算三档口径：已确认（供应商/可核价）+ 待确认（估算）+ 未取价节点。
-  // 人均/日均按「已确认+待确认」合计分摊，分摊人数与天数都来自真实数据。
+  // 预算三档口径：已核价（供应商/可核价）+ 待估算（估算）+ 未取价节点。
   const verified = budgetBreakdown?.verifiedCost ?? 0;
   const pending = budgetBreakdown?.estimatedCost ?? 0;
   const reportTotal = verified + pending;
+  const hasBudgetTotal = Number.isFinite(budgetTotal) && (budgetTotal as number) > 0;
+  const budgetText = hasBudgetTotal
+    ? `¥${Math.round(budgetTotal as number).toLocaleString()}`
+    : budgetEstimated > 0
+      ? `约 ¥${Math.round(budgetEstimated).toLocaleString()}`
+      : verified > 0
+        ? `${money(verified)} 起`
+        : '待报价';
+  // 缺失只说明「还没到」，不把「未估计」当主语；有下限时给「¥x 起」。
+  const budgetHint = hasBudgetTotal
+    ? reportTotal > 0
+      ? pending > 0 ? '已核价 + 待估算合计' : '已核价报价合计'
+      : '按已取到的节点报价合计'
+    : budgetEstimated > 0
+      ? `按已取到的节点报价合计${unpricedCount > 0 ? `，另有 ${unpricedCount} 个节点待估算` : ''}`
+      : verified > 0
+        ? '仅含已核价部分，其余待估算'
+        : '报价返回后自动更新';
+
+  const transportText = transportMinutes != null && transportMinutes > 0
+    ? `${Math.floor(transportMinutes / 60) > 0 ? `${Math.floor(transportMinutes / 60)} 小时 ` : ''}${transportMinutes % 60} 分钟`
+    : '待返回';
+
+  // 人均/日均按「已核价+待估算」合计分摊，分摊人数与天数都来自真实数据。
   const confidenceInfo = budgetBreakdown
     ? CONFIDENCE[budgetBreakdown.confidence || ''] || {
-        label: '可信度：未标注',
+        label: '预算把握：未标注',
         tone: 'text-slate-600 bg-slate-100',
-        hint: '后端未给出可信度分级',
+        hint: '这份预算未标注分级',
       }
     : null;
   const people = Math.max(1, Math.round(Number(memberCount) || 1));
   const days = Math.max(1, Math.round(Number(totalDays) || 1));
-  const perPersonText = reportTotal > 0 ? money(reportTotal / people) : '暂无';
-  const perDayText = reportTotal > 0 ? money(reportTotal / days) : '暂无';
+  const perPersonText = reportTotal > 0 ? money(reportTotal / people) : '待估算';
+  const perDayText = reportTotal > 0 ? money(reportTotal / days) : '待估算';
   const unknownText = budgetBreakdown && budgetBreakdown.unknownCount > 0
-    ? `${budgetBreakdown.unknownCount} 个节点未取价`
-    : '估算价，尚未核实';
+    ? `${budgetBreakdown.unknownCount} 个节点待估算`
+    : '按已取到的报价估算';
+  // 一个金额都没取到、也没有待估算节点时整块不渲染，避免只剩负面卡。
+  const hasBudgetDetail = !!budgetBreakdown
+    && (verified > 0 || pending > 0 || (budgetBreakdown.unknownCount ?? 0) > 0);
   const overrunText = budgetBreakdown?.shortfall && budgetBreakdown.shortfall > 0
     ? budgetBreakdown.status === 'over'
       ? `已超出预算 ${money(budgetBreakdown.shortfall)}`
       : budgetBreakdown.status === 'at_risk'
-        ? `可能超出预算 ${money(budgetBreakdown.shortfall)}（按已确认+待确认合计）`
+        ? `可能超出预算 ${money(budgetBreakdown.shortfall)}（按已核价+待估算合计）`
         : null
     : null;
+
+  // 首屏一行结论：节点数 · 在途时间 · 人均预算，全部来自已有 props。
+  const summaryTransport = transportMinutes != null && transportMinutes > 0
+    ? transportMinutes >= 60
+      ? `约 ${Math.round((transportMinutes / 60) * 10) / 10} 小时在途`
+      : `约 ${transportMinutes} 分钟在途`
+    : '在途时间待估算';
+  const summaryPerPerson = reportTotal > 0
+    ? `预计 ${money(reportTotal / people)}/人`
+    : hasBudgetTotal
+      ? `预计 ${money((budgetTotal as number) / people)}/人`
+      : budgetEstimated > 0
+        ? `预计 ${money(budgetEstimated / people)}/人`
+        : '人均待估算';
+  const overviewSummary = `${dayRoutes.length} 个节点 · ${summaryTransport} · ${summaryPerPerson}`;
 
   return (
     <section
@@ -111,7 +137,10 @@ export default function TripOverviewCard({
       aria-label="今日概览"
       data-testid="trip-overview"
     >
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+      <p className="mb-2 truncate text-xs font-medium text-stone-600" title={overviewSummary}>
+        {overviewSummary}
+      </p>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div className="rounded-xl bg-white p-3">
           <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><MapPin className="h-3 w-3" />今日路线</p>
           <p className="mt-1 truncate text-sm font-black text-stone-800" title={routeText}>{routeText}</p>
@@ -119,13 +148,13 @@ export default function TripOverviewCard({
         </div>
         <div className="rounded-xl bg-white p-3">
           <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><PiggyBank className="h-3 w-3" />总预算</p>
-          <p className={`mt-1 text-sm font-black ${hasVerifiedBudget ? 'text-stone-800' : 'text-amber-700'}`} data-testid="budget-total">{budgetText}</p>
+          <p className={`mt-1 text-sm font-black ${hasBudgetTotal ? 'text-stone-800' : budgetEstimated > 0 ? 'text-amber-700' : 'text-stone-500'}`} data-testid="budget-total">{budgetText}</p>
           <p className="mt-0.5 text-xs text-stone-400">{budgetHint}</p>
         </div>
         <div className="rounded-xl bg-white p-3">
           <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><Clock3 className="h-3 w-3" />交通耗时</p>
-          <p className={`mt-1 text-sm font-black ${transportMinutes != null && transportMinutes > 0 ? 'text-stone-800' : 'text-amber-700'}`}>{transportText}</p>
-          <p className="mt-0.5 text-xs text-stone-400">按已返回的分段交通耗时合计</p>
+          <p className={`mt-1 text-sm font-black ${transportMinutes != null && transportMinutes > 0 ? 'text-stone-800' : 'text-stone-500'}`}>{transportText}</p>
+          <p className="mt-0.5 text-xs text-stone-400">按分段交通耗时汇总</p>
         </div>
         <div className="rounded-xl bg-white p-3">
           <p className="flex items-center gap-1 text-xs font-bold text-stone-400"><ShieldAlert className="h-3 w-3" />风险提醒</p>
@@ -133,36 +162,40 @@ export default function TripOverviewCard({
           <p className="mt-0.5 line-clamp-2 text-xs text-stone-400">{riskDisclosure}</p>
         </div>
       </div>
-      {budgetBreakdown && confidenceInfo && (
+      {budgetBreakdown && confidenceInfo && hasBudgetDetail && (
         <div
-          className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"
+          className="mt-2 flex flex-wrap gap-2"
           data-testid="budget-credibility"
-          aria-label="预算可信度"
+          aria-label="预算把握"
         >
-          <div className="rounded-xl bg-white p-3">
-            <p className="text-xs font-bold text-stone-400">可信度</p>
+          <div className="min-w-[150px] flex-1 rounded-xl bg-white p-3">
+            <p className="text-xs font-bold text-stone-400">预算把握</p>
             <p className={`mt-1 inline-flex rounded-md px-1.5 py-0.5 text-xs font-black ${confidenceInfo.tone}`} data-testid="budget-confidence">
               {confidenceInfo.label}
             </p>
             <p className="mt-1 text-xs text-stone-400">{confidenceInfo.hint}</p>
           </div>
-          <div className="rounded-xl bg-white p-3">
-            <p className="text-xs font-bold text-stone-400">已确认</p>
-            <p className="mt-1 text-sm font-black text-emerald-700" data-testid="budget-verified">
-              {verified > 0 ? money(verified) : '暂无'}
-            </p>
-            <p className="mt-0.5 text-xs text-stone-400">官方/可核来源价格</p>
-          </div>
-          <div className="rounded-xl bg-white p-3">
-            <p className="text-xs font-bold text-stone-400">待确认</p>
-            <p className={`mt-1 text-sm font-black ${pending > 0 ? 'text-amber-700' : 'text-stone-500'}`} data-testid="budget-pending">
-              {pending > 0 ? money(pending) : '暂无'}
-            </p>
-            <p className="mt-0.5 text-xs text-stone-400">{unknownText}</p>
-          </div>
-          <div className="rounded-xl bg-white p-3">
+          {verified > 0 && (
+            <div className="min-w-[132px] flex-1 rounded-xl bg-white p-3">
+              <p className="text-xs font-bold text-stone-400">已核价</p>
+              <p className="mt-1 text-sm font-black text-emerald-700" data-testid="budget-verified">
+                {money(verified)}
+              </p>
+              <p className="mt-0.5 text-xs text-stone-400">官方/可核来源价格</p>
+            </div>
+          )}
+          {pending > 0 && (
+            <div className="min-w-[132px] flex-1 rounded-xl bg-white p-3">
+              <p className="text-xs font-bold text-stone-400">待估算</p>
+              <p className="mt-1 text-sm font-black text-amber-700" data-testid="budget-pending">
+                {money(pending)}
+              </p>
+              <p className="mt-0.5 text-xs text-stone-400">{unknownText}</p>
+            </div>
+          )}
+          <div className="min-w-[150px] flex-1 rounded-xl bg-white p-3">
             <p className="text-xs font-bold text-stone-400">人均 / 日均</p>
-            <p className="mt-1 text-sm font-black text-stone-800" data-testid="budget-per-person">
+            <p className={`mt-1 text-sm font-black ${reportTotal > 0 ? 'text-stone-800' : 'text-stone-500'}`} data-testid="budget-per-person">
               {perPersonText}
             </p>
             <p className="mt-0.5 text-xs text-stone-400">

@@ -7,12 +7,14 @@ import {
   ShieldCheck, AlertTriangle, X, Activity, RotateCw, Radar,
   Thermometer, Globe2, Eye, Siren,
   Navigation, CheckCircle2, Info, Target,
-  Building2, DollarSign
+  Building2
 } from 'lucide-react';
 
 import {
   RADAR_FONT,
   riskProfile,
+  CII_HIGH_THRESHOLD,
+  CII_WARN_THRESHOLD,
   parseCostNumber,
   useRadarTheme,
   radarPalette,
@@ -650,7 +652,6 @@ export default function WorldSafetyGlobe({
   const totalCost = safeRoutePoints.reduce((s, p) => s + parseCostNumber(p.cost), 0);
 
   const alertCount = liveSafety?.active_alerts?.length || 0;
-  const hasSafetyData = !!liveSafety;
   const requestFreshnessLabel = lastRefreshed ? `${Math.max(0, Math.round((currentTime.getTime() - lastRefreshed) / 1000))} 秒前` : '未同步';
   const snapshotTimestamp = Number(liveSafety?.risk_ts);
   const snapshotFreshnessLabel = Number.isFinite(snapshotTimestamp) && snapshotTimestamp > 0
@@ -658,6 +659,26 @@ export default function WorldSafetyGlobe({
     : '无时间戳';
   const signalSources = liveSafety?.signal_sources || {};
   const availableSignalCount = Object.values(signalSources).filter((signal) => signal?.available).length;
+
+  // 风险等级先用人话表达：后端给了 risk_level 就用，没有才按 CII 阈值兜底。
+  const riskLevel = liveSafety?.risk_level
+    || (hasRealCii ? (ciiScore >= CII_HIGH_THRESHOLD ? 'HIGH' : ciiScore >= CII_WARN_THRESHOLD ? 'MEDIUM' : 'LOW') : null);
+  const riskLevelView = riskLevel === 'HIGH'
+    ? { label: '高风险', text: 'text-rose-600 dark:text-rose-400', dot: 'bg-rose-500' }
+    : riskLevel === 'MEDIUM'
+      ? { label: '中风险', text: 'text-amber-600 dark:text-amber-400', dot: 'bg-amber-500' }
+      : riskLevel === 'LOW'
+        ? { label: '低风险', text: 'text-emerald-600 dark:text-emerald-400', dot: 'bg-emerald-500' }
+        : { label: '风险待评估', text: 'text-slate-500', dot: 'bg-slate-400' };
+  const riskAdvice = liveSafety?.safety_advice
+    || (riskLevel === 'HIGH'
+      ? '风险偏高，建议避开高风险时段与区域，必要时调整行程。'
+      : riskLevel === 'MEDIUM'
+        ? '存在一定风险，出行前留意天气与路况提示，避开高风险区域。'
+        : riskLevel === 'LOW'
+          ? '整体风险较低，按常规出行安排即可。'
+          : '暂无足够情报，建议出行前再确认一次天气与安全信息。');
+  const updatedAtLabel = new Date(lastRefreshed).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
   if (typeof document === 'undefined') return null;
 
@@ -730,23 +751,37 @@ export default function WorldSafetyGlobe({
         </div>
 
         <div className="p-4 space-y-3 h-[200px] sm:h-[380px] overflow-y-auto custom-scrollbar">
-          {/* P1: 情报同步状态指示（估算值徽标 + 上次同步时间 + 刷新中转圈） */}
-          <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-500">
-            <span className="flex items-center gap-1.5">
-              <RotateCw className={`w-3 h-3 ${refreshing ? 'animate-spin text-orange-600' : ''}`} />
-              <span>{refreshing ? '正在同步实时情报…' : `本次请求 ${new Date(lastRefreshed).toLocaleTimeString('zh-CN')} · ${requestFreshnessLabel}`}</span>
-            </span>
-            {liveSafety?.is_estimated && (
-              <span className="px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400">估算值</span>
-            )}
-          </div>
+          {/* P1: 情报同步状态指示（综合概览已折叠，其他 tab 保留） */}
+          {activeTab !== 'overview' && (
+            <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-500">
+              <span className="flex items-center gap-1.5">
+                <RotateCw className={`w-3 h-3 ${refreshing ? 'animate-spin text-orange-600' : ''}`} />
+                <span>{refreshing ? '正在同步实时情报…' : `本次请求 ${new Date(lastRefreshed).toLocaleTimeString('zh-CN')} · ${requestFreshnessLabel}`}</span>
+              </span>
+              {liveSafety?.is_estimated && (
+                <span className="px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400">估算值</span>
+              )}
+            </div>
+          )}
 
           {activeTab === 'overview' && (
             <>
-              {/* CII 综合影响指数 */}
-              <div className="space-y-2">
+              {/* 结论优先：先说等级与建议，技术口径统一收进下方折叠区 */}
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${riskLevelView.dot}`} />
+                    <span className={`text-[15px] font-black ${riskLevelView.text}`}>{riskLevelView.label}</span>
+                  </div>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-400">{riskAdvice}</p>
+                </div>
+                <span className="shrink-0 text-[11px] font-mono text-slate-500">更新于 {updatedAtLabel}</span>
+              </div>
+
+              {/* 整体风险指数：保留数值与色条，刻度只留低/中/高 */}
+              <div className="space-y-2" title="综合影响指数（CII）">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-slate-600 dark:text-slate-400 tracking-wide">综合影响指数 (CII)</span>
+                  <span className="text-xs text-slate-600 dark:text-slate-400 tracking-wide">整体风险指数</span>
                   <span className={`text-2xl font-black ${hasRealCii ? profile.text : 'text-slate-500'}`} style={{ fontFamily: RADAR_FONT.display, textShadow: hasRealCii ? `0 0 18px ${profile.color}55` : 'none' }}>{hasRealCii ? ciiScore.toFixed(1) : 'N/A'}</span>
                 </div>
                 <div className="relative h-2 w-full rounded-full bg-slate-800 overflow-hidden">
@@ -757,99 +792,64 @@ export default function WorldSafetyGlobe({
                   <div className="absolute top-0 left-[40%] w-px h-full bg-white/20" />
                 </div>
                 <div className="flex justify-between text-[11px] font-mono">
-                  <span className="text-emerald-600 dark:text-emerald-500">安全</span><span className="text-amber-600 dark:text-amber-500">预警</span><span className="text-rose-600 dark:text-rose-500">高危</span><span className="text-slate-600">100</span>
+                  <span className="text-emerald-600 dark:text-emerald-500">低</span><span className="text-amber-600 dark:text-amber-500">中</span><span className="text-rose-600 dark:text-rose-500">高</span>
                 </div>
               </div>
 
-              {/* 信任提示：无实时情报源时明确标注估算值，避免误导 */}
-              {liveSafety?.is_estimated && (
-                <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-2 flex items-center gap-1.5">
-                  <Info className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
-                  <span className="text-xs text-amber-600 dark:text-amber-300 font-mono">本数据为估算值 · 暂未接入实时情报源</span>
+              {/* 天气 / 路况：一行一条，不再用大卡片 */}
+              <div className="space-y-1.5 text-xs">
+                <div className="flex items-center gap-2">
+                  <Thermometer className="h-3 w-3 shrink-0 text-orange-700 dark:text-orange-400" />
+                  <span className="shrink-0 text-slate-500">天气</span>
+                  <span className="truncate font-bold text-slate-900 dark:text-white">{weatherCondition || '暂无数据'}</span>
                 </div>
-              )}
-
-              <div className="rounded-lg border border-slate-300/50 bg-slate-100/60 p-2.5 dark:border-white/10 dark:bg-slate-900/30">
-                <div className="mb-2 flex items-center justify-between text-[10px] font-bold text-slate-500">
-                  <span>数据边界</span><span>{availableSignalCount}/3 信号源 · 快照 {snapshotFreshnessLabel}</span>
+                <div className="flex items-center gap-2">
+                  <Activity className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <span className="shrink-0 text-slate-500">路况</span>
+                  <span className="truncate font-bold text-slate-900 dark:text-white">{trafficSummary || '暂无数据'}</span>
                 </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  <button type="button" onClick={() => setShowRouteLayer((value) => !value)} aria-pressed={showRouteLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showRouteLayer ? 'bg-orange-600/15 text-orange-700 dark:text-orange-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>路线 {showRouteLayer ? '开' : '关'}</button>
-                  <button type="button" onClick={() => setShowContextLayer((value) => !value)} aria-pressed={showContextLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showContextLayer ? 'bg-slate-300/70 text-slate-700 dark:bg-white/10 dark:text-slate-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>周边 {showContextLayer ? '开' : '关'}</button>
-                  <button type="button" onClick={() => setShowSignalLayer((value) => !value)} aria-pressed={showSignalLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showSignalLayer ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>风险 {showSignalLayer ? '开' : '关'}</button>
-                </div>
-                <div className="mt-1.5 grid grid-cols-2 gap-1.5"><button type="button" onClick={toggleGlobalNetwork} aria-pressed={showGlobalNetwork} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showGlobalNetwork ? 'bg-orange-600/15 text-orange-700 dark:text-orange-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>全球城市 {showGlobalNetwork ? '开' : '关'}</button><span className="rounded bg-slate-200/60 px-1.5 py-1 text-center text-[10px] text-slate-500">信号点 {signalPoints.length}</span></div>
-                <div className="mt-2 grid grid-cols-3 gap-1">{(['safety', 'weather', 'traffic'] as const).map((key) => { const signal = signalSources[key]; return <span key={key} className={`rounded px-1.5 py-1 text-center text-[9px] ${signal?.available ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-slate-200/70 text-slate-400 dark:bg-slate-800'}`}>{key === 'safety' ? '安全' : key === 'weather' ? '天气' : '路况'} · {signal?.available ? (signal.provider || '已接入') : '无数据'}</span>; })}</div>
-                <p className="mt-2 text-[10px] leading-4 text-slate-400">全球城市点为坐标目录，不代表实时天气、路况或客流；实时字段仅在接入供应商且带时间戳时展示。</p>
               </div>
 
-              {/* 目标城市信息卡片 */}
-              <div className="bg-slate-200/70 dark:bg-slate-800/40 rounded-xl p-3 border border-slate-300/50 dark:border-white/5 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Building2 className="w-3.5 h-3.5 text-orange-700 dark:text-orange-400" />
-                    <span className="text-[13px] font-bold text-slate-900 dark:text-white">{targetCity}</span>
+              {/* 城市摘要：只留城市 · 节点数 · 活跃告警，明细在风险/路线 tab */}
+              <div className="flex items-center gap-1.5 rounded-lg border border-slate-300/50 bg-slate-200/70 px-2.5 py-2 text-xs dark:border-white/5 dark:bg-slate-800/40">
+                <Building2 className="h-3.5 w-3.5 shrink-0 text-orange-700 dark:text-orange-400" />
+                <span className="truncate font-bold text-slate-900 dark:text-white">{targetCity}</span>
+                <span className="text-slate-500">·</span>
+                <span className="shrink-0 text-slate-600 dark:text-slate-400">{safeRoutePoints.length} 个节点</span>
+                <span className="text-slate-500">·</span>
+                <span className={`shrink-0 ${alertCount > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>{alertCount} 条活跃告警</span>
+              </div>
+
+              {/* 图层 / 信号源 / 数据边界 / 估算说明：默认折叠，展开后仍可操作 */}
+              <details className="rounded-lg border border-slate-300/50 bg-slate-100/60 dark:border-white/10 dark:bg-slate-900/30">
+                <summary className="cursor-pointer select-none px-2.5 py-2 text-[11px] font-bold text-slate-600 dark:text-slate-400">图层与数据来源</summary>
+                <div className="space-y-2 border-t border-slate-300/40 px-2.5 py-2.5 dark:border-white/5">
+                  <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-slate-500">
+                    <span className="flex items-center gap-1.5">
+                      <RotateCw className={`h-3 w-3 ${refreshing ? 'animate-spin text-orange-600' : ''}`} />
+                      <span>{refreshing ? '正在同步实时情报…' : `本次请求 ${new Date(lastRefreshed).toLocaleTimeString('zh-CN')} · ${requestFreshnessLabel}`}</span>
+                    </span>
+                    {liveSafety?.is_estimated && (
+                      <span className="shrink-0 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-amber-600 dark:text-amber-400">估算值</span>
+                    )}
                   </div>
-                  <span className={`text-xs font-mono px-2 py-0.5 rounded border ${profile.text} border-current/20 bg-current/5`}>{profile.label}</span>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="text-center bg-slate-200/70 dark:bg-slate-900/50 rounded-lg p-2">
-                    <div className="text-[11px] text-slate-500 mb-0.5">风险等级</div>
-                    <div className={`text-[13px] font-black ${hasSafetyData ? profile.text : 'text-slate-500'}`}>
-                      {hasSafetyData ? (liveSafety?.risk_level || '评估中') : '暂无数据'}
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button type="button" onClick={() => setShowRouteLayer((value) => !value)} aria-pressed={showRouteLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showRouteLayer ? 'bg-orange-600/15 text-orange-700 dark:text-orange-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>路线 {showRouteLayer ? '开' : '关'}</button>
+                    <button type="button" onClick={() => setShowContextLayer((value) => !value)} aria-pressed={showContextLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showContextLayer ? 'bg-slate-300/70 text-slate-700 dark:bg-white/10 dark:text-slate-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>周边 {showContextLayer ? '开' : '关'}</button>
+                    <button type="button" onClick={() => setShowSignalLayer((value) => !value)} aria-pressed={showSignalLayer} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showSignalLayer ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>风险 {showSignalLayer ? '开' : '关'}</button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5"><button type="button" onClick={toggleGlobalNetwork} aria-pressed={showGlobalNetwork} className={`rounded px-1.5 py-1 text-[10px] font-bold ${showGlobalNetwork ? 'bg-orange-600/15 text-orange-700 dark:text-orange-300' : 'bg-slate-200 text-slate-400 dark:bg-slate-800'}`}>全球城市 {showGlobalNetwork ? '开' : '关'}</button><span className="rounded bg-slate-200/60 px-1.5 py-1 text-center text-[10px] text-slate-500 dark:bg-slate-800/60">信号点 {signalPoints.length}</span></div>
+                  <div className="grid grid-cols-3 gap-1">{(['safety', 'weather', 'traffic'] as const).map((key) => { const signal = signalSources[key]; return <span key={key} className={`rounded px-1.5 py-1 text-center text-[9px] ${signal?.available ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-slate-200/70 text-slate-400 dark:bg-slate-800'}`}>{key === 'safety' ? '安全' : key === 'weather' ? '天气' : '路况'} · {signal?.available ? (signal.provider || '已接入') : '无数据'}</span>; })}</div>
+                  {liveSafety?.is_estimated && (
+                    <div className="flex items-center gap-1.5 rounded border border-amber-500/20 bg-amber-500/10 p-2">
+                      <Info className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                      <span className="text-[11px] text-amber-600 dark:text-amber-300 font-mono">本数据为估算值 · 暂未接入实时情报源</span>
                     </div>
-                  </div>
-                  <div className="text-center bg-slate-200/70 dark:bg-slate-900/50 rounded-lg p-2">
-                    <div className="text-[11px] text-slate-500 mb-0.5">节点数</div>
-                    <div className="text-[13px] font-black text-slate-900 dark:text-white">{safeRoutePoints.length}</div>
-                  </div>
-                  <div className="text-center bg-slate-200/70 dark:bg-slate-900/50 rounded-lg p-2">
-                    <div className="text-[11px] text-slate-500 mb-0.5">活跃告警</div>
-                    <div className={`text-[13px] font-black ${alertCount > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>{alertCount}</div>
-                  </div>
+                  )}
+                  <p className="text-[10px] leading-4 text-slate-400">数据边界：{availableSignalCount}/3 信号源 · 快照 {snapshotFreshnessLabel}</p>
+                  <p className="text-[10px] leading-4 text-slate-400">全球城市点为坐标目录，不代表实时天气、路况或客流；实时字段仅在接入供应商且带时间戳时展示。</p>
                 </div>
-              </div>
-
-              {/* 天气 & 路况 */}
-              <div className="grid grid-cols-2 gap-2">
-                <div className="bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 border border-slate-300/50 dark:border-white/5">
-                  <div className="flex items-center gap-1 text-orange-700 dark:text-orange-400 mb-0.5"><Thermometer className="w-3 h-3" /><span className="text-[11px] font-bold">天气</span></div>
-                  <div className="text-[13px] text-slate-900 dark:text-white font-bold">{weatherCondition || '暂无数据'}</div>
-                </div>
-                <div className="bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 border border-slate-300/50 dark:border-white/5">
-                  <div className="flex items-center gap-1 text-amber-600 dark:text-amber-400 mb-0.5"><Activity className="w-3 h-3" /><span className="text-[11px] font-bold">路况</span></div>
-                  <div className="text-[13px] text-slate-900 dark:text-white font-bold leading-tight">{trafficSummary || '暂无数据'}</div>
-                </div>
-              </div>
-
-              {/* 成本总览 */}
-              <div className="bg-slate-200/70 dark:bg-slate-800/40 rounded-lg p-2.5 border border-slate-300/50 dark:border-white/5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <DollarSign className="w-3 h-3 text-amber-600 dark:text-amber-400" />
-                    <span className="text-xs text-slate-600 dark:text-slate-400 font-bold">预算总览</span>
-                  </div>
-                  <span className="text-sm font-black text-amber-600 dark:text-amber-400">¥{totalCost.toLocaleString()}</span>
-                </div>
-                {safeRoutePoints.length > 0 ? (
-                  <div className="mt-1.5 flex items-center gap-2 text-[11px] text-slate-500">
-                    <span>{safeRoutePoints.length} 个节点</span>
-                    <span className="text-slate-700">·</span>
-                    <span>均费 ¥{safeRoutePoints.length > 0 ? Math.round(totalCost / safeRoutePoints.length) : 0}</span>
-                  </div>
-                ) : (
-                  <div className="mt-1 text-[11px] text-slate-600 font-mono">暂无路线预算数据</div>
-                )}
-              </div>
-
-              {/* 无数据提示 */}
-              {!hasSafetyData && (
-                <div className="bg-slate-200/60 dark:bg-slate-800/20 border border-dashed border-slate-700/50 rounded-lg p-3 text-center">
-                  <Info className="w-3.5 h-3.5 text-slate-600 mx-auto mb-1" />
-                  <div className="text-xs text-slate-600 font-mono">暂无安全情报数据</div>
-                  <div className="text-[11px] text-slate-700 mt-0.5">后端数据尚未同步，请稍后刷新</div>
-                </div>
-              )}
+              </details>
             </>
           )}
 
@@ -964,7 +964,7 @@ export default function WorldSafetyGlobe({
             </div>
           )}
 
-          {liveSafety?.safety_advice && (
+          {activeTab !== 'overview' && liveSafety?.safety_advice && (
             <div className="pt-2 border-t border-slate-300/50 dark:border-white/5 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
               <span className="text-orange-700 dark:text-orange-400 font-bold flex items-center gap-1 mb-1"><Info className="w-3 h-3" /> 安全建议</span>
               {liveSafety.safety_advice}
