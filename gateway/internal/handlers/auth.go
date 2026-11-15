@@ -361,6 +361,12 @@ func buildAuthUser(u models.User) gin.H {
 		"avatarSeed": avatarSeed,
 		"avatarUrl":  u.AvatarURL,
 		"signature":  u.Signature,
+		// isGuest 让前端明确知道这是「免注册试用」的临时账号，
+		// 从而在界面上说明数据归属并给出转正入口。
+		"isGuest": userIsGuest(u),
+		// isAdmin 由服务端白名单算出（ADMIN_USER_IDS），前端只用来决定
+		// 是否展示管理入口；真正的权限判断仍在每个管理端接口里。
+		"isAdmin": isAdminID(u.ID),
 	}
 }
 
@@ -370,6 +376,9 @@ func RegisterHandler(c *gin.Context) {
 		Username string `json:"username" binding:"required"`
 		Password string `json:"password" binding:"required,min=6"`
 		Nickname string `json:"nickname"`
+		// Guest 由「免注册试用」入口显式传入：创建的是可用的真实账号，
+		// 但会被标记为临时账号，支持原地转正与过期清理。
+		Guest bool `json:"guest"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "用户名或密码格式不正确（密码至少 6 位）", "code": "INVALID_REGISTRATION_REQUEST"})
@@ -398,12 +407,15 @@ func RegisterHandler(c *gin.Context) {
 		return
 	}
 
+	now := time.Now().UTC()
 	user := models.User{
 		ID:           uuid.New().String(),
 		Username:     username,
 		PasswordHash: string(hash),
 		Nickname:     strings.TrimSpace(req.Nickname),
 		AvatarSeed:   username,
+		IsGuest:      req.Guest,
+		LastActiveAt: &now,
 	}
 	if err := database.DB.Create(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "注册失败，请稍后再试", "code": "REGISTRATION_FAILED"})
@@ -486,7 +498,25 @@ func verifyCredentials(c *gin.Context, username, password string) (models.User, 
 	}
 
 	clearAuthFailures(username)
+	// 只有登录成功才算"用过这个账号"，作为临时账号过期清理的依据。
+	touchUserActivity(user.ID)
 	return user, true
+}
+
+// MeHandler 返回当前会话的身份信息（含 isAdmin）。
+//
+// 为什么需要它：登录响应里的 isAdmin 会被前端连同资料一起缓存到 localStorage，
+// 而 ADMIN_USER_IDS 是服务端配置。若只信任缓存，刚被加入白名单的管理员
+// 在重新登录前看不到任何管理入口（反过来，被移出白名单的人也会一直看到入口）。
+// 前端每次启动用这一个轻量接口刷新身份，权限判断仍以各管理端接口为准。
+func MeHandler(c *gin.Context) {
+	var user models.User
+	if err := database.DB.Where("id = ?", CurrentUserID(c)).First(&user).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"user": buildAuthUser(user)})
 }
 
 // LogoutHandler revokes the current device session (access token + refresh

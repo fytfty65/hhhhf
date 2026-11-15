@@ -37,7 +37,7 @@ const sqliteReadConns = 4
 // Increment this value when a schema change needs an explicit, auditable
 // migration step. Migrations are applied one version at a time so a partially
 // upgraded deployment can resume safely on the next start.
-const schemaVersion = 21
+const schemaVersion = 23
 
 // Reader returns the pool that read-only queries should use. Writes must go
 // through DB, which has exactly one connection.
@@ -178,6 +178,14 @@ func migrateSchema(tx *gorm.DB, version int) error {
 		// (user_id, created_at) / (event_type, created_at) 过滤并排序时会先回表
 		// 再排序；SQLite 单写模型下，这会把写锁持有时间放大。
 		return migrateCompositeIndexes(tx)
+	case 22:
+		// 临时账号：User 新增 is_guest / last_active_at 两列，
+		// 既有库靠这次迁移补列，早期 guest_ 前缀的历史账号由 username 兜底识别。
+		return tx.AutoMigrate(&models.User{})
+	case 23:
+		// 特征图谱的节点操作：UserPreference 新增 trait_weights / trait_hidden 两列，
+		// 用来持久化「权重新标定」与「移出节点」，否则刷新就还原。
+		return tx.AutoMigrate(&models.UserPreference{})
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}

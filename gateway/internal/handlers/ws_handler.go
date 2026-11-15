@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,70 @@ var negotiationSlots = struct {
 	sync.Mutex
 	active map[string]bool
 }{active: make(map[string]bool)}
+
+// 房间当前视图（大厅 / 规划页）由网关保存一份。
+//
+// 为什么不让房主来回答「成员索要视图」：房主的读循环在 agent_negotiate 期间
+// 会被推演整段阻塞，此时新成员进场问「房主在哪」房主根本读不到消息，
+// 成员就只能停在大厅等推演结束。这里由网关直接回放最近一次 room_view。
+var roomViewStates = struct {
+	sync.Mutex
+	views map[string]map[string]interface{}
+}{views: make(map[string]map[string]interface{})}
+
+func recordRoomView(roomID string, payload map[string]interface{}) {
+	roomViewStates.Lock()
+	roomViewStates.views[roomID] = payload
+	roomViewStates.Unlock()
+}
+
+func currentRoomView(roomID string) map[string]interface{} {
+	roomViewStates.Lock()
+	defer roomViewStates.Unlock()
+	return roomViewStates.views[roomID]
+}
+
+// 房间节点建议（成员对某个节点的文字建议）。
+// 缓存最近 200 条，供晚加入的成员/房主进场时拉取；采纳或忽略只改状态，
+// 不删除记录，方便回看谁提了什么、最后由谁处理。
+var roomCommentStates = struct {
+	sync.Mutex
+	comments map[string][]map[string]interface{}
+}{comments: make(map[string][]map[string]interface{})}
+
+const maxRoomComments = 200
+
+func appendRoomComment(roomID string, comment map[string]interface{}) {
+	roomCommentStates.Lock()
+	defer roomCommentStates.Unlock()
+	list := append(roomCommentStates.comments[roomID], comment)
+	if len(list) > maxRoomComments {
+		list = list[len(list)-maxRoomComments:]
+	}
+	roomCommentStates.comments[roomID] = list
+}
+
+func updateRoomCommentStatus(roomID, id, status, userID, userName string) {
+	roomCommentStates.Lock()
+	defer roomCommentStates.Unlock()
+	list := roomCommentStates.comments[roomID]
+	for _, comment := range list {
+		if comment["id"] == id {
+			comment["status"] = status
+			comment["handled_by"] = userID
+			comment["handled_by_name"] = userName
+		}
+	}
+}
+
+func snapshotRoomComments(roomID string) []map[string]interface{} {
+	roomCommentStates.Lock()
+	defer roomCommentStates.Unlock()
+	list := roomCommentStates.comments[roomID]
+	out := make([]map[string]interface{}, len(list))
+	copy(out, list)
+	return out
+}
 
 func acquireNegotiation(roomID string) bool {
 	negotiationSlots.Lock()
@@ -231,6 +296,161 @@ func HandleWebSocket(c *gin.Context) {
 		case "cursor_leave":
 			GlobalHub.ClearPresence(roomID, userID)
 			continue
+		case "room_view":
+			// 房主所在视图（大厅 / 规划页）。/ws 只广播白名单类型，
+			// 这里显式转发并注入发送者身份：前端据此忽略自己的回显、
+			// 显示「谁在规划」，跟随中的成员据此自动进出规划页。
+			var p struct {
+				Payload map[string]interface{} `json:"payload"`
+			}
+			_ = json.Unmarshal(message, &p)
+			payload := p.Payload
+			if payload == nil {
+				payload = map[string]interface{}{}
+			}
+			payload["user_id"] = userID
+			payload["user_name"] = nickname
+			recordRoomView(roomID, payload)
+			GlobalHub.Broadcast <- models.WSMessage{
+				Type:    "room_view",
+				RoomID:  roomID,
+				UserID:  userID,
+				Payload: payload,
+			}
+			continue
+		case "room_view_request":
+			// 新成员进场索要房主当前视图：网关直接回放，避免房主读循环被推演占住。
+			// 只在房主仍在线时回放：房主关掉页面后，缓存里那份「规划中」已经失效，
+			// 不该再把之后进场的成员拉进一个没有房主的规划页。
+			if view := currentRoomView(roomID); view != nil {
+				hostID, _ := view["user_id"].(string)
+				online := false
+				for _, m := range GlobalHub.CollectMembers(roomID) {
+					if m["id"] == hostID {
+						online = true
+						break
+					}
+				}
+				if online {
+					GlobalHub.Broadcast <- models.WSMessage{
+						Type:    "room_view",
+						RoomID:  roomID,
+						UserID:  "system_room_view",
+						Payload: view,
+					}
+				}
+			}
+			continue
+		case "room_plan_request":
+			// 新成员进入房间时索要房主已推演好的方案：把请求转发给房间，
+			// 由房主端决定是否回应（房主手里才有那份方案）。
+			var p struct {
+				Payload map[string]interface{} `json:"payload"`
+			}
+			_ = json.Unmarshal(message, &p)
+			payload := p.Payload
+			if payload == nil {
+				payload = map[string]interface{}{}
+			}
+			payload["user_id"] = userID
+			GlobalHub.Broadcast <- models.WSMessage{
+				Type:    msg.Type,
+				RoomID:  roomID,
+				UserID:  userID,
+				Payload: payload,
+			}
+			continue
+		case "room_plan":
+			// 房主推演完成的方案：原样转发给房间内其他成员复用，
+			// 不再让每个成员各自调用一次 AI。
+			var p struct {
+				Payload interface{} `json:"payload"`
+			}
+			_ = json.Unmarshal(message, &p)
+			GlobalHub.Broadcast <- models.WSMessage{
+				Type:    "room_plan",
+				RoomID:  roomID,
+				UserID:  userID,
+				Payload: p.Payload,
+			}
+			continue
+		case "node_comment":
+			// 成员对某个行程节点的文字建议。缓存一份并广播给房间，
+			// 房主端按节点聚合成「建议箱」，成员也能在自己的节点卡片上看到队友的话。
+			var p struct {
+				Payload map[string]interface{} `json:"payload"`
+			}
+			_ = json.Unmarshal(message, &p)
+			payload := p.Payload
+			if payload == nil {
+				continue
+			}
+			nodeName, _ := payload["node_name"].(string)
+			text, _ := payload["text"].(string)
+			nodeName = truncateRunes(strings.TrimSpace(nodeName), 200)
+			text = truncateRunes(strings.TrimSpace(text), 300)
+			if nodeName == "" || text == "" {
+				continue
+			}
+			id, _ := payload["id"].(string)
+			id = strings.TrimSpace(id)
+			if id == "" {
+				id = "c_" + userID + "_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+			}
+			comment := map[string]interface{}{
+				"id":        id,
+				"node_name": nodeName,
+				"day":       payload["day"],
+				"text":      text,
+				"user_id":   userID,
+				"user_name": nickname,
+				"ts":        time.Now().UnixMilli(),
+				"status":    "open",
+			}
+			appendRoomComment(roomID, comment)
+			GlobalHub.Broadcast <- models.WSMessage{
+				Type:    "node_comment",
+				RoomID:  roomID,
+				UserID:  userID,
+				Payload: comment,
+			}
+			continue
+		case "node_comment_ack":
+			// 房主采纳或忽略一条建议：只改状态并广播，让所有端看到处理结果。
+			var p struct {
+				Payload struct {
+					ID     string `json:"id"`
+					Status string `json:"status"`
+				} `json:"payload"`
+			}
+			_ = json.Unmarshal(message, &p)
+			id := strings.TrimSpace(p.Payload.ID)
+			status := strings.ToLower(strings.TrimSpace(p.Payload.Status))
+			if id == "" || (status != "adopted" && status != "dismissed" && status != "open") {
+				continue
+			}
+			updateRoomCommentStatus(roomID, id, status, userID, nickname)
+			GlobalHub.Broadcast <- models.WSMessage{
+				Type:   "node_comment_ack",
+				RoomID: roomID,
+				UserID: userID,
+				Payload: map[string]interface{}{
+					"id":              id,
+					"status":          status,
+					"handled_by":      userID,
+					"handled_by_name": nickname,
+				},
+			}
+			continue
+		case "node_comment_request":
+			// 晚加入的成员进场时拉取已有建议，避免只能看到之后新增的几条。
+			GlobalHub.Broadcast <- models.WSMessage{
+				Type:    "node_comments_snapshot",
+				RoomID:  roomID,
+				UserID:  "system_room_comments",
+				Payload: snapshotRoomComments(roomID),
+			}
+			continue
 		case "node_vote":
 			// 节点投票同步：本人已经在前端做了乐观更新，这里只负责把投票事实
 			// 广播给房间内其他成员。空字符串 / "null" 表示撤销投票。
@@ -298,6 +518,13 @@ func HandleWebSocket(c *gin.Context) {
 			}
 			intent := msg.Payload.UserPreferences.Intent
 			log.Printf("🚀 接收到前端意图: 模式[%s], 诉求[%s]", msg.Payload.UserPreferences.Mode, intent)
+
+			// 接下来的推演会把这个读循环占住几分钟：期间服务端收不到 pong，
+			// 读截止时间不会被刷新。不清掉它的话，推演一结束（下一次 ReadMessage）
+			// 就会立刻判成 i/o timeout 并断开**发起人**的连接 —— 表现为房主推演完
+			// 打开的就是「房间连接正在建立，请稍后再点击开始规划」，再也动不了。
+			_ = conn.SetReadDeadline(time.Time{})
+			restoreReadDeadline := func() { _ = conn.SetReadDeadline(time.Now().Add(pongWait)) }
 
 			// 👑 多人协同：聚合当前房间内所有在线成员的画像，传递给 Python 做多智能体博弈
 			roomMembers := GlobalHub.CollectMembers(roomID)
@@ -383,6 +610,7 @@ func HandleWebSocket(c *gin.Context) {
 
 			if err != nil {
 				releaseNegotiation(roomID)
+				restoreReadDeadline()
 				log.Println("🔥 呼叫 Python 引擎失败:", err)
 				GlobalHub.Broadcast <- models.WSMessage{
 					Type:    "error",
@@ -395,6 +623,7 @@ func HandleWebSocket(c *gin.Context) {
 				status := resp.StatusCode
 				resp.Body.Close()
 				releaseNegotiation(roomID)
+				restoreReadDeadline()
 				GlobalHub.Broadcast <- models.WSMessage{
 					Type:    "error",
 					RoomID:  roomID,
@@ -464,6 +693,7 @@ func HandleWebSocket(c *gin.Context) {
 			}
 			resp.Body.Close() // 读取完毕后关闭连接
 			releaseNegotiation(roomID)
+			restoreReadDeadline()
 			log.Printf("🏆 拓扑路书流式传输完毕，房间: %s", roomID)
 		}
 	}

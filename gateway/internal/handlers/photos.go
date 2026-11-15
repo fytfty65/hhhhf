@@ -5,11 +5,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 
+	"gateway/internal/database"
+	"gateway/internal/models"
 	"gateway/internal/photos"
 )
 
@@ -142,7 +145,14 @@ func GetPhotoHandler(c *gin.Context) {
 		return
 	}
 	userID := c.GetString("user_id")
-	photo, path, err := service.Open(c.Param("id"), userID)
+	var photo photos.Photo
+	var path string
+	if isAdminUser(c) {
+		// 审核端要能打开待审 / 被举报的照片，否则列表里全是打不开的缩略图。
+		photo, path, err = service.OpenAsAdmin(c.Param("id"))
+	} else {
+		photo, path, err = service.Open(c.Param("id"), userID)
+	}
 	if err != nil {
 		photoError(c, err)
 		return
@@ -165,7 +175,12 @@ func ReportPhotoHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "照片服务不可用", "code": "PHOTO_ERROR"})
 		return
 	}
-	photo, err := service.Report(c.Param("id"), c.GetString("user_id"))
+	// 举报理由可选：老客户端不带 body，这里不能用 ShouldBindJSON 强制。
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	photo, err := service.ReportWithReason(c.Param("id"), c.GetString("user_id"), body.Reason)
 	if err != nil {
 		photoError(c, err)
 		return
@@ -173,9 +188,15 @@ func ReportPhotoHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"reported": true, "status": photo.Status, "message": "已收到举报，这张照片已先下架等待复核"})
 }
 
-// isPhotoAdmin：管理端身份来自服务端配置（ADMIN_USER_IDS 逗号分隔），不信任请求里自报的角色。
-func isPhotoAdmin(c *gin.Context) bool {
-	userID := strings.TrimSpace(c.GetString("user_id"))
+// isAdminUser：管理端身份来自服务端配置（ADMIN_USER_IDS 逗号分隔），不信任请求里自报的角色。
+// 照片审核与只读运维看板共用这一套白名单。
+func isAdminUser(c *gin.Context) bool {
+	return isAdminID(strings.TrimSpace(c.GetString("user_id")))
+}
+
+// isAdminID 是白名单的唯一判断实现：登录响应、资料接口、管理端接口都从这里取，
+// 避免出现「接口放行但前端看不到入口」这类两套口径的问题。
+func isAdminID(userID string) bool {
 	if userID == "" {
 		return false
 	}
@@ -189,7 +210,7 @@ func isPhotoAdmin(c *gin.Context) bool {
 
 // ReviewPhotosHandler（管理员）：待复核列表，被举报过的排最前。
 func ReviewPhotosHandler(c *gin.Context) {
-	if !isPhotoAdmin(c) {
+	if !isAdminUser(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "需要管理员身份", "code": "PHOTO_FORBIDDEN"})
 		return
 	}
@@ -207,7 +228,7 @@ func ReviewPhotosHandler(c *gin.Context) {
 
 // ModeratePhotoHandler（管理员）：通过 / 拒绝（拒绝必须给理由，理由回传给上传者）。
 func ModeratePhotoHandler(c *gin.Context) {
-	if !isPhotoAdmin(c) {
+	if !isAdminUser(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "需要管理员身份", "code": "PHOTO_FORBIDDEN"})
 		return
 	}
@@ -224,7 +245,7 @@ func ModeratePhotoHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体格式不对", "code": "PHOTO_REJECTED"})
 		return
 	}
-	photo, err := service.Moderate(c.Param("id"), body.Status, body.Reason)
+	photo, err := service.ModerateBy(c.Param("id"), body.Status, body.Reason, c.GetString("user_id"))
 	if err != nil {
 		if strings.Contains(err.Error(), "理由") || strings.Contains(err.Error(), "非法状态") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "PHOTO_REJECTED"})
@@ -236,6 +257,70 @@ func ModeratePhotoHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"photo": photo})
 }
 
+// PhotoHistoryHandler（管理员）：举报与审核的处理流水（谁、什么时候、做了什么、理由）。
+// 用于用户申诉回溯与滥用排查；只返回计数与身份 ID，不返回照片内容。
+func PhotoHistoryHandler(c *gin.Context) {
+	if !isAdminUser(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "需要管理员身份", "code": "PHOTO_FORBIDDEN"})
+		return
+	}
+	service, err := getPhotoService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "照片服务不可用", "code": "PHOTO_ERROR"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	entries := service.History(limit)
+	if entries == nil {
+		entries = []photos.HistoryEntry{}
+	}
+	// 流水里只存身份 ID（用户改名/注销都不影响审计真实性），展示时再批量补昵称。
+	actorIDs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ActorID != "" {
+			actorIDs = append(actorIDs, entry.ActorID)
+		}
+	}
+	names := lookupNicknames(actorIDs)
+	for index := range entries {
+		entries[index].ActorName = names[entries[index].ActorID]
+	}
+	c.JSON(http.StatusOK, gin.H{"events": entries, "count": len(entries)})
+}
+
+// lookupNicknames 把一批用户 ID 映射成展示名（昵称优先，退化为用户名）。
+// 查不到（账号已删除 / ID 为空）的条目不返回，由前端回退显示 ID 前缀 ——
+// 这比编一个"已注销用户"更诚实，也不会让真正删号的人凭空出现。
+func lookupNicknames(userIDs []string) map[string]string {
+	names := make(map[string]string, len(userIDs))
+	unique := make([]string, 0, len(userIDs))
+	seen := make(map[string]struct{}, len(userIDs))
+	for _, id := range userIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 || database.DB == nil {
+		return names
+	}
+	var users []models.User
+	if err := database.DB.Select("id", "username", "nickname").Where("id IN ?", unique).Find(&users).Error; err != nil {
+		return names
+	}
+	for _, user := range users {
+		name := strings.TrimSpace(user.Nickname)
+		if name == "" {
+			name = strings.TrimSpace(user.Username)
+		}
+		if name != "" {
+			names[user.ID] = name
+		}
+	}
+	return names
+}
+
 // DeletePhotoHandler：上传者本人（或管理员）可删；记录与文件一起清掉。
 func DeletePhotoHandler(c *gin.Context) {
 	service, err := getPhotoService()
@@ -244,7 +329,7 @@ func DeletePhotoHandler(c *gin.Context) {
 		return
 	}
 	userID := c.GetString("user_id")
-	isAdmin := isPhotoAdmin(c)
+	isAdmin := isAdminUser(c)
 	if err := service.Delete(c.Param("id"), userID, isAdmin); err != nil {
 		photoError(c, err)
 		return

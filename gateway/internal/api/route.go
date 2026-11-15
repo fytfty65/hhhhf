@@ -28,6 +28,10 @@ func RegisterRoutes(r *gin.Engine) {
 		authGroup.POST("/register", handlers.AuthRegisterRateLimitMiddleware(), handlers.RegisterHandler)
 		authGroup.POST("/login", handlers.AuthLoginRateLimitMiddleware(), handlers.LoginHandler)
 		authGroup.POST("/logout", handlers.AuthMiddleware(), handlers.LogoutHandler)
+		// 当前会话身份（含 isAdmin），供前端启动时刷新缓存，不作为授权依据。
+		authGroup.GET("/me", handlers.AuthMiddleware(), handlers.MeHandler)
+		// 临时账号原地转正式账号：账号 ID 不变，因此数据无需迁移。
+		authGroup.POST("/upgrade", handlers.AuthMiddleware(), handlers.UpgradeGuestAccountHandler)
 		// Short-lived access token + rotating refresh cookie.
 		authGroup.POST("/refresh", handlers.RefreshHandler)
 		// Single-use WebSocket ticket, so credentials never appear in a WS URL.
@@ -58,6 +62,10 @@ func RegisterRoutes(r *gin.Engine) {
 		// Compatibility alias for the standalone profile screen.
 		userGroup.GET("/trips", handlers.GetTripsHandler)
 		userGroup.POST("/trip", handlers.SaveTripHandler)
+		// 行程详情编辑：重命名 / 更新路线内容 / 删除，归属由服务端会话校验。
+		userGroup.PUT("/trip/:id", handlers.RenameTripHandler)
+		userGroup.PUT("/trip/:id/content", handlers.UpdateTripContentHandler)
+		userGroup.DELETE("/trip/:id", handlers.DeleteTripHandler)
 		userGroup.POST("/avatar", handlers.UpdateAvatarHandler)
 		userGroup.POST("/avatar/upload", handlers.UploadAvatarHandler)
 		userGroup.POST("/profile/update", handlers.UpdateProfileHandler)
@@ -116,13 +124,22 @@ func RegisterRoutes(r *gin.Engine) {
 		// 身份来自服务端配置 ADMIN_USER_IDS（逗号分隔），不信任请求里自报的角色。
 		apiGroup.GET("/admin/photos", handlers.ReviewPhotosHandler)
 		apiGroup.POST("/admin/photos/:id/moderate", handlers.ModeratePhotoHandler)
+		// 举报与审核的处理流水（谁、何时、为何下架或放行），供申诉回溯与滥用排查。
+		apiGroup.GET("/admin/photo-reports", handlers.PhotoHistoryHandler)
+		// 只读运维看板：聚合计数，不返回任何用户的内容明细。
+		apiGroup.GET("/admin/overview", handlers.AdminOverviewHandler)
 
 		// 房间与协同相关路由 (WebSocket 核心)
 		// ⚠️ 前端连接示例: ws://localhost:8080/api/v1/room/你的RoomID/ws?userId=你的UserID
 		apiGroup.GET("/room/:id/ws", handlers.RoomWebSocketHandler)
 
+		// 真实底图代理：只出底图，折线与编号由客户端绘制。
+		apiGroup.GET("/map/static", handlers.StaticMapHandler)
+
 		// 行程规划相关路由 (HTTP)
 		apiGroup.POST("/planning/init", handlers.InitPlanningHandler)
+		// 一句话结构化解析：把自然语言描述转成表单字段，供客户端展示后确认。
+		apiGroup.POST("/planning/intent/parse", handlers.ParsePlanningIntentHandler)
 		// Canonical planning contract and first-phase pre-trip capabilities.
 		apiGroup.POST("/planning/context", handlers.PlanningContextHandler)
 		apiGroup.POST("/planning/digital-twin", handlers.DigitalTwinHandler)
@@ -186,6 +203,8 @@ func RegisterRoutes(r *gin.Engine) {
 		// Retention state for the four usage-driven event tables. Same shape as
 		// the audit-cleanup health endpoint: configuration and counts only.
 		apiGroup.GET("/planning/events/retention-health", handlers.EventRetentionCleanupHealthHandler)
+		// 临时账号过期清理的状态：只有配置与计数，不含任何账号内容。
+		apiGroup.GET("/account/guest-cleanup-health", handlers.GuestCleanupHealthHandler)
 
 		// AI 代理状态同步路由
 		apiGroup.POST("/agent/sync", handlers.AgentSyncHandler)
@@ -197,6 +216,11 @@ func RegisterRoutes(r *gin.Engine) {
 		// 功能1：个性化旅行画像 + 推荐引擎 + A/B 测试
 		// ==========================================
 		apiGroup.GET("/user/preference", handlers.GetUserPreferenceHandler)
+		// 个人旅行特征图谱（只读派生）：只按会话里的 user_id 返回，不接受客户端指定用户。
+		apiGroup.GET("/user/preference/graph", handlers.UserTraitGraphHandler)
+		// 图谱节点操作：权重新标定 / 移出与撤销移出（都持久化到 UserPreference）
+		apiGroup.PATCH("/user/preference/graph/node", handlers.UserTraitGraphNodeUpdateHandler)
+		apiGroup.DELETE("/user/preference/graph/node/:id", handlers.UserTraitGraphNodeDeleteHandler)
 		apiGroup.PUT("/user/preference", handlers.UpdateUserPreferenceHandler)
 		apiGroup.POST("/user/preference/refresh", handlers.RefreshUserPreferenceHandler)
 		apiGroup.DELETE("/user/preference", handlers.DeleteUserPreferenceHandler)
@@ -272,6 +296,7 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/risk/subscriptions", handlers.ListRiskSubscriptionsHandler)
 		apiGroup.POST("/risk/subscriptions/check", handlers.AIRateLimitMiddleware(), handlers.CheckRiskSubscriptionsHandler)
 		apiGroup.GET("/risk/notifications", handlers.ListRiskNotificationsHandler)
+		apiGroup.POST("/risk/notifications/read-all", handlers.MarkAllRiskNotificationsReadHandler)
 		apiGroup.POST("/risk/notifications/:id/read", handlers.AcknowledgeRiskNotificationHandler)
 		apiGroup.GET("/notifications/push/status", handlers.GetPushSubscriptionStatusHandler)
 		apiGroup.POST("/notifications/push/subscription", handlers.SavePushSubscriptionHandler)

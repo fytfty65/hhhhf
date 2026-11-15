@@ -37,6 +37,9 @@ func RefreshHandler(c *gin.Context) {
 	}
 	setRefreshCookie(c, newRefresh)
 	c.Header("Cache-Control", "no-store")
+	// 续期成功同样说明账号仍在使用，避免一个天天打开页面但只靠续期的
+	// 临时账号被误判为过期。
+	touchUserActivity(userID)
 
 	var user models.User
 	if err := database.DB.Where("id = ?", userID).First(&user).Error; err != nil {

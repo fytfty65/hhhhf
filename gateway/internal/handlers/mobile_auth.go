@@ -82,6 +82,7 @@ func MobileRefreshHandler(c *gin.Context) {
 	}
 
 	c.Header("Cache-Control", "no-store")
+	touchUserActivity(userID)
 	c.JSON(http.StatusOK, mobileTokenResponse(accessToken, newRefreshToken, user))
 }
 

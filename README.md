@@ -181,10 +181,10 @@ CI（`.github/workflows/ci.yml`）在 push/PR 上跑上面三条链路。注意�
 - **端到端集成测试缺失**：`front/e2e/` 的用例全部 mock 后端；网关侧已补一条真实链路冒烟测试
   （`gateway/internal/api/realpath_smoke_test.go`：真实路由 + 真实 SQLite + 真实会话 + 真实 WebSocket），
   但「浏览器 → 网关 → AI 服务 → 外部源」整条接缝仍无自动化覆盖。
-- **算法命名与实现不符**：`NashEquilibriumSolver` 名字叫纳什、实际只做帕累托非支配筛选；
-  `TopologyFitnessCalculator` 是线性加权；`core/time_intelligence.py` 是关键词查表。
-  **对用户的文案已修正**（不再出现「纳什博弈完成」），并由 `tests/test_output_honesty.py` 钉住；
-  但类名仍是误导性的，改名是一次涉及导入面的独立改动。
+- **算法命名与实现不符**：旧的 `NashEquilibriumSolver` 名字叫纳什、实际只做帕累托非支配筛选，
+  已改名为 `ParetoFrontierSelector`（同步导入面与测试）；`TopologyFitnessCalculator` 仍是线性加权；
+  `core/time_intelligence.py` 是关键词查表。
+  **对用户的文案已修正**（不再出现「纳什博弈完成」），并由 `tests/test_output_honesty.py` 钉住。
 - **SQLite 仍是单写模型**：`MaxOpenConns(1)` 保证了并发写入稳定，也决定了吞吐上限。短期已补
   busy timeout/重试、读路径分离、高频事件批量写入与复合索引；中期分工（Redis 实时事件与协同状态、
   PostgreSQL 持久化业务数据、SQLite 本地/单实例）见 `docs/storage-scaling.md`。

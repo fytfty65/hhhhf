@@ -61,6 +61,10 @@ func main() {
 	// decision rather than a silent deletion on upgrade.
 	eventRetentionCancel := handlers.StartEventRetentionCleanupLoop(context.Background())
 	defer eventRetentionCancel()
+	// 临时账号（免注册试用）的过期清理。默认开启：界面直接承诺“长期不用会被清理”，
+	// 若默认关闭就等于对用户失信。窗口与间隔可用环境变量调整。
+	guestCleanupCancel := handlers.StartGuestAccountCleanupLoop(context.Background())
+	defer guestCleanupCancel()
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("DB_AUTO_BACKUP")), "true") {
 		if path, err := database.Backup(""); err != nil {
 			log.Printf("数据库自动备份失败: %v", err)
@@ -257,7 +261,12 @@ func corsMiddleware() gin.HandlerFunc {
 			c.Writer.Header().Set("Vary", "Origin")
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		// 真实事故（2026-11-01）：前端 apiClient 每个请求都带 X-Request-Id，
+		// 预订下单还带 Idempotency-Key，但这两个头不在这份白名单里。浏览器预检
+		// 因此直接失败（控制台只报 net::ERR_FAILED），前端只能展示「暂时无法连接
+		// 数据服务，请确认网关已启动」——而服务器其实完全正常，curl 也测不出来，
+		// 因为 curl 不执行 CORS 校验。
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Request-Id, Idempotency-Key")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 		// 允许暴露自定义响应头，便于前端读取错误信息

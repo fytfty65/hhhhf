@@ -32,14 +32,14 @@ const (
 )
 
 const (
-	MaxUploadBytes  = 5 << 20 // 单张上限 5MB
-	MaxDimension    = 1600    // 规范化后最长边
-	JPEGQuality     = 85
-	DailyQuota      = 20 // 每个上传者每天最多 20 张
-	TotalQuota      = 200
-	StatusPending   = "pending"
-	StatusApproved  = "approved"
-	StatusRejected  = "rejected"
+	MaxUploadBytes = 5 << 20 // 单张上限 5MB
+	MaxDimension   = 1600    // 规范化后最长边
+	JPEGQuality    = 85
+	DailyQuota     = 20 // 每个上传者每天最多 20 张
+	TotalQuota     = 200
+	StatusPending  = "pending"
+	StatusApproved = "approved"
+	StatusRejected = "rejected"
 )
 
 var (
@@ -52,25 +52,42 @@ var (
 
 // Photo 是一条照片记录。P1 只落文件，DB 落库在下一批接。
 type Photo struct {
-	ID         string    `json:"id"`
-	NodeName   string    `json:"node_name"`
-	TripID     string    `json:"trip_id,omitempty"`
-	UploaderID string    `json:"uploader_id"`
-	Sha256     string    `json:"sha256"`
-	Mime       string    `json:"mime"`
-	Bytes      int       `json:"bytes"`
-	Width      int       `json:"width"`
-	Height     int       `json:"height"`
-	Status     string    `json:"status"`
+	ID         string `json:"id"`
+	NodeName   string `json:"node_name"`
+	TripID     string `json:"trip_id,omitempty"`
+	UploaderID string `json:"uploader_id"`
+	Sha256     string `json:"sha256"`
+	Mime       string `json:"mime"`
+	Bytes      int    `json:"bytes"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	Status     string `json:"status"`
 	// UploaderIDs 所有上传过这份内容的人。内容寻址去重时**别的用户上传同一张图就追加进来**，
 	// 而不是被当成"不存在"丢给第一个上传者 —— 否则第二个上传者既看不到也取不到"自己"的照片
 	// （实测 2026-09-19：同一张图两次上传得到同一个 id，第二个人的 /my/photos 是空的、取图 403）。
 	UploaderIDs []string `json:"uploader_ids,omitempty"`
 	// RejectReason 拒绝理由**必须回传给上传者**（不做黑箱审核）；举报会先退回复审。
-	RejectReason  string `json:"reject_reason,omitempty"`
-	ReportedCount int    `json:"reported_count,omitempty"`
+	RejectReason  string    `json:"reject_reason,omitempty"`
+	ReportedCount int       `json:"reported_count,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 }
+
+// AuditEvent 是一条举报 / 审核留痕。**单独存而不挂在照片记录上**：
+// 照片被删除后处理记录仍要能查到 —— 申诉回溯、滥用排查都依赖它。
+// Kind 取 report / pending / approved / rejected。
+type AuditEvent struct {
+	PhotoID     string    `json:"photo_id"`
+	NodeName    string    `json:"node_name,omitempty"`
+	UploaderID  string    `json:"uploader_id,omitempty"`
+	StatusAfter string    `json:"status_after"`
+	Kind        string    `json:"kind"`
+	ActorID     string    `json:"actor_id,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// MaxAuditEvents 审计文件保留的流水条数上限（新的在末尾），防止无限增长。
+const MaxAuditEvents = 500
 
 // OwnerIDs 返回这份内容的所有上传者（兼容只有 UploaderID 的旧记录）。
 func (p Photo) OwnerIDs() []string {

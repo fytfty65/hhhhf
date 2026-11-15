@@ -21,9 +21,11 @@ var (
 // Index 是照片记录的持久化索引（P1b 用 JSON 文件，够用且零依赖；等 P2 的审核队列需要
 // 按状态/时间查询时再迁到 gateway 现有的 SQLite，迁移只需换这一层）。
 type Index struct {
-	mu      sync.Mutex
-	path    string
-	records []Photo
+	mu        sync.Mutex
+	path      string
+	auditPath string
+	records   []Photo
+	audit     []AuditEvent
 }
 
 // OpenIndex 读取（或初始化）索引文件。
@@ -31,12 +33,21 @@ func OpenIndex(dir string) (*Index, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建照片目录失败: %w", err)
 	}
-	index := &Index{path: filepath.Join(dir, "index.json")}
+	index := &Index{
+		path:      filepath.Join(dir, "index.json"),
+		auditPath: filepath.Join(dir, "audit.json"),
+	}
 	data, err := os.ReadFile(index.path)
 	if err == nil && len(data) > 0 {
 		if err := json.Unmarshal(data, &index.records); err != nil {
 			// 索引坏了不能把整个功能拖垮，也不能假装没有照片：如实报错让调用方决定
 			return nil, fmt.Errorf("照片索引损坏: %w", err)
+		}
+	}
+	auditData, auditErr := os.ReadFile(index.auditPath)
+	if auditErr == nil && len(auditData) > 0 {
+		if err := json.Unmarshal(auditData, &index.audit); err != nil {
+			return nil, fmt.Errorf("审核流水损坏: %w", err)
 		}
 	}
 	return index, nil
@@ -101,7 +112,8 @@ func (i *Index) Add(photo Photo) (Photo, error) {
 }
 
 // SetStatus 审核状态流转（P2 管理端用）。`reason` 只在拒绝时有意义，会回传给上传者。
-func (i *Index) SetStatus(id, status, reason string) (Photo, error) {
+// actorID 是操作的管理员，写进流水供事后追查。
+func (i *Index) SetStatus(id, status, reason, actorID string) (Photo, error) {
 	if status != StatusPending && status != StatusApproved && status != StatusRejected {
 		return Photo{}, fmt.Errorf("非法状态: %s", status)
 	}
@@ -115,6 +127,9 @@ func (i *Index) SetStatus(id, status, reason string) (Photo, error) {
 			} else {
 				i.records[position].RejectReason = ""
 			}
+			if err := i.appendAuditLocked(i.records[position], status, actorID, reason); err != nil {
+				return Photo{}, err
+			}
 			if err := i.flushLocked(); err != nil {
 				return Photo{}, err
 			}
@@ -124,15 +139,36 @@ func (i *Index) SetStatus(id, status, reason string) (Photo, error) {
 	return Photo{}, ErrNotFound
 }
 
+// appendAuditLocked 追加一条流水并裁掉最旧的（调用方需持有 i.mu）。
+func (i *Index) appendAuditLocked(photo Photo, kind, actorID, reason string) error {
+	i.audit = append(i.audit, AuditEvent{
+		PhotoID:     photo.ID,
+		NodeName:    photo.NodeName,
+		UploaderID:  photo.UploaderID,
+		StatusAfter: photo.Status,
+		Kind:        kind,
+		ActorID:     actorID,
+		Reason:      strings.TrimSpace(reason),
+		CreatedAt:   time.Now().UTC(),
+	})
+	if len(i.audit) > MaxAuditEvents {
+		i.audit = append([]AuditEvent(nil), i.audit[len(i.audit)-MaxAuditEvents:]...)
+	}
+	return i.flushAuditLocked()
+}
+
 // Report 举报：**立刻退回 pending**（等于先下架），并累加举报计数等人工复核。
 // 这样即便审核有疏漏，其他用户也有一个立刻生效的止损手段。
-func (i *Index) Report(id string) (Photo, error) {
+func (i *Index) Report(id, reporterID, reason string) (Photo, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	for position := range i.records {
 		if i.records[position].ID == id {
 			i.records[position].Status = StatusPending
 			i.records[position].ReportedCount++
+			if err := i.appendAuditLocked(i.records[position], "report", reporterID, reason); err != nil {
+				return Photo{}, err
+			}
 			if err := i.flushLocked(); err != nil {
 				return Photo{}, err
 			}
@@ -191,6 +227,28 @@ func (i *Index) flushLocked() error {
 		return err
 	}
 	return os.Rename(tmp, i.path)
+}
+
+// flushAuditLocked 单独落盘审核流水，与照片索引互不覆盖（照片被删也不影响流水）。
+func (i *Index) flushAuditLocked() error {
+	payload, err := json.MarshalIndent(i.audit, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := i.auditPath + ".tmp"
+	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, i.auditPath)
+}
+
+// AuditSnapshot 返回流水副本（按时间正序）。
+func (i *Index) AuditSnapshot() []AuditEvent {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	out := make([]AuditEvent, len(i.audit))
+	copy(out, i.audit)
+	return out
 }
 
 // Service 把核心层与索引串起来，并持有功能开关。
@@ -256,6 +314,17 @@ func (s *Service) ListMine(uploaderID string) []Photo {
 // Open 取某个 id 的可读文件路径：先判可见性，再判文件真的在。
 // 返回 (记录, 路径, error)。
 func (s *Service) Open(id, viewerID string) (Photo, string, error) {
+	return s.open(id, viewerID, false)
+}
+
+// OpenAsAdmin 供审核端取图：待审 / 被举报照片默认只有上传者可见，但审核员
+// 必须先看到图才能判断，否则"审核"这个动作根本完不成（列表能看到、图打不开）。
+// 权限只由调用方（管理端 handler 的白名单）把关，这里只负责放行可见性。
+func (s *Service) OpenAsAdmin(id string) (Photo, string, error) {
+	return s.open(id, "", true)
+}
+
+func (s *Service) open(id, viewerID string, bypassVisibility bool) (Photo, string, error) {
 	if !s.Enabled() {
 		return Photo{}, "", ErrDisabled
 	}
@@ -263,7 +332,7 @@ func (s *Service) Open(id, viewerID string) (Photo, string, error) {
 	if !ok {
 		return Photo{}, "", ErrNotFound
 	}
-	if !VisibleTo(photo, viewerID) {
+	if !bypassVisibility && !VisibleTo(photo, viewerID) {
 		// 借"没有权限"回答，不泄漏"这张图存在但你没资格看"
 		return Photo{}, "", ErrForbidden
 	}
@@ -279,18 +348,28 @@ func (s *Service) Open(id, viewerID string) (Photo, string, error) {
 
 // Moderate 审核（P2 管理端调用）：通过 / 拒绝（拒绝必须给理由，理由会回传给上传者）。
 func (s *Service) Moderate(id, status, reason string) (Photo, error) {
+	return s.ModerateBy(id, status, reason, "")
+}
+
+// ModerateBy 同 Moderate，另外记录操作人（写进处理流水）。
+func (s *Service) ModerateBy(id, status, reason, actorID string) (Photo, error) {
 	if !s.Enabled() {
 		return Photo{}, ErrDisabled
 	}
 	if status == StatusRejected && strings.TrimSpace(reason) == "" {
 		return Photo{}, errors.New("拒绝必须给出理由（要回传给上传者）")
 	}
-	return s.index.SetStatus(id, status, reason)
+	return s.index.SetStatus(id, status, reason, actorID)
 }
 
 // Report 用户举报：先把照片退回 pending（立刻对其他用户不可见），再等人工复核。
 // 上传者自己举报自己无意义，直接忽略。
 func (s *Service) Report(id, reporterID string) (Photo, error) {
+	return s.ReportWithReason(id, reporterID, "")
+}
+
+// ReportWithReason 同 Report，可附带举报理由（前端目前没传，接口先留好）。
+func (s *Service) ReportWithReason(id, reporterID, reason string) (Photo, error) {
 	if !s.Enabled() {
 		return Photo{}, ErrDisabled
 	}
@@ -301,7 +380,76 @@ func (s *Service) Report(id, reporterID string) (Photo, error) {
 	if reporterID != "" && reporterID == photo.UploaderID {
 		return photo, nil
 	}
-	return s.index.Report(id)
+	return s.index.Report(id, reporterID, reason)
+}
+
+// HistoryEntry 是一条扁平化后的处理流水（举报 / 审核），用于管理端回溯。
+type HistoryEntry struct {
+	PhotoID       string `json:"photo_id"`
+	NodeName      string `json:"node_name"`
+	PhotoStatus   string `json:"photo_status"`
+	UploaderID    string `json:"uploader_id,omitempty"`
+	ReportedCount int    `json:"reported_count,omitempty"`
+	Kind          string `json:"kind"`
+	ActorID       string `json:"actor_id,omitempty"`
+	// ActorName 由接口层按 ActorID 查用户表补上（索引层不依赖数据库）。
+	// 只做展示用，历史真伪仍以 ActorID 为准 —— 用户改昵称不会篡改审计记录。
+	ActorName string    `json:"actor_name,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// History 返回最近的举报 / 审核流水，按时间倒序，最多 limit 条。
+//
+// 兼容旧数据：早期只累加 ReportedCount 而没有明细，这里为差值补一条
+// 「历史举报（无明细）」——否则会出现"照片显示被举报 1 次、历史里却查不到"的矛盾。
+func (s *Service) History(limit int) []HistoryEntry {
+	if !s.Enabled() {
+		return nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	var entries []HistoryEntry
+	for _, event := range s.index.AuditSnapshot() {
+		entries = append(entries, HistoryEntry{
+			PhotoID:     event.PhotoID,
+			NodeName:    event.NodeName,
+			PhotoStatus: event.StatusAfter,
+			UploaderID:  event.UploaderID,
+			Kind:        event.Kind,
+			ActorID:     event.ActorID,
+			Reason:      event.Reason,
+			CreatedAt:   event.CreatedAt,
+		})
+	}
+	// 兼容旧数据：早期只累加 ReportedCount 而没有明细，这里为差值补一条
+	// 「历史举报（无明细）」——否则会出现"照片显示被举报 1 次、历史里却查不到"的矛盾。
+	recorded := map[string]int{}
+	for _, entry := range entries {
+		if entry.Kind == "report" {
+			recorded[entry.PhotoID]++
+		}
+	}
+	for _, photo := range s.index.All() {
+		for extra := recorded[photo.ID]; extra < photo.ReportedCount; extra++ {
+			entries = append(entries, HistoryEntry{
+				PhotoID:       photo.ID,
+				NodeName:      photo.NodeName,
+				PhotoStatus:   photo.Status,
+				UploaderID:    photo.UploaderID,
+				ReportedCount: photo.ReportedCount,
+				Kind:          "report",
+				Reason:        "历史举报（无明细记录）",
+				CreatedAt:     photo.CreatedAt,
+			})
+		}
+	}
+	sort.Slice(entries, func(a, b int) bool { return entries[a].CreatedAt.After(entries[b].CreatedAt) })
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries
 }
 
 // ListForReview 管理端待复核列表（默认只看 pending）。

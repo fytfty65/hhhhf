@@ -5,6 +5,8 @@ import (
 	"log"
 	"strings"
 
+	"gateway/internal/metrics"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -66,6 +68,8 @@ func securityEvent(c *gin.Context, event, outcome, username, code string, extra 
 	if encoded, err := json.Marshal(entry); err == nil {
 		log.Println(string(encoded))
 	}
+	// 日志用于取证，计数用于运维看板的即时读数。
+	metrics.RecordSecurityEvent(event)
 }
 
 // Event type and outcome constants, so call sites cannot drift into a dozen

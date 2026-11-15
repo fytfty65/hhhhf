@@ -14,6 +14,12 @@ type User struct {
 	AvatarURL    string // 用户自定义上传头像的相对路径（空则回退到 AvatarSeed 生成）
 	Signature    string // 个性签名（个人主页展示）
 	CreatedAt    time.Time
+	// IsGuest 标记「免注册试用」创建的临时账号。它能像正式账号一样建房、
+	// 协作、保存行程；区别在于可以在原账号上直接转正，且长期不用会被清理。
+	IsGuest bool `gorm:"index;default:false"`
+	// LastActiveAt 记录最近一次登录/续期时间，作为清理临时账号的依据。
+	// 用指针区分「从未记录」与「零值时间」。
+	LastActiveAt *time.Time `gorm:"index"`
 }
 
 // TripPlan 用户行程规划表（用于个人主页展示历史路书与画像）
@@ -124,7 +130,12 @@ type UserPreference struct {
 	ReferenceProfile string
 	// 参考路线条数（多条会按 core/route_profile.merge_profiles 的口径合并）
 	ReferenceCount int
-	UpdatedAt      time.Time
+	// 特征图谱的节点权重微调（JSON：{"food":0.6}）。图谱 GET 时覆盖派生权重，
+	// PATCH 成功后刷新页面仍然生效。
+	TraitWeights string
+	// 用户主动移出图谱的节点 ID（JSON 数组）。图谱 GET 时过滤掉这些节点。
+	TraitHidden string
+	UpdatedAt   time.Time
 }
 
 // NodeAnnotation 行程节点级批注（多人实时协作评论）

@@ -243,6 +243,7 @@ func GetProfileHandler(c *gin.Context) {
 
 	var trips []models.TripPlan
 	database.Reader().Where("user_id = ?", userID).Order("created_at desc").Find(&trips)
+	sanitizeTripsSupplierFacts(trips)
 
 	c.JSON(http.StatusOK, gin.H{
 		"user": gin.H{
@@ -253,9 +254,94 @@ func GetProfileHandler(c *gin.Context) {
 			"avatarUrl":  user.AvatarURL,
 			"signature":  user.Signature,
 			"createdAt":  user.CreatedAt,
+			"isGuest":    userIsGuest(user),
+			"isAdmin":    isAdminID(user.ID),
+		},
+		// 临时账号的数据归属与清理规则要能被前端如实展示，而不是写死在文案里。
+		"guest_policy": gin.H{
+			"retention_days":  guestRetentionDays(),
+			"cleanup_enabled": guestCleanupEnabled(),
 		},
 		"trips": trips,
 	})
+}
+
+// —— 历史行程的供应商事实清洗（2026-11-03）——
+// 出稿侧已经不再写"暂无供应商数据"占位，但**库里的历史行程**是旧版本存的：
+// 原样返回会让用户打开旧行程时仍然满屏占位。这里在读取时按同一口径清一次：
+// 只清已知占位，真实评分/价格/营业时间原样保留；不改库（避免读写放大）。
+// price_label 是 App 落库时把 cost_estimate 转成的展示字段（见 PlanningRepository）：
+// 历史行程里占位文案就存在这个字段上，只清 cost_estimate 时旧行程仍会满屏占位。
+var supplierFactKeys = []string{"rating", "cost_estimate", "open_time", "price_label"}
+
+var supplierPlaceholderValues = map[string]struct{}{
+	"暂无供应商数据": {}, "暂无数据": {}, "暂无": {}, "未核实": {}, "待确认": {},
+	"未知": {}, "不详": {}, "unavailable": {}, "unknown": {}, "n/a": {}, "none": {}, "null": {},
+}
+
+func isSupplierPlaceholder(value any) bool {
+	text, ok := value.(string)
+	if !ok {
+		return false
+	}
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+	_, hit := supplierPlaceholderValues[text]
+	return hit
+}
+
+// clearSupplierPlaceholdersInValue 递归清理 map/slice 里的占位（route/variants 都能覆盖）。
+func clearSupplierPlaceholdersInValue(value any) bool {
+	changed := false
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range supplierFactKeys {
+			if isSupplierPlaceholder(typed[key]) {
+				typed[key] = ""
+				changed = true
+			}
+		}
+		for _, child := range typed {
+			if clearSupplierPlaceholdersInValue(child) {
+				changed = true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if clearSupplierPlaceholdersInValue(child) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// sanitizeTripContent 清洗一段已存库的行程 JSON；空值/非 JSON 原样返回。
+func sanitizeTripContent(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || (!strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[")) {
+		return content
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return content
+	}
+	if !clearSupplierPlaceholdersInValue(payload) {
+		return content
+	}
+	cleaned, err := json.Marshal(payload)
+	if err != nil {
+		return content
+	}
+	return string(cleaned)
+}
+
+func sanitizeTripsSupplierFacts(trips []models.TripPlan) {
+	for i := range trips {
+		trips[i].Content = sanitizeTripContent(trips[i].Content)
+	}
 }
 
 // GetTripsHandler is the stable profile-history contract used by the frontend.
@@ -270,6 +356,7 @@ func GetTripsHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "行程加载失败", "code": "TRIPS_LOAD_FAILED"})
 		return
 	}
+	sanitizeTripsSupplierFacts(trips)
 	c.JSON(http.StatusOK, gin.H{"trips": trips})
 }
 
@@ -326,6 +413,154 @@ func SaveTripHandler(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "行程已保存", "trip_id": trip.ID})
+}
+
+// RenameTripHandler 重命名本人行程。
+// 行程归属以服务端会话为准，路径里的 id 只用来定位记录，不能作为权限依据。
+func RenameTripHandler(c *gin.Context) {
+	tripID := strings.TrimSpace(c.Param("id"))
+	if tripID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少行程 ID", "code": "TRIP_ID_REQUIRED"})
+		return
+	}
+	var req struct {
+		Title string `json:"title"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整", "code": "INVALID_TRIP_REQUEST"})
+		return
+	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "行程标题不能为空", "code": "TRIP_TITLE_REQUIRED"})
+		return
+	}
+	if len([]rune(title)) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "行程标题过长", "code": "TRIP_TITLE_TOO_LONG"})
+		return
+	}
+
+	var trip models.TripPlan
+	if err := database.DB.Where("id = ? AND user_id = ?", tripID, userID).First(&trip).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "行程不存在或无权访问", "code": "TRIP_NOT_FOUND"})
+		return
+	}
+	if err := database.DB.Model(&trip).Update("title", title).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "行程更新失败", "code": "TRIP_UPDATE_FAILED"})
+		return
+	}
+	trip.Title = title
+
+	c.JSON(http.StatusOK, gin.H{"message": "行程标题已更新", "trip": trip})
+}
+
+// UpdateTripContentHandler 更新本人行程的路线内容。
+//
+// 行程详情页编辑路线后走这里：content 与保存时同构（summary/city/days/routes），
+// 服务端只校验 JSON 合法性与长度，**不重排 routes**，编辑后的顺序即最终顺序。
+// 删除 / 调整所属天 / 备注都会体现在 routes 数组里，不做额外的服务端推导。
+func UpdateTripContentHandler(c *gin.Context) {
+	tripID := strings.TrimSpace(c.Param("id"))
+	if tripID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少行程 ID", "code": "TRIP_ID_REQUIRED"})
+		return
+	}
+	var req struct {
+		Content   string `json:"content"`
+		Title     string `json:"title"`
+		DestCity  string `json:"dest_city"`
+		Days      int    `json:"days"`
+		Travelers int    `json:"travelers"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数不完整", "code": "INVALID_TRIP_REQUEST"})
+		return
+	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "行程内容不能为空", "code": "TRIP_CONTENT_REQUIRED"})
+		return
+	}
+	if len([]byte(req.Content)) > 4<<20 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "行程内容过长", "code": "TRIP_CONTENT_TOO_LONG"})
+		return
+	}
+	// 客户端负责生成结构，但库里的 content 会被 Web 端直接解析：
+	// 至少保证写进去的是一段合法 JSON，避免一次损坏就让历史行程打不开。
+	if !json.Valid([]byte(content)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "行程内容格式不正确", "code": "TRIP_CONTENT_INVALID"})
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if len([]rune(title)) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "行程标题过长", "code": "TRIP_TITLE_TOO_LONG"})
+		return
+	}
+	destCity := strings.TrimSpace(req.DestCity)
+	if len([]rune(destCity)) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "目的地名称过长", "code": "TRIP_CITY_TOO_LONG"})
+		return
+	}
+
+	var trip models.TripPlan
+	if err := database.DB.Where("id = ? AND user_id = ?", tripID, userID).First(&trip).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "行程不存在或无权访问", "code": "TRIP_NOT_FOUND"})
+		return
+	}
+
+	updates := map[string]any{"content": req.Content}
+	if title != "" {
+		updates["title"] = title
+	}
+	if destCity != "" {
+		updates["dest_city"] = destCity
+	}
+	if req.Days > 0 {
+		updates["days"] = req.Days
+	}
+	if req.Travelers > 0 {
+		updates["travelers"] = req.Travelers
+	}
+	if err := database.DB.Model(&trip).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "行程更新失败", "code": "TRIP_UPDATE_FAILED"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "行程已更新", "trip_id": tripID})
+}
+
+// DeleteTripHandler 删除本人行程。删除是物理删除，归属校验同上。
+func DeleteTripHandler(c *gin.Context) {
+	tripID := strings.TrimSpace(c.Param("id"))
+	if tripID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少行程 ID", "code": "TRIP_ID_REQUIRED"})
+		return
+	}
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+
+	result := database.DB.Where("id = ? AND user_id = ?", tripID, userID).Delete(&models.TripPlan{})
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "行程删除失败", "code": "TRIP_DELETE_FAILED"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "行程不存在或无权访问", "code": "TRIP_NOT_FOUND"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "行程已删除"})
 }
 
 // UpdateAvatarHandler 更新头像种子（初期用 dicebear 种子，后续可替换为图片 URL / 上传）

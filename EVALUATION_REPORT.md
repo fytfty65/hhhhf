@@ -516,7 +516,7 @@ Gateway 共 **92 条路由**，按业务域分布如下（实测自路由启动 
 
 | 位置 | 命名/宣称 | 实际实现 | 影响 |
 |---|---|---|---|
-| `agent.py:585-626` | `NashEquilibriumSolver` | **无任何纳什均衡计算**，委托 Pareto | 命名误导（代码注释已自认） |
+| `core/negotiation_algos.py` | `ParetoFrontierSelector`（原名 `NashEquilibriumSolver`，已改名） | **无任何纳什均衡计算**，委托 Pareto | 名称已修正为与实际实现一致 |
 | `agent.py:796-850` | `TopologyFitnessCalculator` | 加权线性启发式 + 硬编码魔法数 | 非「拓扑适应度」 |
 | `core/contextual_bandit.py:197-203` | `ContextualThompsonBandit` | **无 Beta 采样**，仅后验均值 | 非 Thompson 采样 |
 | `core/contextual_bandit.py:124` | 探索预算 10% | `max(1, int(decisions*0.10))` → 全程**恰好 1 次探索** | 无法学习 |
@@ -851,7 +851,7 @@ for _, candidate := range strings.Split(os.Getenv("PLANNING_ADMIN_USER_IDS"), ",
 | D8 | 社区列表 **~2,000 查询**；标签接口全表扫描 | `http_api.go:508,527-535,547,787-788` | 单请求打满单写者 |
 | D9 | 前端 **4,760 行单组件 / 75 useState / 25 组件定义**，且 22.1% 为死代码 | ReadAllLines 计量 + 逐文件 import 检索（§3.0） | 全量重渲染、首屏 1,096 KB、不可维护、修复易落错拷贝 |
 | D10 | **伪造用户可见指标** | `team_satisfaction` 96/94/93 硬编码；`estimate_crowdedness` percent 固定 | 信任与合规风险 |
-| D11 | 算法**命名与实际不符**（Nash/Thompson/时间智能） | `agent.py:585-626`、`contextual_bandit.py:197-203`、`time_intelligence.py` | 技术叙事与实现脱节 |
+| D11 | 算法**命名与实际不符**（Nash/Thompson/时间智能） | `core/negotiation_algos.py`（已改名 `ParetoFrontierSelector`）、`contextual_bandit.py:197-203`、`time_intelligence.py` | 技术叙事与实现脱节 |
 | D12 | 核心 1,740 行 `run_negotiate` **零测试**；另有 3 处 `self` 未定义的潜在 NameError 被宽泛 `except` 吞掉 | `agent.py:2160,2527,2651`；测试覆盖率分析 | 核心路径回归无法发现 |
 | D13 | 无部署产物、无优雅停机、无服务器超时 | 全库无 Dockerfile/systemd；`main.go:78` | 不可运维、慢速攻击可 DoS |
 | D14 | 依赖漂移：Python 4 个未声明依赖、无锁文件；前端 5 个 `latest`；CI 工具链 pin 错版本 | `requirements.txt`、`package.json`、`ci.yml:17` vs `go.mod:3` | 构建不可复现 |
@@ -1132,7 +1132,7 @@ OmniRoute 的问题不是「功能不足」，而是**工程交付成熟度落�
 
 ### 12.3 唯一需要警惕的技术叙事风险
 
-代码中 `NashEquilibriumSolver`（无纳什计算）、`ContextualThompsonBandit`（无 Thompson 采样）、时间智能（关键词查表）以及硬编码的 `team_satisfaction` 96/94/93 与固定 `percent` 82/58/35，构成了一个**「命名与实现脱节」**的模式。这类问题在演示中不易被发现，但一旦被技术评审或用户识破，会同时损害产品可信度与技术声誉。建议在阶段二内统一处理：能改为真算法的改（Thompson 采样只需引入 Beta 分布采样，改动很小），无法实现的**如实改名**，所有估算值一律打上已有的 `is_estimated` 标记——项目在其他地方已经建立了极好的溯源纪律，这里只需要保持一致性。
+代码中 `ParetoFrontierSelector`（原名 `NashEquilibriumSolver`，无纳什计算，已如实改名）、`ContextualThompsonBandit`（无 Thompson 采样）、时间智能（关键词查表）以及硬编码的 `team_satisfaction` 96/94/93 与固定 `percent` 82/58/35，构成了一个**「命名与实现脱节」**的模式。这类问题在演示中不易被发现，但一旦被技术评审或用户识破，会同时损害产品可信度与技术声誉。建议在阶段二内统一处理：能改为真算法的改（Thompson 采样只需引入 Beta 分布采样，改动很小），无法实现的**如实改名**，所有估算值一律打上已有的 `is_estimated` 标记——项目在其他地方已经建立了极好的溯源纪律，这里只需要保持一致性。
 
 ### 12.4 优势的可放大之处
 

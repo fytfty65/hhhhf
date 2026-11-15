@@ -114,7 +114,9 @@ func (c *Client) triggerAgentNegotiation(wsMsg models.WSMessage) {
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:8000"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	// 3 天以上的深度推演实测会超过 5 分钟（高德取数受限流闸门串行 + 多轮博弈），
+	// 300s 会把还在正常出字的会话判成超时并直接断开，用户只看到「通道中断」。
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/v1/agent/negotiate", bytes.NewReader(reqBody))
 	if reqErr != nil {
@@ -125,7 +127,7 @@ func (c *Client) triggerAgentNegotiation(wsMsg models.WSMessage) {
 	if token := strings.TrimSpace(os.Getenv("AI_SERVICE_INTERNAL_TOKEN")); token != "" {
 		req.Header.Set("X-Omni-Internal-Token", token)
 	}
-	resp, err := (&http.Client{Timeout: 300 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 600 * time.Second}).Do(req)
 	if err != nil {
 		log.Printf("调用 Python 协商接口网络失败: %v", err)
 		return

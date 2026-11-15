@@ -36,6 +36,32 @@ func ListRiskNotificationsHandler(c *gin.Context) {
 	planningData(c, gin.H{"notifications": notifications, "unread_count": unread, "delivery": "in_app", "provider_policy": "source_and_estimated_are_preserved"})
 }
 
+// MarkAllRiskNotificationsReadHandler marks every unread notification of the
+// caller as read in one update, so the client does not need N requests.
+func MarkAllRiskNotificationsReadHandler(c *gin.Context) {
+	userID, ok := currentUserIDOrReject(c)
+	if !ok {
+		return
+	}
+	status := strings.TrimSpace(c.Query("status"))
+	if status == "" {
+		status = "read"
+	}
+	if status != "read" && status != "acknowledged" {
+		planningError(c, http.StatusBadRequest, "NOTIFICATION_STATUS_INVALID", "通知状态只能为 read 或 acknowledged", nil)
+		return
+	}
+	now := time.Now().UTC()
+	result := database.DB.Model(&models.RiskNotification{}).
+		Where("user_id = ? AND status = ?", userID, "unread").
+		Updates(map[string]any{"status": status, "read_at": now})
+	if result.Error != nil {
+		planningError(c, http.StatusInternalServerError, "NOTIFICATION_UPDATE_FAILED", "风险通知状态更新失败", nil)
+		return
+	}
+	planningData(c, gin.H{"updated": result.RowsAffected, "status": status})
+}
+
 // AcknowledgeRiskNotificationHandler marks one notification as read or
 // acknowledged. Ownership is checked through the authenticated user ID.
 func AcknowledgeRiskNotificationHandler(c *gin.Context) {

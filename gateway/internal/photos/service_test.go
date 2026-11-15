@@ -120,6 +120,55 @@ func TestReportTakesPhotoDownImmediately(t *testing.T) {
 	}
 }
 
+// 处理流水：举报与审核都要留下"谁、何时、为何"，且最新在前。
+func TestHistoryRecordsReportAndModeration(t *testing.T) {
+	service := newTestService(t, true)
+	photo, _ := service.Upload("u1", "博斯腾湖", "trip-1", solidJPEG(t, 16, 12))
+
+	if _, err := service.ModerateBy(photo.ID, StatusApproved, "", "admin-1"); err != nil {
+		t.Fatalf("通过失败: %v", err)
+	}
+	if _, err := service.ReportWithReason(photo.ID, "u2", "与景点无关"); err != nil {
+		t.Fatalf("举报失败: %v", err)
+	}
+
+	entries := service.History(10)
+	if len(entries) != 2 {
+		t.Fatalf("应有 2 条流水（通过 + 举报），得到 %d: %+v", len(entries), entries)
+	}
+	if entries[0].Kind != "report" || entries[0].ActorID != "u2" || entries[0].Reason != "与景点无关" {
+		t.Fatalf("最新一条应是带理由的举报: %+v", entries[0])
+	}
+	if entries[0].NodeName != "博斯腾湖" || entries[0].PhotoStatus != StatusPending {
+		t.Fatalf("流水应带上照片上下文: %+v", entries[0])
+	}
+	if entries[1].Kind != StatusApproved || entries[1].ActorID != "admin-1" {
+		t.Fatalf("第二条应是管理员的通过记录: %+v", entries[1])
+	}
+	if got := service.History(1); len(got) != 1 {
+		t.Fatalf("limit 应生效，得到 %d 条", len(got))
+	}
+}
+
+// 照片被删掉后，处理记录仍要留在审计文件里（申诉回溯依赖它）。
+func TestHistorySurvivesPhotoDeletion(t *testing.T) {
+	service := newTestService(t, true)
+	photo, _ := service.Upload("u1", "赛里木湖", "trip-9", solidJPEG(t, 16, 12))
+	if _, err := service.ModerateBy(photo.ID, StatusRejected, "清晰度不足", "admin-2"); err != nil {
+		t.Fatalf("拒绝失败: %v", err)
+	}
+	if err := service.Delete(photo.ID, "u1", false); err != nil {
+		t.Fatalf("删除失败: %v", err)
+	}
+	entries := service.History(10)
+	if len(entries) != 1 {
+		t.Fatalf("删除照片不应抹掉流水，得到 %d 条", len(entries))
+	}
+	if entries[0].Kind != StatusRejected || entries[0].Reason != "清晰度不足" || entries[0].NodeName != "赛里木湖" {
+		t.Fatalf("流水内容不完整: %+v", entries[0])
+	}
+}
+
 func TestListForReviewPutsReportedFirst(t *testing.T) {
 	service := newTestService(t, true)
 	first, _ := service.Upload("u1", "A", "", solidJPEG(t, 16, 12))
@@ -237,7 +286,6 @@ func TestSecondUploaderOfSameImageKeepsAccess(t *testing.T) {
 		t.Fatal("一个人删除不该把另一个上传者也一并抹掉")
 	}
 }
-
 
 func TestIndexPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
