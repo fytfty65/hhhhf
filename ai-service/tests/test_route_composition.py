@@ -20,6 +20,8 @@ from core.route_composition import (
     composition_audit,
     composition_targets,
     count_route_composition,
+    normalize_day_sequence,
+    order_day_stops_by_nearest,
     order_route_by_day,
     scenic_tier,
     summarize_targets,
@@ -652,6 +654,46 @@ class RouteOrderTests(unittest.TestCase):
         self.assertEqual(route[0]["name"], "乙", "不能就地改调用方的节点")
 
 
+class NormalizeDaySequenceTests(unittest.TestCase):
+    """住宿被插到当天中间时，时刻会倒流（2026-11-02 实测：第 2 天 21:30 入住 → 11:30 游览）。"""
+
+    def test_hotel_in_the_middle_is_moved_to_day_end(self):
+        route = [
+            {"day": 2, "name": "新繁东湖景区", "time": "Day 2 | 08:30 游览", "type": "风景名胜"},
+            {"day": 2, "name": "露营餐厅", "time": "Day 2 | 10:00 用餐", "type": "餐饮服务"},
+            {"day": 2, "name": "泰和西隐酒店", "time": "Day 2 | 21:30 入住", "is_hotel": True},
+            {"day": 2, "name": "香草湖湿地公园", "time": "Day 2 | 11:30 游览", "type": "风景名胜"},
+            {"day": 2, "name": "派对餐厅", "time": "Day 2 | 13:30 用餐", "type": "餐饮服务"},
+        ]
+        ordered = normalize_day_sequence(route)
+        self.assertEqual(
+            [node["name"] for node in ordered],
+            ["新繁东湖景区", "露营餐厅", "香草湖湿地公园", "派对餐厅", "泰和西隐酒店"],
+        )
+        # 白天节点按空间序重贴时刻，住宿固定 21:30 → 单调不减，质量闸门不会再报 day_out_of_order
+        self.assertEqual([node["time"] for node in ordered], [
+            "Day 2 | 08:30 游览", "Day 2 | 10:00 用餐",
+            "Day 2 | 11:30 游览", "Day 2 | 13:30 用餐", "Day 2 | 21:30 入住",
+        ])
+
+    def test_keeps_days_in_order_and_does_not_touch_places(self):
+        route = [
+            {"day": 3, "name": "丙", "time": "Day 3 | 09:00 游览"},
+            {"day": 1, "name": "甲", "time": "Day 1 | 09:00 游览"},
+            {"day": 1, "name": "甲酒店", "time": "Day 1 | 21:30 入住", "is_hotel": True},
+        ]
+        ordered = normalize_day_sequence(route)
+        self.assertEqual([node["name"] for node in ordered], ["甲", "甲酒店", "丙"])
+
+    def test_unknown_time_gets_a_slot(self):
+        ordered = normalize_day_sequence([{"day": 1, "name": "无名点", "type": "风景名胜"}])
+        self.assertEqual(ordered[0]["time"], "Day 1 | 08:30 游览")
+
+    def test_empty_input(self):
+        self.assertEqual(normalize_day_sequence(None), [])
+        self.assertEqual(normalize_day_sequence([]), [])
+
+
 class LodgingTrimTests(unittest.TestCase):
     """住宿不能多于夜数（2026-10-05 横向对照实测：喀什 3 天 4 个住宿、乌鲁木齐 2 天 3 个）。"""
 
@@ -875,6 +917,78 @@ class ParkTrimDisclosureTests(unittest.TestCase):
         self.assertIsNotNone(entry, items)
         self.assertIn("劳动公园→博斯腾湖风景名胜区", str(entry.get("reason")))
         self.assertIn("孔雀公园", str(entry.get("reason")))
+
+
+class DayStopOrderTests(unittest.TestCase):
+    """收口后按最近邻补排日间顺序：换餐/换酒店会让当天变成"东→西→东→西"。"""
+
+    def _node(self, name, coord, kind="景点"):
+        return {"day": 2, "name": name, "type": kind, "lnglat": list(coord)}
+
+    def test_zigzag_day_is_reordered_and_hotel_stays_last(self):
+        # 复刻 2026-11-02 四川实测：三元(东) → 都江堰(西) → TiMi(东) → 胖姐(东) → 唐酥肉(西) → 宾馆
+        route = [
+            self._node("三元景区", (104.426, 30.728)),
+            self._node("都江堰景区", (103.610, 31.003)),
+            self._node("TiMi小吃", (104.394, 30.747), "餐饮服务"),
+            self._node("胖姐小吃", (104.394, 30.748), "餐饮服务"),
+            self._node("唐酥肉炸物小吃", (103.608, 31.005), "餐饮服务"),
+            self._node("二王庙宾馆", (103.613, 31.004), "住宿服务"),
+        ]
+        ordered = order_day_stops_by_nearest(route)
+        names = [item["name"] for item in ordered]
+        self.assertEqual(names[-1], "二王庙宾馆", names)
+        # 东侧两个点必须挨在一起，西侧三个点也挨在一起：整趟只横穿一次
+        east = {"三元景区", "TiMi小吃", "胖姐小吃"}
+        positions = [names.index(name) for name in east]
+        self.assertEqual(max(positions) - min(positions), len(east) - 1, names)
+
+    def test_day_leg_is_cut_half_after_reorder(self):
+        from core.route_composition import _day_leg_km
+
+        route = [
+            self._node("三元景区", (104.426, 30.728)),
+            self._node("都江堰景区", (103.610, 31.003)),
+            self._node("TiMi小吃", (104.394, 30.747), "餐饮服务"),
+            self._node("胖姐小吃", (104.394, 30.748), "餐饮服务"),
+            self._node("唐酥肉炸物小吃", (103.608, 31.005), "餐饮服务"),
+        ]
+        before = _day_leg_km(route)
+        after = _day_leg_km(order_day_stops_by_nearest(route))
+        self.assertLess(after, before * 0.5, f"重排后应从约 {before:.0f}km 降到一半以下，实际 {after:.0f}km")
+
+    def test_days_and_membership_are_unchanged(self):
+        route = [
+            {"day": 1, "name": "甲", "lnglat": [104.0, 30.6]},
+            {"day": 2, "name": "乙", "lnglat": [104.4, 30.7]},
+            {"day": 2, "name": "丙", "lnglat": [103.6, 31.0]},
+            {"day": 2, "name": "丁", "lnglat": [104.4, 30.8]},
+        ]
+        ordered = order_day_stops_by_nearest(route)
+        self.assertEqual(sorted(item["name"] for item in ordered), ["丁", "丙", "乙", "甲"])
+        self.assertEqual([item["day"] for item in ordered], [1, 2, 2, 2])
+
+
+class NormalizeOpenWindowTests(unittest.TestCase):
+    """贴时刻要顺着开放时间：餐馆 10:00 开门就不能排 08:30。"""
+
+    def test_late_opening_restaurant_is_moved_to_its_first_slot(self):
+        route = [
+            {"day": 1, "name": "云端山语·观景餐厅", "type": "餐饮服务", "open_time": "10:00-15:30"},
+            {"day": 1, "name": "四姑娘山景区", "type": "风景名胜"},
+        ]
+        out = normalize_day_sequence(route)
+        self.assertTrue(out[0]["time"].startswith("Day 1 | 10:00"), out[0]["time"])
+        self.assertTrue(out[1]["time"].startswith("Day 1 | 11:30"), out[1]["time"])
+
+    def test_missing_open_time_keeps_the_original_slots(self):
+        route = [
+            {"day": 1, "name": "甲景区", "type": "风景名胜", "open_time": "暂无供应商数据"},
+            {"day": 1, "name": "乙餐馆", "type": "餐饮服务", "open_time": "暂无供应商数据"},
+        ]
+        out = normalize_day_sequence(route)
+        self.assertTrue(out[0]["time"].startswith("Day 1 | 08:30"), out[0]["time"])
+        self.assertTrue(out[1]["time"].startswith("Day 1 | 10:00"), out[1]["time"])
 
 
 if __name__ == "__main__":

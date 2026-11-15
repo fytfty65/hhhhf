@@ -470,3 +470,287 @@ def repair_day_overload(
         removed.extend(day_removed)
 
     return kept, removed
+
+
+# ——————————————————————————————————————————————————————————————
+# 省域口径（B）：目的地是"一个省"时，日内现实性不能按"离省会多远"来判。
+#
+# 为什么必须换一套判据（2026-11-01）：
+#   省级请求会把九寨沟（离成都约 300km）、峨眉山（约 140km）放进候选池。
+#   旧判据 `evaluate_travel_feasibility` 以 `city_center`（省会）为起点算里程与"远景区"，
+#   于是把这些**本来就在候选里、而且真值得去**的景区判成"一天跑不完"，
+#   `repair_day_overload` 直接把川西节点移出 → 用户看到的还是"成都周边"，省域覆盖落空。
+#
+# 省域的真实约束不是"离省会多远"，而是：
+#   1. 同一天只在一个片区（片区 = 地州/州级市，由调用方用 `region_of` 判定）；
+#   2. 跨片区那一天是"整段换乘"（高铁/动车），换乘本身要放得进一天（默认 ≤5 小时）；
+#   3. 片区内部的移动仍受当天里程预算约束（daily_budget_km，与旧口径同一张表）。
+#
+# 所以这里**不传 city_center、也不数 far_nodes**：离省会 300km 是"要坐一趟高铁"，
+# 不是"这一天跑不完"。
+# ——————————————————————————————————————————————————————————————
+
+MAX_TRANSFER_HOURS = 5.0
+
+
+def _leg_km(
+    nodes: Sequence[Mapping[str, Any]],
+    region_of: Optional[Callable[[Mapping[str, Any]], str]] = None,
+) -> float:
+    """当天节点之间的移动里程（不含"从市中心出发/回市中心"那段）。
+
+    ⚠️ 跨片区的那一段**不计入**：那是一趟高铁/动车，由 `transfer_too_long` 判定。
+    把它按 300km 的路网里程算进当天预算，得到的结论会是"换乘日超预算"——
+    而换乘日本来就该把时间花在车上，这不是跑不动的景点日。
+    """
+    total = 0.0
+    previous_coord: Optional[List[float]] = None
+    previous_region = ""
+    for node in nodes:
+        coord = node_lnglat(node)
+        if not coord:
+            continue
+        region = ""
+        if region_of is not None:
+            try:
+                region = str(region_of(node) or "").strip()
+            except Exception:
+                region = ""
+        if previous_coord is not None and not (previous_region and region and previous_region != region):
+            leg = haversine_km(previous_coord, coord)
+            if leg == leg:
+                total += leg
+        previous_coord = coord
+        previous_region = region or previous_region
+    return round(total, 1)
+
+
+def _region_sequence(nodes: Sequence[Mapping[str, Any]], region_of: Callable[[Mapping[str, Any]], str]) -> List[str]:
+    """当天出现过的片区（按首次出现顺序去重）；取不到片区的节点不算数。"""
+    sequence: List[str] = []
+    for node in nodes:
+        try:
+            region = str(region_of(node) or "").strip()
+        except Exception:
+            region = ""
+        if region and region not in sequence:
+            sequence.append(region)
+    return sequence
+
+
+def _region_moves(
+    nodes: Sequence[Mapping[str, Any]], region_of: Callable[[Mapping[str, Any]], str]
+) -> int:
+    """当天相邻节点之间**片区变化**的次数（取不到片区的节点跳过）。
+
+    为什么不能只看"当天出现过几个片区"：成都→阿坝→成都→阿坝 只出现过两个片区，
+    按去重口径会被当成"一次换乘日"直接放过；实际是来回横跳两趟，单日里程 600km+。
+    实测（2026-11-02 四川 4 天，候选池兜底路线）：第 4 天这样排，里程重算 622km，
+    而省域口径只报 62.8km（跨片区那几段按设计不计入），于是质量闸门与省域口径互相矛盾。
+    """
+    moves = 0
+    previous = ""
+    for node in nodes:
+        try:
+            region = str(region_of(node) or "").strip()
+        except Exception:
+            region = ""
+        if not region:
+            continue
+        if previous and region != previous:
+            moves += 1
+        previous = region
+    return moves
+
+
+def evaluate_province_feasibility(
+    route: Sequence[Mapping[str, Any]],
+    *,
+    region_of: Callable[[Mapping[str, Any]], str],
+    region_center_of: Optional[Callable[[str], Sequence[float]]] = None,
+    day_regions: Optional[Mapping[int, str]] = None,
+    distance_tolerance: str = "normal",
+    days: int = 1,
+    max_transfer_hours: float = MAX_TRANSFER_HOURS,
+) -> Dict[str, Any]:
+    """省域口径的日内现实性：同一天一个片区、跨片区一次换乘、片区内受里程预算约束。
+
+    与 `evaluate_travel_feasibility` 返回同构（`ok / days / violations / notes`），
+    额外给出 `scope="province"`、每天的 `regions` 与 `planned_region`（分片建议），
+    便于上游在披露里说清"这一天在哪个片区、换乘多久"。
+    """
+    budget = daily_budget_km(distance_tolerance)
+    effective_budget = effective_daily_budget_km(distance_tolerance)
+    grouped = _days_of(route)
+    planned = dict(day_regions or {})
+    report_days: List[Dict[str, Any]] = []
+    violations: List[Dict[str, Any]] = []
+
+    def _transfer_hours(a: str, b: str) -> Optional[float]:
+        if region_center_of is None:
+            return None
+        try:
+            start = list(region_center_of(a) or [])
+            end = list(region_center_of(b) or [])
+        except Exception:
+            return None
+        if len(start) < 2 or len(end) < 2:
+            return None
+        km = haversine_km(start, end)
+        if km != km:
+            return None
+        return round(float(km) / 200.0 + 0.5, 1)
+
+    for day in range(1, max(1, int(days or 1)) + 1):
+        nodes = grouped.get(day, [])
+        regions = _region_sequence(nodes, region_of)
+        moves = _region_moves(nodes, region_of)
+        km = _leg_km(nodes, region_of)
+        day_violations: List[str] = []
+        transfer: Optional[Dict[str, Any]] = None
+
+        if len(regions) >= 3 or moves >= 2:
+            day_violations.append("too_many_regions_in_one_day")
+            if len(regions) >= 3:
+                detail = f"第 {day} 天跨了 {len(regions)} 个片区（{'、'.join(regions)}），一天只够玩一个片区"
+            else:
+                detail = (
+                    f"第 {day} 天在{'、'.join(regions)}之间来回跑了 {moves} 次，"
+                    "一天只够一个片区（跨片区应整段移动，而不是当天折返）"
+                )
+            violations.append({
+                "code": "too_many_regions_in_one_day",
+                "day": day,
+                "level": "negotiable",
+                "detail": detail,
+            })
+        elif len(regions) == 2:
+            hours = _transfer_hours(regions[0], regions[1])
+            transfer = {"from": regions[0], "to": regions[1], "hours": hours}
+            if hours is not None and hours > max_transfer_hours:
+                day_violations.append("transfer_too_long")
+                violations.append({
+                    "code": "transfer_too_long",
+                    "day": day,
+                    "level": "negotiable",
+                    "detail": (
+                        f"第 {day} 天从{regions[0]}换到{regions[1]}约 {hours:g} 小时（估算），"
+                        f"超出一天可接受换乘 {max_transfer_hours:g} 小时"
+                    ),
+                })
+
+        if nodes and km > effective_budget:
+            day_violations.append("daily_travel_budget_exceeded")
+            violations.append({
+                "code": "daily_travel_budget_exceeded",
+                "day": day,
+                "level": "negotiable",
+                "detail": f"第 {day} 天在片区内移动约 {km:.0f}km，超过当天预算 {budget:.0f}km",
+            })
+
+        report_days.append({
+            "day": day,
+            "nodes": len(nodes),
+            "travel_km": km,
+            "budget_km": budget,
+            "regions": regions,
+            "planned_region": str(planned.get(day) or ""),
+            "transfer": transfer,
+            "violations": day_violations,
+        })
+
+    return {
+        "ok": not violations,
+        "scope": "province",
+        "distance_tolerance": str(distance_tolerance or "normal"),
+        "budget_km": budget,
+        "effective_budget_km": round(effective_budget, 1),
+        "grace_ratio": DAILY_BUDGET_GRACE_RATIO,
+        "max_transfer_hours": float(max_transfer_hours),
+        "days": report_days,
+        "violations": violations,
+        "notes": [item["detail"] for item in violations],
+        # 省域口径下"远景区"这个概念不再适用：离省会远只说明要换乘，不说明跑不完。
+        "note": "省域口径：同一天只安排一个片区；跨片区那天要能当天到（换乘按高铁估算）。",
+    }
+
+
+def repair_province_overload(
+    route: Sequence[Mapping[str, Any]],
+    *,
+    region_of: Callable[[Mapping[str, Any]], str],
+    region_center_of: Optional[Callable[[str], Sequence[float]]] = None,
+    day_regions: Optional[Mapping[int, str]] = None,
+    distance_tolerance: str = "normal",
+    max_transfer_hours: float = MAX_TRANSFER_HOURS,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """把"一天跨了太多片区 / 换乘放不进一天"的节点移出该天（返回 `(新路线, 移走的节点)`）。
+
+    以当天**应当去的片区**为准：给了分片建议（`day_regions`）且这一天确实有该片区的点，
+    就保留该片区、移出串进来的别的片区；没有分片建议时按"出现最多的片区"（并列取先出现的）。
+    **每天至少留 1 个节点**（宁可留一个跨片的，也不把一天清空）。
+    换乘日（两个片区且换乘 ≤ 上限）不动 —— 那正是"跨片区那天整段移动"的正常形态。
+    """
+    grouped = _days_of(route)
+    planned = dict(day_regions or {})
+    kept: List[Dict[str, Any]] = []
+    removed: List[Dict[str, Any]] = []
+
+    def _transfer_hours(a: str, b: str) -> Optional[float]:
+        if region_center_of is None:
+            return None
+        try:
+            start = list(region_center_of(a) or [])
+            end = list(region_center_of(b) or [])
+        except Exception:
+            return None
+        if len(start) < 2 or len(end) < 2:
+            return None
+        km = haversine_km(start, end)
+        if km != km:
+            return None
+        return round(float(km) / 200.0 + 0.5, 1)
+
+    for day in sorted(grouped):
+        nodes = list(grouped[day])
+        regions_of_nodes: List[str] = []
+        for node in nodes:
+            try:
+                regions_of_nodes.append(str(region_of(node) or "").strip())
+            except Exception:
+                regions_of_nodes.append("")
+        present = [region for region in regions_of_nodes if region]
+        if len(present) < 3:
+            long_transfer = False
+            if len(present) == 2:
+                hours = _transfer_hours(present[0], present[1])
+                long_transfer = hours is not None and hours > max_transfer_hours
+            if not long_transfer:
+                kept.extend(dict(node) for node in nodes)
+                continue
+
+        counts: Dict[str, int] = {}
+        for region in present:
+            counts[region] = counts.get(region, 0) + 1
+        # 优先按分片建议保留：这一天的点本来就该是那个片区的，串进来的才是要移走的。
+        # （实测：没有这条时按"出现最多"裁决，某天串进 2 个外片区、只剩 1 个计划内点位，
+        #   就会把计划内的点移走、留下外片区的点，覆盖反而更乱。）
+        planned_region = str(planned.get(day) or "").strip()
+        if planned_region and planned_region in present:
+            dominant = planned_region
+        else:
+            # 出现最多的片区为准；并列时取"先出现的那个"（-index 让更小的下标得分更高）
+            dominant = max(present, key=lambda region: (counts[region], -present.index(region)))
+        day_kept: List[Dict[str, Any]] = []
+        day_removed: List[Dict[str, Any]] = []
+        for node, region in zip(nodes, regions_of_nodes):
+            if region and region != dominant:
+                day_removed.append({**dict(node), "removed_reason": "同一天跨了多个片区（一天只够玩一个片区）"})
+                continue
+            day_kept.append(dict(node))
+        if not day_kept and day_removed:
+            day_kept.append({key: value for key, value in day_removed.pop(0).items() if key != "removed_reason"})
+        kept.extend(day_kept)
+        removed.extend(day_removed)
+
+    return kept, removed

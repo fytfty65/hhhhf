@@ -316,7 +316,7 @@ def top_up_missing_meals(
     additions: List[Dict[str, Any]] = []
     current: List[Dict[str, Any]] = list(nodes)
 
-    def _centroid(day: int, source: Sequence[Mapping[str, Any]]) -> List[float]:
+    def _playable_coords(day: int, source: Sequence[Mapping[str, Any]]) -> List[List[float]]:
         coords = []
         for node in source:
             if node_day(node, 1) != day:
@@ -326,15 +326,21 @@ def top_up_missing_meals(
             coord = node_lnglat(node)
             if coord:
                 coords.append(coord)
-        if not coords:
-            return []
-        return [sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords)]
+        return coords
 
-    def _distance_to(center: Sequence[float], item: Mapping[str, Any]) -> float:
+    def _distance_to(coords: Sequence[Sequence[float]], item: Mapping[str, Any]) -> float:
+        """离**当天任一个玩点**最近的距离。
+
+        以前按当天玩点的**质心**算：跨两个片区的日（四姑娘山 ↔ 玛嘉沟 62km）质心
+        落在无人区，明明就在四姑娘山镇上的饭点会被判成 32km「太远」而不补
+        （实测 2026-11-02 四川 4 天）。饭点只要挨着当天**某一个**玩点就是可去的。
+        """
         coord = node_lnglat(item)
-        if not center or not coord:
+        if not coords or not coord:
             return float("inf")
-        return haversine_km((float(center[0]), float(center[1])), coord)
+        return min(
+            haversine_km((float(point[0]), float(point[1])), coord) for point in coords
+        )
 
     # ① 先做一次**全局分配**：把所有"缺餐的天 × 候选池餐饮"按距离排序，近的优先配
     #    （逐天各取最近会把离 A 天最近的那家配给先轮到、其实更远的 B 天 —— 实测踩到过）。
@@ -342,7 +348,7 @@ def top_up_missing_meals(
         day for day in days if not any(_intent_of_node(node) == "food" for node in current if node_day(node, 1) == day)
     ]
     if pool and hungry:
-        centers = {day: _centroid(day, current) for day in hungry}
+        centers = {day: _playable_coords(day, current) for day in hungry}
         candidates = [
             dict(item)
             for item in (pool.get("food") or [])
@@ -405,7 +411,7 @@ def top_up_missing_meals(
         room = None if cap is None else max(0, cap - len(day_nodes))
         if room is not None and room < 1:
             continue
-        center = _centroid(day, current)
+        center = _playable_coords(day, current)
         donors = [
             node
             for node in current

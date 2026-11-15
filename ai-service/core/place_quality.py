@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .plan_quality import (
@@ -34,6 +35,7 @@ from .plan_quality import (
     nodes_of,
     parse_clock,
 )
+from .poi_pool import scenic_radius_km
 
 # 住宿节点的名字关键词（与 route_composition.is_lodging_node 同口径，避免两套判断）
 _LODGING_WORDS = ("酒店", "民宿", "宾馆", "客栈", "旅馆", "度假村", "旅社", "青旅")
@@ -87,6 +89,105 @@ def _is_lodging(node: Mapping[str, Any]) -> bool:
     return any(word in name for word in _LODGING_WORDS)
 
 
+# —— 目的地范围校验（2026-11-02）：坐标"合法"不等于"属于这趟行程" ——
+# 实测事故：模型给出一个经纬度都在合法区间、但属于别的城市的坐标（例如成都行程里
+# 出现 104.40,30.85 这种几十公里外的点），前端按它把整天地图缩到很低级别，
+# 里程里还会凭空多出几十公里的"通勤"（曾出现 47.7km 的假段）。
+# 口径与 `(0,0)` 完全一致：**坐标不可信就当没有**（名称、时间、花费等字段全部保留，
+# 只是 `lnglat=[]`、`coordinate_status=missing`），不参与里程与地图标点。
+DEFAULT_CITY_COORDINATE_RADIUS_KM = 80.0
+
+# 省域行程（目的地写成"四川/新疆"这类省）里，各片区中心本身就是合法的落脚点，
+# 跨度可能几百公里；用城市口径会把九寨沟/稻城亚丁这些真景区误删。
+DEFAULT_PROVINCE_COORDINATE_RADIUS_KM = 800.0
+
+
+def poi_coordinate_radius_km(
+    trip_days: int = 1,
+    distance_tolerance: str = "normal",
+    *,
+    province_scope: bool = False,
+) -> float:
+    """POI 坐标的可信半径（km）：超出就当作没有坐标。
+
+    默认跟"这趟行程本来就允许排多远"（`scenic_radius_km`）走，且不低于 80km：
+    · 城市行程 1~2 天 normal = 90km、3~4 天 = 150km、5 天以上 = 250km；
+    · 用户明确"不考虑距离"（high）= 250~600km；"不想跑远"（low）= 80km；
+    · 省域行程统一放宽到 800km（各片区中心另外作为合法中心参与判断）。
+    `CITY_COORDINATE_RADIUS_KM` 可显式覆盖以上全部默认（正数才生效）。
+    """
+    raw = str(os.getenv("CITY_COORDINATE_RADIUS_KM") or "").strip()
+    if raw:
+        try:
+            override = float(raw)
+        except ValueError:
+            override = 0.0
+        if override > 0:
+            return override
+    if province_scope:
+        return DEFAULT_PROVINCE_COORDINATE_RADIUS_KM
+    return max(
+        DEFAULT_CITY_COORDINATE_RADIUS_KM,
+        float(scenic_radius_km(int(trip_days or 1), str(distance_tolerance or "normal"))),
+    )
+
+
+def clear_out_of_area_coordinates(
+    plan: Any,
+    *,
+    centers: Sequence[Any],
+    radius_km: float,
+    copy: bool = True,
+) -> List[Dict[str, Any]]:
+    """把离**所有合法中心**都超过 `radius_km` 的坐标清成"缺失"，返回被清掉的清单。
+
+    `centers` 是允许的中心（城市中心；省域行程再加上各片区中心）：
+    多个中心取**最近的一个**判断 —— "离省会很远、但在阿坝州内"是合理的，
+    不能被当成错误坐标。判不了的一律保留（没有中心/半径非正/距离算不出来），
+    **绝不误删**；`(0,0)` 不在这里处理（已由调用方的 0,0 清洗负责）。
+
+    与 `nodes_missing_coordinates` 一样：默认返回的是浅拷贝，要就地改字段的调用方
+    必须传 `copy=False`（否则日志说清了、payload 里还在），见 `nodes_of` 的说明。
+    """
+    if not radius_km or float(radius_km) <= 0:
+        return []
+    valid_centers: List[Tuple[float, float]] = []
+    for center in centers or []:
+        point = node_lnglat({"lnglat": center})
+        if point:
+            valid_centers.append(point)
+    if not valid_centers:
+        return []
+
+    radius = float(radius_km)
+    cleared: List[Dict[str, Any]] = []
+    for node in nodes_of(plan, copy=copy):
+        coord = node_lnglat(node)
+        if not coord:
+            continue
+        distances = [haversine_km(center, coord) for center in valid_centers]
+        finite = [distance for distance in distances if distance == distance]
+        if not finite:
+            continue
+        nearest = min(finite)
+        if nearest <= radius:
+            continue
+        original = [float(coord[0]), float(coord[1])]
+        node["lnglat"] = []
+        node["coordinate_status"] = "missing"
+        node["coordinate_note"] = (
+            f"坐标离目的地最近的中心约 {nearest:.0f}km，超出 {radius:.0f}km 的可信范围，"
+            "已按无效清除（不参与里程与距离判断，地图上不标位置）"
+        )
+        cleared.append({
+            "name": node_name(node),
+            "original_lnglat": original,
+            "distance_km": round(nearest, 1),
+            "radius_km": round(radius, 1),
+        })
+    return cleared
+
+
 def _source_values(node: Mapping[str, Any]) -> List[str]:
     sources = node.get("data_sources")
     if isinstance(sources, Mapping):
@@ -94,6 +195,65 @@ def _source_values(node: Mapping[str, Any]) -> List[str]:
     if isinstance(sources, Sequence) and not isinstance(sources, (str, bytes)):
         return [str(value).strip().lower() for value in sources]
     return []
+
+
+# --------------------------------------------------------------------------
+# 供应商事实（评分/开放时间/价格）：查不到就**留空**，不要满屏写同一句占位
+# --------------------------------------------------------------------------
+SUPPLIER_FACT_FIELDS = ("rating", "cost_estimate", "open_time")
+#: 这些值不是数据，只是"没查到"的写法。它们被复制进最终 payload 后，界面会当成
+#: 事实展示（信息卡出现过"暂无供应商数据 分"，时间轴每站重复一行同款文案）。
+SUPPLIER_PLACEHOLDERS = frozenset({
+    "暂无供应商数据", "暂无数据", "暂无", "未核实", "待确认", "未知", "不详",
+    "unavailable", "unknown", "n/a", "none", "null",
+})
+SUPPLIER_GAP_NOTE = (
+    "这些节点的评分/开放时间/价格未能从供应商核实：对应字段已留空（不展示猜测值），"
+    "避免把占位文案当成事实反复展示；出行前建议再核实。"
+)
+
+
+def is_supplier_placeholder(value: Any) -> bool:
+    """这个字段值是不是"没查到"的占位写法（而不是真实数据）。"""
+    text = str(value or "").strip().lower()
+    return bool(text) and text in SUPPLIER_PLACEHOLDERS
+
+
+def clear_placeholder_supplier_facts(plan: Any, *, copy: bool = True) -> List[Dict[str, Any]]:
+    """把评分/开放时间/价格里的"暂无供应商数据"等占位清成空串，返回被清的节点清单。
+
+    为什么要清（2026-11-03）：高德 `place/text` 的 `biz_ext` 没给评分/营业时间时，
+    底座记录直接写死同一句"暂无供应商数据"；下游 `or "暂无供应商数据"` 又把它原样复制，
+    最终 payload 里每个节点三行相同文案 —— 信息卡显示"暂无供应商数据 分"、
+    时间轴每站重复一行，用户读不到任何信息，还容易把占位误读成事实。
+    **只清占位，不动真值**：真实评分/营业时间/价格（高德/供应商返回）原样保留；
+    清空后由 `supplier_facts_disclosure()` 一次性披露"哪些节点缺什么"。
+    默认返回浅拷贝，就地改 payload 的调用方必须传 `copy=False`（见 `nodes_of`）。
+    """
+    cleared: List[Dict[str, Any]] = []
+    for node in nodes_of(plan, copy=copy):
+        changed = []
+        for field in SUPPLIER_FACT_FIELDS:
+            if not is_supplier_placeholder(node.get(field)):
+                continue
+            node[field] = ""
+            changed.append(field)
+        if changed:
+            cleared.append({"name": node_name(node), "fields": changed})
+    return cleared
+
+
+def supplier_facts_disclosure(cleared: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """把清洗结果汇总成**一处**披露（前端只需展示这一条，不必逐节点重复）。"""
+    if not cleared:
+        return None
+    fields = sorted({str(field) for item in cleared for field in item.get("fields") or []})
+    return {
+        "node_count": len(cleared),
+        "fields": fields,
+        "items": [dict(item) for item in cleared],
+        "note": SUPPLIER_GAP_NOTE,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -469,7 +629,11 @@ def score_completeness(
             "节点没有坐标，算不出日内里程" if worst_km == 0.0
             else (
                 f"最赶的一天是第 {worst_day} 天约 {worst_km:.0f}km（预算 {budget_km:.0f}km"
-                + (f"，在 10% 宽限 {grace_km:.0f}km 之内" if worst_km > budget_km else "")
+                + (
+                    f"，在 10% 宽限 {grace_km:.0f}km 之内"
+                    if budget_km < worst_km <= grace_km
+                    else (f"，已超出 10% 宽限 {grace_km:.0f}km" if worst_km > grace_km else "")
+                )
                 + "）"
             )
         ),

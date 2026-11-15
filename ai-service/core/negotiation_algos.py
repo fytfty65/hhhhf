@@ -11,9 +11,10 @@ The classes are re-exported from ``api.agent`` for compatibility. Prefer importi
 from here in new code.
 
 Contents:
-  - ``NashEquilibriumSolver``: conflict resolution over candidate proposals. The
-    name is historical — it resolves by Pareto frontier, not by computing a Nash
-    equilibrium (see the method docstring).
+  - ``ParetoFrontierSelector``: conflict resolution over candidate proposals by
+    multi-objective Pareto non-dominance (fitness maximised; cost and risk
+    minimised). It does **not** compute a Nash equilibrium; the old class name
+    ``NashEquilibriumSolver`` claimed otherwise and has been retired.
   - ``GraphRouteOptimizer``: DBSCAN geographic clustering plus a
     travelling-salesman approximation to order POIs into a route.
 """
@@ -30,7 +31,7 @@ from typing import Any, Dict, List
 from core.optimization import pareto_frontier, validate_candidate
 
 
-class NashEquilibriumSolver:
+class ParetoFrontierSelector:
     @staticmethod
     def _numeric(value: Any) -> float:
         try:
@@ -64,8 +65,8 @@ class NashEquilibriumSolver:
             valid,
             {
                 "fitness": lambda row: float(row.get("fitness_score", 0) or 0),
-                "cost": lambda row: NashEquilibriumSolver._numeric(row.get("cost", row.get("cost_estimate", 0))),
-                "risk": lambda row: NashEquilibriumSolver._numeric(row.get("risk_score", row.get("riskScore", 0))),
+                "cost": lambda row: ParetoFrontierSelector._numeric(row.get("cost", row.get("cost_estimate", 0))),
+                "risk": lambda row: ParetoFrontierSelector._numeric(row.get("risk_score", row.get("riskScore", 0))),
             },
             {"fitness": True, "cost": False, "risk": False},
         )

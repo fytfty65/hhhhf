@@ -134,6 +134,22 @@ class TestEnforceQuota(unittest.TestCase):
         enforce_quota(PLAN, {"food": 1}, pool=POOL, context={"days": 2})
         self.assertEqual(PLAN, snapshot)
 
+    def test_added_lodging_is_flagged_even_without_hotel_in_name(self):
+        """补住宿要显式打 is_hotel：高德把度假营地归到"体育休闲服务"，名字里也没有"酒店"。
+
+        实测（2026-11-02 四川 4 天）：第 1 天补的「成都·云溪漫谷」没被算住宿，
+        周全判成"2/3 晚有住宿"，方案直接 verdict=fail。
+        """
+        node = build_node_from_candidate(
+            {"name": "成都·云溪漫谷", "type": "体育休闲服务", "lnglat": [104.43, 30.70]},
+            day=1,
+            time="13:30",
+            intent="hotel",
+        )
+        self.assertTrue(node.get("is_hotel"))
+        food = build_node_from_candidate({"name": "小馆", "type": "餐饮"}, day=1, time="12:00", intent="food")
+        self.assertNotIn("is_hotel", food)
+
 
 class TestMeasureIncrement(unittest.TestCase):
     def test_responsiveness_high_for_targeted_change(self):

@@ -14,7 +14,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .agent_bus import AgentMessageBus
 from .agent_contracts import AgentInput, AgentProposal, EvidenceRef, FailureInfo, capability_registry, validate_agent_proposal
+from .llm_agent import LlmComplete, llm_handler
 from .joint_optimization import rank_lodging_options  # 联合优化（P2）：住宿 ↔ 通勤/费用/体力/碳排/预算
 from .tool_permissions import audit_tool_calls, filter_tool_calls  # P2：工具权限真实校验
 
@@ -1051,7 +1053,21 @@ class SpecialistRuntime:
                 latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
             )
 
-    async def execute(self, requests: Sequence[AgentInput]) -> Dict[str, Any]:
+    async def execute(
+        self,
+        requests: Sequence[AgentInput],
+        *,
+        bus: Optional[AgentMessageBus] = None,
+        round_no: Optional[int] = None,
+        since_round: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        # 多轮消息总线（2026-11-03）：执行前把收件箱注入每个请求，执行后把提案广播出去。
+        # `since_round=None` 表示"看到全部历史"：既有上一轮提案，也有本轮裁决 ——
+        # 只给本轮又会退回"各算各的"，协商在审计上仍然不可见。
+        current_round = bus.round_no if (bus is not None and round_no is None) else int(round_no or 0)
+        if bus is not None:
+            for request in requests:
+                bus.inject(request, since_round=since_round)
         proposals = await asyncio.gather(*(self._run_one(request) for request in requests))
         rows = [proposal.model_dump(mode="json") for proposal in proposals]
         # P2：把被拒的工具调用汇总出来 —— 权限控制外面看不见等于没有
@@ -1064,7 +1080,25 @@ class SpecialistRuntime:
             "degraded": sum(item.status == "degraded" for item in proposals),
             "parallel": True,
             "tool_permission_audit": audit,
+            "message_round": current_round,
         }
+        if bus is not None:
+            for row in rows:
+                bus.publish(
+                    sender=str(row.get("agent_id") or "runtime"),
+                    topic="proposal",
+                    content={
+                        "agent_id": row.get("agent_id"),
+                        "domain": row.get("domain"),
+                        "status": row.get("status"),
+                        "candidates": len(row.get("candidates") or []),
+                        "confidence": row.get("confidence"),
+                        "applied_constraints": row.get("applied_constraints") or {},
+                        "explanation": str(row.get("explanation") or "")[:200],
+                    },
+                    round_no=current_round,
+                )
+            result["message_bus"] = bus.summary()
         if audit["denied_count"]:
             logger.warning(
                 "🚫 [工具权限] 本次执行有 %d 次越权调用被拒绝", audit["denied_count"]
@@ -1093,6 +1127,10 @@ def build_pool_runtime(
     city: str = "",
     accessibility_facts: Mapping[str, Any] | None = None,
     mobility_need: bool = False,
+    # LLM 驱动的专业智能体（2026-11-03）：`llm_complete` 不传 = 全部走确定性候选池，
+    # 生产默认行为不变；只有调用方显式开启时才把 `llm_agent_ids` 里的智能体换成 LLM 提案。
+    llm_complete: Optional[LlmComplete] = None,
+    llm_agent_ids: Sequence[str] = (),
 ) -> tuple[SpecialistRuntime, list[AgentInput]]:
     """装配专业智能体运行时。
 
@@ -1133,11 +1171,21 @@ def build_pool_runtime(
     }
     handlers: dict[str, AgentHandler] = {}
     requests: list[AgentInput] = []
+    _labels = {item.agent_id: item.label for item in capability_registry()}
+    _llm_ids = {str(item) for item in llm_agent_ids}
     for agent_id, (domain, candidates, provider, field) in sources.items():
         if agent_id == "lodging-agent":
             # 住宿不再只看房价：走联合评估（通勤/费用/体力/碳排/可玩节点/预算一起算）
             handlers[agent_id] = lodging_handler(
                 route=route, nights=nights, budget_total=budget_total
+            )
+        elif agent_id in _llm_ids and llm_complete is not None:
+            handlers[agent_id] = llm_handler(
+                agent_id,
+                domain,
+                complete=llm_complete,
+                label=_labels.get(agent_id, ""),
+                provider="llm.specialist",
             )
         else:
             handlers[agent_id] = pool_handler(agent_id, domain, provider=provider, field=field)

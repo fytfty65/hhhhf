@@ -20,7 +20,7 @@ os.environ.setdefault("LLM_API_KEY", "test-key-not-used")
 
 from core.negotiation_algos import (  # noqa: E402
     GraphRouteOptimizer,
-    NashEquilibriumSolver,
+    ParetoFrontierSelector,
 )
 from core.text_parsing import (  # noqa: E402
     _fairness_limit_from_env,
@@ -39,7 +39,7 @@ class ReExportContractTests(unittest.TestCase):
     def test_agent_still_exports_both_classes(self):
         from api import agent
 
-        self.assertIs(agent.NashEquilibriumSolver, NashEquilibriumSolver)
+        self.assertIs(agent.ParetoFrontierSelector, ParetoFrontierSelector)
         self.assertIs(agent.GraphRouteOptimizer, GraphRouteOptimizer)
 
     def test_new_module_is_the_single_definition_site(self):
@@ -54,40 +54,40 @@ class ReExportContractTests(unittest.TestCase):
         from api import agent
 
         # The class object's own module must be the new one, not api.agent.
-        self.assertEqual(NashEquilibriumSolver.__module__, "core.negotiation_algos")
+        self.assertEqual(ParetoFrontierSelector.__module__, "core.negotiation_algos")
         self.assertEqual(GraphRouteOptimizer.__module__, "core.negotiation_algos")
         # And the source line found by inspect must live in the new file.
-        self.assertIn("negotiation_algos.py", inspect.getsourcefile(NashEquilibriumSolver))
+        self.assertIn("negotiation_algos.py", inspect.getsourcefile(ParetoFrontierSelector))
         self.assertIn("negotiation_algos.py", inspect.getsourcefile(GraphRouteOptimizer))
         self.assertFalse(hasattr(agent, "DBSCAN"), "the moved class's import should have left agent.py")
 
 
-class NashEquilibriumSolverTests(unittest.TestCase):
+class ParetoFrontierSelectorTests(unittest.TestCase):
     def test_non_list_input_is_handled(self):
-        result = NashEquilibriumSolver.resolve_conflicts(None)  # type: ignore[arg-type]
+        result = ParetoFrontierSelector.resolve_conflicts(None)  # type: ignore[arg-type]
         self.assertEqual(result["frontier"], [])
         self.assertEqual(result["rejected"], [])
 
     def test_non_dict_candidates_are_rejected_not_crashed(self):
-        result = NashEquilibriumSolver.resolve_conflicts([None, "nope", 42])  # type: ignore[list-item]
+        result = ParetoFrontierSelector.resolve_conflicts([None, "nope", 42])  # type: ignore[list-item]
         self.assertGreaterEqual(result["rejected_count"], 1)
 
     def test_numeric_parsing_extracts_a_leading_number(self):
-        self.assertEqual(NashEquilibriumSolver._numeric("¥120 起"), 120.0)
-        self.assertEqual(NashEquilibriumSolver._numeric("no digits"), 0.0)
-        self.assertEqual(NashEquilibriumSolver._numeric(None), 0.0)
+        self.assertEqual(ParetoFrontierSelector._numeric("¥120 起"), 120.0)
+        self.assertEqual(ParetoFrontierSelector._numeric("no digits"), 0.0)
+        self.assertEqual(ParetoFrontierSelector._numeric(None), 0.0)
 
 
 class GraphRouteOptimizerTests(unittest.TestCase):
     def test_empty_and_invalid_input_returns_empty(self):
-        optimizer = GraphRouteOptimizer(NashEquilibriumSolver)
+        optimizer = GraphRouteOptimizer(ParetoFrontierSelector)
         self.assertEqual(optimizer.optimize_and_sort([], 5), [])
         self.assertEqual(optimizer.optimize_and_sort(None, 5), [])  # type: ignore[arg-type]
 
     def test_fewer_than_three_coordinates_falls_back_to_score_order(self):
         """Below three points the graph path is pointless, so the documented
         fallback is a fitness descending sort truncated to max_nodes."""
-        optimizer = GraphRouteOptimizer(NashEquilibriumSolver)
+        optimizer = GraphRouteOptimizer(ParetoFrontierSelector)
         pois = [
             {"name": "a", "fitness_score": 1, "location": [120.0, 30.0]},
             {"name": "b", "fitness_score": 9, "location": [121.0, 31.0]},
@@ -96,7 +96,7 @@ class GraphRouteOptimizerTests(unittest.TestCase):
         self.assertEqual([p["name"] for p in ordered], ["b", "a"])
 
     def test_max_nodes_is_respected(self):
-        optimizer = GraphRouteOptimizer(NashEquilibriumSolver)
+        optimizer = GraphRouteOptimizer(ParetoFrontierSelector)
         pois = [
             {"name": f"p{i}", "fitness_score": i, "location": [120.0 + i, 30.0]}
             for i in range(6)
@@ -141,7 +141,7 @@ class TextParsingReExportTests(unittest.TestCase):
         """Both batches must live in exactly one place, or the copies drift."""
         from core import negotiation_algos, text_parsing
 
-        for name in ("NashEquilibriumSolver", "GraphRouteOptimizer"):
+        for name in ("ParetoFrontierSelector", "GraphRouteOptimizer"):
             self.assertEqual(getattr(negotiation_algos, name).__module__, "core.negotiation_algos")
         for name in self.MOVED:
             self.assertEqual(

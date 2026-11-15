@@ -461,6 +461,130 @@ def _node_day(node: Mapping[str, Any]) -> int:
         return 1
 
 
+# 白天节点的固定时段（与 `itinerary_balance._retime_day` 同一套值，避免两处口径漂移）
+DAY_TIME_SLOTS = ("08:30", "10:00", "11:30", "13:30", "15:00", "16:30", "18:00", "19:30")
+HOTEL_TIME = "21:30"
+
+
+def _time_label(node: Mapping[str, Any], default: str) -> str:
+    """保留原来的活动标签（「游览」「用餐」「深度探索」…），拿不到就用类别默认值。"""
+    text = str(node.get("time") or "")
+    if "|" in text:
+        rest = text.split("|", 1)[1].strip()
+        parts = rest.split(None, 1)
+        if len(parts) == 2 and parts[1].strip():
+            return parts[1].strip()
+    return default
+
+
+def normalize_day_sequence(route: Any) -> List[Dict[str, Any]]:
+    """按天整理**顺序与时刻**：住宿挪到当天末尾，白天节点按现有顺序重贴时刻。
+
+    为什么要（2026-11-02 实测，四川 4 天）：补住宿/就近换酒店会把住宿节点插到当天中间，
+    而时刻是按数组位置贴的（住宿固定 21:30）→ 第 2 天出现「21:30 入住」随后还有
+    「11:30 游览」「13:30 用餐」；质量闸门判 `day_out_of_order`，整份方案 verdict=fail
+    （分数 90.5 也救不回来）。
+
+    只动**顺序与时刻**，不改地点、不改跨天归属；白天节点的相对顺序（已经是空间序）不动。
+    """
+    by_day: Dict[int, List[Dict[str, Any]]] = {}
+    for raw in route or []:
+        if not isinstance(raw, Mapping):
+            continue
+        node = dict(raw)
+        by_day.setdefault(_node_day(node), []).append(node)
+    output: List[Dict[str, Any]] = []
+    for day in sorted(by_day):
+        nodes = by_day[day]
+        daytime = [node for node in nodes if _default_category(node) != "hotel"]
+        hotels = [node for node in nodes if _default_category(node) == "hotel"]
+        # 贴时刻要**顺着每个点自己的开放时间**：只按位置贴会出现「08:30 用餐」
+        # 而餐馆写着 10:00-15:30（实测 2026-11-02 四川：质量闸门判 `opening_hours_conflict`）。
+        from .plan_quality import parse_clock, parse_open_window
+
+        next_index = 0
+        for node in daytime:
+            label = _time_label(node, "用餐" if _default_category(node) == "food" else "游览")
+            window = parse_open_window(node.get("open_time"))
+            chosen: Optional[int] = None
+            for index in range(min(next_index, len(DAY_TIME_SLOTS) - 1), len(DAY_TIME_SLOTS)):
+                clock = parse_clock(DAY_TIME_SLOTS[index])
+                if clock is None:
+                    continue
+                if window is None or _within_window(window, clock):
+                    chosen = index
+                    break
+            if chosen is None:
+                chosen = min(next_index, len(DAY_TIME_SLOTS) - 1)
+            next_index = chosen + 1
+            node["time"] = f"Day {day} | {DAY_TIME_SLOTS[chosen]} {label}"
+        for node in hotels:
+            node["time"] = f"Day {day} | {HOTEL_TIME} 入住"
+        output.extend(daytime + hotels)
+    return output
+
+
+def _within_window(window: Tuple[int, int], clock: int) -> bool:
+    """`clock` 是否落在开放时间内（跨零点营业的按"深夜也算开着"处理）。"""
+    opening, closing = window
+    if closing < opening:
+        return clock >= opening or clock <= closing
+    return opening <= clock <= closing
+
+
+def _nearest_chain(stops: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """从第一家有坐标的点出发逐点就近串接；没有坐标的点按原顺序接在末尾。"""
+    remaining = [dict(node) for node in stops]
+    start_index = next((index for index, node in enumerate(remaining) if _coords_of(node)), None)
+    if start_index is None:
+        return remaining
+    ordered = [remaining.pop(start_index)]
+    current = _coords_of(ordered[0])
+    while remaining:
+        best_index: Optional[int] = None
+        best_km = float("inf")
+        for index, node in enumerate(remaining):
+            coord = _coords_of(node)
+            if not coord:
+                continue
+            km = _km(current, coord)
+            if km < best_km:
+                best_km, best_index = km, index
+        if best_index is None:
+            ordered.extend(remaining)
+            break
+        ordered.append(remaining.pop(best_index))
+        current = _coords_of(ordered[-1])
+    return ordered
+
+
+def order_day_stops_by_nearest(route: Any) -> List[Dict[str, Any]]:
+    """同一天内按最近邻重排白天节点，住宿固定当天末尾。
+
+    为什么收口后还要再排一次（2026-11-02 实测，四川 4 天）：就近换酒店、就近换餐是
+    **逐点替换**的，替换后沿用原数组位置，空间上就变成"东→西→东→西"。实测第 2 天
+    `三元→都江堰→TiMi→胖姐→唐酥肉→宾馆` = 244.6km（预算 160km），同一批点按最近邻
+    串起来只有约 95km —— 不是点太多，是顺序被换餐打乱了。
+
+    只改顺序（随后由 `normalize_day_sequence` 重贴时刻），不改天、不改地点。
+    """
+    by_day: Dict[int, List[Dict[str, Any]]] = {}
+    for raw in route or []:
+        if not isinstance(raw, Mapping):
+            continue
+        node = dict(raw)
+        by_day.setdefault(_node_day(node), []).append(node)
+    output: List[Dict[str, Any]] = []
+    for day in sorted(by_day):
+        nodes = by_day[day]
+        stops = [node for node in nodes if _default_category(node) != "hotel"]
+        hotels = [node for node in nodes if _default_category(node) == "hotel"]
+        if len(stops) >= 3:
+            stops = _nearest_chain(stops)
+        output.extend(stops + hotels)
+    return output
+
+
 # "玩点"类别（判"某天还有没有得看"、算当天玩点聚簇都用它）：
 # 分类器给的是 scenic/cultural/landmark/city_park，缺一档就会把"只有公园/地标的一天"误判成没有玩点。
 PLAY_CATEGORIES = {"scenic", "cultural", "landmark", "city_park", "park", "nature"}

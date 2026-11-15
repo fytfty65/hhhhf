@@ -272,8 +272,8 @@ class LocalBaselineProvider:
                 }
             ],
             "safety_advice": (
-                f"【{city}】当前未接入实时权威情报源，动态综合风险指数 CII 为基础基线（LOW），仅供参考；"
-                "如需更准确的风险评估请配置 WorldMonitor / GDELT 数据源。"
+                f"【{city}】暂时没有接入实时安全数据，以下评估只作参考，"
+                "不构成出行决策依据。"
             ),
         }
 
@@ -751,14 +751,15 @@ class RiskService:
                 seen.add(str(al.get("title")))
         intel["active_alerts"] = existing
 
-        # 融合避险建议
+        # 融合避险建议：面向用户的一句话结论，技术指标留在风险维度/告警明细里
         if fused_cii >= 40:
-            tail = "建议调整行程以规避高风险窗口，优先安排室内/低风险项目。"
+            tail = "建议调整行程，避开高风险时段，优先安排室内或低风险项目。"
         elif fused_cii >= 25:
-            tail = "建议预留缓冲时间并适当错峰。"
+            tail = "建议留出一些缓冲时间，热门景点尽量错峰。"
         else:
-            tail = "当前整体可行，可按计划出行。"
-        intel["safety_advice"] = f"【{city}】动态综合风险指数 CII {fused_cii}（{intel['risk_level']}）。融合信号：{'、'.join(signals) if signals else '未检测到显著风险增量'}。{tail}"
+            tail = "未发现需要特别规避的情况，可以按计划出行。"
+        risk_word = {"HIGH": "偏高", "MEDIUM": "中等"}.get(str(intel.get("risk_level")), "偏低")
+        intel["safety_advice"] = f"【{city}】整体风险{risk_word}。{tail}"
 
         # 6) 维度分回填 + 估算标注（契约闭合，杜绝前端字符串猜测）
         intel["crime_score"] = dims["crime_score"]

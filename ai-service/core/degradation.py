@@ -345,11 +345,18 @@ def collect_degradations(payload: Any) -> Dict[str, Any]:
     if moved_out:
         # 名字**去重**（同一个点可能被两道收口各移出一次）；次数保留真实动作数
         moved_names = "、".join(_unique_names(moved_out))
+        # 原因照实说：省域行程移出的理由是"同一天跨了多个片区"，不是"远景区太多"
+        _reasons = [
+            str(item.get("reason") or "").strip()
+            for item in moved_out
+            if isinstance(item, Mapping) and str(item.get("reason") or "").strip()
+        ]
+        _reason_text = _reasons[0] if _reasons else "一天跑不了两个远景区"
         items.append(
             _entry(
                 "travel_feasibility",
                 STATUS_DEGRADED,
-                f"一天跑不了两个远景区，已移出 {len(moved_out)} 个（{moved_names}）；想保留可以说明愿意多留一天",
+                f"{_reason_text}，已移出 {len(moved_out)} 个（{moved_names}）；想保留可以说明愿意多留一天",
             )
         )
 

@@ -4,11 +4,10 @@ Background (fixed 2026-10-10): the negotiation stream told the user
 
     [时空调度体]: DBSCAN 空间降维与**纳什博弈**完成！
 
-while the code on that path calls ``NashEquilibriumSolver.resolve_conflicts``,
+while the code on that path calls ``ParetoFrontierSelector.resolve_conflicts``,
 which performs **Pareto non-dominance filtering** over three objectives
-(fitness↑ / cost↓ / risk↓). No Nash equilibrium is computed anywhere. The class
-name is a historical leftover; the problem was letting that name leak into a claim
-shown to users.
+(fitness↑ / cost↓ / risk↓). No Nash equilibrium is computed anywhere. The old
+class name ``NashEquilibriumSolver`` overstated what ran and has been retired.
 
 This matters more here than in most codebases because the product's whole
 proposition is that what it tells you is verifiable — the same discipline the

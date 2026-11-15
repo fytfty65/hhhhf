@@ -109,6 +109,23 @@ class MealTopUpTests(unittest.TestCase):
         self.assertTrue(result.get("skipped"), "太远没塞必须留下原因")
         self.assertGreater(result["skipped"][0]["nearest_km"], 30.0)
 
+    def test_a_meal_next_to_one_of_two_spread_out_stops_is_accepted(self):
+        """四姑娘山 ↔ 玛嘉沟 62km 的一日游：镇上的饭点离**质心** 31km，按质心会被判太远；
+        按"离当天任一个玩点最近"算只有 4.5km，应当补进来（实测 2026-11-02 四川 4 天）。"""
+        route = [
+            {"day": 1, "name": "四姑娘山景区", "type": "风景名胜", "lnglat": [102.826, 31.094]},
+            {"day": 1, "name": "玛嘉沟生态旅游景区", "type": "风景名胜", "lnglat": [102.427, 31.534]},
+        ]
+        result = top_up_missing_meals(
+            {"days": 1},
+            {"route": route},
+            {"food": [{"name": "云端山语·观景餐厅", "type": "餐饮服务", "lnglat": [102.80, 31.06]}]},
+            {"max_nodes_per_day": 5, "meal_max_km": 30.0},
+        )
+        added = [item for item in result["actions"] if item["code"] == "add_meal"]
+        self.assertTrue(added, result)
+        self.assertLess(added[0]["distance_km"], 10)
+
     def test_high_tolerance_allows_a_farther_meal(self):
         result = top_up_missing_meals(
             {"days": 3},

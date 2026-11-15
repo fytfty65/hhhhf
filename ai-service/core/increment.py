@@ -377,7 +377,7 @@ def build_node_from_candidate(candidate: Mapping[str, Any], day: int, time: str,
     # 候选自带的中文类型（高德的"餐饮服务;中餐厅"）优先；只有英文意图名或空值时用我们的中文标签
     has_cjk = any("\u4e00" <= char <= "\u9fff" for char in raw_type)
     type_label = raw_type if has_cjk else INTENT_TYPE_LABELS.get(intent, intent)
-    return {
+    node = {
         "day": day,
         "name": name,
         "location": name,
@@ -395,6 +395,13 @@ def build_node_from_candidate(candidate: Mapping[str, Any], day: int, time: str,
         "map_image": candidate.get("map_image"),
         "added_by_increment": intent,
     }
+    # 🤝 补住宿时必须显式打 is_hotel：高德会把"度假营地/漫谷"这类归到
+    #    `体育休闲服务`，名字里也没有"酒店/民宿"，下游 `_is_lodging` 只看名字和
+    #    is_hotel —— 实测（2026-11-02 四川 4 天）：第 1 天补的「成都·云溪漫谷」
+    #    因此没被算作住宿，周全判定成"2/3 晚有住宿"、整个方案 verdict=fail。
+    if intent == "hotel":
+        node["is_hotel"] = True
+    return node
 
 
 def enforce_quota(

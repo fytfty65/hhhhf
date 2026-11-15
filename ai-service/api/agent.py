@@ -30,6 +30,7 @@ from core.optimization import fairness_gate, fairness_report, repair_route, vali
 from core.constraints import resolve_conflicts
 from core.contextual_bandit import ContextualThompsonBandit, derive_reward, stable_arm_id
 from core.agent_contracts import capability_registry, audit_route_agent_proposal
+from core.agent_bus import AgentMessageBus  # 多轮智能体消息总线（可复现、无网络）
 from core.simulation import simulate_plan
 from core.member_negotiation import member_interests, negotiate_member_routes
 from core import llm_config as llm_cfg  # LLM 调用参数单一来源（模型/端点/temperature/max_tokens）
@@ -41,9 +42,28 @@ from core.llm_metrics import record_llm_call  # LLM 调用记账：次数/失败
 # 结果外层代码用了 `needs_widening` 却只在内层函数里导过 → NameError 让整条推演流中断，
 # 而单测全绿（因为没有任何单测覆盖这条长生成器路径）。放在顶层，缺名字在导入时就暴露。
 from core.place_quality import (  # 简介口径：能核实就用，不能就如实说没有
+    SUPPLIER_FACT_FIELDS,
     amap_fact_line,
     clean_web_knowledge,
+    clear_placeholder_supplier_facts,
     description_of,
+    supplier_facts_disclosure,
+)
+# 省域覆盖（A）：把目的地写成一个省时，检索范围是**全省地州**而不只是省会。
+# 实测（2026-11-01，四川 3 天）：省级单查询前 25 条全在成都各区 → 九寨沟/四姑娘山
+# 这些 300km 外的川西景点根本进不了候选池；`config/district` + 逐地州检索能覆盖。
+from core.province_scope import (
+    PROVINCE_DEFAULT_CITY,
+    PROVINCE_SUFFIXES,
+    anchor_quota,
+    assign_cluster_days,
+    choose_region_line,
+    cluster_places,
+    estimate_rail_hours,
+    pick_anchors,
+    province_of,
+    province_scope_note,
+    short_region_name,
 )
 from core.poi_pool import (
     FOOD_WIDENING_KEYWORDS,
@@ -77,7 +97,9 @@ from core.route_composition import (
     composition_hint as composition_hint_text,
     composition_targets,
     count_route_composition,
+    normalize_day_sequence,
     numeric_targets,
+    order_day_stops_by_nearest,
     order_route_by_day,
     rebalance_days_by_geography,
     repair_forbidden_categories,
@@ -576,6 +598,29 @@ LLM_MAX_RETRIES = 2
 # 心跳间隔：流式请求过程中如果长时间未收到 token，则给前端推送心跳日志
 HEARTBEAT_INTERVAL_SEC = 8
 
+# —— LLM 驱动的专业智能体（2026-11-03）——
+# 默认关闭：开启后主推演之外会多一次并行 LLM 调用（route-planner 由"候选池适配器"
+# 换成"LLM 在池内取舍"）；关着时行为与之前完全一致，全部走确定性候选池。
+SPECIALIST_LLM_ENABLED_ENV = "SPECIALIST_LLM_ENABLED"
+SPECIALIST_LLM_AGENT_IDS: Tuple[str, ...] = ("route-planner",)
+
+
+def specialist_llm_enabled() -> bool:
+    return str(os.getenv(SPECIALIST_LLM_ENABLED_ENV) or "").strip().lower() in {
+        "1", "true", "on", "yes",
+    }
+
+
+async def specialist_llm_complete(messages: Sequence[Mapping[str, str]]) -> str:
+    """专业智能体的 LLM 调用适配器（与主推演共用模型/端点/参数）。"""
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[dict(item) for item in messages],
+        temperature=llm_cfg.temperature(),
+        max_tokens=llm_cfg.max_tokens(),
+    )
+    return response.choices[0].message.content or ""
+
 # 长途（≥14 天）首轮分段生成的**总时间预算**（秒）：超预算的段不再调用 LLM，
 # 如实记为"这一段没生成出来"，由前端核对面板提示，而不是让用户无限等。
 LONG_TRIP_GENERATION_SECONDS = 240.0
@@ -795,26 +840,38 @@ async def collect_nearby_food_candidates(
                 coords.append(coord)
         if not coords:
             continue
-        center = (
-            sum(c[0] for c in coords) / len(coords),
-            sum(c[1] for c in coords) / len(coords),
-        )
-        try:
-            rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
-        except Exception as exc:
-            report.append({"day": day, "error": f"{type(exc).__name__}: {str(exc)[:80]}"})
-            continue
+        # ⚠️ 检索中心不能取**质心**（2026-11-02 实测，四川第 3 天）：当天的玩点分布在
+        #    毕棚沟 ↔ 玛嘉沟 ↔ 老马坪（跨约 60km）时，质心落在无人区，15km 内一家餐馆都没有，
+        #    于是"缺餐"被记成"最近的饭点在 126.8km 外"，而理县镇上的餐馆其实就在毕棚沟旁。
+        #    饭点只要挨着当天**某一个**玩点就是可去的（与 `_distance_to` 同口径），
+        #    所以按玩点逐个查、合并结果；相距很近的玩点只查一次，最多查 3 个中心。
+        centers: List[Tuple[float, float]] = []
+        for coord in coords:
+            if all(haversine_km(coord, kept) > 5.0 for kept in centers):
+                centers.append(coord)
+            if len(centers) >= 3:
+                break
         existing = {str(node.get("name") or "").strip() for node in day_nodes}
         added = 0
-        for row in rows:
-            if not isinstance(row, Mapping):
+        errors: List[str] = []
+        for center in centers:
+            try:
+                rows = await fetch_nearby(center, keywords, radius_km=radius_km, limit=limit) or []
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {str(exc)[:80]}")
                 continue
-            name = str(row.get("name") or "").strip()
-            if not name or name in existing or any(item.get("name") == name for item in pool["food"]):
-                continue
-            pool["food"].append({**dict(row), "planning_category": "food"})
-            added += 1
-        report.append({"day": day, "center": center, "found": added})
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                name = str(row.get("name") or "").strip()
+                if not name or name in existing or any(item.get("name") == name for item in pool["food"]):
+                    continue
+                pool["food"].append({**dict(row), "planning_category": "food"})
+                added += 1
+        entry: Dict[str, Any] = {"day": day, "center": centers[0], "centers": centers, "found": added}
+        if errors and not added:
+            entry["error"] = errors[0]
+        report.append(entry)
     return pool, report
 
 
@@ -1045,6 +1102,12 @@ OMNI_EVENTS_STREAM = "omni:events:global"
 # ==========================================
 # 2. 算法层：文旅 POI 硬核清洗过滤器（彻底杜绝油漆/手机/建材等非旅游门店）
 # ==========================================
+# 省级行政区 → 高德检索用的核心城市。高德 place/text 的 city 参数不认省名，
+# 传「四川」会返回相邻地市的零星 POI（实测 2026-11-01：德阳/什邡/绵竹一带，
+# 3 天方案只剩 1 个景区）。映射表已迁到 core/province_scope.py（省域覆盖也要用它），
+# 这里保留同名导出，既有调用方与单测无需改动。
+_PROVINCE_SUFFIXES = PROVINCE_SUFFIXES
+
 NON_TOURIST_BLACKLIST = [
     "涂料", "油漆", "建材", "专卖店", "体验店", "手机", "数码", "五金", "营业厅", 
     "汽修", "药房", "大药房", "门诊", "卫浴", "门窗", "窗帘", "家电", "家装", 
@@ -1054,6 +1117,26 @@ NON_TOURIST_BLACKLIST = [
     "汽车", "电动车", "电池", "百货批发", "建材市场", "装饰", "型材", "门市部", "配件",
     "机电", "机械", "钢构", "化工", "印刷", "包装", "饲料", "兽药", "农资"
 ]
+
+def resolve_search_city(name: str) -> str:
+    """省级行政区 → 用于高德检索的核心城市（省会/直辖市）。
+
+    真实事故（2026-11-01，四川 3 天）：用户填「四川」，旧映射只覆盖了新疆/西藏/甘肃/
+    青海/宁夏/内蒙/海南 7 个省级区，于是 city=四川 直接进了高德 place/text，
+    返回的是德阳/什邡/绵竹一带的零星 POI —— 3 天方案只剩 1 个景区。
+    """
+    text = str(name or "").strip()
+    if not text:
+        return text
+    if text in PROVINCE_DEFAULT_CITY:
+        return PROVINCE_DEFAULT_CITY[text]
+    for suffix in _PROVINCE_SUFFIXES:
+        if len(text) > len(suffix) and text.endswith(suffix):
+            trimmed = text[: -len(suffix)]
+            if trimmed in PROVINCE_DEFAULT_CITY:
+                return PROVINCE_DEFAULT_CITY[trimmed]
+    return text
+
 
 def deduplicate_and_diversify_pois(pois: List[Dict]) -> List[Dict]:
     if not isinstance(pois, list):
@@ -1191,15 +1274,14 @@ def deduplicate_and_diversify_pois(pois: List[Dict]) -> List[Dict]:
 # ==========================================
 # 3. 算法层：冲突消解（帕累托非支配筛选）与图论寻优
 # ==========================================
-# ⚠️ 命名由来：类名 `NashEquilibriumSolver` 是历史遗留，它**不计算纳什均衡**，
-# 做的是多目标帕累托非支配筛选（见 core/negotiation_algos.py 的实现与注释）。
-# 名字保留是为了不破坏既有导入；但**对用户的文案不得沿用这个名字的暗示**
-# （见本文件下方 emit 文案的口径修正）。
+# 命名说明：类名曾叫 `NashEquilibriumSolver`，但它**不计算纳什均衡**，做的是多目标
+# 帕累托非支配筛选（见 core/negotiation_algos.py 的实现与注释）。2026-10 已改名为
+# `ParetoFrontierSelector`，避免研究表达与实现不符。
 # 已抽取到 core/negotiation_algos.py（2026-10-10）：这两个类与请求/流式状态无关，
 # 是纯算法。搬出去后 agent.py 少 ~95 行，且它们可以被单独测试与复用。
-# 这里重新导出以保持既有调用方不变（`NashEquilibriumSolver` / `GraphRouteOptimizer`
+# 这里重新导出以保持既有调用方不变（`ParetoFrontierSelector` / `GraphRouteOptimizer`
 # 在 agent 命名空间下仍然可用）。
-from core.negotiation_algos import GraphRouteOptimizer, NashEquilibriumSolver  # noqa: E402,F401
+from core.negotiation_algos import GraphRouteOptimizer, ParetoFrontierSelector  # noqa: E402,F401
 
 # 用户输入解析与小工具（2026-10-10 抽取到 core/text_parsing.py，第二批）。
 # 这 7 个函数与请求/流式状态无关，AST 实测为零内部依赖，因此可以整批搬走。
@@ -1521,6 +1603,69 @@ class ExpertToolbox:
             "adcode": str(first.get("adcode") or ""),
             "center": str(first.get("location") or ""),
         }
+
+    async def get_sub_districts(self, province: str, *, subdistrict: int = 1) -> List[Dict[str, Any]]:
+        """省级行政区 → 下属地州/市清单（name / adcode / center / level）。
+
+        为什么要它（2026-11-01 实测）：高德 `place/text` 的 `city` 参数**不认省名** ——
+        传「四川」或 510000 都返回 count=1000，但前 25 条全部在成都各区；而逐地州查是正常的
+        （阿坝 311 条、乐山 204 条、九寨沟县 69 条）。所以省域覆盖必须先拿到"全省有哪些地州"，
+        再逐地州检索，否则省域就只是"省会 + 周边"。
+        行政区划边界基本不变，缓存 30 天；失败如实返回空列表（上层退回按省会检索）。
+        """
+        if not self.amap_key or not str(province or "").strip():
+            return []
+        cache_key = f"districts:{str(province).strip()}:{int(subdistrict)}"
+        cached = _cache_get(cache_key)
+        if isinstance(cached, list) and cached:
+            return cached
+        try:
+            async with _http_client(5.0) as http_client:
+                async with AmapGate("config/district"):
+                    resp = await http_client.get(
+                        f"{self.amap_url}/config/district",
+                        params={
+                            "key": self.amap_key,
+                            "keywords": str(province).strip(),
+                            "subdistrict": int(subdistrict),
+                            "extensions": "base",
+                        },
+                    )
+                data = resp.json()
+        except Exception as exc:
+            print(f"⚠️ [省域范围] 地州清单查询失败（{province}）: {type(exc).__name__}: {str(exc)[:80]}", flush=True)
+            return []
+        if not isinstance(data, dict) or str(data.get("status")) != "1":
+            print(
+                f"⚠️ [省域范围] {amap_error_note(str(data.get('info') if isinstance(data, dict) else ''), data.get('status') if isinstance(data, dict) else '')}：{province}（不编造地州）",
+                flush=True,
+            )
+            return []
+        rows: List[Dict[str, Any]] = []
+        for item in data.get("districts") or []:
+            if not isinstance(item, dict):
+                continue
+            # ⚠️ `config/district?keywords=四川&subdistrict=1` 返回的是**包了一层**的结构：
+            #    districts[0] 就是「四川省」本身，真正的 21 个地州在它的 districts 里。
+            #    实测（2026-11-01，真实请求）：只取外层 → 锚点只有「四川省」1 个 →
+            #    全省被当成一个片区，`🗺️ 省域覆盖（5 天）：检索 1 个地州 —— 四川省`，
+            #    于是分片/换乘/日内里程全部按"一个片区"算，日行 471km 被判违规又无法自动修复。
+            children = item.get("districts")
+            nested = [child for child in children if isinstance(child, dict)] if isinstance(children, list) else []
+            entries = nested if nested else [item]
+            for entry in entries:
+                name = str(entry.get("name") or "").strip()
+                if not name:
+                    continue
+                rows.append({
+                    "name": name,
+                    "adcode": str(entry.get("adcode") or ""),
+                    "center": str(entry.get("center") or ""),
+                    "level": str(entry.get("level") or ""),
+                })
+        if rows:
+            _cache_set(cache_key, rows, ttl=30 * 24 * 3600)
+        return rows
 
     # 👑 精准文旅分类码：110000(风景名胜) | 141200(博物馆展览馆) | 060400(特色步行街) | 060100(综合商场)
     async def get_place_photos(self, name: str, city: str = "") -> List[str]:
@@ -2254,12 +2399,14 @@ def _build_seed_final_data(city: str, trip_days: int) -> Optional[Dict[str, Any]
                 "time": ["09:00", "11:00", "14:00", "17:30"][position % 4],
                 "transport": "打车/自驾",
                 "tags": ["经典必游", "预生成模板"],
-                "cost_estimate": "暂无供应商数据",
+                # 种子模板只有名称/坐标/简介，没有接供应商：评分/价格/营业时间**留空**，
+                # 由下面的 supplier_data_gaps 统一说明（不再每站重复"暂无供应商数据"）。
+                "cost_estimate": "",
                 "photos": [],
                 "amap_url": f"https://www.amap.com/search?query={urllib.parse.quote(f'{city} {name}')}",
                 "map_image": _static_map_url(list(lnglat), amap_key),
-                "rating": "暂无供应商数据",
-                "open_time": "暂无供应商数据",
+                "rating": "",
+                "open_time": "",
                 "data_sources": {"cost_estimate": "seed_template", "rating": "seed_template", "open_time": "seed_template"},
                 "estimated": True,
                 "is_hotel": False,
@@ -2282,6 +2429,12 @@ def _build_seed_final_data(city: str, trip_days: int) -> Optional[Dict[str, Any]
         "route": route,
         "recommended_pois": [],
     }
+    # 种子模板没接供应商：评分/开放时间/价格统一在一处说明缺什么（而不是每站写一行占位）。
+    seed_gap = supplier_facts_disclosure(
+        [{"name": node["name"], "fields": list(SUPPLIER_FACT_FIELDS)} for node in route]
+    )
+    if seed_gap:
+        result["supplier_data_gaps"] = seed_gap
     if notes:
         result["seed_note"] = "；".join(notes)
         result["dropped_nodes"] = dropped
@@ -2430,6 +2583,94 @@ _semantic_cache = SemanticItineraryCache()
 # ==========================================
 # 7. 路由层：主推演协商 API 端点（提高节点密度 + 动态消费 + 严格多天输出）
 # ==========================================
+DESTINATION_UNRESOLVED_CODE = "DESTINATION_UNRESOLVED"
+
+# 中国大陆粗略经纬度范围（含海南，不含港澳台/海外）。用于拦下"识别成了城市、
+# 但坐标落在境外"的情况（例如把「大阪」当成一个中文地名送到高德）。
+_MAINLAND_LNG_RANGE = (73.0, 135.1)
+_MAINLAND_LAT_RANGE = (18.0, 53.6)
+
+
+def _pick_explicit_destination(payload: Dict[str, Any], intent_text: str) -> str:
+    """取出用户**明确写下**的目的地（结构化 destinations 优先，其次「目的地：X」）。
+
+    只用于"解析失败要不要显式报错"这个判断：没写目的地时不能因为兜底城市就报错。
+    """
+    current = payload.get("current_request") if isinstance(payload, dict) else None
+    if isinstance(current, dict):
+        destinations = current.get("destinations")
+        if isinstance(destinations, list):
+            for item in destinations:
+                text = str(item or "").strip()
+                if text:
+                    return text
+    match = re.search(r"目的地[：:]\s*([^；;，,。\n]+)", str(intent_text or ""))
+    return match.group(1).strip() if match else ""
+
+
+def _coord_in_mainland(coord: str) -> bool:
+    """坐标是否落在中国大陆范围内（格式 "lng,lat"）。解析不出就当作不合法。"""
+    parts = str(coord or "").split(",")
+    if len(parts) != 2:
+        return False
+    try:
+        lng, lat = float(parts[0]), float(parts[1])
+    except ValueError:
+        return False
+    return (
+        _MAINLAND_LNG_RANGE[0] <= lng <= _MAINLAND_LNG_RANGE[1]
+        and _MAINLAND_LAT_RANGE[0] <= lat <= _MAINLAND_LAT_RANGE[1]
+    )
+
+
+def _destination_error_stream(requested: str, resolution: str):
+    """目的地解析失败时的显式错误流（NDJSON）。
+
+    为什么不再"兜底出方案"（2026-11-03 实测）：目的地填 "Osaka" 时中文规则全不命中，
+    引擎静默兜底成武威并照常出方案 —— 用户打开历史行程看到「Osaka 探索路书」，
+    正文却全是武威。宁可明确失败，也不要给一份不相干的路线。
+    """
+    if resolution == "fallback_default":
+        message = (
+            f"没能识别目的地「{requested}」。当前路书只覆盖中国大陆城市，"
+            "请改用中文城市名（如：成都、杭州、西安）。"
+        )
+    else:
+        message = (
+            f"定位不到目的地「{requested}」或它不在中国大陆范围内。"
+            "请确认城市名是否正确（当前只覆盖中国大陆城市）。"
+        )
+    yield json.dumps(
+        {"type": "error", "payload": {"code": DESTINATION_UNRESOLVED_CODE, "message": message}},
+        ensure_ascii=False,
+    ) + "\n"
+
+
+def _friendly_llm_error(err: Optional[BaseException]) -> str:
+    """把大模型调用异常翻译成**用户能看懂、能照做**的中文提示。
+
+    实测（2026-11-02）：LLM 端点连不上时，降级摘要直接把底层异常原文抛给用户
+    （「大模型服务暂时不可用（Connection error.）」）—— 用户既不知道发生了什么，
+    也不知道下一步做什么。这里只给三档可操作提示，原始异常由调用点 `print` 进日志。
+    """
+    name = type(err).__name__.lower() if err is not None else ""
+    text = str(err or "").lower()
+    network = ("connection", "connect", "timeout", "timed out", "network", "unreachable")
+    # 阿里云百炼欠费会返回 400 Arrearage / overdue-payment，既不是网络错误也不是
+    # 普通 401。若不单独识别，它会落到「服务暂时不可用」这种无法照做的提示里。
+    if any(key in text for key in ("arrearage", "overdue", "good standing", "insufficient balance")):
+        return "AI 模型账户欠费或额度不足，请联系管理员充值或更换 API Key 后重试"
+    if (name and any(key in name for key in network)) or any(key in text for key in network):
+        return "网络连接失败，请稍后重试"
+    if (name and any(key in name for key in ("auth", "permission", "unauthorized"))) or "401" in text or "api key" in text:
+        return "服务鉴权失败，请联系管理员检查模型配置"
+    if (name and any(key in name for key in ("ratelimit", "quota", "insufficient"))) or any(
+        key in text for key in ("429", "quota", "insufficient", "欠费", "余额")
+    ):
+        return "服务限流或额度不足，请稍后重试或联系管理员"
+    return "服务暂时不可用，请稍后重试"
+
+
 @router.post("/agent/negotiate")
 async def run_negotiate(msg: GatewayMessage):
     toolbox = ExpertToolbox()
@@ -2594,13 +2835,6 @@ async def run_negotiate(msg: GatewayMessage):
     DEFAULT_CITY = "武威"
     city_resolution = "unresolved"
 
-    # 👑 省份/自治区 -> 默认核心城市：避免将“新疆/西藏/甘肃”等省级行政区直接作为高德 city 参数查询，
-    # 否则 POI 检索失败导致地点、图片、坐标全部失真
-    province_default_city = {
-        "新疆": "乌鲁木齐", "西藏": "拉萨", "甘肃": "兰州", "青海": "西宁",
-        "宁夏": "银川", "内蒙": "呼和浩特", "内蒙古": "呼和浩特", "海南": "海口",
-    }
-
     all_inputs_to_check = [intent_str] + list(reversed(history_sequence))
 
     for text in all_inputs_to_check:
@@ -2617,6 +2851,17 @@ async def run_negotiate(msg: GatewayMessage):
             match = re.search(pattern, str(text))
             if match:
                 candidate_city = match.group(1)
+                matched = True
+                break
+        if matched:
+            break
+
+        # 👑 省级名（四川/新疆/西藏…）也要能识别：用户不一定说"去四川玩"，
+        #    实测（2026-11-01）"规划四川4天自然风光行程" 三条规则全没命中 → 兜底成武威，
+        #    用户在诉求里明明写了省份，却拿到一份甘肃武威的方案（而省域覆盖根本没机会触发）。
+        for _province_name in PROVINCE_DEFAULT_CITY:
+            if _province_name and _province_name in str(text):
+                candidate_city = _province_name
                 matched = True
                 break
         if matched:
@@ -2656,7 +2901,10 @@ async def run_negotiate(msg: GatewayMessage):
         city_resolution = "fallback_default"
 
     # 👑 省级行政区自动收敛到省会/核心城市，保证高德检索能命中真实 POI
-    target_city = province_default_city.get(target_city, target_city)
+    _province_input = target_city
+    target_city = resolve_search_city(target_city)
+    if target_city != _province_input:
+        print(f"🏙️ [目的地] 省级行政区收敛到检索城市：{_province_input} → {target_city}", flush=True)
 
     # 👑 社区软引导：读取网关注入的高赞社区行程，作为软参考（仅借鉴，非硬约束）
     community_reference = user_prefs.get("community_reference", [])
@@ -2679,7 +2927,23 @@ async def run_negotiate(msg: GatewayMessage):
                 lines.append(f"- 《{title}》：{content[:280]}")
             community_hint = "\n".join(lines)
 
-    coord = await toolbox.get_coordinates(target_city) or "102.63,37.93"
+    # 明确写下了目的地却解析不出来 → 显式失败，不再拿兜底城市出一份不相干的方案。
+    # 注意：必须发生在缓存/种子命中之前，否则旧缓存会把错误目的地"救活"。
+    explicit_destination = _pick_explicit_destination(payload, intent_str)
+    coord = await toolbox.get_coordinates(target_city)
+    if explicit_destination and (
+        city_resolution == "fallback_default" or not _coord_in_mainland(coord)
+    ):
+        print(
+            f"⚠️ [目的地] 无法解析 {explicit_destination!r}（识别结果={target_city!r} / "
+            f"resolution={city_resolution} / coord={coord!r}），显式失败",
+            flush=True,
+        )
+        return StreamingResponse(
+            _destination_error_stream(explicit_destination, city_resolution),
+            media_type="application/x-ndjson",
+        )
+    coord = coord or "102.63,37.93"
     current_mode = mode
     user_role = role
     evolution_memory = payload.get("evolution_memory", [])
@@ -2782,6 +3046,12 @@ async def run_negotiate(msg: GatewayMessage):
         cb = cached_payload.get("budget_breakdown") or budget_breakdown_payload
         cfd = cached_payload.get("final_data") or {}
         ctc = cached_payload.get("target_city") or {}
+        # 老缓存/种子模板里还留着"暂无供应商数据"的占位（2026-11-03）：输出前统一清掉，
+        # 否则命中缓存时又在界面上满屏重复 —— 缓存不该绕过数据质量口径。
+        _cached_fact_cleared = clear_placeholder_supplier_facts(cfd, copy=False)
+        _cached_fact_gap = supplier_facts_disclosure(_cached_fact_cleared)
+        if _cached_fact_gap:
+            cfd["supplier_data_gaps"] = _cached_fact_gap
         yield json.dumps({"type": "budget_breakdown", "payload": cb}, ensure_ascii=False) + "\n"
         yield json.dumps({"token": f"[缓存加速]: 命中【{target_city}】{trip_days} 天行程缓存，首屏 < 1s（跳过 LLM 推理）\n"}, ensure_ascii=False) + "\n"
         if ctc:
@@ -2907,11 +3177,138 @@ async def run_negotiate(msg: GatewayMessage):
 
         coord_task = toolbox.get_coordinates(target_city)
 
+        # 候选供给诊断：记录每一类真实候选有多少、有没有补检索（随方案如实下发）。
+        # ⚠️ 必须先于省域锚点解析初始化：省域分支会往里写 province_scope / province_scope_error。
+        #    实测（2026-11-01）：把它留在下面，省域请求走到这里就是 UnboundLocalError，
+        #    而普通城市请求完全正常 —— 单测也覆盖不到（所以日志里一直看不到省域的任何输出）。
+        pool_diagnostics: Dict[str, Any] = {}
+
+        # 👑 省域覆盖（A）：用户把目的地写成「四川」这类省时，检索范围必须是**全省地州**，
+        #    而不是省会。实测（2026-11-01）：省级单查询（city=四川 / 510000）返回的前 25 条
+        #    全部在成都各区；九寨沟（阿坝）、四姑娘山（阿坝小金）、稻城亚丁（甘孜）离成都
+        #    300km 外，靠"省会 + 半径"永远查不到 —— 用户要的"四川"就成了"成都周边"。
+        #    这里先拿全省地州清单并按天数选锚点，景点/美食/住宿三路取数共用这份清单。
+        province_scope_name = province_of(_province_input)
+        province_anchors: List[Dict[str, Any]] = []
+        if province_scope_name:
+            try:
+                province_anchors = pick_anchors(
+                    await toolbox.get_sub_districts(province_scope_name),
+                    trip_days,
+                    capital=target_city,
+                )
+            except Exception as _province_exc:
+                pool_diagnostics["province_scope_error"] = f"{type(_province_exc).__name__}: {str(_province_exc)[:120]}"
+                print(f"⚠️ [省域范围] 地州锚点解析失败（退回按省会检索）: {_province_exc}", flush=True)
+            if province_anchors:
+                pool_diagnostics["province_scope"] = {
+                    "province": province_scope_name,
+                    "anchor_count": len(province_anchors),
+                    "anchors": [str(item.get("name") or "") for item in province_anchors],
+                    "quota": anchor_quota(trip_days),
+                }
+                print("🗺️ " + province_scope_note(province_scope_name, province_anchors, trip_days), flush=True)
+
+        # 👑 省域覆盖（B）：日内编排的"片区口径"。
+        #    旧判据按"离省会多远"算每天的里程与远景区数，于是九寨沟（离成都 300km）
+        #    会被判成"一天跑不完"并被 `repair_day_overload` 直接移出 —— 省域覆盖等于白做。
+        #    省域请求改用：同一天一个片区 + 跨片区一次换乘（高铁估算）+ 片区内里程预算。
+        #    `_day_region_plan` 在这里先定空值，真正的分片建议在候选池备好后算（见下方）。
+        _day_region_plan: Dict[int, str] = {}
+        _day_region_note = ""
+        # 👑 省域覆盖（B2）：一个地州跨度可能 250km+（阿坝：九寨沟 ↔ 四姑娘山），
+        #    几天之内只能走其中一条线。`_sub_cluster_keep` 记录"某片区这趟只保留哪些候选"，
+        #    `_sub_cluster_note` 是写给用户/提示词的如实说明（其余方向这次不排）。
+        _sub_cluster_keep: Dict[str, set] = {}
+        _sub_cluster_note = ""
+
+        def _province_region_of(node: Mapping[str, Any]) -> str:
+            """节点属于哪个片区：优先读节点自带的片区标签，否则按最近的省域锚点判断。
+
+            ⚠️ 模型输出里通常没有 `region_city`（底座里有，但它不一定照抄），
+            所以必须能用坐标兜底；两边都拿不到就返回空串（当"片区未知"，不参与片区判定）。
+            """
+            explicit = str(node.get("region_short") or node.get("region_city") or "").strip()
+            if explicit:
+                return short_region_name(explicit) or explicit
+            from core.travel_feasibility import node_lnglat
+
+            point = node_lnglat(node)
+            if not point or not province_anchors:
+                return ""
+            nearest = None
+            for _anchor in province_anchors:
+                _center = _anchor.get("center") or []
+                if not _center:
+                    continue
+                _km = haversine_km(point, _center)
+                if nearest is None or _km < nearest[0]:
+                    nearest = (_km, _anchor)
+            if nearest is None:
+                return ""
+            return str(nearest[1].get("short") or short_region_name(str(nearest[1].get("name") or "")))
+
+        def _province_region_center(region: str) -> List[float]:
+            """片区中心坐标（算跨片区换乘耗时用）；找不到返回空列表。"""
+            for _anchor in province_anchors:
+                if region and region in (str(_anchor.get("short") or ""), str(_anchor.get("name") or "")):
+                    return list(_anchor.get("center") or [])
+            return []
+
+        def _evaluate_feasibility(
+            route: Sequence[Mapping[str, Any]],
+            *,
+            city_center: Optional[Sequence[float]],
+            distance_tolerance: str,
+            days: int,
+        ) -> Dict[str, Any]:
+            """日内现实性：省域请求走片区口径，其余保持原口径（行为不变）。"""
+            from core.travel_feasibility import evaluate_province_feasibility, evaluate_travel_feasibility
+
+            if province_scope_name and province_anchors:
+                return evaluate_province_feasibility(
+                    route,
+                    region_of=_province_region_of,
+                    region_center_of=_province_region_center,
+                    day_regions=_day_region_plan,
+                    distance_tolerance=distance_tolerance,
+                    days=days,
+                )
+            return evaluate_travel_feasibility(
+                route,
+                city_center=city_center,
+                distance_tolerance=distance_tolerance,
+                days=days,
+            )
+
+        def _repair_feasibility(
+            route: Sequence[Mapping[str, Any]],
+            *,
+            city_center: Optional[Sequence[float]],
+            distance_tolerance: str,
+        ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            """修复日内容量：省域按片区收口，其余仍按"一天一个远景区"。"""
+            from core.travel_feasibility import repair_day_overload, repair_province_overload
+
+            if province_scope_name and province_anchors:
+                return repair_province_overload(
+                    route,
+                    region_of=_province_region_of,
+                    region_center_of=_province_region_center,
+                    # 分片建议就是"这一天该去哪片"：修复要以它为准，而不是"出现最多的那个"。
+                    day_regions=_day_region_plan,
+                    distance_tolerance=distance_tolerance,
+                )
+            return repair_day_overload(
+                route,
+                city_center=city_center,
+                distance_tolerance=distance_tolerance,
+            )
+
         # 不再把所有景点类型塞进一次宽泛检索。高德在“景点|博物馆|文化地标”
         # 这类混合关键词下很容易返回大量博物馆，导致模型看到的候选池本身就失衡。
         # 分领域检索后再合并，保证自然景区、文化、人文商业和特色餐饮都有真实候选。
-        # 候选供给诊断：记录每一类真实候选有多少、有没有补检索（随方案如实下发）
-        pool_diagnostics: Dict[str, Any] = {}
+        # 候选供给诊断已在省域锚点解析之前初始化（见上，省域分支会先往里写）
         # geocode 结构化结果（province/city/district/level/center）：内层补检索往外层共用一个**可变字典**，
         # 而不是内层重新绑定一个局部名 —— 实测坑：内层 `_geocode = ...` 只改内层局部变量，
         # 外层硬约束过滤读它直接 NameError，还被兜底 except 吞掉（日志里什么都看不到）。
@@ -3138,6 +3535,75 @@ async def run_negotiate(msg: GatewayMessage):
                     pool_diagnostics["neighbor_error"] = str(_neighbor_exc)[:120]
                     print(f"⚠️ [周边景区] 补检索失败（不影响主流程）: {_neighbor_exc}", flush=True)
 
+            # 👑 省域覆盖（A）：省级目的地把**每个地州**各查一次真景区。
+            #    实测（2026-11-01 四川）：阿坝 311 条（九寨沟/神仙池）、乐山 204 条（乐山大佛）、
+            #    九寨沟县 69 条；而省级单查询的前 25 条全在成都各区。不逐地州查，省域覆盖就是空话。
+            #    只留 `scenic_tier=landmark`（城市公园在省会那次检索里已经有了），
+            #    同景区子点先合并，每个地州最多补 10 个，避免候选池被"景区数量"撑爆。
+            if province_anchors:
+                _province_started = time.monotonic()
+                _province_seen = {str(item.get("name") or "") for item in merged}
+                _province_added = 0
+                _province_by_anchor: Dict[str, int] = {}
+                _province_errors: List[str] = []
+                for _anchor in province_anchors:
+                    _anchor_name = str(_anchor.get("name") or "")
+                    if not _anchor_name:
+                        continue
+                    try:
+                        _province_rows = await toolbox.get_dynamic_pois(
+                            _anchor_name,
+                            keywords=SCENIC_WIDENING_KEYWORDS,
+                            types="110000",
+                            limit=20,
+                        )
+                    except Exception as _anchor_exc:
+                        _province_errors.append(f"{_anchor_name}:{type(_anchor_exc).__name__}")
+                        continue
+                    _province_landmarks = [
+                        item for item in keep_for(_province_rows, "scenic")
+                        if str(item.get("scenic_tier") or "") == "landmark"
+                    ]
+                    _province_landmarks, _ = dedupe_sub_spots(_province_landmarks)
+                    _anchor_added = 0
+                    for _item in _province_landmarks:
+                        _item_name = str(_item.get("name") or "")
+                        if not _item_name or _item_name in _province_seen:
+                            continue
+                        if _anchor_added >= 10:
+                            break
+                        _province_seen.add(_item_name)
+                        # 片区标签是编排阶段的依据（同一天只在一个片区；跨片区要整段移动）
+                        _item["region_city"] = _anchor_name
+                        _item["region_short"] = short_region_name(_anchor_name)
+                        if _anchor.get("adcode"):
+                            _item["region_adcode"] = str(_anchor.get("adcode") or "")
+                        _province_km = haversine_km(city_lnglat, _item.get("lnglat"))
+                        if _province_km == _province_km:
+                            _item["distance_km"] = round(float(_province_km), 1)
+                            if float(_province_km) >= 40:
+                                _item["out_of_town"] = True
+                        merged.append(_item)
+                        _anchor_added += 1
+                        _province_added += 1
+                    if _anchor_added:
+                        _province_by_anchor[_anchor_name] = _anchor_added
+                pool_diagnostics.setdefault("province_scope", {})
+                pool_diagnostics["province_scope"].update({
+                    "scenic_added": _province_added,
+                    "scenic_by_anchor": _province_by_anchor,
+                    "scenic_errors": _province_errors,
+                    "scenic_seconds": round(time.monotonic() - _province_started, 1),
+                })
+                if _province_added or _province_errors:
+                    print(
+                        f"🗺️ [省域景区] 逐地州补检索：新增真景区 {_province_added} 个"
+                        f"（{len(_province_by_anchor)}/{len(province_anchors)} 个地州有产出，"
+                        f"{round(time.monotonic() - _province_started, 1)}s）"
+                        + (f"；失败：{'、'.join(_province_errors)}" if _province_errors else ""),
+                        flush=True,
+                    )
+
             # 👑 同景区子景点合并（2026-10-05 伊宁实测）：高德会一次返回同一个景区的 5 个子点
             #    （「天山花海·花田柳林」「天山花海天山花园」「天山花海旅游景区木屋营地」…），
             #    名字互相不包含，所以更早的 dedupe_sub_spots 抓不住 —— 结果同一天排了 5 个
@@ -3195,6 +3661,13 @@ async def run_negotiate(msg: GatewayMessage):
         _snap = LoopLagProbe().start()
         unique_foods = deduplicate_and_diversify_pois(raw_foods)
         unique_attractions = deduplicate_and_diversify_pois(raw_attractions)
+        # 省域：记住"带地州标签的候选"（都是我们自己按地州名实地检索回来的）。
+        # 协商回环里 `unique_attractions` 会被专家重提的候选**整体覆盖**（见下方 `_revised_pools`），
+        # 实测 4 天四川：56 个地州景区被冲回 36 个、只剩成都+阿坝两片。这里留一份快照用于补回。
+        _province_tagged_attractions: List[Dict[str, Any]] = [
+            dict(_p) for _p in unique_attractions
+            if isinstance(_p, Mapping) and str(_p.get("region_short") or "").strip()
+        ]
         if _snap.max_lag > 0.5:
             print(f"⏱️ [卡顿·去重] {_snap.summary()}", flush=True)
         _snap = LoopLagProbe().start()
@@ -3266,6 +3739,87 @@ async def run_negotiate(msg: GatewayMessage):
             if _hotel_widen.get("error"):
                 pool_diagnostics["widening_error"] = _hotel_widen["error"]
                 print(f"⚠️ [候选补检索] 住宿补充检索失败（不影响主流程）: {_hotel_widen['error']}", flush=True)
+
+        # 👑 省域覆盖（A）· 美食与住宿：跨地州行程里"吃在哪儿、住在哪儿"也要跟着片区走。
+        #    只查省域锚点里的前几个片区（吃住不像景区那样值得全省铺开，否则一天吃住都在 80km 外），
+        #    数量按天数封顶。每条候选带 `region_city/region_short`，编排阶段据此按片区分配。
+        if province_anchors:
+            _inn_started = time.monotonic()
+            _inn_anchors = province_anchors[: max(2, min(len(province_anchors), trip_days))]
+            _food_seen = {str(item.get("name") or "") for item in unique_foods if isinstance(item, Mapping)}
+            _hotel_seen = {str(item.get("name") or "") for item in cleaned_hotels if isinstance(item, Mapping)}
+            _food_by_anchor: Dict[str, int] = {}
+            _hotel_by_anchor: Dict[str, int] = {}
+            _inn_errors: List[str] = []
+            for _anchor in _inn_anchors:
+                _anchor_name = str(_anchor.get("name") or "")
+                if not _anchor_name:
+                    continue
+                try:
+                    _region_foods = await toolbox.get_dynamic_pois(
+                        _anchor_name, keywords=FOOD_WIDENING_KEYWORDS, types="050000",
+                        limit=20, play_worthy=False,
+                    )
+                    _region_hotels = await toolbox.get_dynamic_pois(
+                        _anchor_name, keywords=LODGING_WIDENING_KEYWORDS, types="100000",
+                        limit=20, play_worthy=False,
+                    )
+                except Exception as _inn_exc:
+                    _inn_errors.append(f"{_anchor_name}:{type(_inn_exc).__name__}")
+                    continue
+                _added_food_here = 0
+                for _item in _region_foods:
+                    if not isinstance(_item, Mapping):
+                        continue
+                    _item = dict(_item)
+                    _item_name = str(_item.get("name") or "")
+                    if not _item_name or _item_name in _food_seen:
+                        continue
+                    if classify_poi_category(_item_name, str(_item.get("type") or ""), bool(_item.get("is_hotel"))) != "food":
+                        continue
+                    if _added_food_here >= 8:
+                        break
+                    _food_seen.add(_item_name)
+                    _item["region_city"] = _anchor_name
+                    _item["region_short"] = short_region_name(_anchor_name)
+                    unique_foods.append(_item)
+                    _added_food_here += 1
+                if _added_food_here:
+                    _food_by_anchor[_anchor_name] = _added_food_here
+                _added_hotel_here = 0
+                for _item in _region_hotels:
+                    if not isinstance(_item, Mapping):
+                        continue
+                    _item = dict(_item)
+                    _item_name = str(_item.get("name") or "")
+                    if not _item_name or _item_name in _hotel_seen:
+                        continue
+                    if classify_poi_category(_item_name, str(_item.get("type") or ""), bool(_item.get("is_hotel"))) != "hotel":
+                        continue
+                    if _added_hotel_here >= 6:
+                        break
+                    _hotel_seen.add(_item_name)
+                    _item["region_city"] = _anchor_name
+                    _item["region_short"] = short_region_name(_anchor_name)
+                    cleaned_hotels.append(_item)
+                    _added_hotel_here += 1
+                if _added_hotel_here:
+                    _hotel_by_anchor[_anchor_name] = _added_hotel_here
+            pool_diagnostics.setdefault("province_scope", {})
+            pool_diagnostics["province_scope"].update({
+                "food_added": sum(_food_by_anchor.values()),
+                "food_by_anchor": _food_by_anchor,
+                "lodging_added": sum(_hotel_by_anchor.values()),
+                "lodging_by_anchor": _hotel_by_anchor,
+                "inn_errors": _inn_errors,
+                "inn_seconds": round(time.monotonic() - _inn_started, 1),
+            })
+            print(
+                f"🍜 [省域吃住] {len(_inn_anchors)} 个片区补检索：美食 +{sum(_food_by_anchor.values())}、"
+                f"住宿 +{sum(_hotel_by_anchor.values())}（{round(time.monotonic() - _inn_started, 1)}s）"
+                + (f"；失败：{'、'.join(_inn_errors)}" if _inn_errors else ""),
+                flush=True,
+            )
 
         # 👑 住宿候选接上**供应商实价**（2026-10-05）：高德不给房价，所以"住哪"一直没有价格依据，
         #    最后只能标"需要你确认"。供应商一次城市检索就能拿回「酒店名 + 实价 + 星级 + 地址 +
@@ -3379,6 +3933,11 @@ async def run_negotiate(msg: GatewayMessage):
         # selection. Empty supplier data is kept as a degraded proposal rather
         # than being replaced with fabricated facts.
         specialist_runtime_result = {"status": "degraded", "proposals": [], "completed": 0, "failed": 0, "degraded": 0, "parallel": True}
+        # 多轮消息总线：初始轮（round 0）的提案会广播出去，重提轮（round 1..N）的智能体
+        # 因此能看到"上一轮别人提了什么 + 本轮裁决"，而不是只收到一条孤立指令。
+        _agent_bus = AgentMessageBus(correlation_id=plan_correlation_id)
+        _llm_specialist_ids = SPECIALIST_LLM_AGENT_IDS if specialist_llm_enabled() else ()
+        _llm_specialist_complete = specialist_llm_complete if _llm_specialist_ids else None
         try:
             from core.agent_runtime import build_pool_runtime
             from core.proposal_governance import apply_candidate_gates
@@ -3413,8 +3972,12 @@ async def run_negotiate(msg: GatewayMessage):
                     )
                 ][:12],
                 city=target_city,
+                llm_complete=_llm_specialist_complete,
+                llm_agent_ids=_llm_specialist_ids,
             )
-            specialist_runtime_result = await _runtime.execute(_runtime_requests)
+            specialist_runtime_result = await _runtime.execute(
+                _runtime_requests, bus=_agent_bus, round_no=0
+            )
             # 提案是否基于**同一版事实**：不基于就如实点名（每个提案都从输入契约里带 facts_version）
             _facts_alignment = proposal_facts_alignment(
                 specialist_runtime_result.get("proposals"), facts_version_string
@@ -3462,6 +4025,10 @@ async def run_negotiate(msg: GatewayMessage):
                             )
                             if not _directives:
                                 break
+                            # 本轮消息总线：先开新轮次，再把裁决作为显式消息广播给目标智能体；
+                            # 智能体的收件箱里于是同时有「上一轮提案」和「本轮裁决」。
+                            _agent_bus.start_round()
+                            _bus_round = _agent_bus.round_no
                             _revised: Dict[str, Any] = {}
                             _revised_pools: Dict[str, Any] = {}
                             for _agent_id, _directive in _directives.items():
@@ -3478,6 +4045,8 @@ async def run_negotiate(msg: GatewayMessage):
                                     dining=_pool if _agent_id == "dining-agent" else (),
                                     lodging=_pool if _agent_id == "lodging-agent" else (),
                                     facts=request_facts,
+                                    llm_complete=_llm_specialist_complete,
+                                    llm_agent_ids=_llm_specialist_ids,
                                 )
                                 # 只跑目标智能体，并在它的输入契约里加上裁决指令
                                 _target_requests = [
@@ -3487,7 +4056,21 @@ async def run_negotiate(msg: GatewayMessage):
                                     _req.hard_constraints.update(_directive.get("hard_constraints") or {})
                                     _req.context["revision_directive"] = str(_directive.get("message") or "")
                                     _req.context["revision_reason"] = str(_directive.get("reason") or "")
-                                _revision_result = await _revision_runtime.execute(_target_requests)
+                                _agent_bus.publish(
+                                    sender="coordinator",
+                                    topic="directive",
+                                    recipients=(_agent_id,),
+                                    content={
+                                        "message": str(_directive.get("message") or ""),
+                                        "reason": str(_directive.get("reason") or ""),
+                                        "hard_constraints": dict(_directive.get("hard_constraints") or {}),
+                                        "round": _bus_round,
+                                    },
+                                    round_no=_bus_round,
+                                )
+                                _revision_result = await _revision_runtime.execute(
+                                    _target_requests, bus=_agent_bus, round_no=_bus_round
+                                )
                                 for _proposal in _revision_result.get("proposals") or []:
                                     _revised[str(_proposal.get("agent_id"))] = _proposal
                                     if _agent_id == "route-planner":
@@ -3504,6 +4087,19 @@ async def run_negotiate(msg: GatewayMessage):
                             specialist_runtime_result["proposals"] = _merged_proposals
                             if _revised_pools.get("attractions"):
                                 unique_attractions = _revised_pools["attractions"]
+                                # 省域：重提候选通常只覆盖省会周边，把地州实地检索回来的候选补回去
+                                if _province_tagged_attractions:
+                                    _rev_names = {str(_x.get("name") or "") for _x in unique_attractions if isinstance(_x, Mapping)}
+                                    _province_restored = [
+                                        dict(_x) for _x in _province_tagged_attractions
+                                        if str(_x.get("name") or "") not in _rev_names
+                                    ]
+                                    if _province_restored:
+                                        unique_attractions = list(unique_attractions) + _province_restored
+                                        print(
+                                            f"🗺️ [省域候选] 协商重提把地州景区冲掉了，补回 {len(_province_restored)} 个",
+                                            flush=True,
+                                        )
                             _after_facts = build_proposal_conflicts(
                                 _merged_proposals,
                                 forbidden_categories=("cultural",) if own_signals.get("exclude_cultural") else (),
@@ -3606,6 +4202,11 @@ async def run_negotiate(msg: GatewayMessage):
             except Exception as _conflict_exc:  # 分歧记录失败绝不影响出方案
                 specialist_runtime_result["proposal_conflicts"] = {"error": str(_conflict_exc)[:200]}
             _stage("专业提案与协商")
+            _pools_pre_gate = {
+                "attractions": list(unique_attractions),
+                "dining": list(unique_foods),
+                "lodging": list(cleaned_hotels),
+            }
             _gated = apply_candidate_gates(
                 {"attractions": unique_attractions, "dining": unique_foods, "lodging": cleaned_hotels},
                 specialist_runtime_result,
@@ -3614,9 +4215,48 @@ async def run_negotiate(msg: GatewayMessage):
             # scoring pool. A degraded proposal leaves that domain empty and
             # is surfaced in the audit instead of silently becoming a fact.
             unique_attractions = _gated["pools"].get("attractions", [])
+            # 👑 省域覆盖（A）· 门禁放行：`apply_candidate_gates` 只留"专家提案点名"的候选。
+            #    实测（2026-11-01 四川 5 天）：逐地州检索到 57 个真景区（甘孜/凉山/宜宾/攀枝花…），
+            #    但提案只点了成都周边的几个，门禁把其余全判 `not_in_specialist_proposal` 丢掉 ——
+            #    候选池只剩 2 个片区，省域覆盖在最后一米失效（最终又变成"成都周边 5 天"）。
+            #    这里把"我们**自己按地州名实地检索回来**的景区/餐厅/住宿"（带 region_short、
+            #    不是模型编的）在通过结构校验后放回；数量如实进审计，其它门禁（证据、提案状态）不变。
+            if province_anchors:
+                from core.optimization import validate_candidate as _validate_candidate
+
+                for _pool_name in ("attractions", "dining", "lodging"):
+                    _accepted = list(_gated["pools"].get(_pool_name) or [])
+                    _accepted_names = {str(_item.get("name") or "") for _item in _accepted if isinstance(_item, Mapping)}
+                    _readmitted: List[Dict[str, Any]] = []
+                    for _item in _pools_pre_gate.get(_pool_name) or []:
+                        if not isinstance(_item, Mapping):
+                            continue
+                        if not str(_item.get("region_short") or "").strip():
+                            continue
+                        _item_name = str(_item.get("name") or "")
+                        if not _item_name or _item_name in _accepted_names:
+                            continue
+                        if not _validate_candidate(dict(_item)).get("valid"):
+                            continue
+                        _readmitted.append(dict(_item))
+                        _accepted_names.add(_item_name)
+                    if not _readmitted:
+                        continue
+                    _gated["pools"][_pool_name] = _accepted + _readmitted
+                    specialist_runtime_result.setdefault("gate_readmitted", {})[_pool_name] = len(_readmitted)
+                    print(
+                        f"🗺️ [省域候选] {_pool_name}：提案没点名、但确实是地州名实地检索到的，放回 {len(_readmitted)} 个",
+                        flush=True,
+                    )
+            unique_attractions = _gated["pools"].get("attractions", [])
             unique_foods = _gated["pools"].get("dining", [])
             cleaned_hotels = _gated["pools"].get("lodging", [])
             specialist_runtime_result["gate_audits"] = _gated["audits"]
+            # 多轮消息总线：完整记录留在结果里（谁在第几轮说了什么、发给了谁），
+            # 失败分支（except）不会覆盖这里的值，审计仍能看到协商过程。
+            specialist_runtime_result["message_bus"] = _agent_bus.transcript()
+            specialist_runtime_result["message_rounds"] = _agent_bus.round_no
+            specialist_runtime_result["message_summary"] = _agent_bus.summary()
             # 事件流：**逐个智能体**提出候选（producer=该智能体），这是"地点从哪来"的源头。
             # 只发聚合数量，不逐条展开 —— 一次规划几十个候选会把流刷满，审计反而看不清。
             for _proposal in specialist_runtime_result.get("proposals") or []:
@@ -3654,12 +4294,18 @@ async def run_negotiate(msg: GatewayMessage):
                 "hard_constraints": sorted(
                     key for key in ((request_facts.get("constraints") or {}).keys())
                 ),
+                "message_rounds": _agent_bus.round_no,
+                "message_count": _agent_bus.summary().get("messages"),
             }, room_id, correlation_id=plan_correlation_id, producer="coordinator")
         except Exception as _runtime_error:
             specialist_runtime_result = {
                 **specialist_runtime_result,
                 "status": "degraded",
                 "error": str(_runtime_error)[:240],
+                # 出错也要留下已发生的协商记录：否则"为什么没协商"无从查起
+                "message_bus": _agent_bus.transcript(),
+                "message_rounds": _agent_bus.round_no,
+                "message_summary": _agent_bus.summary(),
             }
 
         # 👑 候选池层面就剔除"用户明说不要"的类别：不让专业智能体拿到用户已经否掉的东西
@@ -3772,13 +4418,18 @@ async def run_negotiate(msg: GatewayMessage):
                 if isinstance(p, dict):
                     p["fitness_score"] = fitness_calculator.calculate_fitness(p)
                     p["is_hotel"] = False
+                    # 景区档位在"分桶"时只读这个字段（见 `_pool_cat`）。实测（2026-11-01 四川）：
+                    # 一部分真实景区（天气备选、地州补检索回来的点）没有这个字段，分桶时被当成
+                    # "城市公园"整批砍掉 —— 分片计划里明明有成都 2 天，候选池里成都景区只剩 1 个。
+                    if not str(p.get("scenic_tier") or ""):
+                        p["scenic_tier"] = scenic_tier(p.get("name"), p.get("type"))
 
             for h in cleaned_hotels:
                 if isinstance(h, dict):
                     h["fitness_score"] = fitness_calculator.calculate_fitness(h)
                     h["is_hotel"] = True
 
-            pareto_result = NashEquilibriumSolver.resolve_conflicts(daytime_pois)
+            pareto_result = ParetoFrontierSelector.resolve_conflicts(daytime_pois)
             pareto_daytime = pareto_result.get("frontier", [])
             # Pareto 前沿用于裁决与解释，但极端情况下前沿可能很小，无法覆盖
             # 长行程的每日节点容量。将被支配候选作为“可选补充池”保留，仍在
@@ -3802,10 +4453,175 @@ async def run_negotiate(msg: GatewayMessage):
                 "rejected_count": pareto_result.get("rejected_count", 0),
                 "rejected": pareto_result.get("rejected", [])[:100],
             }
+            # 👑 省域覆盖（A）· 先定片区、再补候选（2026-11-01 实测的顺序倒置）：
+            #    帕累托前沿之后只活下来极少数候选，而"补到 20 个"是**按类别交错**取前 N 个 ——
+            #    省会候选排在前面，阿坝/甘孜的真实景区根本进不了前沿。等分片建议算出来时，
+            #    阿坝只剩 3 个候选，4 天里分到 2 天也排不满（每日密度每天都报不足，地点自然很少）。
+            #    这里先用**全量候选**按地州分组定"哪天在哪片"，再按片区保量补进前沿；
+            #    下游分片直接复用这份计划，不再重算（那时候选已被截断，判断只会更窄）。
+            if province_scope_name and province_anchors:
+                # 口径必须与下游分桶（`_pool_cat`）**完全一致**：景区 = 分类器判 scenic **且**
+                # 档位是 landmark。此前这里只判了前半句（实测 2026-11-01 四川 4 天）：成都那 11 个
+                # 全是公园/乐园档，被算成"成都已有 11 个景区"→ 成都需要补的景区变成 0 个，
+                # 一个真景区都没补进前沿；到分桶时它们全落进 `park` 桶被公园上限砍掉，
+                # 于是"成都 2 天"的候选池里只剩 1 个景区，每日密度天天报不足。
+                def _is_scenic_landmark(p: Mapping) -> bool:
+                    if classify_poi_category(
+                        str(p.get("name") or ""), str(p.get("type") or ""), bool(p.get("is_hotel"))
+                    ) != "scenic":
+                        return False
+                    tier = str(p.get("scenic_tier") or "") or scenic_tier(p.get("name"), p.get("type"))
+                    return tier == "landmark"
+
+                _region_scenic: Dict[str, List[Dict[str, Any]]] = {}
+                for _cand in daytime_pois:
+                    if not isinstance(_cand, Mapping):
+                        continue
+                    if not _is_scenic_landmark(_cand):
+                        continue
+                    _region = str(_cand.get("region_short") or "") or _province_region_of(_cand)
+                    if _region:
+                        _region_scenic.setdefault(_region, []).append(dict(_cand))
+                if _region_scenic:
+                    _early_region_names = list(_region_scenic)
+                    _capital_short = short_region_name(target_city)
+                    _early_start = next(
+                        (index for index, name in enumerate(_early_region_names) if name == _capital_short),
+                        None,
+                    )
+                    _early_plan = assign_cluster_days(
+                        [list(_region_scenic[name]) for name in _early_region_names],
+                        trip_days,
+                        max(1, int(actual_daily_count or 1)),
+                        start_cluster=_early_start,
+                        max_regions=max(2, (trip_days + 1) // 2),
+                    )
+                    _region_days: Dict[str, int] = {}
+                    for _cluster_index, _cluster_days in (_early_plan.get("cluster_days") or {}).items():
+                        if 0 <= int(_cluster_index) < len(_early_region_names):
+                            _name = _early_region_names[int(_cluster_index)]
+                            _region_days[_name] = _region_days.get(_name, 0) + int(_cluster_days)
+                    _early_plan_map: Dict[int, str] = {}
+                    for _day_index, _cluster_index in enumerate(_early_plan.get("day_to_cluster") or [], start=1):
+                        if 0 <= int(_cluster_index) < len(_early_region_names):
+                            _early_plan_map[_day_index] = _early_region_names[int(_cluster_index)]
+                    if _early_plan_map:
+                        _day_region_plan = _early_plan_map
+                        # 👑 省域覆盖（B2）· 计划片区内再收敛成"一条线"：
+                        #    阿坝一个州同时检索到九寨沟（33.1N）与四姑娘山（31.1N），相隔约 250km ——
+                        #    4 天里分给阿坝 2 天，两头都排就是"第 3 天 451km、第 4 天 209km"，
+                        #    看着地点多、实际跑不动（质量闸门 space_efficiency=0）。
+                        #    ⚠️ 顺序很关键：**先用全量候选决定"去哪几个片区"**（供给多、权重高的州优先），
+                        #    再对已选中的片区收敛成一条线。反过来先收敛的话，阿坝候选被砍到 5 个，
+                        #    片区权重就输给凉山的 9 个 —— 用户要的川西雪山线会被凉山顶掉。
+                        _line_notes: List[str] = []
+                        for _region in list(_region_days):
+                            _choice = choose_region_line(_region_scenic.get(_region) or [])
+                            if not _choice.get("applied"):
+                                continue
+                            _region_scenic[_region] = list(_choice["kept"])
+                            _sub_cluster_keep[_region] = {
+                                str(row.get("name") or "")
+                                for row in _choice["kept"]
+                                if str(row.get("name") or "")
+                            }
+                            _line_notes.append(
+                                f"{_region}跨度约 {_choice['span_km']:.0f}km，这趟只走"
+                                f"『{_choice['kept_label']}』这一条线；{_choice['dropped_label']}这次不排"
+                                f"（想走那边可以加天数，或直接把景点写进目的地）"
+                            )
+                        _sub_cluster_note = "；".join(_line_notes)
+                        if _sub_cluster_keep:
+                            _before_line = len(pareto_daytime)
+                            _line_rows: List[Any] = []
+                            for _p in pareto_daytime:
+                                if not isinstance(_p, Mapping):
+                                    _line_rows.append(_p)
+                                    continue
+                                _p_region = str(_p.get("region_short") or "") or _province_region_of(_p)
+                                _keep_names = _sub_cluster_keep.get(_p_region)
+                                if (
+                                    _keep_names is not None
+                                    and _is_scenic_landmark(_p)
+                                    and str(_p.get("name") or "") not in _keep_names
+                                ):
+                                    continue
+                                _line_rows.append(_p)
+                            pareto_daytime = _line_rows
+                            pool_diagnostics.setdefault("province_scope", {})["sub_clusters"] = _line_notes
+                            print(
+                                f"🗺️ [省域候选] 子片区收敛（每州只走一条线）："
+                                + "；".join(_line_notes)
+                                + f"｜前沿移出跨线候选 {_before_line - len(pareto_daytime)} 个",
+                                flush=True,
+                            )
+                        # 片区保量：每个计划片区按"片区天数 × 每天景区名额"留足候选，
+                        # 否则阿坝 2 天只有 3 个景区可选，模型再听话也排不满。
+                        _scenic_target = max(1, int((composition or {}).get("scenic", 0) or 0))
+                        _per_day_scenic = max(1, int(math.ceil(_scenic_target / max(1, trip_days))))
+                        _present_names = {
+                            str(_p.get("name") or "")
+                            for _p in pareto_daytime
+                            if isinstance(_p, Mapping)
+                        }
+                        _present_by_region: Dict[str, int] = {}
+                        for _p in pareto_daytime:
+                            if not isinstance(_p, Mapping) or not _is_scenic_landmark(_p):
+                                continue
+                            _p_region = str(_p.get("region_short") or "") or _province_region_of(_p)
+                            if _p_region:
+                                _present_by_region[_p_region] = _present_by_region.get(_p_region, 0) + 1
+                        _reserved: Dict[str, int] = {}
+                        for _region, _days_here in _region_days.items():
+                            _need = _days_here * _per_day_scenic - _present_by_region.get(_region, 0)
+                            if _need <= 0:
+                                continue
+                            for _cand in sorted(
+                                _region_scenic.get(_region) or [],
+                                key=lambda item: -float(item.get("fitness_score") or 0),
+                            ):
+                                if _need <= 0:
+                                    break
+                                _cand_name = str(_cand.get("name") or "")
+                                if not _cand_name or _cand_name in _present_names:
+                                    continue
+                                _present_names.add(_cand_name)
+                                pareto_daytime.append(_cand)
+                                _reserved[_region] = _reserved.get(_region, 0) + 1
+                                _need -= 1
+                        if _reserved:
+                            pool_diagnostics.setdefault("province_scope", {})["region_scenic_reserved"] = dict(_reserved)
+                            print(
+                                "🗺️ [省域候选] 按片区保量补进前沿："
+                                + "、".join(f"{name}(+{count})" for name, count in _reserved.items()),
+                                flush=True,
+                            )
+
             route_optimizer = GraphRouteOptimizer(fitness_calculator)
             # 👑 空间排序先取完整顺序（不在此处过早截断），后续按类别均衡挑选，
             #    避免美食/文化类 POI 被「TSP 头部截断」整体挤出候选池
             spatial_daytime = route_optimizer.optimize_and_sort(pareto_daytime, max_nodes=max(len(pareto_daytime), 1))
+            # 诊断（省域）：空间排序会**丢掉没有 `location` 的候选**（它只认 "lng,lat" 字符串）。
+            # 实测（2026-11-01 四川 4 天）：前沿里有 8 个成都景区，排序后只剩 1 个 ——
+            # 不打印这一步，分片计划里的"成都 2 天"就没有候选可排。
+            if province_scope_name and province_anchors:
+                _after_regions: Dict[str, int] = {}
+                for _x in spatial_daytime:
+                    if not isinstance(_x, Mapping) or not _is_scenic_landmark(_x):
+                        continue
+                    _x_region = str(_x.get("region_short") or "") or _province_region_of(_x)
+                    if _x_region:
+                        _after_regions[_x_region] = _after_regions.get(_x_region, 0) + 1
+                _dropped_no_loc = sum(
+                    1 for _x in pareto_daytime
+                    if isinstance(_x, Mapping) and "," not in str(_x.get("location") or "")
+                )
+                print(
+                    f"🗺️ [省域候选] 空间排序后真景区片区："
+                    + "、".join(f"{name}({count})" for name, count in _after_regions.items())
+                    + f"｜缺坐标被丢 {_dropped_no_loc} 个",
+                    flush=True,
+                )
             if _snap.max_lag > 0.5:
                 print(f"⏱️ [卡顿·帕累托+空间排序] {_snap.summary()}", flush=True)
             _snap = LoopLagProbe().start()
@@ -3816,9 +4632,37 @@ async def run_negotiate(msg: GatewayMessage):
             def _pool_cat(p):
                 """候选池分桶用：把"城市公园"从自然景观里拆出来（口径见 core/route_composition.scenic_tier）。"""
                 category = _day_cat(p)
-                if category == "scenic" and str(p.get("scenic_tier") or "") != "landmark":
-                    return "park"
+                if category == "scenic":
+                    tier = str(p.get("scenic_tier") or "") or scenic_tier(p.get("name"), p.get("type"))
+                    if tier != "landmark":
+                        return "park"
                 return category
+
+            # 👑 省域覆盖（A）· 片区保底：帕累托前沿 + 空间排序之后，候选会被压到
+            #    `trip_days * 每日节点` 这个量级（实测 4 天四川：79 个候选只活下来 20 个，
+            #    其中真景区 10 个，全在成都周边）。不在这里补，甘孜/凉山/宜宾这些地州
+            #    **在候选池里还在、但进不了提示词** —— 省域覆盖仍然等于没做。
+            #    做法：给"还没进候选的每个片区"各放 1 个代表（优先地州实地检索回来的 landmark）。
+            if province_scope_name and province_anchors:
+                _present_regions = {str(p.get("region_short") or "") for p in spatial_daytime if isinstance(p, Mapping)}
+                _lead_regions: set[str] = set()
+                _region_leads_missing: List[Dict[str, Any]] = []
+                for _candidate in daytime_pois:
+                    if not isinstance(_candidate, Mapping) or _pool_cat(_candidate) != "scenic":
+                        continue
+                    _region = str(_candidate.get("region_short") or "") or _province_region_of(_candidate)
+                    if not _region or _region in _present_regions or _region in _lead_regions:
+                        continue
+                    _lead_regions.add(_region)
+                    _region_leads_missing.append(dict(_candidate))
+                if _region_leads_missing:
+                    spatial_daytime = list(spatial_daytime) + _region_leads_missing
+                    pool_diagnostics.setdefault("province_scope", {})["region_leads_added"] = len(_region_leads_missing)
+                    print(
+                        f"🗺️ [省域候选] 候选池补齐片区代表 {len(_region_leads_missing)} 个："
+                        f"{'、'.join(sorted(_lead_regions))}",
+                        flush=True,
+                    )
 
             # 👑 酒店按适应度精选并限量：用户有住宿/高端诉求时高分酒店优先，但绝不
             #    让酒店挤占白天 POI 容量（此前 29 家酒店把候选池白天席位全部挤掉）
@@ -3836,6 +4680,15 @@ async def run_negotiate(msg: GatewayMessage):
             for p in spatial_daytime:
                 if isinstance(p, dict):
                     _day_buckets.setdefault(_pool_cat(p), []).append(p)
+            if province_scope_name and province_anchors:
+                _dump_regions: Dict[str, int] = {}
+                for _row in _day_buckets.get("scenic") or []:
+                    _r = str(_row.get("region_short") or "") or _province_region_of(_row) or "本城"
+                    _dump_regions[_r] = _dump_regions.get(_r, 0) + 1
+                print(
+                    f"🗺️ [省域候选] 分桶后景区（补齐前）{sum(_dump_regions.values())} 个：{_dump_regions}",
+                    flush=True,
+                )
             # 👑 类别下限兜底（真实缺口，2026-10-04 库尔勒实测）：候选桶建在**帕累托前沿**上，
             #    前沿会把餐饮整类挤掉 —— 餐饮候选已经有 50 个，最终 top 里却是 0 个，
             #    于是"按类别轮流取"的均衡逻辑手里根本没有餐饮可轮，方案长期没有正经吃饭安排。
@@ -3873,10 +4726,337 @@ async def run_negotiate(msg: GatewayMessage):
                 _day_buckets["cultural"] = []
                 print("🚫 [排除人文] 按你的要求，候选池里的人文史迹已全部移除", flush=True)
 
+            # 👑 省域覆盖（A）· 候选池：让**每个行程片区**至少有一个真景区进入模型看到的候选。
+            #    不做这一步，帕累托前沿 + 空间 TSP 会把 300km 外的九寨沟排在后面，再被
+            #    `_day_capacity` 按顺序截断 —— 用户要的"四川"最终还是"成都周边"。
+            #    顺序按片区聚合（同片区的点连在一起），避免提示词里成都↔阿坝来回横跳。
+            if province_scope_name and _day_buckets.get("scenic"):
+                _scenic_bucket = list(_day_buckets.get("scenic") or [])
+                _present_regions = {str(item.get("region_short") or "") for item in _scenic_bucket}
+                _region_leads: List[Dict[str, Any]] = []
+                for _candidate in daytime_pois:
+                    if _pool_cat(_candidate) != "scenic":
+                        continue
+                    _region = str(_candidate.get("region_short") or "")
+                    if not _region or _region in _present_regions:
+                        continue
+                    _present_regions.add(_region)
+                    _region_leads.append(_candidate)
+                if _region_leads:
+                    _scenic_bucket = _region_leads + _scenic_bucket
+                _region_rows: Dict[str, List[Dict[str, Any]]] = {}
+                _region_order: List[str] = []
+                for _candidate in _scenic_bucket:
+                    # 没有片区标签的候选（多半来自省会本城检索）按最近地州锚点归属，
+                    # 否则会凭空多出一个「本城」片区，分片建议把某天排去"从四川省换乘"。
+                    _region = str(_candidate.get("region_short") or "") or _province_region_of(_candidate) or "本城"
+                    if _region not in _region_rows:
+                        _region_rows[_region] = []
+                        _region_order.append(_region)
+                    _region_rows[_region].append(_candidate)
+                _region_first: List[Dict[str, Any]] = []
+                _region_rest: List[Dict[str, Any]] = []
+                for _region in _region_order:
+                    _rows = _region_rows[_region]
+                    _region_first.append(_rows[0])
+                    _region_rest.extend(_rows[1:])
+                _day_buckets["scenic"] = _region_first + _region_rest
+                pool_diagnostics.setdefault("province_scope", {})["regions_in_prompt"] = len(_region_order)
+                print(
+                    f"🗺️ [省域候选] 景区按片区打头：{'、'.join(_region_order[:8])}"
+                    f"（{len(_region_first)} 个片区代表进入候选）",
+                    flush=True,
+                )
+
+                # 👑 省域覆盖（B）· 分片建议：按候选池的真实地理分布算出"哪天在哪片"，写进提示词。
+                #    只给规则（"同一天同片区"）还不够：模型仍可能把成都与九寨沟塞进同一天，
+                #    然后被下游片区口径判违规再移出 —— 用户看到的就是"地点又变少了"。
+                #    先告诉它分片，一次到位。（分片是**建议**，最终取舍仍看候选与用户诉求）
+                try:
+                    # 只有带坐标的景区参与分片：没有坐标的点各自成一片会把分片算歪
+                    _cluster_rows = [
+                        item for item in (_day_buckets.get("scenic") or [])
+                        if isinstance(item.get("lnglat"), (list, tuple))
+                        and len(item.get("lnglat") or []) >= 2
+                    ]
+                    # ✅ 「片区」按**地州**分，不按 150km 几何聚类：实测（2026-11-01 四川 4 天）
+                    #    四姑娘山 / 毕棚沟离成都约 140km，几何聚类会把它们并进「成都」，
+                    #    分片建议于是变成"4 天全在成都"，模型又把阿坝景点塞进成都那一天，
+                    #    再被片区口径的硬约束判违规移出 —— 用户看到的就是"地点越来越少"。
+                    #    这里与 feasibility 的 region_of 用**同一口径**（region_short → 最近地州锚点）。
+                    _by_region: Dict[str, List[Dict[str, Any]]] = {}
+                    for _item in _cluster_rows:
+                        _r = str(_item.get("region_short") or "") or _province_region_of(_item) or "本城"
+                        _by_region.setdefault(_r, []).append(_item)
+                    _clusters = list(_by_region.values())
+                    if _clusters:
+                        # 如实记录分片依据：哪个片区有几个候选（出现"全在一个片区"时一眼能看出是供给问题）
+                        _cluster_desc = []
+                        for _cl in _clusters[:8]:
+                            _cl_regions = [
+                                str(_x.get("region_short") or "") or _province_region_of(_x) or "未标注"
+                                for _x in _cl
+                            ]
+                            _cluster_desc.append(f"{max(set(_cl_regions), key=_cl_regions.count)}({len(_cl)})")
+                        print(f"🗺️ [省域分片] 片区候选：{' / '.join(_cluster_desc)}", flush=True)
+                    # 计划已在候选截断之前算过（见上方"先定片区、再补候选"）就直接复用：
+                    # 那时用的是**全量候选**，片区判断比截断后的候选池更完整。
+                    if not _day_region_plan:
+                        _capital_short = short_region_name(target_city)
+                        _start_cluster = None
+                        for _index, _cluster in enumerate(_clusters):
+                            if any(str(item.get("region_short") or "") == _capital_short for item in _cluster):
+                                _start_cluster = _index
+                                break
+                        _plan = assign_cluster_days(
+                            _clusters,
+                            trip_days,
+                            max(1, int(actual_daily_count or 1)),
+                            start_cluster=_start_cluster,
+                            # 每片区至少 2 天：4 天只排 2 个片区、5 天排 3 个，避免"天天换片区"
+                            # （每天一次长途换乘等于一直在赶路，用户明确说过"行程不要太赶"）
+                            max_regions=max(2, (trip_days + 1) // 2),
+                        )
+                        _plan_map: Dict[int, str] = {}
+                        for _day_index, _cluster_index in enumerate(_plan.get("day_to_cluster") or [], start=1):
+                            if _cluster_index < 0 or _cluster_index >= len(_clusters):
+                                continue
+                            _names = [
+                                str(item.get("region_short") or "") or _province_region_of(item) or "本城"
+                                for item in _clusters[_cluster_index]
+                            ]
+                            if _names:
+                                _plan_map[_day_index] = max(set(_names), key=_names.count)
+                        if _plan_map:
+                            _day_region_plan = _plan_map
+                    if _day_region_plan:
+                        _segments: List[str] = []
+                        _prev_region = ""
+                        for _region in dict.fromkeys(_day_region_plan[day] for day in sorted(_day_region_plan)):
+                            _days_here = [day for day in sorted(_day_region_plan) if _day_region_plan[day] == _region]
+                            _segment = (
+                                "、".join(f"Day {day}" for day in _days_here) + f" 在【{_region}】"
+                            )
+                            if _prev_region:
+                                _hours = estimate_rail_hours(
+                                    _province_region_center(_prev_region),
+                                    _province_region_center(_region),
+                                )
+                                _segment += (
+                                    f"（从{_prev_region}乘高铁/动车约 {_hours:g} 小时）"
+                                    if _hours
+                                    else f"（从{_prev_region}换乘）"
+                                )
+                            _segments.append(_segment)
+                            _prev_region = _region
+                        _day_region_note = "；".join(_segments)
+                        # 子片区收敛（B2）：提示词与用户披露里都要写清"这趟只走哪条线、哪条没排"，
+                        # 否则用户会以为"四川的自然景观就这么多"。
+                        if _sub_cluster_note:
+                            _day_region_note += f"（{_sub_cluster_note}）"
+                        pool_diagnostics.setdefault("province_scope", {})["day_region_plan"] = {
+                            str(day): _day_region_plan[day] for day in sorted(_day_region_plan)
+                        }
+                        print(f"🗺️ [省域分片] {_day_region_note}", flush=True)
+                except Exception as _plan_exc:  # 分片算不出来不影响出方案（规则仍在提示词里）
+                    print(f"⚠️ [省域分片] 失败（不影响出方案）: {_plan_exc}", flush=True)
+
+            # 👑 省域覆盖（B）· 候选池只保留**这趟真的会去的片区**。
+            #    实测（2026-11-01 四川 4 天）：为了让"全省覆盖"看得见，候选池给 9 个地州各塞了
+            #    1 个景区代表；模型很听话，把达州/甘孜/广元/凉山/宜宾的景区全排进 4 天 ——
+            #    然后"同一天只在一个片区"的硬约束把这 8 个全移出，景区从 14 掉到 6。
+            #    分片建议已经算出"4 天只去成都 + 阿坝"，就别再把别的片区塞给模型：
+            #    **覆盖全省**是"检索范围覆盖全省"，不是"4 天塞下 9 个地州"。
+            if province_scope_name and province_anchors and _day_region_plan:
+                _planned_regions = {
+                    str(_region).strip() for _region in _day_region_plan.values() if str(_region or "").strip()
+                }
+                if _planned_regions:
+                    _out_of_plan: Dict[str, int] = {}
+                    for _bucket_name in ("scenic", "cultural", "food", "park", "shopping", "other"):
+                        _kept_rows = []
+                        for _row in list(_day_buckets.get(_bucket_name) or []):
+                            if not isinstance(_row, Mapping):
+                                continue
+                            _row_region = str(_row.get("region_short") or "") or _province_region_of(_row)
+                            if _row_region and _row_region not in _planned_regions:
+                                _out_of_plan[_row_region] = _out_of_plan.get(_row_region, 0) + 1
+                                continue
+                            _kept_rows.append(_row)
+                        _day_buckets[_bucket_name] = _kept_rows
+                    if _out_of_plan:
+                        pool_diagnostics.setdefault("province_scope", {})["regions_out_of_plan"] = _out_of_plan
+                        print(
+                            f"🗺️ [省域候选] 分片只去 {'、'.join(sorted(_planned_regions))}，"
+                            f"其余片区候选不进候选池（覆盖了但不塞进这 {trip_days} 天）："
+                            + "、".join(f"{name}({count})" for name, count in sorted(_out_of_plan.items())),
+                            flush=True,
+                        )
+
+
+            # 👑 省域覆盖（A）· 景区名额按**片区天数**分配：
+            #    分片后只剩 1~2 个片区，但桶内顺序仍是"按空间串接"（省会片区排在前面）——
+            #    按顺序取 14 个景区会先把成都取光，另一个片区那几天又没有候选可用
+            #    （实测：阿坝 2 天只有 3 个可选，模型想排也排不满）。
+            #    这里按"片区天数 × 每天景区名额"给每个计划片区留足名额，再交给交错取用。
+            if province_scope_name and _day_region_plan and _day_buckets.get("scenic"):
+                _scenic_quota = max(1, int((composition or {}).get("scenic", 0) or 0))
+                _plan_region_days: Dict[str, int] = {}
+                for _region in _day_region_plan.values():
+                    _plan_region_days[_region] = _plan_region_days.get(_region, 0) + 1
+                _scenic_by_region: Dict[str, List[Dict[str, Any]]] = {}
+                _scenic_region_order: List[str] = []
+                for _row in list(_day_buckets.get("scenic") or []):
+                    if not isinstance(_row, Mapping):
+                        continue
+                    _row_region = str(_row.get("region_short") or "") or _province_region_of(_row)
+                    # 子片区收敛（B2）后，类别下限补齐可能从全量池再拉回"另一条线"的候选，
+                    # 这里按同一份白名单再挡一次（否则阿坝又会出现九寨沟+四姑娘山）。
+                    _keep_names = _sub_cluster_keep.get(_row_region)
+                    if _keep_names is not None and str(_row.get("name") or "") not in _keep_names:
+                        continue
+                    if _row_region not in _scenic_by_region:
+                        _scenic_by_region[_row_region] = []
+                        _scenic_region_order.append(_row_region)
+                    _scenic_by_region[_row_region].append(_row)
+                _quota_total = min(_scenic_quota, sum(len(rows) for rows in _scenic_by_region.values()))
+                _region_total_days = max(1, sum(_plan_region_days.get(name, 0) for name in _scenic_region_order))
+                _region_share: Dict[str, int] = {}
+                _share_assigned = 0
+                for _name in _scenic_region_order:
+                    _region_share[_name] = int(
+                        math.floor(_quota_total * _plan_region_days.get(_name, 0) / _region_total_days)
+                    )
+                    _region_share[_name] = min(_region_share[_name], len(_scenic_by_region[_name]))
+                    _share_assigned += _region_share[_name]
+                # 整除余下的名额：先补给**天数多的片区**，再补给还有候选富余的片区
+                for _name in sorted(_scenic_region_order, key=lambda name: (-_plan_region_days.get(name, 0), name)):
+                    if _share_assigned >= _quota_total:
+                        break
+                    if _region_share[_name] < len(_scenic_by_region[_name]):
+                        _region_share[_name] += 1
+                        _share_assigned += 1
+                _scenic_kept: List[Dict[str, Any]] = []
+                for _name in _scenic_region_order:
+                    _scenic_kept.extend(_scenic_by_region[_name][: _region_share.get(_name, 0)])
+                _day_buckets["scenic"] = _scenic_kept
+                pool_diagnostics.setdefault("province_scope", {})["scenic_slots_by_region"] = dict(_region_share)
+                print(
+                    f"🗺️ [省域候选] 景区名额按片区天数分配（共 {len(_scenic_kept)} 个）："
+                    + "、".join(f"{name}({_region_share.get(name, 0)})" for name in _scenic_region_order),
+                    flush=True,
+                )
+
+            # 👑 省域覆盖（A）· 先把"计划片区里一个餐饮候选都没有"的片区补进桶。
+            #    实测（2026-11-02 四川 4 天，run w）：前沿只按总分取 6 家餐饮，6 家全在成都，
+            #    阿坝那两天在桶里**一家餐馆都没有**，补餐的周边检索又刚好是无人区 →
+            #    第 4 天没有餐饮节点，判 `skeleton_meal_missing`。
+            #    这些餐饮是**按地州名实地检索回来**的（带 region_short），只是被前沿挤掉了；
+            #    这里按片区补回来，数量如实进审计。
+            if province_scope_name and _day_region_plan and unique_foods:
+                _bucket_food_regions = {
+                    str(_row.get("region_short") or "") or _province_region_of(_row)
+                    for _row in (_day_buckets.get("food") or [])
+                    if isinstance(_row, Mapping)
+                }
+                _region_food_topup = 0
+                for _region in dict.fromkeys(_day_region_plan.values()):
+                    if _region in _bucket_food_regions:
+                        continue
+                    _taken = 0
+                    for _row in unique_foods:
+                        if _taken >= 2:
+                            break
+                        if not isinstance(_row, Mapping):
+                            continue
+                        if str(_row.get("region_short") or "") != _region:
+                            continue
+                        _day_buckets.setdefault("food", []).append(dict(_row))
+                        _taken += 1
+                    if _taken:
+                        _bucket_food_regions.add(_region)
+                        _region_food_topup += 1
+                if _region_food_topup:
+                    pool_diagnostics.setdefault("province_scope", {})["food_region_topup"] = _region_food_topup
+                    print(
+                        f"🍜 [省域候选] 按片区补足餐饮：{_region_food_topup} 个计划片区原本没有餐饮候选",
+                        flush=True,
+                    )
+
+            # 👑 省域覆盖（A）· **餐饮名额也按片区天数分配**（与景区同一口径）。
+            #    实测（2026-11-02 四川 4 天）：只按顺序取 6 家餐饮，结果 6 家全在成都；
+            #    阿坝那两天没有一顿饭可排 —— 补餐要跑 156km（超过 30km 上限）只能不补，
+            #    质量闸门判 `skeleton_meal_missing`。片区代表进了景区桶，餐饮桶也得进。
+            if province_scope_name and _day_region_plan and _day_buckets.get("food"):
+                _food_quota = max(1, int((composition or {}).get("food", 0) or 0))
+                _food_plan_days: Dict[str, int] = {}
+                for _region in _day_region_plan.values():
+                    _food_plan_days[_region] = _food_plan_days.get(_region, 0) + 1
+                _food_by_region: Dict[str, List[Dict[str, Any]]] = {}
+                _food_region_order: List[str] = []
+                for _row in list(_day_buckets.get("food") or []):
+                    if not isinstance(_row, Mapping):
+                        continue
+                    _row_region = str(_row.get("region_short") or "") or _province_region_of(_row)
+                    if _row_region not in _food_by_region:
+                        _food_by_region[_row_region] = []
+                        _food_region_order.append(_row_region)
+                    _food_by_region[_row_region].append(_row)
+                _food_total = min(_food_quota, sum(len(rows) for rows in _food_by_region.values()))
+                _food_total_days = max(1, sum(_food_plan_days.get(name, 0) for name in _food_region_order))
+                _food_share: Dict[str, int] = {}
+                _food_assigned = 0
+                for _name in _food_region_order:
+                    _food_share[_name] = min(
+                        int(math.floor(_food_total * _food_plan_days.get(_name, 0) / _food_total_days)),
+                        len(_food_by_region[_name]),
+                    )
+                    _food_assigned += _food_share[_name]
+                for _name in sorted(_food_region_order, key=lambda name: (-_food_plan_days.get(name, 0), name)):
+                    if _food_assigned >= _food_total:
+                        break
+                    if _food_share[_name] < len(_food_by_region[_name]):
+                        _food_share[_name] += 1
+                        _food_assigned += 1
+                _food_kept: List[Dict[str, Any]] = []
+                for _name in _food_region_order:
+                    _food_kept.extend(_food_by_region[_name][: _food_share.get(_name, 0)])
+                _day_buckets["food"] = _food_kept
+                pool_diagnostics.setdefault("province_scope", {})["food_slots_by_region"] = dict(_food_share)
+                print(
+                    f"🗺️ [省域候选] 餐饮名额按片区天数分配（共 {len(_food_kept)} 个）："
+                    + "、".join(f"{name}({_food_share.get(name, 0)})" for name in _food_region_order),
+                    flush=True,
+                )
+
             _interleaved = []
             # 自然景区与人文先取、美食次之，城市公园排在其后（用户口径：自然景观要景区，
             # 公园可以去但不该顶掉景区与吃饭的名额）
             _bucket_order = ["scenic", "cultural", "food", "park", "shopping", "other"]
+            # 先按**目标配比**取（每类不超过目标），再轮询补满容量。
+            # 实测（2026-11-01 四川 4 天，用户"只想看自然"）：原来各类一比一轮询，
+            # 20 个白天名额被景区/餐饮分成 10/10 —— 模型看到的景区上限就是 10 个，
+            # 而目标配比是景区 14 / 餐饮 6，怎么排都差 4 个（"自然景区 6 个，目标 14 个（偏少）"）。
+            _target_quota = {
+                str(_key): int(_value or 0)
+                for _key, _value in (composition or {}).items()
+                if _key in _bucket_order
+            }
+            _taken_by_cat: Dict[str, int] = {}
+            while len(_interleaved) < _day_capacity:
+                _advanced = False
+                for _c in _bucket_order:
+                    _quota = _target_quota.get(_c)
+                    if not _day_buckets.get(_c) or (_quota is not None and _taken_by_cat.get(_c, 0) >= _quota):
+                        continue
+                    _interleaved.append(_day_buckets[_c].pop(0))
+                    _taken_by_cat[_c] = _taken_by_cat.get(_c, 0) + 1
+                    _advanced = True
+                    if len(_interleaved) >= _day_capacity:
+                        break
+                if not _advanced:
+                    break
+            # 目标配比满足后还有名额（或某一类供给不足）：不再限制类别，补满当日容量。
             while len(_interleaved) < _day_capacity:
                 _advanced = False
                 for _c in _bucket_order:
@@ -4003,6 +5183,10 @@ async def run_negotiate(msg: GatewayMessage):
                     'map_image': str(p.get('map_image') or ''),
                     'data_sources': p.get('data_sources') or {'rating': 'unavailable', 'cost_estimate': 'unavailable', 'open_time': 'unavailable'},
                     'estimated': bool(p.get('estimated', True)),
+                    # 省域行程：这个点属于哪个地州/片区（保底合成按片区排、下游按片区判可行性；
+                    # 非省域请求这里是空串，对其它链路没有含义）
+                    'region_short': str(p.get('region_short') or ''),
+                    'region_city': str(p.get('region_city') or ''),
                     # 👥 景点拥挤度可视化数据（口碑热度+实时路况+周末因子）
                     'crowdedness': estimate_crowdedness(p.get('rating'), traffic_data.get('status_code', 'unknown'), is_weekend)
                 })
@@ -4019,16 +5203,20 @@ async def run_negotiate(msg: GatewayMessage):
                     'cost_estimate': formatted_cost,
                     'is_hotel': bool(p.get("is_hotel", False)),
                     'planning_category': classify_poi_category(p_name, p_type, bool(p.get("is_hotel", False))),
+                    # 省域行程：这个点属于哪个地州/片区（同一天只在一个片区，跨片区要整段移动）。
+                    # 非省域请求这里是空串，对模型没有额外含义。
+                    'region_city': str(p.get('region_city') or p.get('neighbor_region') or ''),
                     'data_sources': p.get('data_sources') or {'rating': 'unavailable', 'cost_estimate': 'unavailable', 'open_time': 'unavailable'},
                     'estimated': bool(p.get('estimated', True)),
                     'hint': short_hint
                 })
 
             # 文案口径修正（2026-10-10）：这里以前对用户说"纳什博弈完成/收敛"，但这条链路上
-            # 实际跑的是 `NashEquilibriumSolver.resolve_conflicts` —— 它做的是**帕累托非支配
-            # 筛选**（多目标：fitness↑ / cost↓ / risk↓），全程没有计算任何纳什均衡。类名是历史
-            # 遗留，不该由它把一句不成立的话带到用户面前。DBSCAN 那半句是真的（紧接着的
-            # `GraphRouteOptimizer.optimize_and_sort` 确实做地理聚类 + TSP 近似），所以保留。
+            # 实际跑的是 `ParetoFrontierSelector.resolve_conflicts` —— 它做的是**帕累托非支配
+            # 筛选**（多目标：fitness↑ / cost↓ / risk↓），全程没有计算任何纳什均衡。类名曾是历史
+            # 遗留（旧名 `NashEquilibriumSolver`），不该由它把一句不成立的话带到用户面前。DBSCAN
+            # 那半句是真的（紧接着的 `GraphRouteOptimizer.optimize_and_sort` 确实做地理聚类 +
+            # TSP 近似），所以保留。
             yield json.dumps({"token": f"[时空调度体]: DBSCAN 空间降维与帕累托前沿筛选完成！正在交织生成覆盖完整 {trip_days} 天的高密路书...\n\n"}, ensure_ascii=False) + "\n"
             async for _e in emit_reasoning("时空调度体", "claim", f"地理聚类（DBSCAN）与非支配筛选（帕累托前沿）完成，交织生成 {trip_days} 天高密路书", "按地理邻近聚类节点，再用帕累托非支配排序保留 fitness 高、成本低、风险低的候选，并均衡景点/美食/住宿三类配比"):
                 yield _e
@@ -4076,10 +5264,40 @@ async def run_negotiate(msg: GatewayMessage):
             except Exception:
                 composition_rules_block = ""
 
+            # 👑 省域覆盖（A）· 提示词规则：目的地是"省"时，原来那句
+            #    「所有景点必须严格属于【成都】」会直接禁止模型选九寨沟 —— 必须先说清范围。
+            if province_scope_name:
+                _dest_scope_line = (
+                    f"当前任务：规划【{province_scope_name}】完整【{trip_days}天】的深度团队行程"
+                    f"（目的地是**省域**，不是单座城市）。"
+                )
+                _scope_warning = (
+                    f"你安排的所有景点、餐厅、酒店必须属于【{province_scope_name}】；"
+                    "同一天只能安排同一个片区（region_city 相同）的地点。"
+                )
+                _province_scope_rules = (
+                    "\n【🔴 省域覆盖规则（目的地是省，不是一座城）】\n"
+                    "1. 候选里的 `region_city` 是地州/片区标签；同一天只选同一片区的地点。\n"
+                    "2. 跨片区必须整段换乘（高铁/动车优先），并在当天第一个节点写明交通方式与耗时"
+                    "（例：成都→九寨沟约 2 小时动车 + 接驳车）。\n"
+                    "3. 不要把同一天拆成两个相距 300km 的点；宁可在同一片区玩透。\n"
+                    "4. 住宿按当天片区选：优先选 `region_city` 与当天景点相同的酒店。\n"
+                    "5. 跨城耗时是估算（直线距离/200km/h + 进出站），实际班次请以 12306 为准。\n"
+                )
+                if _day_region_note:
+                    _province_scope_rules += f"6. 推荐分片（按这个排，别把一天拆到两片）：{_day_region_note}。\n"
+                _province_scope_rules += (
+                    f"本次已检索的片区：{'、'.join(str(item.get('name') or '') for item in province_anchors)}。\n"
+                )
+            else:
+                _dest_scope_line = f"当前任务：规划【{target_city}】完整【{trip_days}天】的深度团队行程。"
+                _scope_warning = f"你安排的所有景点、餐厅、酒店必须严格属于【{target_city}】！"
+                _province_scope_rules = ""
+
             # 👑 严格保证天数输出、每日 5 节点、真实花费与干净外链的 Prompt
             system_prompt = f"""
-你是一个专业的团队旅行协同规划专家。当前任务：规划【{target_city}】完整【{trip_days}天】的深度团队行程。
-【重要警告：绝对禁止越界！】你安排的所有景点、餐厅、酒店必须严格属于【{target_city}】！
+你是一个专业的团队旅行协同规划专家。{_dest_scope_line}
+【重要警告：绝对禁止越界！】{_scope_warning}
 
 同行房间成员画像与诉求 ({len(room_members)}人)：
 {team_members_text}
@@ -4095,6 +5313,7 @@ async def run_negotiate(msg: GatewayMessage):
 
 【本次目标配比（软约束，但**不要为凑数硬塞**）】:
 {composition_hint}
+{_province_scope_rules}
 
 【候选文旅 POI 底座数据 (已附带标准预估花销)】:
 {json.dumps(prompt_pool_data, ensure_ascii=False)}
@@ -4152,7 +5371,7 @@ async def run_negotiate(msg: GatewayMessage):
         except Exception as e:
             print("🔥 [算法计算崩溃 Traceback]:")
             traceback.print_exc()
-            yield json.dumps({"token": f"\n[系统异常] 算法引擎计算失败: {str(e)}\n[FINAL_JSON]\n{{\"status\": \"error\", \"negotiation_summary\": \"算法计算异常\", \"route\": []}}\n"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"token": f"\n[系统异常] 算法引擎计算失败，已停止本次推演，请稍后重试。\n[FINAL_JSON]\n{{\"status\": \"error\", \"negotiation_summary\": \"算法计算异常\", \"route\": []}}\n"}, ensure_ascii=False) + "\n"
             return
 
         try:
@@ -4192,101 +5411,92 @@ async def run_negotiate(msg: GatewayMessage):
             # 实景图补齐的收集区（Post-Route 里逐节点收集，最后统一并发查询 + 兜底图）
             _photo_targets: List[Dict[str, Any]] = []
             def _synthesize_from_pool(reason: str = ""):
-                """从 poi_pool_data 确定性合成完整 trip_days 天 * actual_daily_count 节点路线。"""
+                """从 poi_pool_data 合成行程：按配比分类别取点，标签只描述类别本身。
+
+                2026-11-01 真实事故：旧实现 `rng.shuffle` 后按顺序取点，并用槽位序号
+                贴标签（「楠木沟风景区」被贴成「美食·夜市」）。下游类别判定把标签
+                当证据，于是真景区被算成餐饮，3 天方案最后是 8 家餐厅 + 1 个景区。
+                现在取点交给 core.fallback_synthesis（景区优先、按地理就近），
+                标签也只写「自然·风景区」这类可核实的事实。
+                """
                 if not poi_pool_data:
-                    return [], f"AI 服务异常且无候选池数据：{reason}"
-                import random as _rnd
-                _rnd.seed(42)  # 确定性，避免每次闪烁
-                pool = [p for p in poi_pool_data if isinstance(p, dict) and p.get("name") and p.get("lnglat")]
-                hotels = [p for p in pool if p.get("is_hotel")]
-                others = [p for p in pool if not p.get("is_hotel")]
-                _rnd.shuffle(others)
-                time_slots = ["08:30", "10:30", "12:30", "14:30", "17:30", "21:30"]
-                slot_tags = [["地标","文化"], ["风景","出片"], ["餐饮","老字号"], ["文化","深度"], ["美食","夜市"], ["住宿"]]
+                    return [], f"AI 服务异常且无候选池数据：{reason or '服务暂时不可用，请稍后重试'}"
+                from core.fallback_synthesis import plan_fallback_picks, tags_for
+
+                planned = plan_fallback_picks(
+                    poi_pool_data,
+                    days=trip_days,
+                    daily_nodes=actual_daily_count,
+                    targets=composition,
+                    # 省域保底也要按片区排：不给分片建议时这两个参数不起作用（非省域行为不变）
+                    day_regions=_day_region_plan,
+                    # ⚠️ 必须用 `_province_region_of`：候选池里的点有些只有 `region_city`（“阿坝藏族羌族自治州”），
+                    #    有些干脆没有片区标签（来自省会检索）。只读标签会把“阿坝”和“阿坝藏族羌族自治州”
+                    #    当成两个片区，`_scoped` 全部落空 → 退回全池 → 阿坝的点被摊到每一天
+                    #    （实测 2026-11-02：Day 1 成都却排了毕棚沟，Day 4 成都↔阿坝来回两趟 622km）。
+                    region_of=_province_region_of,
+                )
+                time_slots = ["08:30", "10:30", "12:30", "14:30", "17:30", "19:30", "21:30"]
                 syn = []
-                needed = trip_days * (actual_daily_count + 1)
-                taken_names = set()
-                for d in range(1, trip_days + 1):
-                    day_nodes = []
-                    for slot_i in range(actual_daily_count):
-                        chosen = None
-                        while others:
-                            cand = others.pop(0)
-                            nm = _norm(str(cand.get("name") or ""))
-                            if nm and nm not in taken_names:
-                                chosen = cand
-                                taken_names.add(nm)
-                                break
-                        if not chosen:
-                            break
-                        slot_label = time_slots[min(slot_i, len(time_slots)-2)]
-                        _c_lnglat = chosen.get("lnglat") or [0.0, 0.0]
-                        _c_photos = chosen.get("photos") if isinstance(chosen.get("photos"), list) else []
-                        _c_map = chosen.get("map_image") or _make_static_map(_c_lnglat)
-                        # 简介口径：能核实的（校验过的联网简介 / 供应商原文）才用，否则如实说"暂无简介"
-                        _c_desc, _c_desc_src = _desc_for(chosen, target_city)
-                        day_nodes.append({
-                            "day": d,
-                            "time": f"Day {d} | {slot_label} (建议游玩 1.5 小时)",
-                            "location": chosen.get("name"),
-                            "name": chosen.get("name"),
-                            "lnglat": _c_lnglat,
-                            "type": chosen.get("type") or "风景",
-                            "desc": _c_desc,
-                            "desc_source": _c_desc_src,
-                            "transport": "自驾/打车",
-                            "tags": slot_tags[min(slot_i, len(slot_tags)-2)],
-                            "cost_estimate": chosen.get("cost_estimate") or "暂无供应商数据",
-                            "photos": _c_photos,
-                            "amap_url": chosen.get("amap_url") or "",
-                            "map_image": _c_map,
-                            "rating": chosen.get("rating") or "暂无供应商数据",
-                            "open_time": chosen.get("open_time") or "暂无供应商数据",
-                            "is_hotel": False,
-                            "split_info": "",
-                            "merge_point": False,
-                            "trust_reason": "智能体降级合成 · 基于真实候选池数据",
-                        })
-                    hotel = None
-                    for h in hotels:
-                        nm = _norm(str(h.get("name") or ""))
-                        if nm and nm not in taken_names:
-                            hotel = h
-                            taken_names.add(nm)
-                            break
-                    if hotel:
-                        _h_lnglat = hotel.get("lnglat") or [0.0, 0.0]
-                        _h_photos = hotel.get("photos") if isinstance(hotel.get("photos"), list) else []
-                        _h_map = hotel.get("map_image") or _make_static_map(_h_lnglat)
-                        # 「交通便利」是**断言**，我们并没有算过这家酒店的通勤 —— 没出处就别写
-                        _hotel_desc, _hotel_desc_src = _desc_for(hotel, target_city)
-                        day_nodes.append({
-                            "day": d,
-                            "time": f"Day {d} | 21:30 入住",
-                            "location": hotel.get("name"),
-                            "name": hotel.get("name"),
-                            "lnglat": _h_lnglat,
-                            "type": "酒店住宿",
-                            "desc": _hotel_desc,
-                            "desc_source": _hotel_desc_src,
-                            "transport": "自驾/打车",
-                            "tags": ["住宿"],
-                            "cost_estimate": hotel.get("cost_estimate") or "暂无供应商数据",
-                            "photos": _h_photos,
-                            "amap_url": hotel.get("amap_url") or "",
-                            "map_image": _h_map,
-                            "rating": hotel.get("rating") or "暂无供应商数据",
-                            "open_time": hotel.get("open_time") or "暂无供应商数据",
-                            "is_hotel": True,
-                            "split_info": "",
-                            "merge_point": False,
-                            "trust_reason": "智能体降级合成 · 候选池酒店兜底",
-                        })
-                    syn.extend(day_nodes)
-                    if len(syn) >= needed:
-                        break
-                summary = f"⚠️ 大模型服务暂时不可用（{reason or '网络连接失败'}），已基于高德候选池自动合成 {trip_days} 天保底路线，可直接浏览或点击「换一换」重试生成更高质量方案。"
-                return syn[:needed], summary
+                for pick in planned["picks"]:
+                    chosen = pick.get("item")
+                    if not isinstance(chosen, dict):
+                        continue
+                    day = int(pick.get("day") or 1)
+                    pick_category = str(pick.get("category") or "other")
+                    is_hotel = pick_category == "hotel"
+                    # 城市公园在保底排布里单列一档（不占自然景区名额），
+                    # 但下游类别口径只有 scenic/cultural/food/shopping/hotel，这里映射回 scenic 并保留 tier。
+                    category = "scenic" if pick_category == "city_park" else pick_category
+                    slot_i = int(pick.get("slot") or 0)
+                    lnglat = chosen.get("lnglat") or [0.0, 0.0]
+                    photos = chosen.get("photos") if isinstance(chosen.get("photos"), list) else []
+                    map_image = chosen.get("map_image") or _make_static_map(lnglat)
+                    # 简介口径：能核实的（校验过的联网简介 / 供应商原文）才用，否则如实说"暂无简介"
+                    desc, desc_source = _desc_for(chosen, target_city)
+                    node = {
+                        "day": day,
+                        "time": f"Day {day} | 21:30 入住" if is_hotel
+                        else f"Day {day} | {time_slots[min(slot_i, len(time_slots) - 2)]} (建议游玩 1.5 小时)",
+                        "location": chosen.get("name"),
+                        "name": chosen.get("name"),
+                        "lnglat": lnglat,
+                        "type": chosen.get("type") or ("酒店住宿" if is_hotel else "风景"),
+                        "desc": desc,
+                        "desc_source": desc_source,
+                        "transport": "自驾/打车",
+                        "tags": tags_for(category, chosen),
+                        "planning_category": category,
+                        "cost_estimate": chosen.get("cost_estimate") or "暂无供应商数据",
+                        "photos": photos,
+                        "amap_url": chosen.get("amap_url") or "",
+                        "map_image": map_image,
+                        "rating": chosen.get("rating") or "暂无供应商数据",
+                        "open_time": chosen.get("open_time") or "暂无供应商数据",
+                        "is_hotel": is_hotel,
+                        "split_info": "",
+                        "merge_point": False,
+                        "trust_reason": "智能体降级合成 · 候选池酒店兜底" if is_hotel
+                        else "智能体降级合成 · 基于真实候选池数据",
+                    }
+                    # 片区标签跟着节点走：下游按片区判"同一天是否跨片"时有据可依
+                    if chosen.get("region_short") or chosen.get("region_city"):
+                        node["region_city"] = str(chosen.get("region_city") or chosen.get("region_short") or "")
+                    if chosen.get("scenic_tier") or pick_category == "city_park":
+                        node["scenic_tier"] = chosen.get("scenic_tier") or "city_park"
+                    syn.append(node)
+
+                audit = planned["audit"]
+                by_category = audit["by_category"]
+                shortfall = int(audit["requested_daytime"]) - int(audit["planned_daytime"])
+                gap = f" 候选池只够排 {audit['planned_daytime']}/{audit['requested_daytime']} 个白天节点。" if shortfall > 0 else ""
+                summary = (
+                    f"⚠️ 大模型服务暂时不可用（{reason or '服务暂时不可用，请稍后重试'}），已基于高德候选池合成 "
+                    f"{trip_days} 天保底路线（景区 {int(by_category.get('scenic', 0))} 个、"
+                    f"餐饮 {int(by_category.get('food', 0))} 个）。{gap}"
+                    "可点击「换一换」重试生成更高质量方案。"
+                )
+                return syn, summary
 
             # 👑 天数补全器：主推演若遗漏某几天，则二次请求补齐，保证 5 天就是 5 天
             async def _complete_missing_days(missing_days):
@@ -4427,7 +5637,7 @@ async def run_negotiate(msg: GatewayMessage):
                         error=type(e).__name__,
                     )
                     print(f"⚠️ [LLM 业务错误]: {e}", flush=True)
-                    yield json.dumps({"token": f"\n[系统告警] LLM 平台拒绝服务: {str(e)[:120]}\n"}, ensure_ascii=False) + "\n"
+                    yield json.dumps({"token": "\n[系统告警] 大模型服务拒绝了本次请求，正在切换候选池保底模式…\n"}, ensure_ascii=False) + "\n"
                     break
                 except Exception as e:
                     last_llm_err = e
@@ -4441,21 +5651,21 @@ async def run_negotiate(msg: GatewayMessage):
                         error=err_name,
                     )
                     print(f"⚠️ [LLM 第 {attempt+1} 次调用失败] {err_name}: {e}", flush=True)
-                    yield json.dumps({"token": f"\n[连接自愈]: LLM 调用异常（{err_name}），正在重连...\n"}, ensure_ascii=False) + "\n"
+                    yield json.dumps({"token": "\n[连接自愈] 大模型服务暂时无响应，正在重试连接…\n"}, ensure_ascii=False) + "\n"
                     continue
 
             _stage("主推演输出")
             if not llm_call_succeeded:
                 # 所有重试都失败：显式错误 + 候选池兜底路线，保证前端 100% 收到 final_route
                 err_msg = str(last_llm_err) if last_llm_err else "未知错误"
-                friendly = (f"AI 大模型服务暂时不可达（{type(last_llm_err).__name__ if last_llm_err else 'Error'}），"
+                friendly = (f"AI 大模型服务暂时不可达（{_friendly_llm_error(last_llm_err)}），"
                             f"系统已自动切换至【候选池保底模式】：路线基于高德真实 POI 合成，图片/导航/花费均可正常使用。"
                             f"可稍后点击「换一换」重试高质量智能体推演。")
                 print(f"🔥 [LLM 彻底失败] {err_msg}，切换至候选池兜底", flush=True)
                 yield json.dumps({"type": "error", "payload": friendly}, ensure_ascii=False) + "\n"
                 yield json.dumps({"token": f"\n[系统兜底] {friendly}\n"}, ensure_ascii=False) + "\n"
 
-                syn_routes, syn_summary = _synthesize_from_pool(err_msg[:80])
+                syn_routes, syn_summary = _synthesize_from_pool(_friendly_llm_error(last_llm_err))
                 try:
                     from core.itinerary_balance import enforce_category_mix
 
@@ -4475,6 +5685,54 @@ async def run_negotiate(msg: GatewayMessage):
                         syn_summary = f"{syn_summary} 已执行景区、餐饮、人文类别均衡。"
                 except Exception as _fallback_mix_exc:
                     print(f"⚠️ [兜底类别均衡] 失败，保留候选池顺序: {_fallback_mix_exc}", flush=True)
+                # 👑 兜底路线同样做目的地范围校验（2026-11-02）：保底合成虽然取自候选池，
+                #    仍可能与主路径一样带上"别的城市的坐标"。与主路径共用同一套口径与披露字段，
+                #    避免"降级模式下坐标不受约束"这种只在异常时才出现的漏洞。
+                _fallback_area_report: Optional[Dict[str, Any]] = None
+                try:
+                    from core.place_quality import (
+                        clear_out_of_area_coordinates,
+                        poi_coordinate_radius_km,
+                    )
+
+                    _fallback_centers: List[List[float]] = []
+                    if isinstance(city_lnglat, (list, tuple)) and len(city_lnglat) >= 2:
+                        _fallback_centers.append([float(city_lnglat[0]), float(city_lnglat[1])])
+                    if province_scope_name and province_anchors:
+                        for _anchor in province_anchors:
+                            _anchor_center = _anchor.get("center") or []
+                            if isinstance(_anchor_center, (list, tuple)) and len(_anchor_center) >= 2:
+                                _fallback_centers.append(
+                                    [float(_anchor_center[0]), float(_anchor_center[1])]
+                                )
+                    _fallback_radius = poi_coordinate_radius_km(
+                        trip_days,
+                        str(own_signals.get("distance_tolerance") or "normal"),
+                        province_scope=bool(province_scope_name and province_anchors),
+                    )
+                    _fallback_outside = clear_out_of_area_coordinates(
+                        {"route": syn_routes}, centers=_fallback_centers, radius_km=_fallback_radius, copy=False
+                    )
+                    if _fallback_outside:
+                        _fallback_area_report = {
+                            "names": [str(item.get("name") or "") for item in _fallback_outside],
+                            "radius_km": round(_fallback_radius, 1),
+                            "centers": _fallback_centers,
+                            "items": _fallback_outside,
+                            "note": "这些节点的坐标离目的地超出可信范围（跨城/跨省的错误坐标）："
+                                    "已按无效清除，不参与里程与距离判断，地图上不标位置；名称等其他字段保留。",
+                        }
+                        print(
+                            "🧹 [坐标校验·兜底] "
+                            f"{len(_fallback_outside)} 个坐标超出 {_fallback_radius:.0f}km 可信范围："
+                            + "、".join(
+                                f"{item.get('name') or '(未命名)'}（{item.get('distance_km')}km）"
+                                for item in _fallback_outside[:4]
+                            ),
+                            flush=True,
+                        )
+                except Exception as _fallback_area_exc:  # 校验失败不影响出方案
+                    print(f"⚠️ [坐标校验·兜底] 失败（不影响出方案）: {_fallback_area_exc}", flush=True)
                 final_data = {
                     "status": "degraded_fallback",
                     "negotiation_summary": syn_summary,
@@ -4485,6 +5743,16 @@ async def run_negotiate(msg: GatewayMessage):
                     "optimization_audit": optimization_audit,
                     "fairness": fairness_report(syn_routes, room_members),
                 }
+                if _fallback_area_report:
+                    final_data["out_of_area_coordinates"] = _fallback_area_report
+                # 兜底路线同样清理"暂无供应商数据"占位：降级模式的界面不该更吵。
+                try:
+                    _fallback_fact_cleared = clear_placeholder_supplier_facts(final_data, copy=False)
+                    _fallback_fact_gap = supplier_facts_disclosure(_fallback_fact_cleared)
+                    if _fallback_fact_gap:
+                        final_data["supplier_data_gaps"] = _fallback_fact_gap
+                except Exception as _fallback_fact_exc:  # 清洗失败不影响出方案
+                    print(f"⚠️ [供应商事实·兜底] 清洗失败: {_fallback_fact_exc}", flush=True)
                 # 保底路线同样给出不确定度报告，而不是让前端在降级时丢失该信息。
                 # 注意两侧都要兜住：这段是"最后的兜底"，它自己再抛异常就等于用户什么都拿不到
                 # （实测 2026-09-19：这里引用了不存在的 `weather_info` → NameError → 流直接断，
@@ -6848,14 +8116,14 @@ async def run_negotiate(msg: GatewayMessage):
                                     _center_for_check = [float(_lng_check), float(_lat_check)]
                                 except ValueError:
                                     _center_for_check = []
-                            _before = evaluate_travel_feasibility(
+                            _before = _evaluate_feasibility(
                                 final_data.get("route") or [],
                                 city_center=_center_for_check,
                                 distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
                                 days=trip_days,
                             )
                             if not _before.get("ok"):
-                                _kept_route, _moved_out = repair_day_overload(
+                                _kept_route, _moved_out = _repair_feasibility(
                                     final_data.get("route") or [],
                                     city_center=_center_for_check,
                                     distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
@@ -6876,7 +8144,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         "moved_out": [str(item.get("name") or "") for item in _moved_out][:5],
                                         "correlation_id": plan_correlation_id,
                                     }, room_id, correlation_id=plan_correlation_id, producer="validator")
-                                _after = evaluate_travel_feasibility(
+                                _after = _evaluate_feasibility(
                                     final_data.get("route") or [],
                                     city_center=_center_for_check,
                                     distance_tolerance=str(own_signals.get("distance_tolerance") or "normal"),
@@ -7062,6 +8330,55 @@ async def run_negotiate(msg: GatewayMessage):
                     except Exception as _photo_exc:  # 配图失败绝不影响出方案
                         print(f"⚠️ [配图] 补齐失败，继续下发: {_photo_exc}", flush=True)
 
+                    # 👑 省域按片区拆天（方案 1，2026-11-02）：候选池/分片建议都对了，
+                    #    但模型仍可能把同一片区 4 个景区全塞进一天（实测第 3 天 251km），
+                    #    再把本该在阿坝的第 4 天排成成都餐饮（第 4 天没有玩点）。
+                    #    这里在最终门禁**之前**做一次确定性分摊：按"哪天在哪片"块内
+                    #    地理最近邻串线 + DP 切天，移出整天跨片区的点，缺的从同片区候选补。
+                    #    放在门禁之前，是为了让下面按片区候选池补点/补餐能接住减少的名额。
+                    def _split_province_days(stage: str) -> Optional[List[Dict[str, Any]]]:
+                        """按片区拆天；动了就返回新路线，没动（或不合规/出错）返回 None。"""
+                        if not (province_scope_name and province_anchors and _day_region_plan):
+                            return None
+                        try:
+                            from core.province_scope import redistribute_province_days as _redistribute
+                            from core.travel_feasibility import effective_daily_budget_km as _eff_budget
+
+                            _split = _redistribute(
+                                final_data.get("route") or [],
+                                day_regions=_day_region_plan,
+                                region_of=_province_region_of,
+                                days=trip_days,
+                                pool=poi_pool_data if isinstance(poi_pool_data, list) else [],
+                                budget_km=_eff_budget(
+                                    str(own_signals.get("distance_tolerance") or "normal")
+                                ),
+                                region_allow=_sub_cluster_keep or None,
+                            )
+                            if not _split.get("applied"):
+                                return None
+                            _previous = final_data.get("province_day_split") or {}
+                            final_data["province_day_split"] = {
+                                key: _split.get(key) for key in ("days", "dropped", "added", "notes")
+                            }
+                            final_data["province_day_split"]["passes"] = (
+                                int(_previous.get("passes") or 0) + 1
+                            )
+                            print(
+                                f"🗺️ [省域拆天{stage}] " + "；".join(_split.get("notes") or []),
+                                flush=True,
+                            )
+                            return list(_split["route"])
+                        except Exception as _split_exc:  # 分摊失败不影响出方案（但要留痕）
+                            final_data["province_day_split"] = {"error": str(_split_exc)[:200]}
+                            print(f"⚠️ [省域拆天{stage}] 失败（不影响出方案）: {_split_exc}", flush=True)
+                            return None
+
+                    _split_route = _split_province_days("")
+                    if _split_route is not None:
+                        final_data["route"] = _split_route
+                        llm_routes = final_data["route"]
+
                     # Final daily-density gate.  Fairness, bandit, review and
                     # long-trip stages may replace the route after the first
                     # balance pass; run the same deterministic check immediately
@@ -7070,11 +8387,29 @@ async def run_negotiate(msg: GatewayMessage):
                         from core.itinerary_balance import enforce_category_mix, rebalance_daily_route
 
                         _final_target = target_daily_count if role == "深度探索" else min(target_daily_count, 5)
+                        # 👑 省域行程按**当天片区**补节点（2026-11-01 实测的死循环）：
+                        #    全局补全会把别的片区的景区塞进某一天，紧接着又被"同一天一片区"的
+                        #    硬约束移出（补 9 个、删 9 个），用户看到的还是"地点很少"。
+                        #    分片建议已经定了"哪天在哪片"，补全就只能从当天的片区里选。
+                        _day_pools_for_balance: Optional[Dict[int, List[Dict[str, Any]]]] = None
+                        if province_scope_name and province_anchors and _day_region_plan:
+                            def _balance_region(item: Mapping[str, Any]) -> str:
+                                return str(item.get("region_short") or "") or _province_region_of(item)
+
+                            _day_pools_for_balance = {
+                                int(_day): [
+                                    dict(_item) for _item in poi_pool_data
+                                    if isinstance(_item, Mapping)
+                                    and (not _balance_region(_item) or _balance_region(_item) == str(_region))
+                                ]
+                                for _day, _region in _day_region_plan.items()
+                            }
                         _balanced = rebalance_daily_route(
                             final_data.get("route") or [],
                             poi_pool_data,
                             days=trip_days,
                             target_daytime=_final_target,
+                            day_pools=_day_pools_for_balance,
                         )
                         final_data["route"] = _balanced["route"]
                         llm_routes = final_data["route"]
@@ -7096,6 +8431,7 @@ async def run_negotiate(msg: GatewayMessage):
                                 target_daytime=_final_target,
                                 required_categories=("scenic", "food") if pref_signals.get("exclude_cultural") else ("scenic", "food", "cultural"),
                                 max_cultural_share=0 if pref_signals.get("exclude_cultural") else 0.4,
+                                day_pools=_day_pools_for_balance,
                             )
                             final_data["route"] = _mixed["route"]
                             llm_routes = final_data["route"]
@@ -7232,14 +8568,14 @@ async def run_negotiate(msg: GatewayMessage):
                             #    「南河清泉…度假美宿」在没被移走时会被当成"这一晚已有住宿"，
                             #    于是住宿收口什么都不补；等它被移走，第一晚就空了）。
                             #    收口里任何"会删节点"的步骤都要排在住宿收口之前，住宿收口必须是最后一道。
-                            _co_before = evaluate_travel_feasibility(
+                            _co_before = _evaluate_feasibility(
                                 final_data.get("route") or [],
                                 city_center=_closeout_center,
                                 distance_tolerance=_closeout_tolerance,
                                 days=trip_days,
                             )
                             if not _co_before.get("ok"):
-                                _co_kept_route, _co_moved = repair_day_overload(
+                                _co_kept_route, _co_moved = _repair_feasibility(
                                     final_data.get("route") or [],
                                     city_center=_closeout_center,
                                     distance_tolerance=_closeout_tolerance,
@@ -7261,7 +8597,7 @@ async def run_negotiate(msg: GatewayMessage):
                                         "reason": "一天跑不了两个远景区",
                                     }
                                     _closeout_summary.append(f"日内又移出 {len(_co_moved)} 个")
-                                final_data["travel_feasibility"] = evaluate_travel_feasibility(
+                                final_data["travel_feasibility"] = _evaluate_feasibility(
                                     final_data.get("route") or [],
                                     city_center=_closeout_center,
                                     distance_tolerance=_closeout_tolerance,
@@ -7347,6 +8683,14 @@ async def run_negotiate(msg: GatewayMessage):
                         except Exception as _closeout_exc:  # 收口失败绝不影响出方案（但要留痕）
                             final_data["hard_constraint_closeout"] = {"error": str(_closeout_exc)[:200]}
                             print(f"⚠️ [硬约束收口] 失败（不影响出方案）: {_closeout_exc}", flush=True)
+                        # 👑 收口之后再拆一次天（2026-11-02 实测）：门禁补点/住宿就近换店/换餐
+                        #    都会往某一天塞点，把刚摊平的片区块又挤成"一天 209km、另一天没玩点"。
+                        #    这里再跑一遍同一个确定性分摊；`redistribute_province_days` 自己会在
+                        #    合规时不动，所以多做一次没有副作用（`province_day_split.passes` 记次数）。
+                        _split_route = _split_province_days("·收口后")
+                        if _split_route is not None:
+                            final_data["route"] = _split_route
+                            llm_routes = final_data["route"]
                         _stage("硬约束修复与收口")
                         # 行程数组的顺序就是行程顺序：住宿兜底/补点是"追加"节点的，
                         # 补的第 1 晚会被放到数组末尾（实测伊宁：第 1 天的民宿排在第 3 天之后），
@@ -7375,17 +8719,27 @@ async def run_negotiate(msg: GatewayMessage):
                                 _protect_kinds = ["scenic"]
                             elif _wants_cultural and not _wants_scenic:
                                 _protect_kinds = ["cultural"]
-                            _rebalanced, _rebalance_report = rebalance_days_by_geography(
-                                final_data.get("route") or [], protect_kinds=_protect_kinds
-                            )
-                            if _rebalance_report.get("applied"):
-                                final_data["route"] = _rebalanced
-                                final_data["day_rebalance"] = _rebalance_report
-                                print(f"🧭 [按地理分天] {_rebalance_report['note']}", flush=True)
-                            elif _rebalance_report.get("moved"):
-                                # 算了但没采用也要留痕：否则"为什么没重排"事后无从回答
-                                final_data["day_rebalance"] = _rebalance_report
-                                print(f"🧭 [按地理分天] 未采用：{_rebalance_report['note']}", flush=True)
+                            # 🗺️ 省域行程**不做跨片区换天**（2026-11-01 实测）：
+                            #    这一趟"哪天在哪片"是分片建议定的（4 天四川 = 成都 2 天 + 阿坝 2 天），
+                            #    按里程重排会把都江堰（成都）搬到计划里属于阿坝的那一天 ——
+                            #    于是披露里写着"Day 3-4 在阿坝"，实际 Day 3 还在成都，
+                            #    阿坝的行程被压成一天。片区内的里程由 `evaluate_province_feasibility`
+                            #    按当天预算判（超了会如实披露），不需要靠跨天搬点来降里程。
+                            if province_scope_name and province_anchors and _day_region_plan:
+                                print("🗺️ [按地理分天] 省域行程按片区结构走，跳过跨天重排", flush=True)
+                                _protect_kinds = []
+                            else:
+                                _rebalanced, _rebalance_report = rebalance_days_by_geography(
+                                    final_data.get("route") or [], protect_kinds=_protect_kinds
+                                )
+                                if _rebalance_report.get("applied"):
+                                    final_data["route"] = _rebalanced
+                                    final_data["day_rebalance"] = _rebalance_report
+                                    print(f"🧭 [按地理分天] {_rebalance_report['note']}", flush=True)
+                                elif _rebalance_report.get("moved"):
+                                    # 算了但没采用也要留痕：否则"为什么没重排"事后无从回答
+                                    final_data["day_rebalance"] = _rebalance_report
+                                    print(f"🧭 [按地理分天] 未采用：{_rebalance_report['note']}", flush=True)
                         except Exception as _rebalance_exc:  # 重排失败不影响出方案
                             print(f"⚠️ [按地理分天] 失败（不影响出方案）: {_rebalance_exc}", flush=True)
 
@@ -7404,10 +8758,13 @@ async def run_negotiate(msg: GatewayMessage):
                             _nearby_fetch = getattr(toolbox, "get_nearby_pois", None)
                             if _nearby_fetch:
                                 try:
+                                    # 检索半径要和"能不能接受"的尺子对齐：补餐上限是 30km
+                                    # （`meal_max_km`），所以周边检索用 25km，别用 15km —— 实测
+                                    # 毕棚沟到理县镇上约 17km，15km 会漏掉唯一能吃饭的那一片。
                                     _meal_radius = (
                                         40.0
                                         if str((own_signals or {}).get("distance_tolerance") or "normal") == "high"
-                                        else 15.0
+                                        else 25.0
                                     )
                                     _nearby_pool, _nearby_report = await asyncio.wait_for(
                                         collect_nearby_food_candidates(
@@ -7529,6 +8886,59 @@ async def run_negotiate(msg: GatewayMessage):
                                 )
                         except Exception as _coord_exc:  # 清洗失败不影响出方案
                             print(f"⚠️ [坐标清洗] 失败（不影响出方案）: {_coord_exc}", flush=True)
+
+                        # 👑 目的地范围校验（2026-11-02）：坐标"合法"不等于"属于这趟行程"。
+                        #    模型偶尔给出经纬度都在合法区间、却明显在别的城市的坐标 ——
+                        #    前端按它把整天地图缩到很低级别，里程里还会凭空多出几十公里的
+                        #    "通勤"（实测 DAY 1 曾出现 47.7km 的假段）。
+                        #    口径与上面的 `(0,0)` 清洗一致：坐标不可信就当没有（名称等其他字段保留），
+                        #    不参与里程/预算判断，地图上不标位置。
+                        #    城市行程以城市中心为界；省域行程把各片区中心也算作合法中心，
+                        #    否则九寨沟/稻城亚丁这类真景区会被城市口径误删。
+                        try:
+                            from core.place_quality import (
+                                clear_out_of_area_coordinates,
+                                poi_coordinate_radius_km,
+                            )
+
+                            _guard_centers: List[List[float]] = []
+                            if isinstance(city_lnglat, (list, tuple)) and len(city_lnglat) >= 2:
+                                _guard_centers.append([float(city_lnglat[0]), float(city_lnglat[1])])
+                            if province_scope_name and province_anchors:
+                                for _anchor in province_anchors:
+                                    _anchor_center = _anchor.get("center") or []
+                                    if isinstance(_anchor_center, (list, tuple)) and len(_anchor_center) >= 2:
+                                        _guard_centers.append(
+                                            [float(_anchor_center[0]), float(_anchor_center[1])]
+                                        )
+                            _guard_radius = poi_coordinate_radius_km(
+                                trip_days,
+                                str(own_signals.get("distance_tolerance") or "normal"),
+                                province_scope=bool(province_scope_name and province_anchors),
+                            )
+                            _out_of_area = clear_out_of_area_coordinates(
+                                final_data, centers=_guard_centers, radius_km=_guard_radius, copy=False
+                            )
+                            if _out_of_area:
+                                final_data["out_of_area_coordinates"] = {
+                                    "names": [str(item.get("name") or "") for item in _out_of_area],
+                                    "radius_km": round(_guard_radius, 1),
+                                    "centers": _guard_centers,
+                                    "items": _out_of_area,
+                                    "note": "这些节点的坐标离目的地超出可信范围（跨城/跨省的错误坐标）："
+                                            "已按无效清除，不参与里程与距离判断，地图上不标位置；名称等其他字段保留。",
+                                }
+                                print(
+                                    "🧹 [坐标校验] "
+                                    f"{len(_out_of_area)} 个坐标超出 {_guard_radius:.0f}km 可信范围："
+                                    + "、".join(
+                                        f"{item.get('name') or '(未命名)'}（{item.get('distance_km')}km）"
+                                        for item in _out_of_area[:4]
+                                    ),
+                                    flush=True,
+                                )
+                        except Exception as _area_exc:  # 校验失败不影响出方案
+                            print(f"⚠️ [坐标校验] 失败（不影响出方案）: {_area_exc}", flush=True)
 
                         # 👑 酒店实时房价（供应商只读 MCP）—— **必须放在住宿定型之后**：
                         #    硬约束收口的最后一道是 `settle_lodging`（会补/换酒店），
@@ -8002,6 +9412,22 @@ async def run_negotiate(msg: GatewayMessage):
                     except Exception as _final_balance_exc:
                         final_data["daily_balance"] = {"gate": "final_pre_emit", "error": str(_final_balance_exc)[:200]}
 
+                    # 👑 出稿前把「顺序与时刻」对齐一次（2026-11-02 实测，四川 4 天）：
+                    #    补住宿/就近换酒店会把住宿节点插到当天中间，而时刻是按数组位置贴的
+                    #    （住宿固定 21:30）→ 第 2 天「21:30 入住」后面还有「11:30 游览」
+                    #    「13:30 用餐」，质量闸门判 `day_out_of_order`，verdict 直接 fail。
+                    #    纯本地、零网络，只把住宿挪到当天末尾并重贴时刻，不改地点与跨天归属。
+                    try:
+                        # 👑 省域行程在收口后补排一次日间顺序：就近换酒店/换餐是逐点替换，
+                        #    换完当天的数组顺序会变成"东→西→东→西"（实测第 2 天 244.6km）。
+                        #    只排当天、不改天不改点；随后 `normalize_day_sequence` 重贴时刻。
+                        if province_scope_name and province_anchors:
+                            final_data["route"] = order_day_stops_by_nearest(final_data.get("route") or [])
+                        final_data["route"] = normalize_day_sequence(final_data.get("route") or [])
+                        llm_routes = final_data["route"]
+                    except Exception as _normalize_exc:  # 失败不影响出方案
+                        print(f"⚠️ [顺序对齐] 失败，保留原顺序: {_normalize_exc}", flush=True)
+
                     # 👑 出稿前把「每日密度」按**最终路线**重算一次（2026-10-05 实测发现）：
                     #    上面那道门禁跑在硬约束收口**之前**，而收口会移出节点（例如"一天跑不了
                     #    两个远景区"），于是下发的 payload 里 `daily_balance` 描述的是**收口前**的
@@ -8145,7 +9571,7 @@ async def run_negotiate(msg: GatewayMessage):
                         if isinstance(_facts_center, dict):
                             _travel_center = _facts_center.get("value") or None
                         _travel_prev = final_data.get("travel_feasibility") if isinstance(final_data.get("travel_feasibility"), dict) else {}
-                        _travel_fresh = _travel_again(
+                        _travel_fresh = _evaluate_feasibility(
                             final_data.get("route") or [],
                             city_center=_travel_center,
                             distance_tolerance=str(
@@ -8201,6 +9627,26 @@ async def run_negotiate(msg: GatewayMessage):
                             )
                     except Exception:  # 闸门状态只是观测，取不到不影响出方案
                         pass
+
+                    # 👑 供应商事实占位清洗（2026-11-03）：查不到的评分/开放时间/价格
+                    #    在底座里被写成同一句"暂无供应商数据"，一路复制进最终 payload ——
+                    #    信息卡会显示"暂无供应商数据 分"、时间轴每站重复一行同款文案，
+                    #    用户读不到任何信息，还容易把占位当成事实。
+                    #    口径：**未知就留空**，由 supplier_data_gaps 统一披露一次；真值原样保留。
+                    #    必须排在下面「按最终路线重算披露/事实」之前：让 degradations 说的是"缺失"，
+                    #    而不是把占位文案当成一个值再抄一遍。
+                    try:
+                        _fact_cleared = clear_placeholder_supplier_facts(final_data, copy=False)
+                        _fact_gap = supplier_facts_disclosure(_fact_cleared)
+                        if _fact_gap:
+                            final_data["supplier_data_gaps"] = _fact_gap
+                            print(
+                                f"🧹 [供应商事实] {len(_fact_cleared)} 个节点的占位值已留空"
+                                f"（{'/'.join(_fact_gap['fields'])}）→ 统一披露于 supplier_data_gaps",
+                                flush=True,
+                            )
+                    except Exception as _fact_clean_exc:  # 清洗失败不影响出方案
+                        print(f"⚠️ [供应商事实] 清洗失败（不影响出方案）: {_fact_clean_exc}", flush=True)
 
                     # 👑 披露与事实快照必须按**最终路线**重算（2026-10-05 实测抓到）
                     #    上面那两处登记（degradations / facts）跑在"最终均衡门禁 + 出稿前硬约束收口"
@@ -8383,7 +9829,7 @@ async def run_negotiate(msg: GatewayMessage):
         except Exception as e:
             print("🔥 [流式推演崩溃 Traceback]:")
             traceback.print_exc()
-            yield json.dumps({"token": f"\n[FINAL_JSON]\n{{\"status\": \"error\", \"negotiation_summary\": \"{str(e)}\", \"route\": []}}\n"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"token": f"\n[FINAL_JSON]\n{{\"status\": \"error\", \"negotiation_summary\": \"{_friendly_llm_error(e)}\", \"route\": []}}\n"}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
