@@ -1,0 +1,21 @@
+.scene { position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:0; background:#a1b1b9; }
+.poster { position:absolute; inset:0; background-size:cover; background-position:center; }
+.posterCovered { opacity:0; transition:opacity 1s ease; }
+.arriving { animation:reveal 2s ease both; }
+.layers { position:absolute; inset:0; animation:reveal 1s ease both; }
+.layerBackground,.layerSubject { position:absolute; inset:-14px; background-size:cover; background-position:center; }
+.layerBackground { transform:translate(calc(var(--scene-x, 0px) * .25),calc(var(--scene-y, 0px) * .25)); filter:saturate(1.05) contrast(1.04); transition:filter 1.2s ease; }
+.layerSubject { transform:translate(var(--scene-x, 0px),var(--scene-y, 0px)); filter:saturate(1.08) contrast(1.08) drop-shadow(0 18px 24px rgba(0,0,0,.18)); }
+.layerFog { position:absolute; inset:-14px; background-size:cover; background-position:center; opacity:.58; mix-blend-mode:screen; animation:fogDrift 28s ease-in-out infinite alternate; transform:translate(calc(var(--scene-x, 0px) * .45),calc(var(--scene-y, 0px) * .35)); }
+.layerForeground { position:absolute; inset:-18px; background-size:cover; background-position:center; opacity:.88; transform:translate(calc(var(--scene-x, 0px) * 1.55),calc(var(--scene-y, 0px) * 1.2)); filter:saturate(1.08) contrast(1.06) drop-shadow(0 12px 28px rgba(0,0,0,.28)); }
+.layerLight { position:absolute; inset:-14px; background-size:cover; background-position:center; opacity:.48; mix-blend-mode:screen; pointer-events:none; animation:lightPulse 16s ease-in-out infinite alternate; transform:translate(calc(var(--scene-x, 0px) * .12),calc(var(--scene-y, 0px) * .08)); }
+.layerDetail { position:absolute; inset:-14px; background-size:cover; background-position:center; opacity:.72; mix-blend-mode:soft-light; pointer-events:none; transform:translate(calc(var(--scene-x, 0px) * .72),calc(var(--scene-y, 0px) * .58)); }
+.layers::after { content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(ellipse at 68% 35%, rgba(255,230,177,.18), transparent 28%), linear-gradient(180deg, transparent 55%, rgba(5,12,16,.28)); mix-blend-mode:screen; }
+.atmosphere { position:absolute; inset:0; background:linear-gradient(90deg,transparent 40%,rgba(17,28,38,.25)),linear-gradient(0deg,rgba(10,22,32,.55),transparent 40%); }
+.scene[data-motion='false'] .arriving { animation:none; }
+.scene[data-motion='false'] :global(.painted-cloud),.scene[data-motion='false'] :global(.painted-balloon),.scene[data-motion='false'] :global(.painted-birds) { animation:none; }
+@keyframes reveal { from { opacity:0; } to { opacity:1; } }
+@keyframes fogDrift { from { opacity:.34; transform:translate3d(-5px, 2px, 0) scale(1.015); } to { opacity:.68; transform:translate3d(8px, -3px, 0) scale(1.03); } }
+@keyframes lightPulse { from { opacity:.28; } to { opacity:.56; } }
+@media(max-width:767px) { .scene { max-height:1000px; } .poster { background-position:center top; } .layerBackground,.layerSubject,.layerFog,.layerForeground,.layerLight,.layerDetail { inset:-8px; } .layers::after { background:linear-gradient(180deg, transparent 50%, rgba(5,12,16,.35)); } .atmosphere { background:linear-gradient(0deg,#17232c 0%,transparent 65%); } }
+@media(prefers-reduced-motion:reduce) { .arriving { animation:none; } .layerFog,.layerLight { animation:none; } }

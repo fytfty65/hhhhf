@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+<defs>
+<linearGradient id="bark" x2="1" y2="1"><stop stop-color="#0b1419"/><stop offset=".46" stop-color="#24342e"/><stop offset=".7" stop-color="#111b20"/><stop offset="1" stop-color="#3c4934"/></linearGradient>
+<linearGradient id="house" x2="0" y2="1"><stop stop-color="#886346"/><stop offset="1" stop-color="#241c19"/></linearGradient>
+<radialGradient id="window"><stop stop-color="#fff0b7" stop-opacity=".98"/><stop offset="1" stop-color="#e98d45" stop-opacity=".08"/></radialGradient>
+<filter id="glow"><feGaussianBlur stdDeviation="14"/></filter>
+<filter id="barkNoise"><feTurbulence baseFrequency=".018" numOctaves="4" seed="7"/><feColorMatrix type="saturate" values=".25"/><feComponentTransfer><feFuncA type="table" tableValues="0 .35"/></feComponentTransfer></filter>
+</defs>
+<!-- giant framing tree -->
+<path d="M0 0C45 170 50 300 142 390c85 84 156 104 276 143 85 28 142 80 200 145" fill="none" stroke="#0b1419" stroke-width="170" stroke-linecap="round"/>
+<path d="M-5 15C45 175 60 290 154 370c90 78 170 104 274 140 95 33 170 94 230 172" fill="none" stroke="url(#bark)" stroke-width="118" stroke-linecap="round"/>
+<path d="M245 245C365 250 480 190 620 80M195 335C360 375 500 340 725 205M140 470C300 480 460 540 580 660" fill="none" stroke="#192923" stroke-width="42" stroke-linecap="round"/>
+<g stroke="#b8a277" stroke-opacity=".3" stroke-width="4" fill="none"><path d="M82 70q35 130 8 250t98 180"/><path d="M132 60q46 145 26 250t120 185"/><path d="M188 48q52 155 28 262"/><path d="M245 255q120 6 240-48"/></g>
+<path d="M0 0h620v720H0Z" filter="url(#barkNoise)" opacity=".36"/>
+<!-- spring canopy -->
+<g fill="#476d55" opacity=".9"><circle cx="180" cy="130" r="72"/><circle cx="320" cy="110" r="94"/><circle cx="470" cy="126" r="78"/><circle cx="620" cy="90" r="90"/><circle cx="760" cy="140" r="70"/></g>
+<g fill="#9abf83" opacity=".8"><circle cx="120" cy="180" r="36"/><circle cx="255" cy="205" r="42"/><circle cx="385" cy="170" r="34"/><circle cx="535" cy="196" r="45"/><circle cx="690" cy="170" r="36"/></g>
+<g fill="#e8b7b1"><circle cx="205" cy="115" r="8"/><circle cx="335" cy="78" r="9"/><circle cx="470" cy="150" r="7"/><circle cx="605" cy="85" r="8"/><circle cx="748" cy="132" r="7"/></g>
+<!-- floating island -->
+<path d="M340 705c180-78 405-94 630-27 148 43 245 102 367 126-218 81-701 73-1055-10Z" fill="#1c2d29"/>
+<path d="M350 690c190-80 415-86 620-24 148 43 250 99 357 119-214 54-682 56-977-15Z" fill="#5d7e58"/>
+<path d="M416 760q220 65 470 18t370 11" fill="none" stroke="#aac18d" stroke-width="8" opacity=".45"/>
+<!-- cabin -->
+<g transform="translate(610 493)"><path d="M0 196V53L155 0l214 53v143Z" fill="url(#house)" stroke="#171514" stroke-width="7"/><path d="M-32 57 153-31 402 58l-42 27L153 12 8 84Z" fill="#28201d" stroke="#121719" stroke-width="7"/><path d="M22 92h335M22 128h335M22 164h335" stroke="#c28d62" stroke-opacity=".28" stroke-width="5"/><rect x="126" y="84" width="112" height="112" rx="4" fill="#101a20" stroke="#c49769" stroke-width="8"/><rect x="138" y="96" width="88" height="88" fill="url(#window)"/><path d="M182 96v88M138 140h88" stroke="#865e45" stroke-width="6"/><circle cx="182" cy="140" r="82" fill="#ffcb78" opacity=".2" filter="url(#glow)"/></g>
+<!-- swing and travel silhouette -->
+<g stroke="#111b20" stroke-width="6" fill="none"><path d="M985 150v300M1060 150v300"/><path d="M955 450h135"/></g><path d="M950 454q70 35 140 0" fill="none" stroke="#111b20" stroke-width="10"/>
+<g fill="#17242a"><circle cx="1180" cy="616" r="18"/><path d="M1168 635l-32 74h28l18-38 30 42h32l-35-77Z"/></g>
+</svg>
