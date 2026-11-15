@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUpRight, Compass, Route, Users, ShieldCheck } from 'lucide-react';
+import { ArrowUpRight, Route, Users, ShieldCheck } from 'lucide-react';
 import styles from './JourneyEditorial.module.css';
 
 const chapters = [
@@ -18,9 +18,4 @@ export default function JourneyEditorial() {
   </section>;
 }
 
-export function JourneyLobbyHero({ onExplore }: { onExplore: () => void }) {
-  return <section className={styles.lobbyHero} aria-label="旅程规划序章">
-    <div className={styles.lobbyCopy}><p><Compass size={15} /> YOUR JOURNEY STARTS HERE</p><h2>下一站，<em>心之所向。</em></h2><span>从一个目的地开始，把大家的期待写进同一段旅程。</span><button type="button" onClick={onExplore}>寻找目的地灵感 <ArrowUpRight size={16} /></button></div>
-    <div className={styles.routeArt} aria-hidden="true"><span className={styles.routeLabel}>A LITTLE DETOUR, A NEW DISCOVERY</span><svg viewBox="0 0 420 180" fill="none"><path d="M0 145C70 145 45 40 130 65S205 180 270 90 350 55 420 15" stroke="currentColor" strokeWidth="1" opacity=".22" /><path className={styles.routeLine} d="M35 145C120 160 65 20 185 50S240 170 365 45" stroke="currentColor" strokeWidth="2" strokeDasharray="5 7" /><circle cx="35" cy="145" r="7" fill="currentColor" /><circle cx="185" cy="50" r="6" fill="currentColor" /><circle cx="365" cy="45" r="9" stroke="currentColor" strokeWidth="2" /><circle cx="365" cy="45" r="3" fill="currentColor" /></svg><span className={styles.routeStart}>此刻 · 出发</span><span className={styles.routeEnd}>下一站 · 未知的美好</span><div className={styles.stamp}>GO<br /><b>TOGETHER</b></div></div>
-  </section>;
-}
+export { default as JourneyLobbyHero } from './SeasonJourneyBanner';

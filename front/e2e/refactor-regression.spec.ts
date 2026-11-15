@@ -1014,3 +1014,131 @@ test('travel journal theme keeps downstream pages readable in both modes', async
   await reachDecision(page);
   await capture('workspace');
 });
+
+test('seasonal banner: four scenes animate, pause and respect reduced motion', async ({ page }) => {
+  test.setTimeout(90_000);
+  await installMocks(page);
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, route => route.abort());
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  const banner = page.getByTestId('journey-season-banner');
+  await expect(banner).toHaveAttribute('data-motion', 'playing');
+  for (const season of ['spring', 'summer', 'autumn', 'winter']) {
+    await page.getByRole('combobox', { name: '旅程季节' }).selectOption(season);
+    await expect(banner).toHaveAttribute('data-season', season);
+    await expect(page.getByTestId('journey-banner-landscape')).toHaveCSS('background-image', new RegExp(`${season}\\.webp`));
+    // Wait for the actual CSS background to decode, so captures include the landscape.
+    await page.evaluate(async value => { const image = new Image(); image.src = `/hero/v5/${value}.webp`; await image.decode(); }, season);
+    // Preserve CSS playback: screenshot animation disabling resumes via WAAPI,
+    // which would override the CSS pause control tested below.
+    await banner.screenshot({ path: `../work/season-banners/${season}-day.png`, animations: 'allow' });
+    await page.getByRole('button', { name: '切换到暗色模式' }).click();
+    await banner.screenshot({ path: `../work/season-banners/${season}-night.png`, animations: 'allow' });
+    await page.getByRole('button', { name: '切换到亮色模式' }).click();
+    await page.setViewportSize({ width: 360, height: 800 });
+    await noHorizontalOverflow(page);
+    await banner.screenshot({ path: `../work/season-banners/${season}-mobile.png`, animations: 'allow' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  }
+  await page.getByRole('button', { name: '暂停横幅动效' }).click();
+  await expect(banner).toHaveAttribute('data-motion', 'paused');
+  await expect.poll(() => banner.evaluate(el => el.getAnimations({ subtree: true })
+    .filter(animation => animation.playState === 'running')
+    .map(animation => ({ name: (animation as CSSAnimation).animationName, target: (animation.effect as KeyframeEffect).target?.nodeName })))).toEqual([]);
+  await page.reload();
+  await expect(banner).toHaveAttribute('data-motion', 'paused');
+  await page.getByRole('button', { name: '开启横幅动效' }).click();
+  await expect(banner).toHaveAttribute('data-motion', 'playing');
+  const initial = await banner.locator('svg circle').last().evaluate(el => getComputedStyle(el).offsetDistance);
+  await expect.poll(() => banner.locator('svg circle').last().evaluate(el => getComputedStyle(el).offsetDistance)).not.toBe(initial);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(banner).toHaveAttribute('data-motion', 'paused');
+  await expect(page.getByRole('button', { name: '系统已减少动态效果' })).toBeDisabled();
+  await page.getByRole('button', { name: '寻找目的地灵感', exact: true }).click();
+  await expect(page.locator('.destination-map-shell')).toBeVisible();
+});
+
+test('seasonal journey: demo freezes the visible entry season after login', async ({ page }) => {
+  await installMocks(page, { loggedOut: true });
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, route => route.abort());
+  await page.route('**/hero/v5/**', route => route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"><rect width="16" height="9" fill="#456"/></svg>' }));
+  await page.addInitScript(() => {
+    localStorage.setItem('omni_season_preferences', JSON.stringify({ season: 'spring', mode: 'demo', motionEnabled: true }));
+    // A previously entered season must be replaced by the visible new entry.
+    localStorage.setItem('omni_journey_season', 'winter');
+  });
+  await page.clock.install();
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: '春', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.clock.fastForward(24_000);
+  await expect(page.getByRole('button', { name: '夏', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByTestId('auth-username').fill(user.username);
+  await page.getByTestId('auth-password').fill('test-password');
+  await page.getByTestId('auth-submit').click();
+  await expect(page.getByRole('combobox', { name: '旅程季节' })).toHaveValue('summer');
+  await page.clock.fastForward(96_000);
+  await expect(page.locator('html')).toHaveAttribute('data-journey-season', 'summer');
+  await expect(page.getByRole('combobox', { name: '旅程季节' })).toHaveValue('summer');
+});
+
+for (const [season, label] of [['spring', '春'], ['summer', '夏'], ['autumn', '秋'], ['winter', '冬']]) {
+  test(`seasonal journey: ${season} follows entry across every page and night mode`, async ({ page }) => {
+    test.setTimeout(180_000);
+    // Visual QA uses system fonts, independent of Google Fonts availability.
+    await page.route(/fonts\.(googleapis|gstatic)\.com/, route => route.abort());
+    await installMocks(page, { loggedOut: true });
+    await page.route('**/api/v1/room/create', route => route.fulfill({ json: { room_id: 'ROOM-E2E', invite_code: 'ROOM-E2E', room_name: '季节体验房间' } }));
+    await page.route('**/api/v1/room/join', route => route.fulfill({ json: { room_id: 'ROOM-E2E', invite_code: 'ROOM-E2E' } }));
+    await page.route('**/api/auth/refresh', route => route.fulfill({ json: { token: user.token, user } }));
+    await page.route('**/api/auth/me', route => route.fulfill({ json: { user } }));
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto('/');
+    await page.getByRole('button', { name: label, exact: true }).click();
+    await expect(page.getByRole('button', { name: label, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    // Alternate real-login and guest entry contracts without contacting a server.
+    if (season === 'summer' || season === 'winter') await page.getByTestId('auth-trial').click();
+    else {
+      await page.getByTestId('auth-username').fill(user.username);
+      await page.getByTestId('auth-password').fill('test-password');
+      await page.getByTestId('auth-submit').click();
+    }
+    await expect(page.getByTestId('begin-plan')).toBeVisible();
+    await expect(page.locator('html')).toHaveAttribute('data-journey-season', season);
+    const capture = async (view: string, cover?: string) => {
+      if (view === 'workspace') await page.locator('.journey-workspace-header').scrollIntoViewIfNeeded();
+      await expect(page.getByRole('combobox', { name: '旅程季节' })).toHaveValue(season);
+      if (cover) await expect(page.locator(cover)).toHaveCSS('background-image', new RegExp(`${season}\\.webp`));
+      await page.screenshot({ path: `../work/season-journeys/${season}-${view}-day.png`, fullPage: true, animations: 'disabled' });
+      await page.getByRole('button', { name: '切换到暗色模式' }).click();
+      await expect(page.locator('html')).toHaveClass(/dark/);
+      await expect(page.getByRole('combobox', { name: '旅程季节' })).toHaveValue(season);
+      await page.screenshot({ path: `../work/season-journeys/${season}-${view}-night.png`, fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await noHorizontalOverflow(page);
+      await page.screenshot({ path: `../work/season-journeys/${season}-${view}-mobile.png`, fullPage: true, animations: 'disabled' });
+      await page.getByRole('button', { name: '切换到亮色模式' }).click();
+      await page.setViewportSize({ width: 1440, height: 1000 });
+    };
+    await capture('lobby', '[data-testid="journey-banner-landscape"]');
+    await page.reload();
+    await expect(page.getByTestId('begin-plan')).toBeVisible();
+    await expect(page.getByRole('combobox', { name: '旅程季节' })).toHaveValue(season);
+    for (const [name, cover] of [['个人主页', '.profile-landscape'], ['社区', '.community-cover']]) {
+      await page.getByTestId('lobby-more').click();
+      await page.getByTestId('lobby-more-menu').getByRole('button', { name, exact: true }).click();
+      await capture(name === '社区' ? 'community' : 'profile', cover);
+      await page.getByRole('button', { name: '返回大厅', exact: true }).click();
+    }
+    await reachDecision(page);
+    await capture('workspace');
+    // Theme changes must not reset an in-progress itinerary.
+    const alternate = season === 'winter' ? 'spring' : 'winter';
+    await page.getByRole('combobox', { name: '旅程季节' }).selectOption(alternate);
+    await expect(page.locator('html')).toHaveAttribute('data-journey-season', alternate);
+    await expect(page.getByText('路线共识解释')).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem('omni_journey_season'))).toBe(alternate);
+    expect(errors).toEqual([]);
+  });
+}

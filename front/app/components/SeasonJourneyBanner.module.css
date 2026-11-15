@@ -1,0 +1,121 @@
+.banner {
+  --scene-ink: #ffedf0;
+  --scene-accent: #ffcfdf;
+  --scene-shade: #30262def;
+  --scene-mid: #38302ca3;
+  --scene-end: #453c3e66;
+  --scene-light: #f8c7ac38;
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: minmax(0,1.15fr) minmax(0,1fr);
+  align-items: center;
+  gap: 36px;
+  min-height: 320px;
+  margin-bottom: 28px;
+  padding: 38px 42px;
+  overflow: hidden;
+  border-radius: 22px;
+  background: #292a2b;
+  color: var(--scene-ink);
+}
+.banner[data-season='summer'] {
+  --scene-ink: #f3f6e5;
+  --scene-accent: #eed8a2;
+  --scene-shade: #123a30ef;
+  --scene-mid: #153d31a3;
+  --scene-end: #204d3f66;
+  --scene-light: #f2d27238;
+}
+.banner[data-season='autumn'] {
+  --scene-ink: #fff3e5;
+  --scene-accent: #f8d29b;
+  --scene-shade: #40271fef;
+  --scene-mid: #563520a3;
+  --scene-end: #61422466;
+  --scene-light: #ffb35b38;
+}
+.banner[data-season='winter'] {
+  --scene-ink: #f5f1ff;
+  --scene-accent: #e1d6fa;
+  --scene-shade: #262b46ef;
+  --scene-mid: #303551a3;
+  --scene-end: #3e446366;
+  --scene-light: #c4bfff38;
+}
+.landscape, .light, .mist, .particles { position: absolute; inset: 0; pointer-events: none; z-index: -1; }
+.landscape {
+  background-image: linear-gradient(90deg,var(--scene-shade),var(--scene-mid) 58%,var(--scene-end)),var(--season-image);
+  background-position: center, center 47%;
+  background-size: cover;
+}
+.light { background: radial-gradient(ellipse at 82% 5%,var(--scene-light),transparent 60%); animation: sunlight 18s ease-in-out infinite alternate; }
+.mist { inset: 25% -10% -45%; background: radial-gradient(ellipse at 70% 80%,#f8ead622,transparent 65%); animation: mist 24s ease-in-out infinite alternate; }
+.copy { position: relative; z-index: 1; }
+.eyebrow { display: flex; align-items: center; gap: 9px; font-size: 11px; letter-spacing: 2.2px; color: var(--scene-accent); }
+.copy h2 { margin: 20px 0 16px; font-family: 'Songti SC',SimSun,serif; font-size: clamp(28px,2.8vw,40px); font-weight: 400; line-height: 1.5; letter-spacing: 1px; }
+.copy h2 em { color: var(--scene-accent); font-style: normal; }
+.description { max-width: 460px; font-size: 15px; line-height: 1.9; color: var(--scene-ink); }
+.explore { display: flex; align-items: center; justify-content: space-between; gap: 28px; min-height: 44px; margin-top: 17px; padding-bottom: 5px; border-bottom: 1px solid color-mix(in srgb,var(--scene-accent) 45%,transparent); color: var(--scene-accent); font-size: 14px; cursor: pointer; }
+.explore svg { transition: transform .2s; }
+.explore:hover svg { transform: translate(2px,-2px); }
+.banner button:focus-visible { outline: 2px solid var(--scene-accent); outline-offset: 5px; }
+.seasonNote { display: flex; align-items: center; gap: 9px; margin-top: 18px; color: var(--scene-accent); font-size: 11px; letter-spacing: 1px; }
+.noteDivider { height: 10px; width: 1px; background: currentColor; opacity: .4; }
+.routeArt { position: relative; align-self: center; min-width: 0; margin-right: 10px; color: var(--scene-accent); transform: rotate(-5deg); }
+.routeArt > svg { display: block; width: 100%; overflow: visible; }
+.routeCaption { margin: 0 0 10px 14px; font-size: 10px; letter-spacing: 2.2px; }
+.routeLine { animation: route-flow 32s linear infinite; }
+.traveler { offset-distance: 0%; animation: travel 16s linear infinite; filter: drop-shadow(0 0 5px var(--scene-accent)); }
+.destinationPulse { transform-box: fill-box; transform-origin: center; animation: beacon 4s ease-out infinite; }
+.stamp { position: absolute; right: 12%; bottom: -8px; width: 65px; height: 65px; display: flex; flex-direction: column; justify-content: center; align-items: center; border: 1px solid color-mix(in srgb,var(--scene-accent) 55%,transparent); border-radius: 50%; transform: rotate(16deg); }
+.stamp > span { font: italic 25px Georgia,serif; }
+.stamp small { font-size: 7px; letter-spacing: 1px; margin-top: 3px; }
+.motionToggle { position: absolute; right: 20px; bottom: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 4px 10px; border: 1px solid #ffffff38; border-radius: 30px; background: #121a2338; color: var(--scene-ink); font-size: 10px; cursor: pointer; }
+.motionToggle:disabled { cursor: default; }
+.motionToggle:hover { background: #121a2370; }
+.particles { overflow: hidden; }
+.particles i { position: absolute; left: var(--x); top: -10%; display: block; width: var(--size); height: var(--size); background: #f9c7d8; border-radius: 80% 0 70% 40%; opacity: 0; animation: petals var(--duration) var(--delay) linear infinite; }
+.particles[data-kind='fireflies'] i { top: var(--y); width: 3px; height: 3px; background: #fff3a9; border-radius: 50%; box-shadow: 0 0 7px 2px #e8df8366; animation-name: fireflies; }
+.particles[data-kind='leaves'] i { width: calc(var(--size) * 1.3); background: #e7af63; border-radius: 0; clip-path: polygon(50% 0,61% 28%,87% 15%,80% 44%,100% 58%,65% 72%,50% 100%,39% 72%,0 58%,20% 43%,13% 15%,40% 28%); animation-name: leaves; }
+.particles[data-kind='snow'] i { width: calc(var(--size) * .45); height: calc(var(--size) * .45); background: #f6efff; border-radius: 50%; animation-name: snow; }
+.banner[data-motion='paused'] :is(.landscape,.light,.mist,.particles i,.routeLine,.traveler,.destinationPulse) { animation-play-state: paused; }
+
+:global(.dark) .banner { --scene-shade: #111620f5; --scene-mid: #141a29b0; --scene-end: #151c2d8a; }
+:global(.dark) .banner[data-season='spring'] { --scene-shade: #211925f5; --scene-mid: #291e2cba; --scene-end: #34283987; }
+:global(.dark) .banner[data-season='summer'] { --scene-shade: #0b221ef5; --scene-mid: #0d2923ba; --scene-end: #102f2a87; }
+:global(.dark) .banner[data-season='autumn'] { --scene-shade: #281b19f5; --scene-mid: #32221cba; --scene-end: #39281e87; }
+
+@keyframes route-flow { to { stroke-dashoffset: -280; } }
+@keyframes travel { to { offset-distance: 100%; } }
+@keyframes beacon { 0% { transform: scale(.65); opacity: .65; } 100% { transform: scale(1.5); opacity: 0; } }
+@keyframes sunlight { from { opacity: .45; } to { opacity: 1; } }
+@keyframes mist { from { transform: translateX(-3%); opacity: .4; } to { transform: translateX(5%); opacity: .9; } }
+@keyframes petals { 0% { transform: translate3d(0,-20px,0) rotate(0); opacity: 0; } 15% { opacity: .65; } 85% { opacity: .55; } 100% { transform: translate3d(var(--sway),390px,0) rotate(240deg); opacity: 0; } }
+@keyframes leaves { 0% { transform: translate3d(0,-20px,0) rotate(-30deg); opacity: 0; } 15% { opacity: .6; } 50% { transform: translate3d(-25px,180px,0) rotate(95deg); } 85% { opacity: .5; } 100% { transform: translate3d(var(--sway),390px,0) rotate(200deg); opacity: 0; } }
+@keyframes snow { 0% { transform: translate3d(0,-20px,0); opacity: 0; } 15% { opacity: .7; } 85% { opacity: .5; } 100% { transform: translate3d(var(--sway),390px,0); opacity: 0; } }
+@keyframes fireflies { 0%,100% { opacity: 0; transform: translate3d(0,8px,0); } 35% { opacity: .8; } 65% { opacity: .25; } 80% { opacity: .65; transform: translate3d(var(--sway),-20px,0); } }
+
+@media (max-width: 1000px) and (min-width: 761px) {
+  .banner { padding: 32px; gap: 16px; }
+  .copy h2 { font-size: 30px; letter-spacing: 0; }
+  .routeCaption { font-size: 8px; letter-spacing: 1px; }
+}
+@media (max-width: 760px) {
+  .banner { grid-template-columns: 1fr; gap: 20px; min-height: 400px; padding: 28px 25px 48px; }
+  .landscape { background-image: linear-gradient(120deg,var(--scene-shade),var(--scene-mid)),var(--season-image-mobile); background-position: center, center 48%; }
+  .copy h2 { font-size: clamp(26px,5vw,34px); margin-block: 17px 12px; }
+  .description { font-size: 14px; }
+  .eyebrow { font-size: 9px; letter-spacing: 1.6px; }
+  .routeArt { width: 100%; max-width: 460px; justify-self: end; margin-right: 0; }
+  .routeCaption { font-size: 8px; letter-spacing: 1.5px; }
+  .stamp { width: 52px; height: 52px; bottom: -2px; }
+  .stamp > span { font-size: 20px; }
+  .stamp small { font-size: 6px; }
+  .particles i:nth-child(n+9) { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .banner *, .banner *::before, .banner *::after { animation: none!important; transition: none!important; }
+  .traveler { display: none; }
+  .destinationPulse { opacity: .25; }
+}

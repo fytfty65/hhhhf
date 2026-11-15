@@ -1,5 +1,7 @@
 'use client';
 
+import JourneySeasonSelect from './JourneySeasonSelect';
+
 import dynamic from 'next/dynamic';
 import { useState, useRef, useEffect, useMemo } from 'react';
 import {
@@ -1994,7 +1996,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           不再常驻 200px；移动端仍保持「头部固定 + 正文自己滚动」，避免溢出遮挡下方地图。 */}
       <div className={`w-full ${mapLayout === 'doc' ? 'lg:flex-1 h-auto lg:h-full' : mapLayout === 'map' ? 'lg:w-[380px] xl:w-[420px] h-[56vh] lg:h-full' : 'lg:w-[620px] xl:w-[700px] h-[56vh] lg:h-full'} min-h-[480px] lg:min-h-0 flex flex-col relative z-20 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white shadow-2xl shrink-0 lg:overflow-y-auto custom-scrollbar`}>
         <header className="journey-workspace-header px-5 sm:px-8 py-4 border-b border-slate-100 bg-white shadow-xs z-10">
-          <p className="interior-eyebrow workspace-eyebrow">JOURNEY STUDIO <span>/ 行程编辑室</span></p>
+          <div className="workspace-season-heading"><p className="interior-eyebrow workspace-eyebrow">JOURNEY STUDIO <span>/ 行程编辑室</span></p><JourneySeasonSelect /></div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">

@@ -1,5 +1,7 @@
 import './globals.css'
 import './journey-system.css' // 引入全局样式（如 Tailwind）
+import './journey-seasons.css'
+import { JourneySeasonProvider } from './components/JourneySeasonProvider'
 import ThemeToggle from './components/ThemeToggle'
 
 export const metadata = {
@@ -21,6 +23,18 @@ const themeInitScript = `
     } catch (e) {}
   }
   apply();
+  // Paint the saved entry season before hydration to avoid a colour flash.
+  try {
+    var seasons = ['spring', 'summer', 'autumn', 'winter'];
+    var entry = localStorage.getItem('omni_journey_season');
+    if (seasons.indexOf(entry) < 0) {
+      var pref = JSON.parse(localStorage.getItem('omni_season_preferences') || 'null');
+      var month = new Date().getMonth();
+      entry = pref && (pref.mode === 'manual' || pref.mode === 'demo') && seasons.indexOf(pref.season) >= 0
+        ? pref.season : month >= 2 && month <= 4 ? 'spring' : month >= 5 && month <= 7 ? 'summer' : month >= 8 && month <= 10 ? 'autumn' : 'winter';
+    }
+    document.documentElement.dataset.journeySeason = entry;
+  } catch (e) {}
   // 跨标签页手动切换同步
   window.addEventListener('storage', function (e) {
     if (e.key === KEY) apply();
@@ -63,8 +77,10 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
       <body className="journey-ui">
-        {children}
-        <ThemeToggle />
+        <JourneySeasonProvider>
+          {children}
+          <ThemeToggle />
+        </JourneySeasonProvider>
         {process.env.NODE_ENV === 'production' && (
           <script dangerouslySetInnerHTML={{ __html: swRegisterScript }} />
         )}

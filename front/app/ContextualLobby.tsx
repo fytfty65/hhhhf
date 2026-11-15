@@ -1,6 +1,7 @@
 'use client';
 
 import { JourneyLobbyHero } from './components/JourneyEditorial';
+import JourneySeasonSelect from './components/JourneySeasonSelect';
 
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
@@ -485,6 +486,7 @@ export default function ContextualLobby() {
               </div>
 
               <div className="flex items-center gap-2 sm:gap-3">
+                <JourneySeasonSelect />
                 <ServiceHealthIndicator />
 
                 <div className="relative">

@@ -182,41 +182,8 @@
 .journey-ui .bg-white\/92 { background-color: var(--paper-card); }
 .journey-ui .hover\:bg-accent-ink:hover { background-color: var(--accent); filter: brightness(1.12); }
 
-/* Interior pages: sunlit paper, apricot highlights and coral actions.
-   These scoped tokens deliberately leave the seasonal landing page unchanged. */
-:is(.journey-workspace,.profile-page,.community-page) {
-  --paper: #fff8ef;
-  --paper-card: #ffffff;
-  --paper-raised: #ffffff;
-  --paper-hover: #fff0df;
-  --ink: #382d28;
-  --ink-2: #65554b;
-  --ink-3: #806b5d;
-  --line: #efddcb;
-  --line-soft: #f5e9dd;
-  --accent: #c64b31;
-  --accent-ink: #a83924;
-  --accent-soft: #ffe7d6;
-  --focus-ring: #c64b31;
-  --backdrop: #40271980;
-  color: var(--ink);
-}
-.dark :is(.journey-workspace,.profile-page,.community-page) {
-  --paper: #251e1b;
-  --paper-card: #322823;
-  --paper-raised: #3e312a;
-  --paper-hover: #49372d;
-  --ink: #fff3e6;
-  --ink-2: #e1cab7;
-  --ink-3: #c9ac94;
-  --line: #604535;
-  --line-soft: #4a372d;
-  --accent: #c64b31;
-  --accent-ink: #ffbd91;
-  --accent-soft: #583629;
-  --focus-ring: #ffbd91;
-  --backdrop: #170d08cc;
-}
+/* All interior pages inherit the entry season from the root. */
+:is(.journey-workspace,.profile-page,.community-page) { color: var(--ink); }
 .interior-eyebrow {
   margin: 0 0 18px;
   color: var(--ink-3);

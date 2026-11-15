@@ -33,6 +33,8 @@ import AvatarUploader from './AvatarUploader';
 import AccountSecurity from './AccountSecurity';
 import GuestAccountPanel from './GuestAccountPanel';
 import UserTraitGraphCard from './UserTraitGraphCard';
+import JourneySeasonSelect from './JourneySeasonSelect';
+import { useJourneySeason } from './JourneySeasonProvider';
 
 type TripFilter = 'all' | 'recent' | 'shared';
 type TripData = { trips?: ProfileTrip[] };
@@ -231,6 +233,7 @@ export default function ProfileScreen({
   // 当前房间号：只有传了它，特征图谱才能算「房间共同交集」。
   roomCode?: string;
 }) {
+  const { story } = useJourneySeason();
   const [trips, setTrips] = useState<ProfileTrip[]>([]);
   const [posts, setPosts] = useState<CommunityPostItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -384,13 +387,14 @@ export default function ProfileScreen({
       <div className="portal-header border-b border-line bg-paper-card/95 backdrop-blur">
         <div className="portal-container mx-auto flex w-full max-w-[1180px] items-center justify-between gap-4 px-4 py-3 sm:px-8">
           <button type="button" onClick={onBack} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-2.5 text-sm font-semibold text-ink-2 transition hover:bg-paper-hover hover:text-ink"><ArrowLeft className="h-4 w-4" /> <span>返回大厅</span></button>
+          <JourneySeasonSelect />
           <div className="flex items-center gap-2 text-right"><span className="hidden text-[11px] font-semibold text-ink-3 sm:inline">个人主页</span>{onContinuePlanning && <button type="button" onClick={onContinuePlanning} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3.5 text-xs font-semibold text-white transition hover:bg-accent-ink"><Play className="h-4 w-4" /> 新建规划</button>}</div>
         </div>
       </div>
 
       <div className="portal-container mx-auto w-full max-w-[1180px] px-4 py-6 sm:px-8 sm:py-8">
         <section className={`${panel} profile-hero overflow-hidden`} aria-labelledby="profile-heading">
-          <div className="profile-landscape" aria-hidden="true"><span>THE TRAVEL JOURNAL</span><span>山川与日常 · 都值得记录</span></div>
+          <div className="profile-landscape"><span>{story.english} / THE TRAVEL JOURNAL</span><span>{story.journal}</span><span className="season-cover-edition" aria-hidden="true">{story.edition}</span></div>
           <div className="profile-identity grid gap-6 p-5 sm:p-7 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
             <div className="flex min-w-0 items-center gap-4 sm:gap-5"><div className="relative shrink-0"><Avatar src={avatarSource(displayUser)} name={currentUser.nickname || currentUser.username} className="h-20 w-20 rounded-2xl border-4 border-line-soft shadow-sm sm:h-24 sm:w-24" /></div><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h1 id="profile-heading" className="truncate text-2xl font-bold tracking-tight text-ink sm:text-3xl">{currentUser.nickname || currentUser.username}</h1><button type="button" onClick={() => { setEditNickname(currentUser.nickname || currentUser.username); setEditSignature(currentUser.signature || ''); setShowEditor(true); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition hover:bg-paper-hover hover:text-ink" title="编辑资料" aria-label="编辑资料"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => setShowUploader(true)} disabled={avatarSaving} className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-ink-3 transition hover:bg-paper-hover hover:text-ink disabled:opacity-60" title="更换头像" aria-label="更换头像"><Camera className="h-3.5 w-3.5" /> 更换头像</button></div><p className="mt-0.5 truncate text-xs font-semibold text-ink-3">@{currentUser.username}</p><p className="mt-2 line-clamp-2 max-w-xl text-sm leading-6 text-ink-2">{currentUser.signature || '还没有写下旅行宣言，去记录下一段远方吧。'}</p><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-semibold text-ink-3"><span className="inline-flex items-center gap-1"><Check className="h-3.5 w-3.5 text-good" /> 偏好已记录</span><span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" /> 随行程更新</span></div></div></div>
             <div className="profile-stats grid grid-cols-2 gap-3 sm:grid-cols-4 lg:min-w-[430px]">{stats.map(({ label, value, Icon }) => <div key={label} className="rounded-lg bg-paper-hover px-4 py-3 text-center sm:px-3"><Icon className="mx-auto h-4 w-4 text-ink-3" /><strong className="mt-1 block text-xl font-bold text-ink">{value}</strong><span className="text-[10px] font-semibold text-ink-3">{label}</span></div>)}</div>

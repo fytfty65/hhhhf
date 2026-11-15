@@ -1,0 +1,194 @@
+/* Four editions of one travel journal. Only decorative/brand tokens change;
+   warning, success and risk colours retain their semantic meaning. */
+:root, [data-journey-season='spring'] {
+  --season-accent: #ad405e;
+  --season-accent-ink: #97324e;
+  --season-soft: #fce8ed;
+  --season-secondary: #477051;
+  --season-secondary-soft: #edf3e3;
+  --season-paper: #fffaf8;
+  --season-line: #ecdce0;
+  --season-night: #241e23;
+  --season-night-card: #30272e;
+  --season-night-raised: #3b3038;
+  --season-night-soft: #492e3b;
+  --season-night-ink: #f3aec4;
+  --season-night-secondary: #bfd1a8;
+  --season-night-line: #57424e;
+  --season-image: url('/hero/v5/spring.webp');
+  --season-image-mobile: url('/hero/v5/spring-mobile.webp');
+}
+[data-journey-season='summer'] {
+  --season-accent: #197569;
+  --season-accent-ink: #146257;
+  --season-soft: #e1f3eb;
+  --season-secondary: #856315;
+  --season-secondary-soft: #fff3c9;
+  --season-paper: #fafcf6;
+  --season-line: #d7e6db;
+  --season-night: #1b2523;
+  --season-night-card: #26322f;
+  --season-night-raised: #303e38;
+  --season-night-soft: #24483e;
+  --season-night-ink: #96ddc6;
+  --season-night-secondary: #edd18e;
+  --season-night-line: #3c5a4d;
+  --season-image: url('/hero/v5/summer.webp');
+  --season-image-mobile: url('/hero/v5/summer-mobile.webp');
+}
+[data-journey-season='autumn'] {
+  --season-accent: #b74b2c;
+  --season-accent-ink: #a13c20;
+  --season-soft: #ffead8;
+  --season-secondary: #846025;
+  --season-secondary-soft: #fcf0d4;
+  --season-paper: #fffaf3;
+  --season-line: #efddcb;
+  --season-night: #251e1b;
+  --season-night-card: #322823;
+  --season-night-raised: #3e312a;
+  --season-night-soft: #533528;
+  --season-night-ink: #ffbd91;
+  --season-night-secondary: #e5cd99;
+  --season-night-line: #604535;
+  --season-image: url('/hero/v5/autumn.webp');
+  --season-image-mobile: url('/hero/v5/autumn-mobile.webp');
+}
+[data-journey-season='winter'] {
+  --season-accent: #7356aa;
+  --season-accent-ink: #654493;
+  --season-soft: #eee8fa;
+  --season-secondary: #6c6188;
+  --season-secondary-soft: #f6edfa;
+  --season-paper: #fcfaff;
+  --season-line: #e4ddec;
+  --season-night: #231f2d;
+  --season-night-card: #2e293b;
+  --season-night-raised: #39324a;
+  --season-night-soft: #443558;
+  --season-night-ink: #d7bcff;
+  --season-night-secondary: #dfd0ea;
+  --season-night-line: #534564;
+  --season-image: url('/hero/v5/winter.webp');
+  --season-image-mobile: url('/hero/v5/winter-mobile.webp');
+}
+:root, [data-journey-season] {
+  --paper: var(--season-paper);
+  --paper-card: #fffefd;
+  --paper-raised: #ffffff;
+  --paper-hover: color-mix(in srgb,var(--season-soft) 55%,#fff);
+  --ink: #352e32;
+  --ink-2: #62585c;
+  --ink-3: #786a70;
+  --line: var(--season-line);
+  --line-soft: color-mix(in srgb,var(--season-line) 58%,transparent);
+  --accent: var(--season-accent);
+  --accent-ink: var(--season-accent-ink);
+  --accent-soft: var(--season-soft);
+  --focus-ring: var(--season-accent);
+  --backdrop: #2c202780;
+  --season-cover-shade: #241e2d94;
+  --color-orange-50: var(--paper-hover);
+  --color-orange-100: var(--accent-soft);
+  --color-orange-200: color-mix(in srgb,var(--accent) 25%,var(--paper-card));
+  --color-orange-300: color-mix(in srgb,var(--accent) 40%,var(--paper-card));
+  --color-orange-400: var(--accent);
+  --color-orange-500: var(--accent);
+  --color-orange-600: var(--accent);
+  --color-orange-700: var(--accent-ink);
+  --color-orange-800: var(--accent-ink);
+}
+html.dark, .dark [data-journey-season] {
+  --paper: var(--season-night);
+  --paper-card: var(--season-night-card);
+  --paper-raised: var(--season-night-raised);
+  --paper-hover: var(--season-night-raised);
+  --ink: #f8f0eb;
+  --ink-2: #ddd1cf;
+  --ink-3: #bdb0b3;
+  --line: var(--season-night-line);
+  --line-soft: color-mix(in srgb,var(--season-night-line) 60%,transparent);
+  --accent-ink: var(--season-night-ink);
+  --accent-soft: var(--season-night-soft);
+  --season-secondary: var(--season-night-secondary);
+  --season-secondary-soft: var(--season-night-raised);
+  --focus-ring: var(--season-night-ink);
+  --backdrop: #120d15cc;
+  --season-cover-shade: #171020bd;
+}
+
+/* A quiet, always-reachable theme control, without another floating toolbar. */
+.journey-season-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 30px;
+  color: var(--accent-ink);
+  background: var(--paper-card);
+}
+.journey-season-select > svg:first-child { position: absolute; left: 12px; pointer-events: none; }
+.journey-season-select > svg:last-child { position: absolute; right: 10px; pointer-events: none; }
+.journey-season-select select {
+  appearance: none;
+  width: 160px;
+  min-height: 40px;
+  padding: 8px 27px 8px 36px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.journey-season-select select option { color: var(--ink); background: var(--paper-card); }
+.journey-season-select:focus-within { box-shadow: 0 0 0 4px var(--accent-soft); }
+.journey-lobby-sheet > header { flex-wrap: wrap; gap: 16px; }
+.journey-lobby-sheet > header > div:last-child { flex-wrap: wrap; }
+.portal-header > .portal-container { flex-wrap: wrap; gap: 10px; }
+.workspace-season-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.workspace-season-heading .workspace-eyebrow { margin: 0; border: 0; padding: 0; gap: 5px; }
+.workspace-season-heading .workspace-eyebrow span { display: block; width: 100%; }
+.workspace-season-heading .journey-season-select { background: var(--accent-soft); border-color: transparent; }
+.journey-ui .journey-workspace-header { border-top: 3px solid var(--accent); }
+
+/* Personal and community covers share the selected seasonal image. */
+.profile-landscape {
+  position: relative;
+  isolation: isolate;
+  min-height: 200px;
+  padding-right: 110px;
+  background: linear-gradient(0deg,var(--season-cover-shade),#20172610 90%),var(--season-image) center 43%/cover;
+}
+.profile-landscape > span:nth-child(2) { font: 400 23px/1.6 'Songti SC',SimSun,serif; letter-spacing: 2px; }
+.journey-ui .profile-landscape .season-cover-edition { position: absolute; right: 24px; bottom: 6px; font: italic 88px/1 Georgia,serif; color: #fffaf14d; letter-spacing: -5px; z-index: -1; }
+.community-cover {
+  background: linear-gradient(0deg,var(--season-cover-shade),#241e2d10 85%),var(--season-image) 65% 40%/cover;
+  gap: 12px;
+}
+.community-cover > span { max-width: 300px; font-size: 27px; text-wrap: balance; }
+.season-cover-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex: 1; padding-bottom: 20px; }
+.season-cover-heading small { font-size: 10px; letter-spacing: 2px; }
+.season-cover-heading > span { display: grid; place-items: center; width: 38px; height: 52px; border: 1px solid #fffaf180; font: 20px 'Songti SC',SimSun,serif; }
+.dark :is(.profile-landscape,.community-cover) { background-blend-mode: normal; background-color: var(--paper); }
+.journey-ui .community-page .community-hero { background: linear-gradient(115deg,var(--paper-card) 30%,var(--accent-soft)); }
+.journey-ui .journey-workspace .planning-tab.is-active { box-shadow: 0 3px 10px color-mix(in srgb,var(--accent) 18%,transparent); }
+.journey-ui .journey-lobby-sheet > footer { background: var(--paper-hover); }
+
+@media (max-width: 640px) {
+  .journey-season-select select { width: 148px; font-size: 12px; }
+  .journey-lobby-sheet > header > div:last-child { width: 100%; gap: 8px; }
+  .profile-landscape { min-height: 170px; padding-right: 60px; background-image: linear-gradient(0deg,var(--season-cover-shade),transparent),var(--season-image-mobile); }
+  .profile-landscape > span:nth-child(2) { font-size: 20px; }
+  .journey-ui .profile-landscape .season-cover-edition { right: 15px; font-size: 65px; }
+  .community-cover { min-height: 230px; }
+  .community-cover > small { display: block; }
+  .workspace-season-heading { gap: 6px; }
+  .workspace-season-heading .workspace-eyebrow { font-size: 10px; letter-spacing: 1.2px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .journey-season-select { transition: background-color .25s,box-shadow .25s; }
+}

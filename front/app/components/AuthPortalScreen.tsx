@@ -5,6 +5,7 @@ import { AlertCircle, ArrowRight, CheckCircle2, Compass, Lock, RefreshCw, User }
 import { apiFetch, setAccessToken } from '../lib/apiClient';
 import OmniLogo from './OmniLogo';
 import JourneyEditorial from './JourneyEditorial';
+import { useJourneySeason } from './JourneySeasonProvider';
 import SeasonalExperience from './spatial/SeasonalExperience';
 import SeasonControls from './spatial/SeasonControls';
 import SeasonParticles from './spatial/SeasonParticles';
@@ -14,6 +15,7 @@ import styles from './AuthPortalScreen.module.css';
 
 /** Seasonal sign-in portal. Authentication contracts and test ids stay stable. */
 export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (user: any) => void }) {
+  const { enterSeason } = useJourneySeason();
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [displayedSeason, setDisplayedSeason] = useState<Season>('spring');
   const [inputFocused, setInputFocused] = useState(false);
@@ -121,6 +123,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
         throw new Error(data?.detail || data?.message || data?.error || `试用登录失败 (HTTP ${login.status})`);
       }
       setAccessToken(data.token);
+      enterSeason(displayedSeason);
       onLoginSuccess({ ...data.user });
     } catch (err: any) {
       setErrorMsg(err.message || '试用入口暂时不可用，请稍后再试或直接注册');
@@ -158,6 +161,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
       }
       // Access token stays in memory; refresh token is an HttpOnly cookie.
       setAccessToken(data.token);
+      enterSeason(displayedSeason);
       onLoginSuccess({ ...data.user });
     } catch (err: any) {
       setErrorMsg(err.message || '连接认证中枢失败，请检查网关服务与 API_BASE 配置');
@@ -165,7 +169,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
   };
 
   return (
-    <div className={styles.portal} data-season={displayedSeason}>
+    <div className={styles.portal} data-season={displayedSeason} data-journey-season={displayedSeason}>
       <div className={styles.stage}>
       <div className={styles.landscape}>
         <SeasonalExperience season={season} motionEnabled={effectiveMotion} onDisplayedSeason={setDisplayedSeason} onAssetStatus={setAssetStatus} retryToken={assetRetry} />
