@@ -1,0 +1,118 @@
+.launcher, .primary, .secondary, .jump, .close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.launcher {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: .4rem .85rem;
+  border: 1px solid var(--line);
+  border-radius: 30px;
+  background: var(--paper-card);
+  color: var(--accent-ink);
+  font-size: .8125rem;
+  font-weight: 650;
+}
+
+.launcher:hover, .secondary:hover, .close:hover { background: var(--paper-hover); }
+
+.invitation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .85rem 1rem;
+  margin-bottom: 1.75rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(105deg, var(--accent-soft), var(--paper-card) 78%);
+  color: var(--ink);
+}
+
+.invitationIcon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--accent-ink);
+  background: var(--paper-card);
+}
+
+.invitationCopy { flex: 1 1 200px; }
+.invitationCopy strong { display: block; font-size: 1rem; }
+.invitationCopy p { margin: .15rem 0 0; color: var(--ink-2); font-size: .875rem; }
+.invitationActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-inline-start: auto; }
+
+.dialog {
+  position: fixed;
+  inset: 0;
+  width: min(660px, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--paper-card);
+  color: var(--ink);
+  box-shadow: 0 20px 70px #14112055;
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  line-height: 1.65;
+}
+
+.dialog::backdrop { background: #181423a0; }
+:global(html):has(.dialog[open]) { overflow: hidden; }
+
+.dialogHeader, .dialogBrand, .footer { display: flex; align-items: center; }
+.dialogHeader { justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); background: var(--paper); }
+.dialogBrand { gap: .65rem; }
+.dialogBrand svg { color: var(--accent-ink); }
+.dialogBrand h2 { font-size: 1rem; font-weight: 650; }
+.close { width: 44px; border-radius: 10px; color: var(--ink-2); }
+
+.chapters { display: flex; flex-wrap: wrap; gap: .35rem; padding: .8rem 1.5rem; border-bottom: 1px solid var(--line); }
+.chapters button { min-height: 38px; padding: .3rem .65rem; border-radius: 8px; color: var(--ink-2); font-size: .8125rem; cursor: pointer; }
+.chapters button:hover { background: var(--paper-hover); }
+.chapters button[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-ink); font-weight: 700; }
+
+.chapter { padding: 1.3rem 1.5rem 1.45rem; }
+.chapter h3 { font-family: 'Songti SC', STSong, SimSun, serif; font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 600; }
+.intro { margin-top: .3rem; color: var(--ink-2); font-size: .9375rem; }
+.example { margin-block: 1rem; padding: .75rem .9rem; border-inline-start: 3px solid var(--season-accent, var(--accent)); border-radius: 0 8px 8px 0; background: var(--paper-hover); color: var(--ink-2); font-size: .875rem; }
+.example strong { color: var(--accent-ink); }
+.steps { display: grid; margin: 1.1rem 0 0; padding: 0; list-style: none; }
+.steps li { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: .75rem; padding-block: .8rem; border-top: 1px solid var(--line); }
+.stepNumber { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink); font: 600 .875rem Georgia, serif; }
+.steps h4 { font-size: .9375rem; font-weight: 700; }
+.steps p { margin-top: .25rem; color: var(--ink-2); font-size: .875rem; }
+.jump { color: var(--accent-ink); font-size: .875rem; font-weight: 650; text-align: start; }
+.jump:hover { text-decoration: underline; text-underline-offset: .25em; }
+.notice { margin-top: .5rem; color: var(--ink-2); font-size: .875rem; }
+.footer { justify-content: space-between; gap: .65rem; padding: .85rem 1.5rem; border-top: 1px solid var(--line); background: var(--paper); }
+.primary, .secondary { padding: .45rem .9rem; border-radius: 9px; font-size: .875rem; font-weight: 650; }
+.primary { background: var(--season-accent, var(--accent)); color: #fff; }
+.primary:hover { filter: brightness(.93); }
+.secondary { color: var(--ink-2); }
+.secondary:disabled { opacity: .45; cursor: default; }
+
+:global([data-web-guide]:focus) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 4px;
+  scroll-margin-block: 1rem;
+}
+
+@media (max-width: 480px) {
+  .dialog { width: calc(100% - 1rem); max-height: calc(100dvh - 1rem); border-radius: 15px; }
+  .dialogHeader, .chapters, .chapter, .footer { padding-inline: 1rem; }
+  .invitationActions { width: 100%; }
+  .invitationCopy { flex-basis: 160px; }
+}

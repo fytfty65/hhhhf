@@ -5,6 +5,7 @@ import { AlertCircle, ArrowRight, CheckCircle2, Compass, Lock, RefreshCw, User }
 import { apiFetch, setAccessToken } from '../lib/apiClient';
 import OmniLogo from './OmniLogo';
 import JourneyEditorial from './JourneyEditorial';
+import WebGuide from './WebGuide';
 import { useJourneySeason } from './JourneySeasonProvider';
 import SeasonalExperience from './spatial/SeasonalExperience';
 import SeasonControls from './spatial/SeasonControls';
@@ -195,14 +196,17 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
           <div className={styles.seasonCaption}><span className={styles.seasonIndicator} /><span>{mode === 'date' ? '随日期 · 当季风景' : mode === 'demo' ? (effectiveMotion ? '四季循环 · 每 24 秒换景' : '四季循环 · 已暂停') : '手动选季'} · {SEASON_LABELS[displayedSeason].name}</span></div>
           <div id="portal-season" className={styles.controls}><SeasonControls season={displayedSeason} mode={mode} motionEnabled={motionEnabled} onSeasonChange={setSeason} onModeChange={setMode} onMotionChange={setMotionEnabled} /></div>
         </section>
-        <section id="portal-login" className={styles.panel} aria-label="旅行者账号"
+        <section id="portal-login" className={styles.panel} aria-label="旅行者账号" data-web-guide="portal-account" tabIndex={-1}
           onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) setInputFocused(true); }}
           onBlurCapture={(event) => {
             if (!(event.relatedTarget instanceof HTMLInputElement) || !event.currentTarget.contains(event.relatedTarget)) setInputFocused(false);
           }}>
           <div className={styles.panelInner}>
             <div className={styles.panelHeading}>
-              <div className={styles.accountMark}><Compass size={22} strokeWidth={1.25} /><span>OmniRoute <i>/ 旅行者账号</i></span></div>
+              <div className={styles.accountBar}>
+                <div className={styles.accountMark}><Compass size={22} strokeWidth={1.25} /><span>OmniRoute <i>/ 旅行者账号</i></span></div>
+                <WebGuide startAt="portal" />
+              </div>
               <h2>{tab === 'login' ? '好久不见。' : '认识一下。'}</h2>
               <p>{tab === 'login' ? '登录，接着安排你的下一次出发。' : '创建账号，和朋友一起把行程安排好。'}</p>
             </div>

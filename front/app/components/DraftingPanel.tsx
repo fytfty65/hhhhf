@@ -186,6 +186,8 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
             <VoiceIntentChips parsed={parsed} />
             <textarea
               data-testid="intent-input"
+              data-web-guide="intent"
+              aria-label="你的个性化旅行诉求"
               disabled={isReady}
               value={userIntent}
               onChange={(e) => setUserIntent(e.target.value)}
@@ -198,6 +200,7 @@ export default function DraftingPanel({ activeMode, activeRole, onModeChange, on
             <button
               type="button"
               onClick={onSubmit}
+              data-web-guide="submit-intent"
               disabled={isReady || userIntent.trim().length === 0}
               className={`flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-lg text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 ${isReady ? 'bg-good text-white' : userIntent.trim() ? 'bg-accent text-white hover:bg-accent-ink' : 'cursor-not-allowed border border-line bg-paper-hover text-ink-3'}`}
             >

@@ -233,7 +233,7 @@
   margin-bottom:13px;
 }
 
-.panelHeading h2 {
+.panelHeading > h2 {
   font-family:'Songti SC',SimSun,serif;
   font-size: 25px;
   font-weight:500;
@@ -696,11 +696,12 @@
 }
 .panel::before { display: none; }
 .panelInner { padding: 34px 32px 25px; }
-.accountMark { display: flex; align-items: center; gap: 9px; margin-bottom: 30px; font-size: 14px; font-weight: 600; }
+.accountBar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 20px; }
+.accountMark { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 600; }
 .accountMark svg { color: var(--account-muted); }
 .accountMark i { margin-left: 5px; color: var(--account-muted); font-size: 12px; font-style: normal; font-weight: 400; }
 .panelHeading { margin-bottom: 26px; }
-.panelHeading h2 { font-size: 32px; letter-spacing: 1px; }
+.panelHeading > h2 { font-size: 32px; letter-spacing: 1px; }
 .panelHeading > p:last-child { margin-top: 12px; color: var(--account-muted); font-size: 14px; }
 .tabs { padding: 0; gap: 26px; border: 0; border-bottom: 1px solid var(--account-line); border-radius: 0; background: transparent; margin-bottom: 24px; }
 .tab { flex: none; min-height: 42px; padding: 0 3px 12px; color: var(--account-muted); border-bottom: 2px solid transparent; border-radius: 0; font-size: 16px; }

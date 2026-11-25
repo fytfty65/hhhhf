@@ -1015,6 +1015,64 @@ test('travel journal theme keeps downstream pages readable in both modes', async
   await capture('workspace');
 });
 
+test('new user guide follows the real planning flow and can be reopened', async ({ page }) => {
+  await installMocks(page, { loggedOut: true });
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, route => route.abort());
+  await page.route('**/api/v1/room/create', route => route.fulfill({ json: { room_id: 'ROOM-E2E', invite_code: 'ROOM-E2E' } }));
+  await page.route('**/api/auth/refresh', route => route.fulfill({ json: { token: user.token, user } }));
+  await page.route('**/api/auth/me', route => route.fulfill({ json: { user } }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+
+  const launcher = page.getByRole('button', { name: '新手指南', exact: true });
+  const guide = page.getByRole('dialog', { name: '新手指南' });
+  await launcher.click();
+  await expect(guide.getByRole('heading', { name: '登录与体验' })).toBeVisible();
+  await guide.getByRole('button', { name: '前往账号区' }).click();
+  await expect(page.getByRole('region', { name: '旅行者账号' })).toBeFocused();
+  await page.getByTestId('auth-trial').click();
+
+  const invitation = page.getByRole('complementary', { name: '首次规划提示' });
+  await invitation.getByRole('button', { name: '开始引导' }).click();
+  await expect(guide.getByRole('heading', { name: '开始规划' })).toBeVisible();
+  await noHorizontalOverflow(page);
+  await guide.getByRole('button', { name: '和朋友同行' }).click();
+  await guide.getByRole('button', { name: '去房间区域' }).click();
+  await expect(page.getByTestId('join-room-code')).toBeFocused();
+  await expect(invitation).toHaveCount(0);
+
+  await page.reload();
+  await expect(launcher).toBeVisible();
+  await expect(invitation).toHaveCount(0);
+  await launcher.click();
+  await guide.getByRole('button', { name: '去填目的地' }).click();
+  const destination = page.getByTestId('lobby-destination');
+  await expect(destination).toBeFocused();
+  await destination.fill('成都');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByTestId('begin-plan').click();
+  await page.getByRole('button', { name: '查看规划方案' }).click();
+  await expect(page.getByTestId('intent-input')).toHaveValue(/成都/);
+
+  await launcher.click();
+  await expect(guide.getByText('可以这样写')).toBeVisible();
+  await guide.getByRole('button', { name: '去写旅行需求' }).click();
+  const intent = page.getByTestId('intent-input');
+  await expect(intent).toBeFocused();
+  await intent.fill('我们两个人去洛阳玩2天，想去龙门石窟');
+  await page.getByRole('button', { name: '生成行程方案' }).click();
+  await expect(page.getByTestId('save-trip')).toBeVisible();
+
+  await launcher.click();
+  await expect(guide.getByRole('heading', { name: '查看、调整与保存' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(launcher).toBeFocused();
+  await launcher.click();
+  await guide.getByRole('button', { name: '定位到保存按钮' }).click();
+  await expect(page.getByTestId('save-trip')).toBeFocused();
+  await expect(page.getByTestId('save-trip')).toHaveText('保存到我的行程');
+});
+
 test('seasonal banner: four scenes animate, pause and respect reduced motion', async ({ page }) => {
   test.setTimeout(90_000);
   await installMocks(page);

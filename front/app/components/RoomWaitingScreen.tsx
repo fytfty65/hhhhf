@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import OmniLogo from './OmniLogo';
+import WebGuide from './WebGuide';
 import RoomConnectionStatus, { type RoomConnectionState } from './RoomConnectionStatus';
 import { generatedAvatarUrl } from '../lib/avatarArt';
 import { voteCountsByNode, type RoomVoteState } from '../lib/collaborationVotes';
@@ -74,9 +75,11 @@ export default function RoomWaitingScreen({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <WebGuide startAt="room" />
             <span className="font-mono text-sm font-black tracking-wider text-orange-600">{roomCode || '准备中…'}</span>
             <button
               type="button"
+              data-web-guide="room-code"
               onClick={onCopyRoomCode}
               className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:border-orange-300 hover:text-orange-600"
               title="复制房间码"

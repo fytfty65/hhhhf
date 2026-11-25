@@ -1,6 +1,7 @@
 'use client';
 
 import { JourneyLobbyHero } from './components/JourneyEditorial';
+import WebGuide from './components/WebGuide';
 import JourneySeasonSelect from './components/JourneySeasonSelect';
 
 import dynamic from 'next/dynamic';
@@ -486,6 +487,7 @@ export default function ContextualLobby() {
               </div>
 
               <div className="flex items-center gap-2 sm:gap-3">
+                <WebGuide startAt="lobby" />
                 <JourneySeasonSelect />
                 <ServiceHealthIndicator />
 
@@ -552,6 +554,7 @@ export default function ContextualLobby() {
 
             <main className="flex-1 px-5 py-6 sm:px-10 sm:py-8 overflow-y-auto overflow-x-hidden">
               <JourneyLobbyHero onExplore={() => setShowDestinationMap(true)} />
+              <WebGuide startAt="lobby" invitation />
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
                 <section className="flex flex-col gap-4 lg:col-span-8">
                   <div>
@@ -574,6 +577,7 @@ export default function ContextualLobby() {
                       <span className="mb-1.5 flex items-center gap-1.5 text-xs font-bold text-slate-600"><MapPin className="h-3.5 w-3.5 text-orange-500" /> 目的地</span>
                       <input
                         data-testid="lobby-destination"
+                        data-web-guide="destination"
                         value={destination}
                         onChange={(event) => setDestination(event.target.value)}
                         placeholder="例如：成都、西安、洛阳"
@@ -660,6 +664,7 @@ export default function ContextualLobby() {
                       <button
                         type="button"
                         data-testid="lobby-edit-intent"
+                        data-web-guide="preferences"
                         onClick={() => setShowEditIntentModal(true)}
                         className="flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-600 transition-colors hover:border-orange-200 hover:text-orange-600"
                       >
@@ -679,6 +684,7 @@ export default function ContextualLobby() {
                       </div>
                       <button
                         data-testid="begin-plan"
+                        data-web-guide="begin-plan"
                         onClick={handleBeginPlan}
                         className="btn-cta-3d flex items-center justify-center gap-2 rounded-2xl px-6 py-3 text-sm font-bold text-white"
                       >
@@ -783,6 +789,7 @@ export default function ContextualLobby() {
                     <div className="mt-3 flex gap-1.5">
                       <input
                         data-testid="join-room-code"
+                        data-web-guide="room-code"
                         type="text"
                         placeholder="输入好友分享的房间码"
                         value={inputRoomCode}

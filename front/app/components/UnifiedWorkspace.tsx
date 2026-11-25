@@ -1,6 +1,7 @@
 'use client';
 
 import JourneySeasonSelect from './JourneySeasonSelect';
+import WebGuide from './WebGuide';
 
 import dynamic from 'next/dynamic';
 import { useState, useRef, useEffect, useMemo } from 'react';
@@ -1996,7 +1997,13 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           不再常驻 200px；移动端仍保持「头部固定 + 正文自己滚动」，避免溢出遮挡下方地图。 */}
       <div className={`w-full ${mapLayout === 'doc' ? 'lg:flex-1 h-auto lg:h-full' : mapLayout === 'map' ? 'lg:w-[380px] xl:w-[420px] h-[56vh] lg:h-full' : 'lg:w-[620px] xl:w-[700px] h-[56vh] lg:h-full'} min-h-[480px] lg:min-h-0 flex flex-col relative z-20 border-b lg:border-b-0 lg:border-r border-slate-200 bg-white shadow-2xl shrink-0 lg:overflow-y-auto custom-scrollbar`}>
         <header className="journey-workspace-header px-5 sm:px-8 py-4 border-b border-slate-100 bg-white shadow-xs z-10">
-          <div className="workspace-season-heading"><p className="interior-eyebrow workspace-eyebrow">JOURNEY STUDIO <span>/ 行程编辑室</span></p><JourneySeasonSelect /></div>
+          <div className="workspace-season-heading flex-wrap">
+            <p className="interior-eyebrow workspace-eyebrow">JOURNEY STUDIO <span>/ 行程编辑室</span></p>
+            <div className="flex flex-wrap items-center gap-2">
+              <WebGuide startAt={phase === 'decision' ? 'result' : isHost ? 'draft' : 'room'} canJump={phase === 'decision' || (phase === 'drafting' && isHost)} />
+              <JourneySeasonSelect />
+            </div>
+          </div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -2066,7 +2073,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
                   }
                 }}
               >
-              <button data-testid="save-trip" onClick={handleSaveTrip} className={`px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer ${tripSaved ? 'btn-success' : ''}`}>
+              <button data-testid="save-trip" data-web-guide="save-plan" onClick={handleSaveTrip} className={`px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer ${tripSaved ? 'btn-success' : ''}`}>
                 {tripSaved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />} {tripSaved ? '已保存' : '保存到我的行程'}
               </button>
               {/* 普通模式只留“保存 + 更多”：导出、日记、预算账本收进菜单，
@@ -2081,6 +2088,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
               </div>
               <button
                 data-testid="toggle-more-tools"
+                data-web-guide="plan-tools"
                 onClick={() => setShowMoreTools((open) => !open)}
                 aria-expanded={showMoreTools}
                 className="px-3.5 py-1.5 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 border shadow-2xs cursor-pointer"
@@ -2331,7 +2339,7 @@ export default function UnifiedWorkspace({ mode, role, roomCode, roomMembers, cu
           )}
           {phase === 'decision' && (
             <div className="mt-4 flex flex-wrap items-center gap-2">
-              <nav className="workspace-section-nav flex min-w-0 flex-1 items-center gap-1 rounded-xl border border-stone-200 bg-stone-50 p-1" aria-label="工作区层级">
+              <nav className="workspace-section-nav flex min-w-0 flex-1 items-center gap-1 rounded-xl border border-stone-200 bg-stone-50 p-1" aria-label="工作区层级" data-web-guide="plan-nav" tabIndex={-1}>
               {layerTabs.map(([key, label, hint]) => (
                 <button
                   key={key}
