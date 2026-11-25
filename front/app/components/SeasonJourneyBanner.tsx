@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { ArrowUpRight, Compass, Pause, Play } from 'lucide-react';
+import { JOURNEY_TRAILS } from '../lib/journeySeason';
 import { useJourneySeason } from './JourneySeasonProvider';
 import { seasonIcons } from './JourneySeasonSelect';
 import { restoreSeasonPreferences, SEASON_STORAGE_KEY } from '../lib/season';
@@ -9,10 +10,10 @@ import styles from './SeasonJourneyBanner.module.css';
 
 const MOTION_KEY = 'omni_journey_banner_motion';
 const scenes = {
-  spring: { heading: '花开之处。', destination: '下一站 · 花开的地方', trail: 'FOLLOW THE BLOSSOMS, FIND YOUR WAY', path: 'M30 180C110 182 55 55 145 78S240 190 310 100 395 90 440 40', waypoint: [145, 78], kind: 'petals' },
-  summer: { heading: '心之所向。', destination: '下一站 · 山海与长夏', trail: 'A LITTLE DETOUR, A NEW DISCOVERY', path: 'M30 180C115 195 65 20 190 55S280 180 350 90 410 85 440 40', waypoint: [190, 55], kind: 'fireflies' },
-  autumn: { heading: '层林之间。', destination: '下一站 · 山野的秋色', trail: 'TAKE THE SLOW ROAD, KEEP THE GOLD', path: 'M30 180C80 135 125 195 175 125S205 40 280 68 390 135 440 40', waypoint: [280, 68], kind: 'leaves' },
-  winter: { heading: '雪落之境。', destination: '下一站 · 雪中的暖意', trail: 'QUIET MOUNTAINS, WARM MEMORIES', path: 'M30 180C90 180 100 130 165 130S205 65 275 82 390 20 440 40', waypoint: [275, 82], kind: 'snow' },
+  spring: { heading: '花开之处。', destination: '下一站 · 花开的地方', path: 'M30 180C110 182 55 55 145 78S240 190 310 100 395 90 440 40', waypoint: [145, 78], kind: 'petals' },
+  summer: { heading: '心之所向。', destination: '下一站 · 山海与长夏', path: 'M30 180C115 195 65 20 190 55S280 180 350 90 410 85 440 40', waypoint: [190, 55], kind: 'fireflies' },
+  autumn: { heading: '层林之间。', destination: '下一站 · 山野的秋色', path: 'M30 180C80 135 125 195 175 125S205 40 280 68 390 135 440 40', waypoint: [280, 68], kind: 'leaves' },
+  winter: { heading: '雪落之境。', destination: '下一站 · 雪中的暖意', path: 'M30 180C90 180 100 130 165 130S205 65 275 82 390 20 440 40', waypoint: [275, 82], kind: 'snow' },
 } as const;
 
 const motes = Array.from({ length: 14 }, (_, index) => ({
@@ -74,7 +75,7 @@ export default function SeasonJourneyBanner({ onExplore }: { onExplore: () => vo
       <div className={styles.seasonNote}><Icon size={15} strokeWidth={1.4} /><span>{story.title}</span><span className={styles.noteDivider} />{story.english} / {story.edition}</div>
     </div>
     <div className={styles.routeArt} aria-hidden="true">
-      <p className={styles.routeCaption}>{scene.trail}</p>
+      <p className={styles.routeCaption}>{JOURNEY_TRAILS[season]}</p>
       <svg viewBox="0 0 480 230" fill="none">
         <path d="M0 175C65 175 30 78 110 98S235 207 275 127 365 0 480 30" stroke="currentColor" opacity=".22" />
         <path className={styles.routeLine} d={scene.path} stroke="currentColor" strokeWidth="2" strokeDasharray="5 9" />

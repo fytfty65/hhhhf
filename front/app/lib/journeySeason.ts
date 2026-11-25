@@ -4,6 +4,13 @@ import { SEASONS, restoreSeasonPreferences, type Season } from './season';
 // the landing page's date/demo clock. This is a visual preference, not trip data.
 export const JOURNEY_SEASON_KEY = 'omni_journey_season';
 
+export const JOURNEY_TRAILS: Record<Season, string> = {
+  spring: 'FOLLOW THE BLOSSOMS, FIND YOUR WAY',
+  summer: 'A LITTLE DETOUR, A NEW DISCOVERY',
+  autumn: 'TAKE THE SLOW ROAD, KEEP THE GOLD',
+  winter: 'QUIET MOUNTAINS, WARM MEMORIES',
+};
+
 export function restoreJourneySeason(saved: string | null, portal: string | null): Season {
   return SEASONS.includes(saved as Season) ? saved as Season : restoreSeasonPreferences(portal).season;
 }

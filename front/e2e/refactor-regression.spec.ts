@@ -1073,6 +1073,51 @@ test('new user guide follows the real planning flow and can be reopened', async 
   await expect(page.getByTestId('save-trip')).toHaveText('保存到我的行程');
 });
 
+test('guidebook switches seasons, hands guests off to the lobby and resumes the same chapter', async ({ page }) => {
+  await installMocks(page, { loggedOut: true });
+  await page.route('**/api/auth/register', route => route.fulfill({ status: 500, json: { error: 'temporarily unavailable' } }), { times: 1 });
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, route => route.abort());
+  await page.route('**/hero/v5/**', route => route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"/>' }));
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  await page.getByRole('button', { name: '新手指南', exact: true }).click();
+  const guide = page.getByRole('dialog', { name: '新手指南' });
+  await expect(guide.getByRole('heading', { name: '登录与体验' })).toBeVisible();
+  await page.keyboard.press('ArrowRight');
+  await expect(guide.getByRole('heading', { name: '开始规划' })).toBeVisible();
+  await guide.getByRole('button', { name: '冬季', exact: true }).click();
+  await expect(guide).toHaveAttribute('data-book-season', 'winter');
+  await expect(page.locator('[data-season="winter"]').first()).toBeAttached();
+
+  const enterGuest = guide.getByRole('button', { name: '以游客身份进入并定位' }).first();
+  await enterGuest.click();
+  await expect(guide.getByText('暂时无法进入大厅', { exact: false })).toBeVisible();
+  await enterGuest.click();
+  const destination = page.getByTestId('lobby-destination');
+  await expect(destination).toBeFocused();
+  await expect(destination).toHaveAttribute('data-guide-spotlight', 'winter');
+  await expect(page.getByRole('combobox', { name: '旅程季节' })).toHaveValue('winter');
+  const resume = page.getByRole('button', { name: /继续指南.*02\/07/ });
+  await resume.click();
+  await expect(guide.getByRole('heading', { name: '开始规划' })).toBeVisible();
+  await guide.getByRole('heading', { name: '开始规划' }).hover();
+  await page.mouse.wheel(270, 0);
+  await expect(guide.getByRole('heading', { name: '开始规划' })).toBeVisible();
+  await page.mouse.wheel(0, 270);
+  await expect(guide.getByRole('heading', { name: '和朋友同行' })).toBeVisible();
+  await page.keyboard.press('ArrowLeft');
+
+  await guide.getByRole('button', { name: '定位到「修改」' }).click();
+  await expect(page.getByTestId('lobby-edit-intent')).toBeFocused();
+  await expect(resume).toBeVisible();
+  await resume.click();
+  await page.keyboard.press('7');
+  await expect(guide.getByRole('heading', { name: '浏览社区' })).toBeVisible();
+  await expect(guide.getByRole('button', { name: '开始这段旅程' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(guide).toHaveCount(0);
+});
+
 test('seasonal banner: four scenes animate, pause and respect reduced motion', async ({ page }) => {
   test.setTimeout(90_000);
   await installMocks(page);

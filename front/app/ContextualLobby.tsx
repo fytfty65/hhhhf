@@ -1,12 +1,12 @@
 'use client';
 
 import { JourneyLobbyHero } from './components/JourneyEditorial';
-import WebGuide from './components/WebGuide';
+import WebGuide, { type LobbyGuideTarget } from './components/WebGuide';
 import JourneySeasonSelect from './components/JourneySeasonSelect';
 
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Users, MapPin, Sparkles, Coffee, Camera, Car, ArrowRight, Check,
   Map as MapIcon, Compass,
@@ -87,6 +87,9 @@ const DestinationMap = dynamic(() => import('./DestinationMap'), {
 // 主入口：认证判断 -> 大厅界面 -> 多智能体决策工作区
 // =========================================================================
 export default function ContextualLobby() {
+  const [guideInvitationHost, setGuideInvitationHost] = useState<HTMLDivElement | null>(null);
+  const [guestGuideTarget, setGuestGuideTarget] = useState<LobbyGuideTarget | null>(null);
+  const clearGuestGuideTarget = useCallback(() => setGuestGuideTarget(null), []);
   // 首页只回答三件事：去哪、几天、几个人，以及必须满足什么。其余入口收进「更多」。
   const [destination, setDestination] = useState('');
   const [days, setDays] = useState(3);
@@ -226,7 +229,8 @@ export default function ContextualLobby() {
   if (!currentUser || !currentUser.isLoggedIn) {
     return (
       <AuthPortalScreen 
-        onLoginSuccess={(user) => {
+        onLoginSuccess={(user, guideTarget) => {
+          setGuestGuideTarget(guideTarget ?? null);
           signIn(user);
           // 管理员登录后直接进入运维看板：这个账号的用途就是看板和审核，
           // 停在普通用户大厅等于没有入口。看板里有「返回大厅」，不锁死。
@@ -487,7 +491,7 @@ export default function ContextualLobby() {
               </div>
 
               <div className="flex items-center gap-2 sm:gap-3">
-                <WebGuide startAt="lobby" />
+                <WebGuide startAt="lobby" invitationHost={guideInvitationHost} handoffTarget={guestGuideTarget} onHandoff={clearGuestGuideTarget} />
                 <JourneySeasonSelect />
                 <ServiceHealthIndicator />
 
@@ -554,7 +558,7 @@ export default function ContextualLobby() {
 
             <main className="flex-1 px-5 py-6 sm:px-10 sm:py-8 overflow-y-auto overflow-x-hidden">
               <JourneyLobbyHero onExplore={() => setShowDestinationMap(true)} />
-              <WebGuide startAt="lobby" invitation />
+              <div ref={setGuideInvitationHost} />
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
                 <section className="flex flex-col gap-4 lg:col-span-8">
                   <div>

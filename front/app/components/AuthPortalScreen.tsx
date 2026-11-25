@@ -5,7 +5,7 @@ import { AlertCircle, ArrowRight, CheckCircle2, Compass, Lock, RefreshCw, User }
 import { apiFetch, setAccessToken } from '../lib/apiClient';
 import OmniLogo from './OmniLogo';
 import JourneyEditorial from './JourneyEditorial';
-import WebGuide from './WebGuide';
+import WebGuide, { type LobbyGuideTarget } from './WebGuide';
 import { useJourneySeason } from './JourneySeasonProvider';
 import SeasonalExperience from './spatial/SeasonalExperience';
 import SeasonControls from './spatial/SeasonControls';
@@ -15,7 +15,7 @@ import { SEASON_LABELS, type Season } from '../lib/season';
 import styles from './AuthPortalScreen.module.css';
 
 /** Seasonal sign-in portal. Authentication contracts and test ids stay stable. */
-export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (user: any) => void }) {
+export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (user: any, guideTarget?: LobbyGuideTarget) => void }) {
   const { enterSeason } = useJourneySeason();
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [displayedSeason, setDisplayedSeason] = useState<Season>('spring');
@@ -90,7 +90,8 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
   };
 
   // Guest accounts are real server accounts; no promise of later account migration.
-  const startTrial = async () => {
+  const startTrial = async (guideTarget?: LobbyGuideTarget) => {
+    if (loading) return false;
     setErrorMsg('');
     setSuccessMsg('');
     setLoading(true);
@@ -102,7 +103,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
     };
     try {
       const reg = await apiFetch('/api/auth/register', {
-        method: 'POST', auth: false,
+        method: 'POST', auth: false, timeoutMs: 12_000,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(credentials),
       });
@@ -113,7 +114,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
         throw new Error(regData?.detail || regData?.message || regData?.error || `试用账号创建失败 (HTTP ${reg.status})`);
       }
       const login = await apiFetch('/api/auth/login', {
-        method: 'POST', auth: false,
+        method: 'POST', auth: false, timeoutMs: 12_000,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(credentials),
       });
@@ -124,10 +125,12 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
         throw new Error(data?.detail || data?.message || data?.error || `试用登录失败 (HTTP ${login.status})`);
       }
       setAccessToken(data.token);
-      enterSeason(displayedSeason);
-      onLoginSuccess({ ...data.user });
+      enterSeason(guideTarget ? season : displayedSeason);
+      onLoginSuccess({ ...data.user }, guideTarget);
+      return true;
     } catch (err: any) {
       setErrorMsg(err.message || '试用入口暂时不可用，请稍后再试或直接注册');
+      return false;
     } finally { setLoading(false); }
   };
 
@@ -205,7 +208,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
             <div className={styles.panelHeading}>
               <div className={styles.accountBar}>
                 <div className={styles.accountMark}><Compass size={22} strokeWidth={1.25} /><span>OmniRoute <i>/ 旅行者账号</i></span></div>
-                <WebGuide startAt="portal" />
+                <WebGuide startAt="portal" portal={{ season, changeSeason: setSeason, enterAsGuest: startTrial }} />
               </div>
               <h2>{tab === 'login' ? '好久不见。' : '认识一下。'}</h2>
               <p>{tab === 'login' ? '登录，接着安排你的下一次出发。' : '创建账号，和朋友一起把行程安排好。'}</p>
@@ -239,7 +242,7 @@ export default function AuthPortalScreen({ onLoginSuccess }: { onLoginSuccess: (
               </form>
             )}
             {!resetOpen && <div className={styles.trial}>
-              <button type="button" data-testid="auth-trial" onClick={startTrial} disabled={loading} className={styles.trialButton}>先以游客身份看看 <ArrowRight size={14} /></button>
+              <button type="button" data-testid="auth-trial" onClick={() => void startTrial()} disabled={loading} className={styles.trialButton}>先以游客身份看看 <ArrowRight size={14} /></button>
               <details className={styles.guestNote}><summary>关于游客模式</summary><p>会为你创建临时账号。行程仅保存在该账号下，不支持跨设备找回；长期保存行程请注册账号。</p></details>
             </div>}
             {resetOpen && <div className={styles.reset}>
