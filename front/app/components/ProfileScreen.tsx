@@ -212,13 +212,23 @@ function CoverStamp() {
         <defs>
           <path id={pathId} d="M60,60 m-45,0 a45,45 0 1,1 90,0 a45,45 0 1,1 -90,0" />
         </defs>
-        <circle cx="60" cy="60" r="54" fill="none" stroke="rgba(255,255,255,.55)" strokeWidth="1.1" />
-        <circle cx="60" cy="60" r="42" fill="none" stroke="rgba(255,255,255,.34)" strokeWidth=".8" strokeDasharray="2 4" />
-        <text fill="rgba(255,255,255,.62)" fontSize="7.4" fontWeight="600" letterSpacing="1.2">
-          <textPath href={`#${pathId}`} startOffset="3%">OMNIROUTE · FIELD NOTES · 旅人手札 ·</textPath>
+        <circle cx="60" cy="60" r="55" fill="none" stroke="rgba(31,35,40,.26)" strokeWidth="1.1" />
+        <circle cx="60" cy="60" r="46" fill="none" stroke="rgba(31,35,40,.17)" strokeWidth=".8" />
+        <circle cx="60" cy="60" r="41" fill="none" stroke="rgba(31,35,40,.14)" strokeWidth=".7" strokeDasharray="2 4" />
+        <text fill="rgba(31,35,40,.32)" fontSize="6.8" fontWeight="600" letterSpacing=".9">
+          <textPath href={`#${pathId}`} startOffset="4%">OMNIROUTE POST · FIELD NOTES · 旅人手札 ·</textPath>
         </text>
-        <text x="60" y="58" fill="rgba(255,255,255,.88)" fontFamily="'Noto Serif SC', serif" fontSize="17" textAnchor="middle" letterSpacing="2">同行</text>
-        <text x="60" y="74" fill="rgba(255,255,255,.58)" fontFamily="Georgia, serif" fontSize="7" textAnchor="middle" letterSpacing=".8">THE LONG WAY HOME</text>
+        <text x="60" y="55" fill="rgba(31,35,40,.38)" fontFamily="'Noto Serif SC', serif" fontSize="16" textAnchor="middle" letterSpacing="2">同行</text>
+        <text x="60" y="69" fill="rgba(31,35,40,.26)" fontFamily="Georgia, serif" fontSize="6.5" textAnchor="middle" letterSpacing=".7">THE LONG WAY HOME</text>
+        {[76, 82, 88, 94].map((y) => (
+          <path
+            key={y}
+            d={`M14 ${y} q 9 -4 18 0 t 18 0 t 18 0 t 18 0 t 18 0`}
+            fill="none"
+            stroke="rgba(31,35,40,.16)"
+            strokeWidth="1"
+          />
+        ))}
       </svg>
     </div>
   );
@@ -433,6 +443,15 @@ export default function ProfileScreen({
             <div className="pj-header-right">
               <div className="pj-guide-slot"><WebGuide startAt="profile" /></div>
               <JourneySeasonSelect />
+              <button
+                type="button"
+                className="pj-header-avatar"
+                onClick={() => scrollToSection('profile-heading')}
+                aria-label="回到个人档案"
+                title="回到个人档案"
+              >
+                <Avatar src={avatarSource(displayUser)} name={currentUser.nickname || currentUser.username} className="pj-avatar-img" />
+              </button>
               {onContinuePlanning && (
                 <button type="button" onClick={onContinuePlanning} className="pj-new-plan">
                   <Plus aria-hidden="true" />
@@ -454,7 +473,6 @@ export default function ProfileScreen({
             <section className="pj-passport" aria-labelledby="profile-heading">
               <div className="profile-landscape pj-cover">
                 <CoverRoute />
-                <CoverStamp />
                 <div className="pj-cover-copy">
                   <span className="pj-cover-kicker">{story.english} / THE TRAVEL JOURNAL</span>
                   <div className="pj-cover-title">
@@ -463,6 +481,7 @@ export default function ProfileScreen({
                   </div>
                 </div>
               </div>
+              <CoverStamp />
 
               <div className="pj-passport-body">
                 <div className="pj-identity">
@@ -493,8 +512,11 @@ export default function ProfileScreen({
                       >
                         <Edit3 aria-hidden="true" />
                       </button>
+                      <button type="button" className="pj-change-avatar" onClick={() => setShowUploader(true)}>
+                        <Camera aria-hidden="true" />更换头像
+                      </button>
                     </div>
-                    <p className="pj-handle">@{currentUser.username}</p>
+                    <p className="pj-handle">@{currentUser.nickname || currentUser.username}</p>
                     <button
                       type="button"
                       className={`pj-signature${currentUser.signature ? '' : ' is-empty'}`}
@@ -543,7 +565,7 @@ export default function ProfileScreen({
                   <div className="pj-progress-ring" style={{ '--pj-progress': `${profileCompletion}%` } as React.CSSProperties} aria-label={`资料完整度 ${profileCompletion}%`}>
                     <span>{profileCompletion}<small>%</small></span>
                   </div>
-                  <span className="pj-progress-label">资料完整度<br />旅行档案</span>
+                  <span className="pj-progress-label">资料完整度</span>
                 </div>
                 <button
                   type="button"
@@ -564,11 +586,8 @@ export default function ProfileScreen({
             <div className="pj-workspace">
               <section className="pj-ledger" aria-labelledby="trips-heading">
                 <div className="pj-section-head">
-                  <div>
-                    <span className="pj-eyebrow">TRAVEL LEDGER</span>
-                    <h2 id="trips-heading">我的路书</h2>
-                  </div>
-                  <span className="pj-count">{filteredTrips.length} / {trips.length} 篇</span>
+                  <h2 id="trips-heading">我的路书</h2>
+                  <span className="pj-count"><BookOpen aria-hidden="true" />{filteredTrips.length} / {trips.length} 篇</span>
                 </div>
 
                 <div className="pj-ledger-tools">
@@ -611,8 +630,6 @@ export default function ProfileScreen({
                     const title = tripTitle(trip, parsed);
                     const days = routeDays(parsed);
                     const isShared = isTripShared(trip);
-                    const firstName = textValue(nodes[0]?.name || nodes[0]?.location, '起点');
-                    const lastName = textValue(nodes[nodes.length - 1]?.name || nodes[nodes.length - 1]?.location, '终点');
                     return (
                       <article key={trip.ID} className={`pj-trip-card${isOpen ? ' is-open' : ''}`}>
                         <div className="pj-trip-head">
@@ -647,23 +664,24 @@ export default function ProfileScreen({
                           <i aria-hidden="true" />
                           <span><Clock3 aria-hidden="true" />{tripDate(textValue(trip.CreatedAt))}</span>
                           <i aria-hidden="true" />
-                          <span>{days || 1} 天 · {nodes.length} 个停留点</span>
+                          <span><Compass aria-hidden="true" />{days || 1} 天 · {nodes.length} 个停留点</span>
                         </div>
 
                         <div className="pj-trip-foot">
                           <div className="pj-node-track" title={nodes.map((node) => textValue(node?.name || node?.location)).filter(Boolean).join(' · ')}>
                             {nodes.length > 0 ? (
-                              nodes.length > 1 ? (
-                                <>
-                                  <span className="pj-track-end">起点</span>
-                                  <span className="pj-track-node">{firstName}</span>
-                                  <span className="pj-track-line" aria-hidden="true"><i /><i /><i /></span>
-                                  <span className="pj-track-node">{lastName}</span>
-                                  <span className="pj-track-end">终点</span>
-                                </>
-                              ) : (
-                                <span className="pj-track-node">{firstName} · 1 个节点</span>
-                              )
+                              <>
+                                <span className="pj-track-end">起点</span>
+                                <span className="pj-track-hub" aria-hidden="true" />
+                                <span className="pj-track-line" aria-hidden="true">
+                                  {nodes.slice(0, 5).map((node, index) => (
+                                    <i key={`${trip.ID}-track-${index}`} />
+                                  ))}
+                                  {nodes.length > 5 && <em>+{nodes.length - 5}</em>}
+                                </span>
+                                <span className="pj-track-arrow" aria-hidden="true">▶</span>
+                                <span className="pj-track-end">终点</span>
+                              </>
                             ) : (
                               <span className="pj-track-node">路线节点待补充</span>
                             )}
