@@ -445,6 +445,7 @@ export default function ContextualLobby() {
         roomCode={roomCode}
         onBack={() => setShowProfile(false)}
         onContinuePlanning={() => { setShowProfile(false); setShowWorkspace(true); }}
+        onOpenCommunity={() => { setShowProfile(false); setShowCommunity(true); }}
         onProfileChange={(patch) => updateProfile(patch)}
       />
     );

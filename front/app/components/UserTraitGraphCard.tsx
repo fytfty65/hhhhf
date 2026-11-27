@@ -75,10 +75,10 @@ const TONE: Record<
 > = {
   accent: {
     fill: '#FFFFFF',
-    activeFill: '#FFF7ED',
-    stroke: '#F97316',
-    text: '#C2410C',
-    badgeBg: '#FFEDD5',
+    activeFill: 'var(--pj-soft, #FFF7ED)',
+    stroke: 'var(--pj-accent, #F97316)',
+    text: 'var(--pj-accent-ink, #C2410C)',
+    badgeBg: 'var(--pj-soft, #FFEDD5)',
   },
   good: {
     fill: '#FFFFFF',
@@ -337,6 +337,26 @@ export default function UserTraitGraphCard({
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ id: number; x: number; y: number; ox: number; oy: number } | null>(null);
+  const starCanvasRef = useRef<HTMLDivElement | null>(null);
+
+  // 移动端星图保留完整信息密度，靠横向滑动查看；首次进入默认居中聚焦。
+  useEffect(() => {
+    const el = starCanvasRef.current;
+    if (!el) return;
+    const center = () => {
+      if (window.matchMedia('(max-width: 767px)').matches && el.scrollWidth > el.clientWidth) {
+        el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2;
+      } else {
+        el.scrollLeft = 0;
+      }
+    };
+    const timer = window.setTimeout(center, 60);
+    window.addEventListener('resize', center);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('resize', center);
+    };
+  }, [graph]);
 
   // 新增状态 1：多人协同房间交集对比模式
   const [roomCompareMode, setRoomCompareMode] = useState(false);
@@ -555,7 +575,7 @@ export default function UserTraitGraphCard({
       data-testid="user-trait-graph"
     >
       {/* 顶部标题区 + 房间协同交集对比开关 */}
-      <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-stone-100">
+      <div className="pj-star-head flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-stone-100">
         <div className="min-w-0">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-orange-50 border border-orange-200/60 text-[11px] font-bold text-orange-600 tracking-wide">
             <Compass className="w-3.5 h-3.5" />
@@ -689,7 +709,7 @@ export default function UserTraitGraphCard({
       {!loading && !error && !isEmpty && (
         <>
           {/* 顶部指标条与分段过滤器 */}
-          <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
+          <div className="pj-star-controls mt-5 flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-wrap items-center gap-2.5">
               <div className="flex items-center gap-2 rounded-xl bg-paper-hover border border-stone-200/70 px-3.5 py-1.5">
                 <Layers className="w-3.5 h-3.5 text-orange-500" />
@@ -805,10 +825,10 @@ export default function UserTraitGraphCard({
           {/* 主体双栏：左侧双环星图画布 + 右侧 Bento 交互洞察面板
               高度必须固定：悬停节点会切换右侧内容，若高度随内容变化，画布就会被拉伸、
               节点随之位移，鼠标脱离节点后内容又缩回去，形成hover抖动/闪烁。 */}
-          <div className="mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_316px] lg:items-stretch lg:h-[560px]">
+          <div className="pj-star-layout mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_316px] lg:items-stretch lg:h-[480px]">
             {/* 左侧 SVG 星图容器 */}
             <div
-              className="relative min-w-0 overflow-hidden rounded-2xl border border-stone-200/80 bg-paper-hover shadow-inner flex flex-col justify-between"
+              className="pj-star-canvas relative min-w-0 overflow-hidden rounded-2xl border border-stone-200/80 bg-paper-hover shadow-inner flex flex-col justify-between"
             >
               {/* 画布左上角动态图例说明 */}
               <div className="pointer-events-none absolute top-3.5 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold">
@@ -823,6 +843,8 @@ export default function UserTraitGraphCard({
                   </span>
                 </div>
 
+                <span className="pj-star-swipe-hint">左右滑动查看完整星图</span>
+
                 {roomCompareMode && (
                   <span className="inline-flex items-center gap-1.5 bg-amber-50/95 backdrop-blur-xs px-3 py-1 rounded-full border border-amber-300/80 text-amber-800 font-bold shadow-2xs">
                     <span className="w-2 h-2 rounded-full bg-orange-500" />
@@ -831,13 +853,14 @@ export default function UserTraitGraphCard({
                 )}
               </div>
 
-              <svg
-                viewBox={`${box.x} ${box.y} ${box.w} ${box.h}`}
-                className="w-full h-full min-h-[390px] select-none"
-                style={{
-                  cursor: view.scale > 1 ? (dragging ? 'grabbing' : 'grab') : 'default',
-                  touchAction: 'pan-y',
-                }}
+              <div ref={starCanvasRef} className="pj-star-scroll relative min-h-0 flex-1">
+                <svg
+                  viewBox={`${box.x} ${box.y} ${box.w} ${box.h}`}
+                  className="w-full h-full min-h-[390px] select-none"
+                  style={{
+                    cursor: view.scale > 1 ? (dragging ? 'grabbing' : 'grab') : 'default',
+                    touchAction: 'pan-x pan-y',
+                  }}
                 role="img"
                 aria-label={`你的旅行特征图谱，共 ${nodes.length} 个节点，基于 ${samples} 条记录`}
                 data-testid="trait-graph-svg"
@@ -854,22 +877,22 @@ export default function UserTraitGraphCard({
                     height={22}
                     patternUnits="userSpaceOnUse"
                   >
-                    <circle cx={1.5} cy={1.5} r={1} fill="#D6D3D1" opacity={0.55} />
+                    <circle cx={1.5} cy={1.5} r={1} fill="var(--pj-line-strong, #D6D3D1)" opacity={0.55} />
                   </pattern>
 
                   <radialGradient id={`${uid}-center-glow`} cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stopColor="#F97316" stopOpacity="0.18" />
-                    <stop offset="55%" stopColor="#F97316" stopOpacity="0.05" />
-                    <stop offset="100%" stopColor="#FAF8F5" stopOpacity="0" />
+                    <stop offset="0%" stopColor="var(--pj-accent, #F97316)" stopOpacity="0.16" />
+                    <stop offset="55%" stopColor="var(--pj-accent, #F97316)" stopOpacity="0.05" />
+                    <stop offset="100%" stopColor="var(--pj-subtle, #FAF8F5)" stopOpacity="0" />
                   </radialGradient>
 
                   <linearGradient id={`${uid}-core-grad`} x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#FB923C" />
-                    <stop offset="100%" stopColor="#EA580C" />
+                    <stop offset="0%" stopColor="var(--pj-accent, #FB923C)" />
+                    <stop offset="100%" stopColor="var(--pj-accent-ink, #EA580C)" />
                   </linearGradient>
                 </defs>
 
-                <rect x={box.x} y={box.y} width={box.w} height={box.h} fill="#FAF8F5" />
+                <rect x={box.x} y={box.y} width={box.w} height={box.h} fill="var(--pj-subtle, #FAF8F5)" />
                 <rect
                   x={box.x}
                   y={box.y}
@@ -889,7 +912,7 @@ export default function UserTraitGraphCard({
                     rx={INNER_ORBIT_R * 1.15}
                     ry={INNER_ORBIT_R * 0.88}
                     fill="none"
-                    stroke={roomCompareMode ? '#FDBA74' : '#E7E5E4'}
+                    stroke={roomCompareMode ? 'var(--pj-border, #FDBA74)' : 'var(--pj-line, #E7E5E4)'}
                     strokeWidth={1.2}
                     strokeDasharray="4 6"
                   />
@@ -899,7 +922,7 @@ export default function UserTraitGraphCard({
                     rx={OUTER_ORBIT_R * 1.22}
                     ry={OUTER_ORBIT_R * 0.86}
                     fill="none"
-                    stroke="#E7E5E4"
+                    stroke="var(--pj-line, #E7E5E4)"
                     strokeWidth={1}
                     strokeDasharray="2 8"
                     opacity={0.75}
@@ -931,7 +954,7 @@ export default function UserTraitGraphCard({
                         <path
                           d={d}
                           fill="none"
-                          stroke={highlightInRoom ? '#F97316' : tone.stroke}
+                          stroke={highlightInRoom ? 'var(--pj-accent, #F97316)' : tone.stroke}
                           strokeWidth={isFocus || highlightInRoom ? strokeW + 1 : strokeW}
                           strokeOpacity={
                             dimmed ? 0.08 : isFocus || highlightInRoom ? 0.82 : 0.28
@@ -942,7 +965,7 @@ export default function UserTraitGraphCard({
                           <path
                             d={d}
                             fill="none"
-                            stroke={highlightInRoom ? '#EA580C' : tone.stroke}
+                            stroke={highlightInRoom ? 'var(--pj-accent-ink, #EA580C)' : tone.stroke}
                             strokeWidth={2.2}
                             strokeDasharray="5 6"
                             strokeLinecap="round"
@@ -967,7 +990,7 @@ export default function UserTraitGraphCard({
                       cy={CY}
                       r={SELF_R + 12}
                       fill="none"
-                      stroke="#F97316"
+                      stroke="var(--pj-accent, #F97316)"
                       strokeWidth={1.3}
                       strokeDasharray={roomCompareMode ? '6 4' : '3 6'}
                       opacity={0.55}
@@ -977,7 +1000,7 @@ export default function UserTraitGraphCard({
                       cy={CY}
                       r={SELF_R + 4}
                       fill="#FFFFFF"
-                      stroke="#FED7AA"
+                      stroke="var(--pj-border, #FED7AA)"
                       strokeWidth={1.5}
                     />
                     <circle cx={CX} cy={CY} r={SELF_R} fill={`url(#${uid}-core-grad)`} />
@@ -997,7 +1020,7 @@ export default function UserTraitGraphCard({
                       textAnchor="middle"
                       fontSize={9}
                       fontWeight={700}
-                      fill="#FFEDD5"
+                      fill="var(--pj-soft, #FFEDD5)"
                       letterSpacing={0.6}
                     >
                       {roomCompareMode ? activeRoomCode : 'CORE'}
@@ -1089,8 +1112,8 @@ export default function UserTraitGraphCard({
                               isFocus || isSelected
                                 ? tone.stroke
                                 : highlightInRoom
-                                  ? '#F97316'
-                                  : '#E7E5E4'
+                                  ? 'var(--pj-accent, #F97316)'
+                                  : 'var(--pj-line, #E7E5E4)'
                             }
                             strokeWidth={isFocus || isSelected || highlightInRoom ? 2 : 1.2}
                           />
@@ -1110,7 +1133,7 @@ export default function UserTraitGraphCard({
                             textAnchor="middle"
                             fontSize={item.orbit === 'inner' ? 13 : 12.5}
                             fontWeight={700}
-                            fill={isFocus || isSelected ? tone.text : '#292524'}
+                            fill={isFocus || isSelected ? tone.text : 'var(--pj-ink, #292524)'}
                           >
                             {item.label}
                           </text>
@@ -1148,7 +1171,7 @@ export default function UserTraitGraphCard({
                                 width={34}
                                 height={15}
                                 rx={7.5}
-                                fill="#F97316"
+                                fill="var(--pj-accent, #F97316)"
                               />
                               <text
                                 x={item.x + item.w / 2 - 9}
@@ -1168,6 +1191,7 @@ export default function UserTraitGraphCard({
                   })}
                 </g>
               </svg>
+              </div>
 
               {/* 分类为空浮层 */}
               {filtered.length === 0 && (
@@ -1179,7 +1203,7 @@ export default function UserTraitGraphCard({
               )}
 
               {/* 底部画布图例栏 */}
-              <div className="px-4 py-2.5 bg-white/90 backdrop-blur-xs border-t border-stone-200/60 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-stone-500">
+              <div className="pj-star-legend px-4 py-2.5 bg-white/90 backdrop-blur-xs border-t border-stone-200/60 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-stone-500">
                 <div className="flex flex-wrap items-center gap-3">
                   {Object.entries(RELATION_META).map(([relation, item]) => (
                     <span key={relation} className="inline-flex items-center gap-1.5">

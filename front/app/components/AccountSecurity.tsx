@@ -1,15 +1,15 @@
 'use client';
 
 /**
- * 账号安全：改密、设备会话与"退出所有设备"。
+ * 账号安全：改密、设备会话与「退出所有设备」。
  *
  * 后端已经把凭证拆成短期 access token + HttpOnly refresh cookie，并记录了
- * 每个设备的会话；这里把这些能力真正呈现给用户，否则"能撤销"只存在于 API 里。
+ * 每个设备的会话；这里把这些能力真正呈现给用户，否则「能撤销」只存在于 API 里。
  * 所有金额无关，故不涉及 precision；时间直接显示本地时区。
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { AlertCircle, Check, LogOut, RefreshCw, ShieldCheck, Smartphone } from 'lucide-react';
+import { AlertCircle, Check, Eye, EyeOff, LogOut, Monitor, RefreshCw, ShieldCheck } from 'lucide-react';
 import { apiJson } from '../lib/apiClient';
 
 type DeviceSession = {
@@ -47,6 +47,8 @@ export default function AccountSecurity({ className = '' }: { className?: string
   const [message, setMessage] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
@@ -126,79 +128,104 @@ export default function AccountSecurity({ className = '' }: { className?: string
   };
 
   return (
-    <section className={`${className}`} aria-labelledby="security-heading" data-testid="account-security">
-      <div className="flex items-center justify-between gap-2">
-        <h2 id="security-heading" className="inline-flex items-center gap-2 text-sm font-black text-slate-900">
-          <ShieldCheck className="h-4 w-4 text-orange-500" /> 账号安全
-        </h2>
-        <button type="button" onClick={() => void loadSessions()} disabled={loading || busy}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
-          title="刷新会话列表" aria-label="刷新会话列表">
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+    <section className={className} aria-labelledby="security-heading" data-testid="account-security">
+      <div className="pj-side-head">
+        <h2 id="security-heading"><ShieldCheck aria-hidden="true" />账号安全</h2>
+        <button
+          type="button"
+          onClick={() => void loadSessions()}
+          disabled={loading || busy}
+          className="pj-icon-button"
+          title="刷新会话列表"
+          aria-label="刷新会话列表"
+        >
+          <RefreshCw className={loading ? 'pj-spin' : undefined} aria-hidden="true" />
         </button>
       </div>
 
-      {error && (
-        <div role="alert" className="mt-3 flex items-start gap-2 border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-bold text-rose-700">
-          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}
-        </div>
-      )}
-      {message && (
-        <div role="status" className="mt-3 flex items-start gap-2 border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-700">
-          <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />{message}
+      {(error || message) && (
+        <div className="pj-sec-errors">
+          {error && (
+            <div role="alert" className="pj-sec-error"><AlertCircle aria-hidden="true" />{error}</div>
+          )}
+          {message && (
+            <div role="status" className="pj-sec-message"><Check aria-hidden="true" />{message}</div>
+          )}
         </div>
       )}
 
-      <form onSubmit={changePassword} className="mt-4 space-y-2.5">
-        <label className="block">
-          <span className="mb-1 block text-[11px] font-bold text-slate-600">当前密码</span>
-          <input type="password" autoComplete="current-password" value={currentPassword}
-            onChange={(event) => setCurrentPassword(event.target.value)}
-            className="h-10 w-full border border-slate-200 bg-slate-50 px-3 text-xs outline-none focus:border-orange-400 focus:bg-white focus:ring-2 focus:ring-orange-100" />
+      <form onSubmit={changePassword} className="pj-sec-form">
+        <label className="pj-sec-field">
+          <span>当前密码</span>
+          <div className="pj-password-wrap">
+            <input
+              type={showCurrentPassword ? 'text' : 'password'}
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(event) => setCurrentPassword(event.target.value)}
+            />
+            <button
+              type="button"
+              className="pj-password-toggle"
+              onClick={() => setShowCurrentPassword((value) => !value)}
+              aria-label={showCurrentPassword ? '隐藏当前密码' : '显示当前密码'}
+              title={showCurrentPassword ? '隐藏当前密码' : '显示当前密码'}
+            >
+              {showCurrentPassword ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+            </button>
+          </div>
         </label>
-        <label className="block">
-          <span className="mb-1 block text-[11px] font-bold text-slate-600">新密码</span>
-          <input type="password" autoComplete="new-password" value={newPassword}
-            onChange={(event) => setNewPassword(event.target.value)}
-            className="h-10 w-full border border-slate-200 bg-slate-50 px-3 text-xs outline-none focus:border-orange-400 focus:bg-white focus:ring-2 focus:ring-orange-100" />
+        <label className="pj-sec-field">
+          <span>新密码</span>
+          <div className="pj-password-wrap">
+            <input
+              type={showNewPassword ? 'text' : 'password'}
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(event) => setNewPassword(event.target.value)}
+            />
+            <button
+              type="button"
+              className="pj-password-toggle"
+              onClick={() => setShowNewPassword((value) => !value)}
+              aria-label={showNewPassword ? '隐藏新密码' : '显示新密码'}
+              title={showNewPassword ? '隐藏新密码' : '显示新密码'}
+            >
+              {showNewPassword ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+            </button>
+          </div>
         </label>
-        <button type="submit" disabled={busy}
-          className="inline-flex min-h-9 w-full items-center justify-center gap-2 bg-orange-500 px-3 text-xs font-bold text-white transition hover:bg-orange-600 disabled:opacity-60">
-          更新密码
-        </button>
+        <button type="submit" disabled={busy} className="pj-primary-full">更新密码</button>
       </form>
 
-      <div className="mt-4 border-t border-slate-100 pt-3">
-        <p className="text-[11px] font-black uppercase tracking-[0.14em] text-slate-400">已登录设备</p>
+      <div className="pj-sec-devices">
+        <div className="pj-sec-devices-head">
+          <p>已登录设备</p>
+          <span>{sessions.length} 台</span>
+        </div>
         {loading ? (
-          <p className="mt-2 inline-flex items-center gap-2 text-xs font-semibold text-slate-400"><RefreshCw className="h-3.5 w-3.5 animate-spin" />正在同步会话…</p>
+          <p className="pj-device-empty inline-flex items-center gap-1.5"><RefreshCw className="pj-spin" aria-hidden="true" />正在同步会话…</p>
         ) : sessions.length === 0 ? (
-          <p className="mt-2 text-xs leading-5 text-slate-500">当前没有可用的设备会话。</p>
+          <p className="pj-device-empty">当前没有可用的设备会话。</p>
         ) : (
-          <ul className="mt-2 space-y-2">
+          <div className="pj-device-list">
             {sessions.map((session) => (
-              <li key={session.id} className="flex items-start justify-between gap-2 border border-slate-100 bg-slate-50/60 px-2.5 py-2">
-                <div className="min-w-0">
-                  <p className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
-                    <Smartphone className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                    <span className="truncate">{formatDevice(session)}</span>
-                    {session.current && <span className="shrink-0 border border-emerald-200 bg-emerald-50 px-1.5 text-[10px] font-bold text-emerald-700">本机</span>}
+              <div key={session.id} className="pj-device-card">
+                <span className="pj-device-icon" aria-hidden="true"><Monitor /></span>
+                <div className="pj-device-copy">
+                  <p className="pj-device-name">
+                    <span>{formatDevice(session)}</span>
+                    {session.current && <span className="pj-device-now">本机</span>}
                   </p>
-                  <p className="mt-0.5 truncate text-[10px] font-semibold text-slate-400">
-                    {session.ip || '未知 IP'} · 最近使用 {formatTime(session.last_used_at)}
-                  </p>
+                  <p className="pj-device-meta">{session.ip || '未知 IP'} · 最近使用 {formatTime(session.last_used_at)}</p>
                 </div>
-                <button type="button" onClick={() => void revoke(session)} disabled={busy}
-                  className="shrink-0 rounded px-2 py-1 text-[10px] font-bold text-rose-600 transition hover:bg-rose-50 disabled:opacity-50">
-                  退出
-                </button>
-              </li>
+                <button type="button" onClick={() => void revoke(session)} disabled={busy} className="pj-device-exit">退出</button>
+              </div>
             ))}
-          </ul>
+          </div>
         )}
-        <button type="button" onClick={() => void logoutAll()} disabled={busy}
-          className="mt-3 inline-flex min-h-9 w-full items-center justify-center gap-2 border border-rose-200 bg-rose-50 px-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-60">
-          <LogOut className="h-3.5 w-3.5" /> 退出所有设备
+        <button type="button" onClick={() => void logoutAll()} disabled={busy} className="pj-logout-all">
+          <LogOut aria-hidden="true" /> 退出所有设备
         </button>
       </div>
     </section>
