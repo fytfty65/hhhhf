@@ -798,23 +798,25 @@ export default function UserTraitGraphCard({
                   {/* 天体星盘：外圈 360° 刻度尺 */}
                   <circle cx={CX} cy={CY} r={ASTRO_R} fill="none" stroke="var(--pj-line-strong, #D6D3D1)" strokeWidth={1} />
                   <circle cx={CX} cy={CY} r={ASTRO_R - 8} fill="none" stroke="var(--pj-line, #E7E5E4)" strokeWidth={0.8} />
-                  {Array.from({ length: 72 }, (_, index) => {
-                    const angle = ((index * 5) - 90) * Math.PI / 180;
-                    const major = index % 6 === 0;
-                    const innerR = ASTRO_R - (major ? 7 : 3);
-                    return (
-                      <line
-                        key={`tick-${index}`}
-                        x1={CX + Math.cos(angle) * ASTRO_R}
-                        y1={CY + Math.sin(angle) * ASTRO_R}
-                        x2={CX + Math.cos(angle) * innerR}
-                        y2={CY + Math.sin(angle) * innerR}
-                        stroke="var(--pj-ink-3, #A8A29E)"
-                        strokeWidth={major ? 1 : 0.6}
-                        opacity={major ? 0.55 : 0.34}
-                      />
-                    );
-                  })}
+                  <g className="pj-star-tick-ring" pointerEvents="none">
+                    {Array.from({ length: 72 }, (_, index) => {
+                      const angle = ((index * 5) - 90) * Math.PI / 180;
+                      const major = index % 6 === 0;
+                      const innerR = ASTRO_R - (major ? 7 : 3);
+                      return (
+                        <line
+                          key={`tick-${index}`}
+                          x1={CX + Math.cos(angle) * ASTRO_R}
+                          y1={CY + Math.sin(angle) * ASTRO_R}
+                          x2={CX + Math.cos(angle) * innerR}
+                          y2={CY + Math.sin(angle) * innerR}
+                          stroke="var(--pj-ink-3, #A8A29E)"
+                          strokeWidth={major ? 1 : 0.6}
+                          opacity={major ? 0.55 : 0.34}
+                        />
+                      );
+                    })}
+                  </g>
                   {Array.from({ length: 12 }, (_, index) => {
                     const angle = ((index * 30) - 90) * Math.PI / 180;
                     return (
@@ -823,7 +825,7 @@ export default function UserTraitGraphCard({
                         x={CX + Math.cos(angle) * (ASTRO_R + 14)}
                         y={CY + Math.sin(angle) * (ASTRO_R + 14) + 3}
                         textAnchor="middle"
-                        fontSize={11}
+                        fontSize={12}
                         fontWeight={500}
                         fill="var(--pj-ink-3, #A8A29E)"
                         fontFamily="var(--pj-mono, ui-monospace, monospace)"                      >
@@ -832,8 +834,25 @@ export default function UserTraitGraphCard({
                     );
                   })}
 
-                  {/* 中心柔光 */}
-                  <circle cx={CX} cy={CY} r={ASTRO_R - 20} fill={`url(#${uid}-center-glow)`} pointerEvents="none" />
+                  {/* 缓慢呼吸的中心柔光与星尘 */}
+                  <circle className="pj-star-core-glow" cx={CX} cy={CY} r={ASTRO_R - 20} fill={`url(#${uid}-center-glow)`} pointerEvents="none" />
+                  <g className="pj-star-dust" pointerEvents="none">
+                    {Array.from({ length: 16 }, (_, index) => {
+                      const angle = ((index * 137.5) - 90) * Math.PI / 180;
+                      const radius = INNER_ORBIT_R + ((index * 31) % Math.max(1, OUTER_ORBIT_R - INNER_ORBIT_R));
+                      return (
+                        <circle
+                          key={`dust-${index}`}
+                          className="pj-star-dust-dot"
+                          cx={CX + Math.cos(angle) * radius}
+                          cy={CY + Math.sin(angle) * radius}
+                          r={index % 4 === 0 ? 1.6 : 1.1}
+                          fill={index % 5 === 0 ? 'var(--pj-accent, #F97316)' : 'var(--pj-ink-3, #A8A29E)'}
+                          style={{ animationDelay: `${-index * 0.48}s` }}
+                        />
+                      );
+                    })}
+                  </g>
 
                   {/* 三条同心轨道与六条放射轴 */}
                   <circle
@@ -868,6 +887,7 @@ export default function UserTraitGraphCard({
                   {placed.length > 2 && (
                     <>
                       <polygon
+                        className="pj-star-web"
                         points={placed.map((item) => `${item.x},${item.y}`).join(' ')}
                         fill="var(--pj-accent, #F97316)"
                         fillOpacity={0.055}
@@ -881,6 +901,7 @@ export default function UserTraitGraphCard({
                         const next = placed[(index + 1) % placed.length];
                         return (
                           <line
+                            className="pj-star-web-line"
                             key={`web-${item.node.id}`}
                             x1={item.x}
                             y1={item.y}
@@ -897,7 +918,7 @@ export default function UserTraitGraphCard({
 
                   {/* 中心节点：单人「你」与房间共识双态 */}
                   <g pointerEvents="none">
-                    <circle cx={CX} cy={CY} r={SELF_R + 9} fill="none" stroke="var(--pj-accent, #F97316)" strokeWidth={0.9} strokeDasharray={roomCompareMode ? '6 4' : '2 5'} opacity={0.45} />
+                    <circle className="pj-star-self-ring" cx={CX} cy={CY} r={SELF_R + 9} fill="none" stroke="var(--pj-accent, #F97316)" strokeWidth={0.9} strokeDasharray={roomCompareMode ? '6 4' : '2 5'} opacity={0.45} />
                     <circle cx={CX} cy={CY} r={SELF_R} fill="var(--pj-soft, #F8ECEF)" stroke="var(--pj-border, #ECD6DC)" strokeWidth={1} />
                     <path
                       d={`M ${CX} ${CY - 13} L ${CX + 3.8} ${CY - 3.8} L ${CX + 13} ${CY} L ${CX + 3.8} ${CY + 3.8} L ${CX} ${CY + 13} L ${CX - 3.8} ${CY + 3.8} L ${CX - 13} ${CY} L ${CX - 3.8} ${CY - 3.8} Z`}
@@ -908,7 +929,7 @@ export default function UserTraitGraphCard({
                       x={CX}
                       y={CY + 26}
                       textAnchor="middle"
-                      fontSize={11}
+                      fontSize={12.5}
                       fontWeight={600}
                       fill="var(--pj-ink-2, #57534E)"
                       letterSpacing={0.6}
@@ -918,7 +939,7 @@ export default function UserTraitGraphCard({
                   </g>
 
                   {/* 发光星子节点层 */}
-                  {placed.map((item) => {
+                  {placed.map((item, index) => {
                     const tone = TONE[item.tone];
                     const isFocus = focusId === item.node.id;
                     const isSelected = selectedId === item.node.id;
@@ -993,11 +1014,13 @@ export default function UserTraitGraphCard({
 
                         {/* 外圈柔和光晕 */}
                         <circle
+                          className="pj-star-node-halo"
                           cx={item.x}
                           cy={item.y}
                           r={radius + (isFocus || isSelected ? 6 : 4)}
                           fill={highlightInRoom ? '#F59E0B' : tone.stroke}
                           opacity={isFocus || isSelected || highlightInRoom ? 0.22 : 0.14}
+                          style={{ animationDelay: `${(index % 7) * 0.42}s` }}
                         />
 
                         {/* 四芒星节点 */}
@@ -1022,10 +1045,10 @@ export default function UserTraitGraphCard({
                           x={labelX}
                           y={labelY}
                           textAnchor={labelAnchor}
-                          fontSize={15}
+                          fontSize={17}
                           fontWeight={isFocus || isSelected ? 700 : 600}
                           fill={isFocus || isSelected ? tone.stroke : 'var(--pj-ink, #1F2328)'}
-                          fontFamily="var(--pj-serif, 'Noto Serif SC', serif)"
+                          fontFamily="var(--pj-sans, 'Noto Sans SC', sans-serif)"
                           paintOrder="stroke"
                           stroke="#FFFFFF"
                           strokeWidth={2.2}
@@ -1040,7 +1063,7 @@ export default function UserTraitGraphCard({
                             x={item.x}
                             y={item.y - radius - 8}
                             textAnchor="middle"
-                            fontSize={8}
+                            fontSize={9.5}
                             fontWeight={800}
                             fill="#B45309"
                           >

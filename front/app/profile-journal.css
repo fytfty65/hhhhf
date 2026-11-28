@@ -27,8 +27,8 @@
   --pj-risk-soft: #fdf0f2;
   --pj-shadow-card: 0 12px 32px -12px rgba(31, 24, 28, .05), 0 2px 6px -1px rgba(31, 24, 28, .02);
   --pj-shadow-card-hover: 0 18px 40px -14px rgba(166, 63, 86, .10), 0 4px 12px -2px rgba(31, 24, 28, .03);
-  --pj-serif: 'Noto Serif SC', 'Songti SC', 'STSong', SimSun, serif;
-  --pj-sans: 'Inter', 'PingFang SC', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --pj-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', SimSun, serif;
+  --pj-sans: 'Noto Sans SC', 'HarmonyOS Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei UI', 'Segoe UI', 'Microsoft YaHei', sans-serif;
   --pj-mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace;
   --accent: var(--pj-accent);
   --accent-ink: var(--pj-accent-ink);
@@ -2786,3 +2786,211 @@
   .profile-journal *::before,
   .profile-journal *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+/* ==========================================================================
+   Typography polish — larger, softer, easier to read
+   ========================================================================== */
+
+.profile-journal.profile-page {
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.profile-journal .pj-back { font-size: 15px; }
+.profile-journal .pj-brand-text strong { font-family: var(--pj-sans); font-size: 17px; font-weight: 650; letter-spacing: .01em; }
+.profile-journal .pj-brand-text span { font-size: 12px; }
+.profile-journal .pj-guide-slot button { font-size: 13px; }
+.profile-journal .pj-header-right .journey-season-select { font-size: 12px; }
+.profile-journal .pj-header-right .journey-season-select select { font-size: 12px; }
+.profile-journal .pj-new-plan { min-height: 40px; font-size: 14px; }
+
+.profile-journal .pj-cover-kicker { font-size: 12px; letter-spacing: .15em; }
+.profile-journal .pj-cover-poem { font-size: clamp(28px, 2.2vw, 32px); font-weight: 500; }
+.profile-journal .pj-cover-edition { font-size: 56px; }
+
+.profile-journal .pj-name-row h1 { font-family: var(--pj-sans); font-size: 30px; font-weight: 650; letter-spacing: -.01em; }
+.profile-journal .pj-handle { font-size: 13px; }
+.profile-journal .pj-signature { font-size: 15px; line-height: 1.7; }
+.profile-journal .pj-change-avatar { min-height: 28px; font-size: 12px; }
+.profile-journal .pj-icon-button { width: 28px; height: 28px; }
+.profile-journal .pj-status-pill { min-height: 26px; font-size: 12px; }
+.profile-journal .pj-stat strong { font-size: 32px; }
+.profile-journal .pj-stat > span { font-size: 12.5px; letter-spacing: .03em; }
+
+.profile-journal .pj-ticket-kicker { font-size: 12px; }
+.profile-journal .pj-ticket h2 { font-family: var(--pj-sans); font-size: 21px; font-weight: 650; letter-spacing: -.01em; }
+.profile-journal .pj-ticket p { font-size: 14px; line-height: 1.65; }
+.profile-journal .pj-progress-label { font-size: 13px; }
+.profile-journal .pj-ticket-action { min-height: 42px; font-size: 14px; }
+
+.profile-journal .pj-star-gene-badge,
+.profile-journal .pj-star-fact,
+.profile-journal .pj-star-confidence { min-height: 28px; font-size: 12px; }
+.profile-journal .pj-star-privacy { min-height: 28px; font-size: 13px; }
+.profile-journal .pj-star-room-switch button { min-height: 30px; font-size: 12px; }
+.profile-journal .pj-star-title { font-family: var(--pj-sans); font-size: 28px; font-weight: 650; letter-spacing: -.01em; }
+.profile-journal .pj-star-head > .pj-star-head-copy > p.pj-star-subtitle { font-size: 14px; line-height: 1.7; }
+.profile-journal .pj-star-disclosure { font-size: 12px; line-height: 1.6; }
+.profile-journal .pj-star-legend { font-size: 12px; }
+.profile-journal .pj-star-filter button { min-height: 28px; font-size: 11.5px; }
+.profile-journal .pj-star-zoom-value { font-size: 10.5px; }
+.profile-journal .pj-star-inspector-title h3 { font-family: var(--pj-sans); font-size: 24px; font-weight: 650; }
+.profile-journal .pj-star-inspector-title > span { font-size: 11px; }
+.profile-journal .pj-star-node-kind,
+.profile-journal .pj-star-node-shared { min-height: 26px; font-size: 11px; }
+.profile-journal .pj-star-inspector-empty p,
+.profile-journal .pj-star-inspector-desc { font-size: 14px; line-height: 1.75; }
+.profile-journal .pj-star-empty-hint { font-size: 12px; }
+.profile-journal .pj-star-weight-head > span { font-size: 13px; }
+.profile-journal .pj-star-weight-head strong { font-size: 16px; }
+.profile-journal .pj-star-weight-scale { font-size: 11px; }
+.profile-journal .pj-star-inspector-meta { font-size: 11.5px; }
+.profile-journal .pj-star-remove { min-height: 42px; font-size: 13px; }
+
+.profile-journal .pj-section-head h2 { font-family: var(--pj-sans); font-size: 24px; font-weight: 650; letter-spacing: -.01em; }
+.profile-journal .pj-count { font-size: 13px; }
+.profile-journal .pj-search input { height: 42px; font-size: 14px; }
+.profile-journal .pj-segmented button { min-height: 32px; font-size: 12.5px; }
+.profile-journal .pj-trip-title-row h3 { font-family: var(--pj-sans); font-size: 18px; font-weight: 650; }
+.profile-journal .pj-seal { font-size: 11px; }
+.profile-journal .pj-ghost-btn,
+.profile-journal .pj-share-btn { min-height: 34px; font-size: 13px; }
+.profile-journal .pj-trip-meta { font-size: 13px; }
+.profile-journal .pj-node-track { font-size: 12px; }
+.profile-journal .pj-track-end { font-size: 11px; }
+.profile-journal .pj-track-node { font-size: 12px; }
+
+.profile-journal .pj-side-head h2 { font-family: var(--pj-sans); font-size: 18px; font-weight: 650; }
+.profile-journal .pj-side-desc { font-size: 13.5px; }
+.profile-journal .pj-warn-pill { font-size: 13px; }
+.profile-journal .pj-meter-labels { font-size: 13px; }
+.profile-journal .pj-mini-card p { font-size: 12px; }
+.profile-journal .pj-mini-card strong { font-size: 16px; }
+.profile-journal .pj-footprint-title { font-size: 14px; }
+.profile-journal .pj-footprint-meta { font-size: 12px; }
+.profile-journal .pj-side-empty { font-size: 13px; }
+.profile-journal .pj-sec-field > span { font-size: 13px; }
+.profile-journal .pj-password-wrap input { height: 40px; font-size: 14px; }
+.profile-journal .pj-primary-full { min-height: 42px; font-size: 14px; }
+.profile-journal .pj-sec-devices-head p { font-size: 12px; }
+.profile-journal .pj-device-name { font-size: 13px; }
+.profile-journal .pj-device-meta { font-size: 11.5px; }
+.profile-journal .pj-device-exit { font-size: 12px; }
+.profile-journal .pj-logout-all { min-height: 40px; font-size: 13px; }
+
+.profile-journal .pj-timeline-day { font-size: 11px; }
+.profile-journal .pj-timeline-item h4 { font-size: 14px; }
+.profile-journal .pj-timeline-item p { font-size: 13px; }
+
+@media (max-width: 767px) {
+  .profile-journal.profile-page { font-size: 14px; }
+  .profile-journal .pj-back { font-size: 14px; }
+  .profile-journal .pj-brand-text strong { font-size: 15px; }
+  .profile-journal .pj-name-row h1 { font-size: 24px; }
+  .profile-journal .pj-signature { font-size: 14px; }
+  .profile-journal .pj-stat strong { font-size: 28px; }
+  .profile-journal .pj-stat > span { font-size: 12px; }
+  .profile-journal .pj-ticket h2 { font-size: 19px; }
+  .profile-journal .pj-ticket p { font-size: 13px; }
+  .profile-journal .pj-ticket-action { font-size: 13px; }
+  .profile-journal .pj-star-title { font-size: 23px; }
+  .profile-journal .pj-star-subtitle { font-size: 13px; }
+  .profile-journal .pj-section-head h2 { font-size: 21px; }
+  .profile-journal .pj-trip-meta { font-size: 12px; }
+  .profile-journal .pj-trip-title-row h3 { font-size: 17px; }
+}
+
+
+/* --------------------------------------------------------------------------
+   Living astrolabe — ambient motion, always on
+   -------------------------------------------------------------------------- */
+
+@keyframes pj-star-turn {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pj-star-core-breathe {
+  0%, 100% { opacity: .58; transform: scale(.96); }
+  50% { opacity: .96; transform: scale(1.04); }
+}
+
+@keyframes pj-star-web-breathe {
+  0%, 100% { opacity: .36; }
+  50% { opacity: .78; }
+}
+
+@keyframes pj-star-halo-breathe {
+  0%, 100% { opacity: .16; transform: scale(.94); }
+  50% { opacity: .42; transform: scale(1.08); }
+}
+
+@keyframes pj-star-dust-twinkle {
+  0%, 100% { opacity: .18; transform: scale(.82); }
+  45% { opacity: .72; transform: scale(1.12); }
+}
+
+.pj-star-tick-ring {
+  transform-box: view-box;
+  transform-origin: 400px 270px;
+  animation: pj-star-turn 240s linear infinite;
+  will-change: transform;
+}
+
+.pj-star-self-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pj-star-turn 42s linear infinite;
+}
+
+.pj-star-core-glow {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pj-star-core-breathe 6.5s ease-in-out infinite;
+}
+
+.pj-star-web {
+  animation: pj-star-web-breathe 5.2s ease-in-out infinite;
+}
+
+.pj-star-web-line {
+  animation: pj-star-web-breathe 5.2s ease-in-out infinite;
+  animation-delay: -1.4s;
+}
+
+.pj-star-node-halo {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pj-star-halo-breathe 4.6s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+
+.pj-star-dust-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pj-star-dust-twinkle 3.8s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pj-star-tick-ring,
+  .pj-star-self-ring,
+  .pj-star-core-glow,
+  .pj-star-web,
+  .pj-star-web-line,
+  .pj-star-node-halo,
+  .pj-star-dust-dot {
+    animation: none;
+  }
+}
+
+/* Final legibility pass — functional labels only */
+.profile-journal .pj-ticket-kicker > span { font-size: 11.5px; }
+.profile-journal .pj-star-disclosure { font-size: 13px; }
+.profile-journal .pj-star-filter button { font-size: 12px; }
+.profile-journal .pj-star-filter button span { font-size: 12.5px; }
+.profile-journal .pj-star-zoom-value { font-size: 12px; }
+.profile-journal .pj-track-end { font-size: 12px; }
+.profile-journal .pj-device-now { font-size: 10.5px; padding: 2px 5px; }
+.profile-journal .pj-device-meta { font-size: 12px; }
+.profile-journal .pj-sec-devices-head span { font-size: 12px; }
+
