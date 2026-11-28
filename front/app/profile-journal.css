@@ -14,7 +14,7 @@
   --pj-scrim: rgba(44, 24, 30, .72);
   --pj-ink: #1f2328;
   --pj-ink-2: #57606a;
-  --pj-ink-3: #8c959f;
+  --pj-ink-3: #616b76;
   --pj-line: rgba(31, 35, 40, .07);
   --pj-line-strong: rgba(31, 35, 40, .12);
   --pj-good: #1f6e52;
@@ -28,8 +28,8 @@
   --pj-shadow-card: 0 12px 32px -12px rgba(31, 24, 28, .05), 0 2px 6px -1px rgba(31, 24, 28, .02);
   --pj-shadow-card-hover: 0 18px 40px -14px rgba(166, 63, 86, .10), 0 4px 12px -2px rgba(31, 24, 28, .03);
   --pj-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', SimSun, serif;
-  --pj-sans: 'Noto Sans SC', 'HarmonyOS Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei UI', 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  --pj-mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace;
+  --pj-sans: var(--journal-text-font);
+  --pj-mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, var(--journal-text-font), monospace;
   --accent: var(--pj-accent);
   --accent-ink: var(--pj-accent-ink);
   --accent-soft: var(--pj-soft);
@@ -160,7 +160,7 @@
 }
 
 .pj-brand-text strong {
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 15px;
   font-weight: 600;
   letter-spacing: .02em;
@@ -310,7 +310,7 @@
   z-index: 2;
   margin: 0;
   color: #fffdfa;
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: clamp(26px, 3vw, 38px);
   font-weight: 500;
   line-height: 1.25;
@@ -436,7 +436,7 @@
   margin: 0;
   overflow: hidden;
   color: var(--pj-ink);
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 24px;
   font-weight: 600;
   line-height: 1.35;
@@ -494,7 +494,7 @@
 }
 
 .pj-signature:hover { color: var(--pj-ink); border-bottom-color: var(--pj-line-strong); }
-.pj-signature.is-empty { color: var(--pj-ink-3); font-style: italic; }
+.pj-signature.is-empty { color: var(--pj-ink-3); }
 
 .pj-status-row {
   display: flex;
@@ -563,20 +563,20 @@
 .pj-stat svg { width: 14px; height: 14px; color: var(--pj-accent); opacity: .82; }
 
 .pj-stat strong {
-  color: var(--pj-ink);
-  font-family: var(--pj-serif);
-  font-size: 24px;
-  font-weight: 600;
-  line-height: 1.15;
+  color: var(--pj-accent-ink);
+  font-family: var(--pj-sans);
+  font-size: clamp(24px, 2.1vw, 30px);
+  font-weight: 650;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
 
-.pj-stat span {
-  color: var(--pj-ink-3);
+.pj-stat > span {
+  color: var(--pj-ink-2);
   font-family: var(--pj-sans);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: .04em;
+  font-size: clamp(14px, 1.1vw, 15px);
+  font-weight: 550;
+  line-height: 1.4;
 }
 
 /* ---------- ticket ------------------------------------------------------ */
@@ -631,7 +631,7 @@
 .pj-ticket h2 {
   margin: 6px 0 0;
   color: var(--pj-ink);
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 19px;
   font-weight: 600;
   line-height: 1.35;
@@ -771,10 +771,10 @@
 .profile-journal .pj-astrolabe h2#trait-graph-heading {
   margin-top: 10px;
   color: var(--pj-ink);
-  font-family: var(--pj-serif);
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: .02em;
+  font-family: var(--pj-sans);
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -.01em;
 }
 
 .profile-journal .pj-astrolabe .pj-star-head > div:first-child > p {
@@ -859,7 +859,7 @@
 }
 
 .profile-journal .pj-astrolabe [data-testid='trait-graph-inspector'] h3 {
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 18px;
   font-weight: 600;
 }
@@ -949,7 +949,7 @@
 .pj-section-head h2 {
   margin: 4px 0 0;
   color: var(--pj-ink);
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 22px;
   font-weight: 600;
   letter-spacing: .02em;
@@ -1078,7 +1078,7 @@
   margin: 0;
   overflow: hidden;
   color: var(--pj-ink);
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 16px;
   font-weight: 600;
   line-height: 1.45;
@@ -1352,7 +1352,7 @@
 }
 
 .pj-empty-mark svg { width: 18px; height: 18px; }
-.pj-empty h3 { margin: 11px 0 0; color: var(--pj-ink); font-family: var(--pj-serif); font-size: 16px; font-weight: 600; }
+.pj-empty h3 { margin: 11px 0 0; color: var(--pj-ink); font-family: var(--pj-sans); font-size: 16px; font-weight: 600; }
 .pj-empty p { max-width: 320px; margin: 4px auto 0; color: var(--pj-ink-3); font-size: 10.5px; line-height: 1.7; }
 .pj-empty button { display: inline-flex; align-items: center; gap: 5px; min-height: 31px; margin-top: 13px; padding: 0 12px; border: 1px solid var(--pj-accent); border-radius: 999px; background: var(--pj-accent); color: #fff; font-size: 10px; font-weight: 600; cursor: pointer; }
 .pj-empty button svg { width: 12px; height: 12px; }
@@ -1383,7 +1383,7 @@
   gap: 6px;
   margin: 0;
   color: var(--pj-ink);
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 14px;
   font-weight: 600;
 }
@@ -1437,7 +1437,7 @@
 .pj-mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 11px; }
 .pj-mini-card { padding: 8px 9px; border-radius: 9px; background: #fafbfb; }
 .pj-mini-card p { margin: 0; color: var(--pj-ink-3); font-size: 8.5px; font-weight: 600; }
-.pj-mini-card strong { display: block; margin-top: 2px; overflow: hidden; color: var(--pj-ink); font-family: var(--pj-serif); font-size: 11px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.pj-mini-card strong { display: block; margin-top: 2px; overflow: hidden; color: var(--pj-ink); font-family: var(--pj-sans); font-size: 11px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 
 .pj-footprint-list { display: grid; gap: 0; margin-top: 10px; }
 
@@ -1457,7 +1457,7 @@
 .pj-footprint-item:not(:last-child) { margin-bottom: 1px; }
 .pj-footprint-item:hover .pj-footprint-title { color: var(--pj-accent); }
 .pj-footprint-copy { min-width: 0; }
-.pj-footprint-title { display: block; overflow: hidden; color: var(--pj-ink); font-family: var(--pj-serif); font-size: 11.5px; font-weight: 600; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; transition: color .2s ease; }
+.pj-footprint-title { display: block; overflow: hidden; color: var(--pj-ink); font-family: var(--pj-sans); font-size: 11.5px; font-weight: 600; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; transition: color .2s ease; }
 .pj-footprint-meta { display: block; margin-top: 1px; color: var(--pj-ink-3); font-size: 9px; font-weight: 500; }
 .pj-footprint-item > svg { width: 12px; height: 12px; flex: 0 0 auto; color: var(--pj-ink-3); }
 
@@ -1584,7 +1584,7 @@
 /* ---------- guest card -------------------------------------------------- */
 
 .pj-guest-card { padding: 17px; }
-.pj-guest-card h2 { display: inline-flex; align-items: center; gap: 6px; color: var(--pj-ink); font-family: var(--pj-serif); font-size: 14px; font-weight: 600; }
+.pj-guest-card h2 { display: inline-flex; align-items: center; gap: 6px; color: var(--pj-ink); font-family: var(--pj-sans); font-size: 14px; font-weight: 600; }
 .pj-guest-card h2 svg { width: 14px; height: 14px; color: var(--pj-accent); }
 .pj-guest-card > div:first-child > span { border: 1px solid var(--pj-warn-border); border-radius: 5px; background: var(--pj-warn-soft); color: var(--pj-warn); padding: 2px 6px; font-size: 9px; }
 .pj-guest-card > p { margin-top: 7px; color: var(--pj-ink-3); font-size: 10px; line-height: 1.7; }
@@ -1610,7 +1610,7 @@
   box-shadow: 0 28px 80px -22px rgba(24, 24, 28, .3);
 }
 .pj-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.pj-modal-head h2 { margin: 0; color: var(--pj-ink); font-family: var(--pj-serif); font-size: 19px; font-weight: 600; }
+.pj-modal-head h2 { margin: 0; color: var(--pj-ink); font-family: var(--pj-sans); font-size: 19px; font-weight: 600; }
 .pj-modal-body { display: grid; gap: 13px; margin-top: 17px; }
 .pj-modal-field { display: grid; gap: 5px; }
 .pj-modal-field > span { color: var(--pj-ink-2); font-size: 10px; font-weight: 600; }
@@ -1843,8 +1843,6 @@
   border-left: 1px dashed var(--pj-line-strong);
 }
 .pj-stat svg { width: 15px; height: 15px; }
-.pj-stat strong { font-size: 26px; }
-.pj-stat span { font-size: 11px; }
 
 .pj-ticket {
   min-height: 92px;
@@ -2061,7 +2059,7 @@
 .pj-star-title {
   margin: 14px 0 0;
   color: var(--pj-ink);
-  font-family: var(--pj-serif);
+  font-family: var(--pj-sans);
   font-size: 24px;
   font-weight: 600;
   line-height: 1.4;
@@ -2150,7 +2148,7 @@
   min-height: 0;
 }
 
-.pj-star-canvas svg { min-height: 380px; height: 100%; }
+.pj-star-scroll > svg { min-height: 380px; height: 100%; }
 
 .pj-star-canvas > .absolute.inset-0 { z-index: 5; }
 
@@ -2318,7 +2316,7 @@
 }
 
 .pj-star-inspector-title svg { color: var(--pj-accent); }
-.pj-star-inspector-title h3 { margin: 0; color: var(--pj-ink); font-family: var(--pj-serif); font-size: 22px; font-weight: 600; line-height: 1.2; }
+.pj-star-inspector-title h3 { margin: 0; color: var(--pj-ink); font-family: var(--pj-sans); font-size: 22px; font-weight: 600; line-height: 1.2; }
 .pj-star-inspector-title > span { margin-left: auto; padding: 3px 7px; border-radius: 999px; background: #fff; color: var(--pj-ink-3); font-size: 10px; white-space: nowrap; }
 
 .pj-star-inspector-desc {
@@ -2509,7 +2507,7 @@
 
 .profile-journal .pj-astrolabe .pj-star-inspector-empty p,
 .profile-journal .pj-astrolabe .pj-star-inspector-desc {
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .profile-journal .pj-astrolabe .pj-star-inspector-empty p { max-width: 210px; }
@@ -2545,7 +2543,6 @@
   .pj-passport-body { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
   .pj-avatar-button { width: 70px; height: 70px; margin-top: -54px; border-radius: 18px; }
   .pj-name-row h1 { font-size: 21px; }
-  .pj-stat strong { font-size: 21px; }
 }
 
 @media (max-width: 767px) {
@@ -2601,7 +2598,7 @@
 
   .pj-astrolabe-section { margin-top: 20px; padding-top: 19px; }
   .profile-journal .pj-astrolabe .pj-star-head { gap: 10px; padding-bottom: 12px; }
-  .profile-journal .pj-astrolabe h2#trait-graph-heading { font-size: 19px; }
+  .profile-journal .pj-astrolabe h2#trait-graph-heading { font-size: 24px; }
   .profile-journal .pj-astrolabe .pj-star-head > div:first-child > p { font-size: 10.5px; }
   .profile-journal .pj-astrolabe .pj-star-controls { padding: 7px; }
   .profile-journal .pj-astrolabe .pj-star-controls > div:first-child { gap: 5px; }
@@ -2747,7 +2744,7 @@
 
   .profile-journal .pj-astrolabe .pj-star-layout { gap: 14px; margin-top: 14px; }
   .pj-star-canvas { min-height: 330px; }
-  .pj-star-canvas svg { min-height: 300px; }
+  .pj-star-scroll > svg { min-height: 300px; }
   .profile-journal .pj-astrolabe .pj-star-scroll > svg { min-width: 680px; }
   .pj-star-bottom { display: block; padding: 8px 10px; }
   .pj-star-legend { gap: 7px; font-size: 10px; }
@@ -2804,104 +2801,98 @@
 .profile-journal .pj-new-plan { min-height: 40px; font-size: 14px; }
 
 .profile-journal .pj-cover-kicker { font-size: 12px; letter-spacing: .15em; }
-.profile-journal .pj-cover-poem { font-size: clamp(28px, 2.2vw, 32px); font-weight: 500; }
+.profile-journal .pj-cover-poem { font-family: var(--journal-cover-font); font-size: clamp(21px, 2.2vw, 32px); font-weight: 400; }
 .profile-journal .pj-cover-edition { font-size: 56px; }
 
-.profile-journal .pj-name-row h1 { font-family: var(--pj-sans); font-size: 30px; font-weight: 650; letter-spacing: -.01em; }
-.profile-journal .pj-handle { font-size: 13px; }
-.profile-journal .pj-signature { font-size: 15px; line-height: 1.7; }
-.profile-journal .pj-change-avatar { min-height: 28px; font-size: 12px; }
+.profile-journal .pj-name-row h1 { font-family: var(--pj-sans); font-size: 32px; font-weight: 650; letter-spacing: -.015em; }
+.profile-journal .pj-handle { font-size: 14px; }
+.profile-journal .pj-signature { font-size: 17px; line-height: 1.7; }
+.profile-journal .pj-change-avatar { min-height: 28px; font-size: 14px; }
 .profile-journal .pj-icon-button { width: 28px; height: 28px; }
-.profile-journal .pj-status-pill { min-height: 26px; font-size: 12px; }
-.profile-journal .pj-stat strong { font-size: 32px; }
-.profile-journal .pj-stat > span { font-size: 12.5px; letter-spacing: .03em; }
+.profile-journal .pj-status-pill { min-height: 26px; font-size: 13px; }
 
 .profile-journal .pj-ticket-kicker { font-size: 12px; }
-.profile-journal .pj-ticket h2 { font-family: var(--pj-sans); font-size: 21px; font-weight: 650; letter-spacing: -.01em; }
-.profile-journal .pj-ticket p { font-size: 14px; line-height: 1.65; }
+.profile-journal .pj-ticket h2 { font-family: var(--pj-sans); font-size: 23px; font-weight: 650; letter-spacing: -.01em; }
+.profile-journal .pj-ticket p { font-size: 16px; line-height: 1.65; }
 .profile-journal .pj-progress-label { font-size: 13px; }
-.profile-journal .pj-ticket-action { min-height: 42px; font-size: 14px; }
+.profile-journal .pj-ticket-action { min-height: 42px; font-size: 15px; }
 
 .profile-journal .pj-star-gene-badge,
 .profile-journal .pj-star-fact,
 .profile-journal .pj-star-confidence { min-height: 28px; font-size: 12px; }
 .profile-journal .pj-star-privacy { min-height: 28px; font-size: 13px; }
 .profile-journal .pj-star-room-switch button { min-height: 30px; font-size: 12px; }
-.profile-journal .pj-star-title { font-family: var(--pj-sans); font-size: 28px; font-weight: 650; letter-spacing: -.01em; }
-.profile-journal .pj-star-head > .pj-star-head-copy > p.pj-star-subtitle { font-size: 14px; line-height: 1.7; }
-.profile-journal .pj-star-disclosure { font-size: 12px; line-height: 1.6; }
-.profile-journal .pj-star-legend { font-size: 12px; }
-.profile-journal .pj-star-filter button { min-height: 28px; font-size: 11.5px; }
+.profile-journal .pj-astrolabe .pj-star-head > .pj-star-head-copy > p.pj-star-subtitle { color: var(--pj-ink-2); font-size: 16px; line-height: 1.7; }
+.profile-journal .pj-star-disclosure { font-size: 14px; line-height: 1.6; }
+.profile-journal .pj-star-legend { font-size: 13px; }
+.profile-journal .pj-star-filter button { min-height: 28px; font-size: 13px; }
 .profile-journal .pj-star-zoom-value { font-size: 10.5px; }
 .profile-journal .pj-star-inspector-title h3 { font-family: var(--pj-sans); font-size: 24px; font-weight: 650; }
 .profile-journal .pj-star-inspector-title > span { font-size: 11px; }
 .profile-journal .pj-star-node-kind,
 .profile-journal .pj-star-node-shared { min-height: 26px; font-size: 11px; }
 .profile-journal .pj-star-inspector-empty p,
-.profile-journal .pj-star-inspector-desc { font-size: 14px; line-height: 1.75; }
-.profile-journal .pj-star-empty-hint { font-size: 12px; }
-.profile-journal .pj-star-weight-head > span { font-size: 13px; }
+.profile-journal .pj-star-inspector-desc { font-size: 15px; line-height: 1.75; }
+.profile-journal .pj-star-empty-hint { font-size: 14px; }
+.profile-journal .pj-star-weight-head > span { font-size: 14px; }
 .profile-journal .pj-star-weight-head strong { font-size: 16px; }
 .profile-journal .pj-star-weight-scale { font-size: 11px; }
-.profile-journal .pj-star-inspector-meta { font-size: 11.5px; }
-.profile-journal .pj-star-remove { min-height: 42px; font-size: 13px; }
+.profile-journal .pj-star-inspector-meta { font-size: 13px; }
+.profile-journal .pj-star-remove { min-height: 42px; font-size: 14px; }
 
-.profile-journal .pj-section-head h2 { font-family: var(--pj-sans); font-size: 24px; font-weight: 650; letter-spacing: -.01em; }
-.profile-journal .pj-count { font-size: 13px; }
-.profile-journal .pj-search input { height: 42px; font-size: 14px; }
-.profile-journal .pj-segmented button { min-height: 32px; font-size: 12.5px; }
-.profile-journal .pj-trip-title-row h3 { font-family: var(--pj-sans); font-size: 18px; font-weight: 650; }
+.profile-journal .pj-section-head h2 { font-family: var(--pj-sans); font-size: 26px; font-weight: 650; letter-spacing: -.01em; }
+.profile-journal .pj-count { font-size: 14px; }
+.profile-journal .pj-search input { height: 42px; font-size: 16px; }
+.profile-journal .pj-segmented button { min-height: 32px; font-size: 14px; }
+.profile-journal .pj-trip-title-row h3 { font-family: var(--pj-sans); font-size: 20px; font-weight: 650; }
 .profile-journal .pj-seal { font-size: 11px; }
 .profile-journal .pj-ghost-btn,
-.profile-journal .pj-share-btn { min-height: 34px; font-size: 13px; }
-.profile-journal .pj-trip-meta { font-size: 13px; }
-.profile-journal .pj-node-track { font-size: 12px; }
+.profile-journal .pj-share-btn { min-height: 34px; font-size: 14px; }
+.profile-journal .pj-trip-meta { font-size: 14px; }
+.profile-journal .pj-node-track { font-size: 13px; }
 .profile-journal .pj-track-end { font-size: 11px; }
-.profile-journal .pj-track-node { font-size: 12px; }
+.profile-journal .pj-track-node { font-size: 13px; }
 
-.profile-journal .pj-side-head h2 { font-family: var(--pj-sans); font-size: 18px; font-weight: 650; }
-.profile-journal .pj-side-desc { font-size: 13.5px; }
+.profile-journal .pj-side-head h2 { font-family: var(--pj-sans); font-size: 20px; font-weight: 650; }
+.profile-journal .pj-side-desc { font-size: 15px; }
 .profile-journal .pj-warn-pill { font-size: 13px; }
 .profile-journal .pj-meter-labels { font-size: 13px; }
 .profile-journal .pj-mini-card p { font-size: 12px; }
 .profile-journal .pj-mini-card strong { font-size: 16px; }
 .profile-journal .pj-footprint-title { font-size: 14px; }
 .profile-journal .pj-footprint-meta { font-size: 12px; }
-.profile-journal .pj-side-empty { font-size: 13px; }
-.profile-journal .pj-sec-field > span { font-size: 13px; }
-.profile-journal .pj-password-wrap input { height: 40px; font-size: 14px; }
+.profile-journal .pj-side-empty { font-size: 14px; }
+.profile-journal .pj-sec-field > span { font-size: 14px; }
+.profile-journal .pj-password-wrap input { height: 40px; font-size: 16px; }
 .profile-journal .pj-primary-full { min-height: 42px; font-size: 14px; }
 .profile-journal .pj-sec-devices-head p { font-size: 12px; }
 .profile-journal .pj-device-name { font-size: 13px; }
-.profile-journal .pj-device-meta { font-size: 11.5px; }
+.profile-journal .pj-device-meta { font-size: 13px; }
 .profile-journal .pj-device-exit { font-size: 12px; }
 .profile-journal .pj-logout-all { min-height: 40px; font-size: 13px; }
 
 .profile-journal .pj-timeline-day { font-size: 11px; }
-.profile-journal .pj-timeline-item h4 { font-size: 14px; }
-.profile-journal .pj-timeline-item p { font-size: 13px; }
+.profile-journal .pj-timeline-item h4 { font-size: 16px; }
+.profile-journal .pj-timeline-item p { font-size: 15px; }
 
 @media (max-width: 767px) {
   .profile-journal.profile-page { font-size: 14px; }
   .profile-journal .pj-back { font-size: 14px; }
   .profile-journal .pj-brand-text strong { font-size: 15px; }
-  .profile-journal .pj-name-row h1 { font-size: 24px; }
-  .profile-journal .pj-signature { font-size: 14px; }
-  .profile-journal .pj-stat strong { font-size: 28px; }
-  .profile-journal .pj-stat > span { font-size: 12px; }
-  .profile-journal .pj-ticket h2 { font-size: 19px; }
-  .profile-journal .pj-ticket p { font-size: 13px; }
-  .profile-journal .pj-ticket-action { font-size: 13px; }
-  .profile-journal .pj-star-title { font-size: 23px; }
-  .profile-journal .pj-star-subtitle { font-size: 13px; }
-  .profile-journal .pj-section-head h2 { font-size: 21px; }
-  .profile-journal .pj-trip-meta { font-size: 12px; }
-  .profile-journal .pj-trip-title-row h3 { font-size: 17px; }
+  .profile-journal .pj-name-row h1 { font-size: 27px; }
+  .profile-journal .pj-signature { font-size: 17px; }
+  .profile-journal .pj-ticket h2 { font-size: 23px; }
+  .profile-journal .pj-ticket p { font-size: 16px; }
+  .profile-journal .pj-ticket-action { font-size: 15px; }
+  .profile-journal .pj-astrolabe .pj-star-head > .pj-star-head-copy > p.pj-star-subtitle { font-size: 15px; }
+  .profile-journal .pj-section-head h2 { font-size: 26px; }
+  .profile-journal .pj-trip-meta { font-size: 14px; }
+  .profile-journal .pj-trip-title-row h3 { font-size: 20px; }
 }
 
 
 /* --------------------------------------------------------------------------
-   Living astrolabe — ambient motion, always on
+   Living astrolabe — signals travel along the rings and the selected connection
    -------------------------------------------------------------------------- */
 
 @keyframes pj-star-turn {
@@ -2932,8 +2923,47 @@
 .pj-star-tick-ring {
   transform-box: view-box;
   transform-origin: 400px 270px;
-  animation: pj-star-turn 240s linear infinite;
+  animation: pj-star-turn 96s linear infinite;
   will-change: transform;
+}
+
+.pj-star-comet {
+  transform-box: view-box;
+  transform-origin: 400px 270px;
+  animation: pj-star-turn 15s linear -2s infinite;
+}
+.pj-star-comet.is-inner { animation: pj-star-turn 11s linear -5s infinite reverse; }
+.pj-star-comet-wake, .pj-star-comet-tail { fill: none; stroke: var(--pj-accent); stroke-linecap: round; }
+.pj-star-comet-wake { stroke-width: 2; opacity: .32; }
+.pj-star-comet-tail { stroke-width: 3; stroke-dasharray: 68 100; stroke-dashoffset: -32; opacity: .7; }
+.pj-star-comet-head { fill: var(--pj-accent); stroke: white; stroke-width: 1.25; }
+.pj-star-focus-connection { stroke: var(--pj-accent); stroke-width: 1.5; opacity: .4; }
+.pj-star-focus-signal { stroke: var(--pj-accent); stroke-width: 3.5; stroke-linecap: round; stroke-dasharray: 12 88; animation: pj-star-signal 1.7s linear infinite; }
+@keyframes pj-star-signal { to { stroke-dashoffset: -100; } }
+.pj-star-node { cursor: pointer; transition: transform .34s ease-out, opacity .2s ease-out; }
+.pj-star-node:focus-visible .pj-star-pulse { stroke-width: 2.5; }
+
+.pj-star-motion-toggle, .pj-star-save-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 5px 10px;
+  border: 1px solid var(--pj-border);
+  border-radius: 9px;
+  background: var(--pj-soft);
+  color: var(--pj-accent-ink);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.pj-star-motion-toggle:hover:not(:disabled), .pj-star-save-row button:hover:not(:disabled) { background: var(--pj-border); }
+.pj-star-motion-toggle:disabled, .pj-star-save-row button:disabled, .pj-star-remove:disabled { opacity: .6; cursor: default; }
+.pj-star-save-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.pj-star-save-row [role='status'] { color: var(--pj-ink-2); font-size: 13px; }
+.pj-star-canvas[data-star-motion='paused'] :is(.pj-star-comet,.pj-star-tick-ring,.pj-star-self-ring,.pj-star-core-glow,.pj-star-web,.pj-star-web-line,.pj-star-node-halo,.pj-star-dust-dot,.pj-star-pulse,.pj-star-focus-signal) {
+  animation-play-state: paused;
 }
 
 .pj-star-self-ring {
@@ -2972,6 +3002,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .pj-star-comet,
+  .pj-star-focus-signal,
+  .pj-star-pulse,
   .pj-star-tick-ring,
   .pj-star-self-ring,
   .pj-star-core-glow,
@@ -2981,16 +3014,18 @@
   .pj-star-dust-dot {
     animation: none;
   }
+  .pj-star-focus-signal { display: none; }
+  .pj-star-node { transition: none; }
 }
 
 /* Final legibility pass — functional labels only */
 .profile-journal .pj-ticket-kicker > span { font-size: 11.5px; }
-.profile-journal .pj-star-disclosure { font-size: 13px; }
-.profile-journal .pj-star-filter button { font-size: 12px; }
-.profile-journal .pj-star-filter button span { font-size: 12.5px; }
+.profile-journal .pj-star-disclosure { font-size: 14px; }
+.profile-journal .pj-star-filter button { font-size: 13px; }
+.profile-journal .pj-star-filter button span { font-size: 13px; }
 .profile-journal .pj-star-zoom-value { font-size: 12px; }
 .profile-journal .pj-track-end { font-size: 12px; }
 .profile-journal .pj-device-now { font-size: 10.5px; padding: 2px 5px; }
-.profile-journal .pj-device-meta { font-size: 12px; }
+.profile-journal .pj-device-meta { font-size: 13px; }
 .profile-journal .pj-sec-devices-head span { font-size: 12px; }
 

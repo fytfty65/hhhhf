@@ -1,6 +1,8 @@
 import './globals.css'
 import './journey-system.css' // 引入全局样式（如 Tailwind）
 import './journey-seasons.css'
+import '@fontsource-variable/noto-sans-sc'
+import './journal-fonts.css'
 import './community-journal.css'
 import './profile-journal.css'
 import { JourneySeasonProvider } from './components/JourneySeasonProvider'

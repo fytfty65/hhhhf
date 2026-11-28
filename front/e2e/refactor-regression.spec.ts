@@ -291,12 +291,12 @@ async function reachDecision(page: Page) {
   await expect(page.getByTestId('room-code')).not.toBeEmpty();
 
   await page.getByTestId('begin-plan').click();
-  await expect(page.getByText('查看规划方案')).toBeVisible({ timeout: 10_000 });
-  await page.getByText('查看规划方案').click();
+  await expect(page.getByRole('button', { name: '查看规划方案', exact: true })).toBeVisible({ timeout: 10_000 });
+  await page.getByRole('button', { name: '查看规划方案', exact: true }).click();
 
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible({ timeout: 20_000 });
   await page.locator('textarea').first().fill('去洛阳玩1天，想吃地道老字号，节奏不要太赶');
-  await page.getByText('生成行程方案').click();
+  await page.getByRole('button', { name: '生成行程方案', exact: true }).click();
   await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 20_000 });
 }
 
@@ -409,7 +409,7 @@ test.describe('refactor regression', () => {
     for (const role of ['寻味探索', '视觉体验', '休闲漫步', '深度探索']) {
       await expect(page.getByText(role, { exact: true }).first()).toBeVisible();
     }
-    await expect(page.getByText('查看规划方案')).toBeVisible();
+    await expect(page.getByRole('button', { name: '查看规划方案', exact: true })).toBeVisible();
     await noHorizontalOverflow(page);
   });
 
@@ -421,7 +421,7 @@ test.describe('refactor regression', () => {
     // 个人主页收进「更多」二级入口
     await page.getByTestId('lobby-more').click();
     await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
-    await expect(page.getByText('我的路书', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: '我的路书', exact: true })).toBeVisible({ timeout: 15_000 });
     await page.setViewportSize({ width: 390, height: 844 });
     await noHorizontalOverflow(page);
     await page.getByText('返回大厅', { exact: true }).click();
@@ -432,7 +432,7 @@ test.describe('refactor regression', () => {
   test('个人旅行特征图谱只渲染自己的特征，并标注仅自己可见', async ({ page }) => {
     await installMocks(page);
     // 只返回当前账号的数据：接口本身不接受 user_id，这里连别人的节点都不给。
-    await page.route('**/api/v1/user/preference/graph', (route) =>
+    await page.route(/\/api\/v1\/user\/preference\/graph(?:\?.*)?$/, (route) =>
       route.fulfill({
         json: {
           data: {
@@ -476,7 +476,32 @@ test.describe('refactor regression', () => {
     await card.getByTestId('trait-node-feedback').click();
     const inspector = page.getByTestId('trait-graph-inspector');
     await expect(inspector.getByText('九寨沟', { exact: true })).toBeVisible();
-    await expect(inspector.getByText('反馈记录')).toBeVisible();
+    await expect(inspector.getByText(/行程反馈记录/)).toBeVisible();
+
+    const canvas = page.getByTestId('trait-graph-svg');
+    await expect(canvas.locator('.pj-star-comet')).toHaveCount(2);
+    await card.getByRole('button', { name: '暂停动效' }).click();
+    await expect(canvas.locator('.pj-star-comet').first()).toHaveCSS('animation-play-state', 'paused');
+    await card.getByRole('button', { name: '播放动效' }).click();
+    await expect(canvas.locator('.pj-star-comet').first()).toHaveCSS('animation-play-state', 'running');
+
+    const edits: unknown[] = [];
+    await page.route('**/api/v1/user/preference/graph/node', route => {
+      edits.push(route.request().postDataJSON());
+      return route.fulfill({ json: { ok: true } });
+    });
+    const selectedNode = card.getByTestId('trait-node-feedback');
+    const before = await selectedNode.evaluate(el => getComputedStyle(el).transform);
+    await inspector.getByRole('slider').focus();
+    await page.keyboard.press('Home');
+    await expect.poll(() => selectedNode.evaluate(el => getComputedStyle(el).transform)).not.toBe(before);
+    expect(edits).toEqual([]);
+    await inspector.getByRole('button', { name: '保存调整' }).click();
+    await expect(inspector.getByText('偏好已保存')).toBeVisible();
+    expect(edits).toEqual([{ node_id: 'fb:九寨沟', weight: 0 }]);
+
+    await card.getByTestId('trait-node-tag').hover();
+    await expect(inspector.getByRole('heading', { name: '九寨沟' })).toBeVisible();
 
     // 交互 2：按类型筛选时，画布只留对应节点。
     await card.getByRole('button', { name: '标签 1', exact: true }).click();
@@ -489,6 +514,14 @@ test.describe('refactor regression', () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await card.scrollIntoViewIfNeeded();
     await page.screenshot({ path: '../work/user-trait-graph.png', fullPage: false });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await expect(card.getByRole('button', { name: '动效已减少' })).toBeDisabled();
+    await expect(canvas.locator('.pj-star-comet').first()).toHaveCSS('animation-name', 'none');
+    await card.getByTestId('trait-node-tag').click();
+    await expect(inspector.getByRole('heading', { name: '自然风光' })).toBeInViewport();
+    await noHorizontalOverflow(page);
   });
 
   test('临时账号在个人主页可以原地转正，且数据提示不再声称「只在这台设备」', async ({ page }) => {
@@ -500,7 +533,7 @@ test.describe('refactor regression', () => {
 
     await page.getByTestId('lobby-more').click();
     await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
-    await expect(page.getByText('我的路书', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: '我的路书', exact: true })).toBeVisible({ timeout: 15_000 });
 
     const panel = page.getByTestId('guest-account-panel');
     await expect(panel).toBeVisible();
@@ -767,10 +800,10 @@ test.describe('refactor regression', () => {
     await page.getByTestId('join-room-submit').click();
     await expect(page.getByTestId('room-code')).not.toBeEmpty();
     await page.getByTestId('begin-plan').click();
-    await expect(page.getByText('查看规划方案')).toBeVisible({ timeout: 10_000 });
-    await page.getByText('查看规划方案').click();
+    await expect(page.getByRole('button', { name: '查看规划方案', exact: true })).toBeVisible({ timeout: 10_000 });
+    await page.getByRole('button', { name: '查看规划方案', exact: true }).click();
     await page.locator('textarea').first().fill('去洛阳玩1天，想吃地道老字号，节奏不要太赶');
-    await page.getByText('生成行程方案').click();
+    await page.getByRole('button', { name: '生成行程方案', exact: true }).click();
 
     await expect(page.getByRole('heading', { name: '正在整理你的行程方案…' })).toBeVisible({ timeout: 10_000 });
     const stages = page.getByTestId('deduction-stages');
@@ -1007,7 +1040,13 @@ test('travel journal theme keeps downstream pages readable in both modes', async
   for (const [label, title, name] of [['个人主页', '我的路书', 'profile'], ['社区', '同行者社区', 'community']]) {
     await page.getByTestId('lobby-more').click();
     await page.getByTestId('lobby-more-menu').getByRole('button', { name: label, exact: true }).click();
-    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+    const seasonSelect = page.getByRole('combobox', { name: '旅程季节' });
+    const paper = page.locator(`.${name}-journal`);
+    for (const season of ['spring', 'summer', 'autumn', 'winter']) {
+      await seasonSelect.selectOption(season);
+      await expect(paper).toHaveAttribute('data-season', season);
+    }
     await capture(name);
     await page.getByText('返回大厅', { exact: true }).click();
   }

@@ -416,7 +416,6 @@ export default function ProfileScreen({
   const learningNote = learningQuality?.training_ready
     ? '样本已足够'
     : `还需要更多记录：${learningQuality?.learning_readiness?.reason || '总样本不足'}`;
-  const padCount = (value: number) => String(value).padStart(2, '0');
   const scrollToSection = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
@@ -546,7 +545,7 @@ export default function ProfileScreen({
                       aria-label={`${label} ${value}，前往查看`}
                     >
                       <Icon aria-hidden="true" />
-                      <strong>{padCount(value)}</strong>
+                      <strong>{value}</strong>
                       <span>{label}</span>
                     </button>
                   ))}

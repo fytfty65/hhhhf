@@ -1,0 +1,16 @@
+/* LXGW WenKai v1.530. The subset covers the eight static cover lines
+   in journeySeason.ts and CommunityPanel.tsx. Other glyphs use the UI font.
+   Upstream: https://github.com/lxgw/LxgwWenKai/releases/tag/v1.530 */
+@font-face {
+  font-family: 'LXGW WenKai Journal';
+  src: url('/fonts/journal/lxgw-wenkai-journal-1.530.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+3002, U+4E00, U+4E0A, U+4E0B, U+4EAB, U+4EBA, U+4F60, U+5149, U+5199, U+51FA, U+5206, U+53D1, U+540C, U+58F0, U+590F, U+5929, U+5BC4, U+5C42, U+5C71, U+5F00, U+5F7C, U+60A0, U+610F, U+628A, U+62FE, U+65C5, U+65E0, U+65E5, U+65F6, U+6625, U+6696, U+6709, U+6797, U+67D3, U+6B21, U+6B64, U+6BB5, U+6CBF, U+6D77, U+7559, U+7684, U+79CB, U+7ED9, U+8272, U+82B1, U+843D, U+884C, U+8DEF, U+8FBD, U+8FDB, U+9014, U+91CE, U+957F, U+9614, U+96EA, U+98CE, U+FF0C;
+}
+
+:where(.profile-journal, .community-journal) {
+  --journal-text-font: 'Noto Sans SC Variable', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --journal-cover-font: 'LXGW WenKai Journal', 'Noto Sans SC Variable', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
