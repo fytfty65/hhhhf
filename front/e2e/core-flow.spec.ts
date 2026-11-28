@@ -89,7 +89,7 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   // render at desktop width and hide overflow.
   await page.getByTestId('lobby-more').click();
   await page.getByTestId('lobby-more-menu').getByRole('button', { name: '个人主页' }).click();
-  await expect(page.getByText('我的路书', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '我的路书', exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoHorizontalOverflow(page);
   await page.getByText('返回大厅', { exact: true }).click();
@@ -114,10 +114,10 @@ test('注册/登录、建房、入房、AI 推演、预算与导出主链路', a
   await page.getByTestId('join-room-submit').click();
   await expect(page.getByTestId('room-code')).toHaveText('ROOM-E2E');
   await page.getByTestId('begin-plan').click();
-  await page.getByText('查看规划方案').click();
+  await page.getByRole('button', { name: '查看规划方案', exact: true }).click();
   await expect(page.getByText('你的个性化旅行诉求')).toBeVisible();
   await page.locator('textarea').fill('去洛阳玩1天，想吃地道老字号，节奏不要太赶');
-  await page.getByText('生成行程方案').click();
+  await page.getByRole('button', { name: '生成行程方案', exact: true }).click();
   // 主推演要在 mock WS 返回后走完预算/共识渲染；满负载时实测超过 15s，
   // 与其余首屏等待（20s）对齐，避免把排队等待误判成"没出方案"。
   await expect(page.getByText('路线共识解释')).toBeVisible({ timeout: 25_000 });

@@ -14,14 +14,14 @@
   --cj-card: #ffffff;
   --cj-ink: #1f2328;
   --cj-ink-2: #57606a;
-  --cj-ink-3: #8c959f;
+  --cj-ink-3: #616b76;
   --cj-line: rgba(31, 35, 40, .07);
   --cj-line-strong: rgba(31, 35, 40, .12);
   --cj-good: #2e6b52;
   --cj-good-soft: rgba(46, 107, 82, .08);
   --cj-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', SimSun, serif;
-  --cj-sans: 'Noto Sans SC', 'HarmonyOS Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei UI', 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  --cj-mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace;
+  --cj-sans: var(--journal-text-font);
+  --cj-mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, var(--journal-text-font), monospace;
   --accent: var(--cj-accent);
   --accent-ink: var(--cj-accent-ink);
   --accent-soft: var(--cj-soft);
@@ -148,7 +148,7 @@
 }
 
 .cj-brand-text strong {
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 15px;
   font-weight: 600;
   letter-spacing: .02em;
@@ -278,7 +278,7 @@
 
 .cj-hero h1 {
   margin: 14px 0 0;
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: clamp(30px, 3vw, 38px);
   font-weight: 500;
   line-height: 1.32;
@@ -289,7 +289,7 @@
 
 .cj-hero-motto {
   margin: 9px 0 0;
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 17px;
   font-weight: 400;
   line-height: 1.7;
@@ -492,7 +492,7 @@
 
 .cj-tab[data-active='true'] {
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-weight: 600;
   letter-spacing: .05em;
 }
@@ -824,7 +824,7 @@
   border: 0;
   background: transparent;
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 20px;
   font-weight: 600;
   line-height: 1.52;
@@ -1317,7 +1317,7 @@
 .cj-passport-name h2 {
   margin: 0;
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 19px;
   font-weight: 600;
   line-height: 1.35;
@@ -1405,7 +1405,7 @@
 
 .cj-stamp-wall-head strong {
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: .08em;
@@ -1512,7 +1512,7 @@
   gap: 7px;
   margin: 0;
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 13px;
   font-weight: 600;
   letter-spacing: .06em;
@@ -1580,7 +1580,7 @@
 .cj-invite h3 {
   margin: 10px 0 0;
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 20px;
   font-weight: 600;
   line-height: 1.6;
@@ -1693,7 +1693,7 @@
 .cj-empty-copy h2 {
   margin: 10px 0 0;
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 24px;
   font-weight: 600;
   line-height: 1.55;
@@ -1838,7 +1838,7 @@
   max-width: 88%;
   margin: 9px 0 0;
   color: #fff;
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 25px;
   font-weight: 500;
   line-height: 1.5;
@@ -1930,7 +1930,7 @@
   gap: 7px;
   margin: 0;
   color: var(--cj-ink);
-  font-family: var(--cj-serif);
+  font-family: var(--cj-sans);
   font-size: 14px;
   font-weight: 600;
   letter-spacing: .07em;
@@ -2089,7 +2089,7 @@
 
 .cj-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .cj-modal-head p { margin: 0; color: var(--cj-ink-3); font-size: 9px; letter-spacing: .16em; text-transform: uppercase; }
-.cj-modal-head h2 { margin: 7px 0 0; color: var(--cj-ink); font-family: var(--cj-serif); font-size: 24px; font-weight: 600; letter-spacing: .05em; }
+.cj-modal-head h2 { margin: 7px 0 0; color: var(--cj-ink); font-family: var(--cj-sans); font-size: 24px; font-weight: 600; letter-spacing: .05em; }
 .cj-modal-close {
   display: grid;
   width: 34px;
@@ -2415,50 +2415,50 @@
 
 .community-journal .cj-eyebrow { font-size: 11.5px; }
 .community-journal .cj-hero h1 { font-family: var(--cj-sans); font-size: clamp(34px, 3.4vw, 44px); font-weight: 650; letter-spacing: .015em; }
-.community-journal .cj-hero-motto { font-family: var(--cj-sans); font-size: 19px; font-weight: 400; letter-spacing: .035em; }
-.community-journal .cj-hero-desc { max-width: 470px; font-size: 14.5px; line-height: 1.8; }
-.community-journal .cj-hero-stats { min-height: 38px; padding: 8px 16px; font-size: 12.5px; }
+.community-journal .cj-hero-motto { font-family: var(--journal-cover-font); font-size: 21px; font-weight: 400; letter-spacing: .035em; }
+.community-journal .cj-hero-desc { max-width: 470px; font-size: 16px; line-height: 1.8; }
+.community-journal .cj-hero-stats { min-height: 38px; padding: 8px 16px; font-size: 14px; }
 .community-journal .cj-hero-stats b { font-size: 14px; }
 .community-journal .cj-hero-link,
-.community-journal .cj-hero-publish { min-height: 38px; padding: 0 16px; font-size: 13px; }
+.community-journal .cj-hero-publish { min-height: 38px; padding: 0 16px; font-size: 14px; }
 .community-journal .cj-route-caption { font-size: 10px; }
 .community-journal .cj-route-start,
 .community-journal .cj-route-end { font-size: 10.5px; }
 .community-journal .cj-stamp-center { font-size: 16px; }
 .community-journal .cj-stamp-center small { font-size: 8px; }
 
-.community-journal .cj-tab { min-height: 42px; font-size: 13.5px; }
-.community-journal .cj-search input { min-height: 42px; font-size: 14px; }
-.community-journal .cj-sort button { min-height: 34px; font-size: 12.5px; }
-.community-journal .cj-tag { min-height: 31px; font-size: 12px; }
-.community-journal .cj-tag em { font-size: 10.5px; }
-.community-journal .cj-tag-count { font-size: 12px; }
+.community-journal .cj-tab { min-height: 42px; font-size: 15px; }
+.community-journal .cj-search input { min-height: 42px; font-size: 16px; }
+.community-journal .cj-sort button { min-height: 34px; font-size: 14px; }
+.community-journal .cj-tag { min-height: 31px; font-size: 13px; }
+.community-journal .cj-tag em { font-size: 12px; }
+.community-journal .cj-tag-count { font-size: 13px; }
 
 .community-journal .cj-featured-kicker { font-size: 11px; }
-.community-journal .cj-meta-author strong { font-size: 14px; }
-.community-journal .cj-city-chip { min-height: 24px; font-size: 11.5px; }
-.community-journal .cj-meta-date { font-size: 11.5px; }
-.community-journal .cj-verified { min-height: 26px; font-size: 11.5px; }
-.community-journal .cj-card-title { font-family: var(--cj-sans); font-size: clamp(22px, 1.75vw, 25px); font-weight: 650; line-height: 1.45; letter-spacing: .005em; }
-.community-journal .cj-card-facts { margin-top: 8px; font-size: 12.5px; }
-.community-journal .cj-card-summary { margin-top: 9px; font-size: 14.5px; line-height: 1.8; }
-.community-journal .cj-card-tags button { font-size: 11.5px; }
+.community-journal .cj-meta-author strong { font-size: 15px; }
+.community-journal .cj-city-chip { min-height: 24px; font-size: 13px; }
+.community-journal .cj-meta-date { font-size: 13px; }
+.community-journal .cj-verified { min-height: 26px; font-size: 12.5px; }
+.community-journal .cj-card-title { font-family: var(--cj-sans); font-size: clamp(22px, 1.9vw, 28px); font-weight: 650; line-height: 1.45; letter-spacing: .005em; }
+.community-journal .cj-card-facts { margin-top: 8px; font-size: 14px; }
+.community-journal .cj-card-summary { margin-top: 9px; font-size: 16px; line-height: 1.8; }
+.community-journal .cj-card-tags button { font-size: 13px; }
 
 .community-journal .cj-axis { min-height: 42px; padding: 8px 13px; }
 .community-journal .cj-axis-pin { width: 24px; height: 24px; font-size: 10px; }
-.community-journal .cj-axis-name { font-size: 14px; }
-.community-journal .cj-axis-toggle { font-size: 12px; }
+.community-journal .cj-axis-name { font-size: 15px; }
+.community-journal .cj-axis-toggle { font-size: 14px; }
 .community-journal .cj-node-head { gap: 8px; }
 .community-journal .cj-node-no { font-size: 10px; }
-.community-journal .cj-node-name { font-size: 14px; }
-.community-journal .cj-node-time { font-size: 11.5px; }
-.community-journal .cj-node-desc { margin-top: 3px; font-size: 13px; line-height: 1.75; }
-.community-journal .cj-node-more { font-size: 12px; }
+.community-journal .cj-node-name { font-size: 16px; }
+.community-journal .cj-node-time { font-size: 13px; }
+.community-journal .cj-node-desc { margin-top: 3px; font-size: 15px; line-height: 1.75; }
+.community-journal .cj-node-more { font-size: 14px; }
 .community-journal .cj-drawer-node-list .cj-node-name { font-size: 15px; }
-.community-journal .cj-drawer-node-list .cj-node-desc { font-size: 13.5px; -webkit-line-clamp: initial; }
+.community-journal .cj-drawer-node-list .cj-node-desc { font-size: 15px; -webkit-line-clamp: initial; }
 
-.community-journal .cj-action { min-height: 34px; font-size: 12.5px; }
-.community-journal .cj-adopt { min-height: 36px; padding: 0 15px; font-size: 13px; }
+.community-journal .cj-action { min-height: 34px; font-size: 14px; }
+.community-journal .cj-adopt { min-height: 36px; padding: 0 15px; font-size: 14px; }
 .community-journal .cj-icon-btn { width: 34px; height: 34px; }
 
 .community-journal .cj-bookplate-top { font-size: 9px; }
@@ -2468,9 +2468,9 @@
 .community-journal .cj-passport-edition { font-size: 9px; }
 .community-journal .cj-passport-name h2 { font-family: var(--cj-sans); font-size: 24px; font-weight: 650; letter-spacing: .01em; }
 .community-journal .cj-passport-title { font-size: 11px; }
-.community-journal .cj-passport-signature { font-size: 13px; line-height: 1.7; }
+.community-journal .cj-passport-signature { font-size: 15px; line-height: 1.7; }
 .community-journal .cj-stat strong { font-size: 26px; }
-.community-journal .cj-stat span { font-size: 11.5px; }
+.community-journal .cj-stat span { font-size: 13px; }
 .community-journal .cj-stamp-wall-head strong { font-size: 14px; }
 .community-journal .cj-stamp-wall-head span { font-size: 10.5px; }
 .community-journal .cj-season-stamp-circle { width: 44px; height: 44px; font-size: 16px; }
@@ -2479,33 +2479,33 @@
 .community-journal .cj-passport-secondary { min-height: 40px; font-size: 12.5px; }
 
 .community-journal .cj-trust { padding: 21px 22px 18px; }
-.community-journal .cj-trust-head h2 { font-family: var(--cj-sans); font-size: 16px; font-weight: 650; }
-.community-journal .cj-trust-item strong { font-size: 12.5px; }
-.community-journal .cj-trust-item p { margin-top: 3px; font-size: 12px; line-height: 1.7; }
+.community-journal .cj-trust-head h2 { font-family: var(--cj-sans); font-size: 18px; font-weight: 650; }
+.community-journal .cj-trust-item strong { font-size: 14px; }
+.community-journal .cj-trust-item p { margin-top: 3px; font-size: 14px; line-height: 1.7; }
 
 .community-journal .cj-drawer-cover h2 { font-family: var(--cj-sans); font-size: clamp(28px, 2.2vw, 34px); font-weight: 650; }
 .community-journal .cj-drawer-cover-meta { font-size: 13px; }
-.community-journal .cj-drawer-body { font-size: 15px; }
+.community-journal .cj-drawer-body { font-size: 16px; }
 .community-journal .cj-section-head h3 { font-family: var(--cj-sans); font-size: 19px; font-weight: 650; }
 .community-journal .cj-comment-body p,
-.community-journal .cj-comment-body p strong { font-size: 13px; }
-.community-journal .cj-comment-tools { font-size: 11px; }
+.community-journal .cj-comment-body p strong { font-size: 14px; }
+.community-journal .cj-comment-tools { font-size: 13px; }
 .community-journal .cj-modal-head p { font-size: 11px; }
 .community-journal .cj-modal-head h2 { font-family: var(--cj-sans); font-size: 27px; font-weight: 650; }
-.community-journal .cj-modal-note { font-size: 13px; }
-.community-journal .cj-field span { font-size: 13px; }
+.community-journal .cj-modal-note { font-size: 14px; }
+.community-journal .cj-field span { font-size: 14px; }
 .community-journal .cj-field span em { font-size: 10.5px; }
-.community-journal .cj-form-cancel { min-height: 42px; font-size: 13px; }
+.community-journal .cj-form-cancel { min-height: 42px; font-size: 14px; }
 
 @media (max-width: 767px) {
   .community-journal.community-page { font-size: 14px; }
   .community-journal .cj-back { font-size: 14px; }
   .community-journal .cj-brand-text strong { font-size: 15px; }
-  .community-journal .cj-hero h1 { font-size: 30px; }
-  .community-journal .cj-hero-desc { font-size: 13.5px; }
-  .community-journal .cj-card-title { font-size: 21px; }
-  .community-journal .cj-card-summary { font-size: 13.5px; }
-  .community-journal .cj-node-desc { font-size: 12.5px; }
+  .community-journal .cj-hero h1 { font-size: 32px; }
+  .community-journal .cj-hero-desc { font-size: 16px; }
+  .community-journal .cj-card-title { font-size: clamp(22px, 1.9vw, 28px); }
+  .community-journal .cj-card-summary { font-size: 16px; }
+  .community-journal .cj-node-desc { font-size: 15px; }
   .community-journal .cj-passport-name h2 { font-size: 22px; }
   .community-journal .cj-drawer-cover h2 { font-size: 26px; }
   .community-journal .cj-section-head h3 { font-size: 18px; }
@@ -2513,10 +2513,10 @@
 
 /* Final legibility pass — functional labels only */
 .community-journal .cj-eyebrow { font-size: 12px; }
-.community-journal .cj-tag { font-size: 12.5px; }
-.community-journal .cj-tag em { font-size: 11.5px; }
-.community-journal .cj-card-tags button { font-size: 12.5px; }
-.community-journal .cj-stat span { font-size: 12px; }
+.community-journal .cj-tag { font-size: 13px; }
+.community-journal .cj-tag em { font-size: 12px; }
+.community-journal .cj-card-tags button { font-size: 13px; }
+.community-journal .cj-stat span { font-size: 13px; }
 .community-journal .cj-passport-title { font-size: 12px; }
 .community-journal .cj-axis-pin { font-size: 10.5px; }
 

@@ -17,6 +17,8 @@ import {
   Trash2,
   Undo2,
   Star,
+  Pause,
+  Play,
 } from 'lucide-react';
 import { apiJson } from '../lib/apiClient';
 
@@ -172,6 +174,20 @@ const OUTER_ORBIT_R = 172;
 const ASTRO_R = 212;
 const MAX_VISIBLE_NODES = 14;
 
+const displayedWeight = (weight: number) => Number.isFinite(weight) ? Math.max(0, Math.min(1, weight)) : 0.65;
+
+function OrbitComet({ radius, inner }: { radius: number; inner?: boolean }) {
+  const angle = Math.PI / 4;
+  const startX = CX - Math.sin(angle) * radius;
+  const startY = CY - Math.cos(angle) * radius;
+  const arc = `M ${startX} ${startY} A ${radius} ${radius} 0 0 1 ${CX} ${CY - radius}`;
+  return <g className={`pj-star-comet${inner ? ' is-inner' : ''}`} aria-hidden="true" pointerEvents="none">
+    <path d={arc} className="pj-star-comet-wake" pathLength="100" />
+    <path d={arc} className="pj-star-comet-tail" pathLength="100" />
+    <circle cx={CX} cy={CY - radius} r={inner ? 3 : 4} className="pj-star-comet-head" />
+  </g>;
+}
+
 function shortLabel(label: string) {
   const runes = Array.from(label);
   return runes.length > 9 ? `${runes.slice(0, 8).join('')}…` : label;
@@ -250,11 +266,10 @@ type Layout = {
 };
 
 function buildOrbitLayout(nodes: TraitNode[], edgeMap: Map<string, TraitEdge>): Layout {
-  const visible = nodes.slice(0, MAX_VISIBLE_NODES);
-
   const innerList: TraitNode[] = [];
   const outerList: TraitNode[] = [];
 
+  const visible = nodes.slice(0, MAX_VISIBLE_NODES);
   visible.forEach((node) => {
     if (node.kind === 'dimension' || node.kind === 'budget') {
       innerList.push(node);
@@ -322,7 +337,7 @@ function buildOrbitLayout(nodes: TraitNode[], edgeMap: Map<string, TraitEdge>): 
 
   return {
     items: [...innerPlaced, ...outerPlaced],
-    hidden: Math.max(0, nodes.length - visible.length),
+    hidden: nodes.length - visible.length,
     box: { x: 0, y: 0, w: 800, h: 540 },
   };
 }
@@ -340,12 +355,16 @@ export default function UserTraitGraphCard({
   const [error, setError] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
   const [filter, setFilter] = useState<FilterKey>('all');
+  const [animationPaused, setAnimationPaused] = useState(false);
+  const [animationVisible, setAnimationVisible] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [hoverId, setHoverId] = useState('');
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ id: number; x: number; y: number; ox: number; oy: number } | null>(null);
   const starCanvasRef = useRef<HTMLDivElement | null>(null);
+  const inspectorRef = useRef<HTMLElement>(null);
 
   // 移动端星图保留完整信息密度，靠横向滑动查看；首次进入默认居中聚焦。
   useEffect(() => {
@@ -366,11 +385,39 @@ export default function UserTraitGraphCard({
     };
   }, [graph]);
 
+  useEffect(() => {
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const syncPreference = () => setReducedMotion(preference.matches);
+    syncPreference();
+    preference.addEventListener('change', syncPreference);
+    return () => preference.removeEventListener('change', syncPreference);
+  }, []);
+
+  useEffect(() => {
+    const canvas = starCanvasRef.current;
+    if (!canvas || loading) return;
+    let onScreen = false;
+    const syncVisibility = () => setAnimationVisible(onScreen && !document.hidden);
+    const observer = new IntersectionObserver(([entry]) => {
+      onScreen = entry.isIntersecting;
+      syncVisibility();
+    });
+    observer.observe(canvas);
+    document.addEventListener('visibilitychange', syncVisibility);
+    return () => {
+      observer.disconnect();
+      document.removeEventListener('visibilitychange', syncVisibility);
+    };
+  }, [graph, loading]);
+
   // 新增状态 1：多人协同房间交集对比模式
   const [roomCompareMode, setRoomCompareMode] = useState(false);
 
   // 新增状态 2：本地实时权重覆盖与节点剔除（支持一键撤销）
   const [weightOverrides, setWeightOverrides] = useState<Record<string, number>>({});
+  const [weightDraft, setWeightDraft] = useState<{ id: string; value: number } | null>(null);
+  const [savingWeight, setSavingWeight] = useState(false);
+  const [saveNote, setSaveNote] = useState<{ id: string; text: string } | null>(null);
   const [removedIds, setRemovedIds] = useState<string[]>([]);
   const [lastRemovedNode, setLastRemovedNode] = useState<TraitNode | null>(null);
   // 权重/移出操作失败的可见提示：不再静默吞掉，否则用户以为已经保存。
@@ -417,15 +464,11 @@ export default function UserTraitGraphCard({
     const removedSet = new Set(removedIds);
     return (graph?.nodes || [])
       .filter((node) => node.kind !== 'self' && !removedSet.has(node.id))
-      .map((node) =>
-        weightOverrides[node.id] !== undefined
-          ? { ...node, weight: weightOverrides[node.id] }
-          : node
-      )
       .sort(
         (a, b) =>
           (b.evidence_count || 0) - (a.evidence_count || 0) || (b.weight || 0) - (a.weight || 0)
-      );
+      )
+      .map(node => weightOverrides[node.id] === undefined ? node : { ...node, weight: weightOverrides[node.id] });
   }, [graph, weightOverrides, removedIds]);
 
   const edgeMap = useMemo(() => dominantEdges(graph?.edges || []), [graph]);
@@ -440,12 +483,13 @@ export default function UserTraitGraphCard({
     return base;
   }, [nodes]);
 
+  useEffect(() => {
+    if (filter !== 'all' && counts[filter] === 0) setFilter('all');
+  }, [counts, filter]);
+
   const filtered = useMemo(() => {
     if (filter === 'all') return nodes;
-    if (filter === 'dimension') {
-      return nodes.filter((node) => node.kind === 'dimension' || node.kind === 'budget');
-    }
-    return nodes.filter((node) => node.kind === filter);
+    return nodes.filter(node => KIND_META[node.kind].filter === filter);
   }, [nodes, filter]);
 
   const layout = useMemo(() => buildOrbitLayout(filtered, edgeMap), [filtered, edgeMap]);
@@ -454,6 +498,7 @@ export default function UserTraitGraphCard({
 
   // 统计房间共识交集数据
   const sharedPlaced = useMemo(() => placed.filter((item) => item.isShared), [placed]);
+  const sharedCount = nodes.filter(isRoomConsensusNode).length;
   // 没有房间号、或房间里不足 2 位成员时，不存在"共同交集"，不展示对比入口。
   const activeRoomCode = (roomCode || graph?.room_code || '').toUpperCase();
   const roomSharedAvailable = Boolean(activeRoomCode) && (graph?.room_member_count || 0) >= 2;
@@ -466,54 +511,69 @@ export default function UserTraitGraphCard({
       : { label: '尚无样本', color: 'text-stone-500 bg-stone-100', dot: 'bg-stone-400' });
 
   const isEmpty = Boolean(graph?.empty) || nodes.length === 0;
-  const focusId = hoverId || selectedId;
-  const active = placed.find((item) => item.node.id === focusId);
-  const activeWeightPct = active
-    ? Math.round(
-        (((active.node.weight > 0 && active.node.weight <= 1 ? active.node.weight : 0.65) || 0.65) * 100)
-      )
-    : 0;
+  const selected = placed.find((item) => item.node.id === selectedId);
+  const active = selected ?? placed.find((item) => item.node.id === hoverId);
+  const focusId = active?.node.id ?? '';
+  const activeWeightPct = active ? Math.round(weightFor(active.node) * 100) : 0;
 
-  useEffect(() => {
-    if (filter !== 'all' && selectedId) {
-      const stillVisible = filtered.some((node) => node.id === selectedId);
-      if (!stillVisible) setSelectedId('');
-    }
-  }, [filter, filtered, selectedId]);
+  function weightFor(node: TraitNode) {
+    return weightDraft?.id === node.id ? weightDraft.value : displayedWeight(node.weight);
+  }
+
+  function nodeOffset(item: Placed) {
+    // Keep each kind on its own ring and make weight changes visible without moving neighboring stars.
+    const distance = (0.5 - weightFor(item.node)) * 38;
+    return { x: Math.cos(item.angle) * distance, y: Math.sin(item.angle) * distance };
+  }
 
   useEffect(() => {
     if (!roomSharedAvailable) setRoomCompareMode(false);
   }, [roomSharedAvailable]);
 
-  const selectNode = (id: string) => {
-    setSelectedId((prev) => (prev === id ? '' : id));
+  const selectNode = (id: string, revealOnSmallScreen = false) => {
+    const next = selectedId === id ? '' : id;
+    setSelectedId(next);
+    setHoverId('');
+    setWeightDraft(null);
+    setSaveNote(null);
+    if (next && revealOnSmallScreen && window.matchMedia('(max-width: 1023px)').matches) {
+      window.requestAnimationFrame(() => inspectorRef.current?.scrollIntoView({ block: 'nearest', behavior: reducedMotion ? 'instant' : 'smooth' }));
+    }
   };
 
-  // 处理节点权重微调
-  const handleWeightSliderChange = (node: TraitNode, pctValue: number) => {
-    const normalized = Math.round(pctValue) / 100;
-    setWeightOverrides((prev) => ({ ...prev, [node.id]: normalized }));
-    onWeightChange?.(node.id, normalized);
+  function resetSelection() {
+    setSelectedId('');
+    setHoverId('');
+    setWeightDraft(null);
+    setSaveNote(null);
+  }
 
-    // 同步后端持久化，失败时明确告知（否则刷新就还原，用户以为没生效）
-    apiJson('/api/v1/user/preference/graph/node', {
-      method: 'PATCH',
-      body: JSON.stringify({ node_id: node.id, weight: normalized }),
-    })
-      .then(() => setActionError(''))
-      .catch((err) => {
-        setActionError(
-          `「${node.label}」权重保存失败：${err instanceof Error ? err.message : '请稍后重试'}`
-        );
+  const saveWeight = async () => {
+    if (!selected || !weightDraft || weightDraft.id !== selected.node.id || savingWeight) return;
+    const { id, value } = weightDraft;
+    setSavingWeight(true);
+    setSaveNote(null);
+    try {
+      await apiJson('/api/v1/user/preference/graph/node', {
+        method: 'PATCH', body: JSON.stringify({ node_id: id, weight: value }),
       });
+      setWeightOverrides(prev => ({ ...prev, [id]: value }));
+      setWeightDraft(current => current?.id === id && current.value === value ? null : current);
+      onWeightChange?.(id, value);
+      setActionError('');
+      setSaveNote({ id, text: '偏好已保存' });
+    } catch {
+      setSaveNote({ id, text: '暂时无法保存，可以再试一次。' });
+    } finally {
+      setSavingWeight(false);
+    }
   };
 
   // 处理移出过时节点
   const handleRemoveActiveNode = (node: TraitNode) => {
     setRemovedIds((prev) => [...prev, node.id]);
     setLastRemovedNode(node);
-    setSelectedId('');
-    setHoverId('');
+    resetSelection();
     onRemoveNode?.(node.id);
 
     apiJson(`/api/v1/user/preference/graph/node/${encodeURIComponent(node.id)}`, {
@@ -557,7 +617,7 @@ export default function UserTraitGraphCard({
   const zoomOut = () => zoomTo(view.scale - 0.1);
 
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
-    if (event.pointerType !== 'mouse' || view.scale <= 1) return;
+    if (event.pointerType !== 'mouse' || event.button !== 0 || view.scale <= 1 || (event.target as Element).closest('[role="button"]')) return;
     dragRef.current = {
       id: event.pointerId,
       x: event.clientX,
@@ -584,12 +644,21 @@ export default function UserTraitGraphCard({
   };
 
   const handlePointerUp = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (dragRef.current?.id !== event.pointerId) return;
     dragRef.current = null;
     setDragging(false);
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
   const transform = `translate(${view.x} ${view.y}) translate(${CX} ${CY}) scale(${view.scale}) translate(${-CX} ${-CY})`;
+  const motionState = reducedMotion ? 'reduced' : animationPaused || !animationVisible ? 'paused' : 'playing';
+  const activeOffset = active && nodeOffset(active);
+
+  function switchFilter(next: FilterKey) {
+    setFilter(next);
+    setView(DEFAULT_VIEW);
+    resetSelection();
+  }
 
   return (
     <section
@@ -629,8 +698,8 @@ export default function UserTraitGraphCard({
           </h2>
           <p className="pj-star-subtitle">
             {roomSharedAvailable
-              ? '支持实时微调节点引力权重，或开启「房间交集对比」一眼锁定同行好友的共同偏好。'
-              : '支持实时微调节点引力权重、移出过时标签；调整后自动同步至你的账号。'}
+              ? '点亮一颗星查看它的来历，或切换到房间视图，找到你和同行人的共同偏好。'
+              : '点亮一颗星，看看是什么塑造了你的旅行偏好。越靠近圆心，代表你越看重它。'}
           </p>
           {graph?.disclosures?.[0] && (
             <p className="pj-star-disclosure">{graph.disclosures[0]}</p>
@@ -639,6 +708,12 @@ export default function UserTraitGraphCard({
 
         {/* 右上角：协同交集模式切换器 + 隐私标识 */}
         <div className="pj-star-head-aside">
+          {!loading && !error && !isEmpty && (
+            <button type="button" onClick={() => setAnimationPaused(paused => !paused)} disabled={reducedMotion} className="pj-star-motion-toggle">
+              {animationPaused || reducedMotion ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}
+              {reducedMotion ? '动效已减少' : animationPaused ? '播放动效' : '暂停动效'}
+            </button>
+          )}
           {roomSharedAvailable && (
             <div className="pj-star-room-switch">
               <button
@@ -719,7 +794,7 @@ export default function UserTraitGraphCard({
           </div>
           <p className="mt-3.5 text-base font-bold text-stone-800">你的旅行星图尚未点亮</p>
           <p className="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-stone-500">
-            生成第一份协同行程、对推荐景点进行点赞或避雷，或在偏好设置中勾选心仪标签后，这里将自动生长出专属于你的兴趣引力图。
+            选几个喜欢的旅行标签，或给行程里的地点留下反馈，你的偏好就会慢慢出现在这里。
           </p>
           {lastRemovedNode && (
             <button
@@ -744,6 +819,7 @@ export default function UserTraitGraphCard({
             {/* 左侧 SVG 星图容器 */}
             <div
               className="pj-star-canvas relative min-w-0 overflow-hidden rounded-2xl border border-stone-200/80 bg-paper-hover shadow-inner flex flex-col justify-between"
+              data-star-motion={motionState}
             >
               <div ref={starCanvasRef} className="pj-star-scroll relative min-h-0 flex-1">
                 <svg
@@ -753,7 +829,7 @@ export default function UserTraitGraphCard({
                     cursor: view.scale > 1 ? (dragging ? 'grabbing' : 'grab') : 'default',
                     touchAction: 'pan-x pan-y',
                   }}
-                role="img"
+                role="group"
                 aria-label={`你的旅行特征图谱，共 ${nodes.length} 个节点，基于 ${samples} 条记录`}
                 data-testid="trait-graph-svg"
                 onPointerDown={handlePointerDown}
@@ -791,7 +867,7 @@ export default function UserTraitGraphCard({
                   width={box.w}
                   height={box.h}
                   fill={`url(#${uid}-dots)`}
-                  onClick={() => setSelectedId('')}
+                  onClick={resetSelection}
                 />
 
                 <g transform={transform}>
@@ -867,6 +943,8 @@ export default function UserTraitGraphCard({
                     pointerEvents="none"
                   />
                   <circle cx={CX} cy={CY} r={OUTER_ORBIT_R} fill="none" stroke="var(--pj-line, #E7E5E4)" strokeWidth={0.8} opacity={0.8} pointerEvents="none" />
+                  <OrbitComet radius={OUTER_ORBIT_R} />
+                  <OrbitComet radius={INNER_ORBIT_R} inner />
                   {Array.from({ length: 6 }, (_, index) => {
                     const angle = ((index * 60) - 90) * Math.PI / 180;
                     return (
@@ -938,6 +1016,13 @@ export default function UserTraitGraphCard({
                     </text>
                   </g>
 
+                  {active && activeOffset && (
+                    <g aria-hidden="true" pointerEvents="none">
+                      <line className="pj-star-focus-connection" x1={CX} y1={CY} x2={active.x + activeOffset.x} y2={active.y + activeOffset.y} />
+                      <line className="pj-star-focus-signal" pathLength="100" x1={CX} y1={CY} x2={active.x + activeOffset.x} y2={active.y + activeOffset.y} />
+                    </g>
+                  )}
+
                   {/* 发光星子节点层 */}
                   {placed.map((item, index) => {
                     const tone = TONE[item.tone];
@@ -946,7 +1031,8 @@ export default function UserTraitGraphCard({
                     const highlightInRoom = roomCompareMode && item.isShared;
                     const dimmed =
                       (focusId !== '' && !isFocus) || (roomCompareMode && !item.isShared && !isFocus);
-                    const strength = Math.min(1, Math.max(0.2, item.node.weight ?? item.edge?.weight ?? 0.6));
+                    const strength = weightFor(item.node);
+                    const offset = nodeOffset(item);
                     const radius = 6 + strength * 5.5;
                     const labelDist = radius + 12;
                     const dx = item.x - CX;
@@ -954,15 +1040,15 @@ export default function UserTraitGraphCard({
                     const dist = Math.hypot(dx, dy) || 1;
                     const labelX = item.x + (dx / dist) * labelDist;
                     const labelY = item.y + (dy / dist) * labelDist + 3;
-                    const labelAnchor = dx >= 0 ? 'start' : 'end';
+                    const labelAnchor = Math.abs(dx) < 1 ? 'middle' : dx > 0 ? 'start' : 'end';
 
                     return (
                       <g
                         key={`node-${item.node.id}`}
+                        className="pj-star-node"
                         style={{
-                          opacity: dimmed ? 0.35 : 1,
-                          transition: 'opacity 0.22s cubic-bezier(0.22, 1, 0.36, 1)',
-                          cursor: 'pointer',
+                          opacity: dimmed ? 0.45 : 1,
+                          transform: `translate(${offset.x}px, ${offset.y}px)`,
                         }}
                         data-testid={`trait-node-${item.node.kind}`}
                         onMouseEnter={() => setHoverId(item.node.id)}
@@ -971,7 +1057,7 @@ export default function UserTraitGraphCard({
                         onBlur={() => setHoverId('')}
                         onClick={(event) => {
                           event.stopPropagation();
-                          selectNode(item.node.id);
+                          selectNode(item.node.id, true);
                         }}
                         onKeyDown={(event) => {
                           if (event.key === 'Enter' || event.key === ' ') {
@@ -1047,7 +1133,7 @@ export default function UserTraitGraphCard({
                           textAnchor={labelAnchor}
                           fontSize={17}
                           fontWeight={isFocus || isSelected ? 700 : 600}
-                          fill={isFocus || isSelected ? tone.stroke : 'var(--pj-ink, #1F2328)'}
+                          fill={isFocus || isSelected ? 'var(--pj-accent-ink)' : 'var(--pj-ink, #1F2328)'}
                           fontFamily="var(--pj-sans, 'Noto Sans SC', sans-serif)"
                           paintOrder="stroke"
                           stroke="#FFFFFF"
@@ -1074,17 +1160,8 @@ export default function UserTraitGraphCard({
                     );
                   })}
                 </g>
-              </svg>
+                </svg>
               </div>
-
-              {/* 分类为空浮层 */}
-              {filtered.length === 0 && (
-                <div className="absolute inset-0 flex items-center justify-center bg-paper-hover/60 backdrop-blur-[2px]">
-                  <p className="rounded-xl bg-white border border-stone-200/80 shadow-xs px-4 py-2 text-xs font-bold text-stone-500">
-                    该分类下暂无关联记录
-                  </p>
-                </div>
-              )}
 
               {/* 画布悬浮底栏：图例 + 筛选 + 缩放 */}
               <div className="pj-star-bottom">
@@ -1094,9 +1171,7 @@ export default function UserTraitGraphCard({
                   {roomCompareMode && (
                     <span className="pj-star-legend-room">★ 金色双环 = 同行好友共同偏好</span>
                   )}
-                  {layout.hidden > 0 && (
-                    <span className="pj-star-legend-hidden">另折叠 {layout.hidden} 项</span>
-                  )}
+                  {layout.hidden > 0 && <span className="pj-star-legend-hidden">另折叠 {layout.hidden} 项</span>}
                   <span className="pj-star-swipe-hint">左右滑动查看完整星图</span>
                 </div>
 
@@ -1107,7 +1182,8 @@ export default function UserTraitGraphCard({
                         type="button"
                         aria-label={`全部 ${nodes.length}`}
                         className={filter === 'all' ? 'is-active' : ''}
-                        onClick={() => setFilter('all')}
+                        aria-pressed={filter === 'all'}
+                        onClick={() => switchFilter('all')}
                       >
                         全部<span>{nodes.length}</span>
                       </button>
@@ -1120,7 +1196,8 @@ export default function UserTraitGraphCard({
                             type="button"
                             aria-label={`${value === 'tag' ? '标签' : label} ${count}`}
                             className={filter === value ? 'is-active' : ''}
-                            onClick={() => setFilter(value)}
+                            aria-pressed={filter === value}
+                            onClick={() => switchFilter(value)}
                           >
                             {label}<span>{count}</span>
                           </button>
@@ -1151,7 +1228,9 @@ export default function UserTraitGraphCard({
             {/* 右侧：Bento 风格洞察、权重微调与节点剔除面板 */}
             <aside
               className="pj-star-inspector"
-              aria-live="polite"
+              ref={inspectorRef}
+              tabIndex={-1}
+              aria-label="旅行偏好详情"
               data-testid="trait-graph-inspector"
             >
               {active ? (
@@ -1161,7 +1240,7 @@ export default function UserTraitGraphCard({
                     {active.isShared && <span className="pj-star-node-shared">★ 房间共识</span>}
                     <button
                       type="button"
-                      onClick={() => setSelectedId('')}
+                      onClick={resetSelection}
                       className="pj-star-inspector-close"
                       aria-label="关闭节点详情"
                     >
@@ -1172,36 +1251,41 @@ export default function UserTraitGraphCard({
                   <div className="pj-star-inspector-title">
                     <Star className="h-4 w-4" />
                     <h3>{active.node.label}</h3>
-                    <span>{active.node.kind === 'dimension' ? '核心维度' : '兴趣标签'}</span>
                   </div>
 
                   <p className="pj-star-inspector-desc">
                     {active.edge?.note ||
-                      `偏好「${active.node.label}」已记录在旅行基因中。权重越高，规划时越优先匹配与这一偏好相符的停留点与路线节奏。`}
+                      `越看重「${active.node.label}」，规划时就越优先考虑与之相符的安排。`}
                   </p>
 
-                  <div className="pj-star-weight">
+                  {selected ? <div className="pj-star-weight">
                     <div className="pj-star-weight-head">
-                      <span><Sliders className="h-3.5 w-3.5" />引力权重</span>
+                      <span><Sliders className="h-3.5 w-3.5" />重视程度</span>
                       <strong>{activeWeightPct}<small> / 100</small></strong>
                     </div>
                     <input
                       type="range"
-                      min={10}
+                      min={0}
                       max={100}
-                      step={5}
+                      step={1}
                       value={activeWeightPct}
-                      onChange={(event) =>
-                        handleWeightSliderChange(active.node, Number(event.target.value))
-                      }
+                      disabled={savingWeight}
+                      onChange={event => {
+                        setWeightDraft({ id: selected.node.id, value: Number(event.target.value) / 100 });
+                        setSaveNote(null);
+                      }}
                       className="pj-star-range"
-                      aria-label={`${active.node.label}引力权重`}
+                      aria-label={`${active.node.label}的重视程度`}
                     />
                     <div className="pj-star-weight-scale">
-                      <span>偶发参考</span>
-                      <span>核心必选</span>
+                      <span>偶尔考虑</span>
+                      <span>优先考虑</span>
                     </div>
-                  </div>
+                    <div className="pj-star-save-row">
+                      <button type="button" onClick={saveWeight} disabled={savingWeight || weightDraft?.id !== selected.node.id || weightDraft.value === displayedWeight(selected.node.weight)}>{savingWeight ? '保存中…' : '保存调整'}</button>
+                      {saveNote?.id === selected.node.id && <span role="status">{saveNote.text}</span>}
+                    </div>
+                  </div> : <p className="pj-star-empty-hint">点选这颗星可固定详情并调整偏好。</p>}
 
                   <div className="pj-star-inspector-meta">
                     <span>数据来源 · {SOURCE_META[active.node.source] || active.node.source}</span>
@@ -1212,14 +1296,15 @@ export default function UserTraitGraphCard({
                     </span>
                   </div>
 
-                  <button
+                  {selected && <button
                     type="button"
                     onClick={() => handleRemoveActiveNode(active.node)}
+                    disabled={savingWeight}
                     className="pj-star-remove"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     移出过时标签
-                  </button>
+                  </button>}
                 </div>
               ) : (
                 <div className="pj-star-inspector-empty">
@@ -1228,9 +1313,7 @@ export default function UserTraitGraphCard({
                       <div className="pj-star-room-summary-head">
                         <span><Users className="h-3.5 w-3.5" />房间 {activeRoomCode} 共识</span>
                         <strong>
-                          {placed.length > 0
-                            ? `${Math.round((sharedPlaced.length / placed.length) * 100)}%`
-                            : '0%'}
+                          {Math.round((sharedCount / nodes.length) * 100)}%
                         </strong>
                       </div>
                       <p>已高亮你与同行伙伴重合的兴趣锚点。</p>
@@ -1249,8 +1332,8 @@ export default function UserTraitGraphCard({
                   ) : (
                     <>
                       <span className="pj-star-empty-icon"><Compass className="h-6 w-6" /></span>
-                      <p>点击左侧星盘中的任意星点，即可实时微调偏好引力权重。</p>
-                      <span className="pj-star-empty-hint">调整后，节点会向圆心或外沿平滑移动。</span>
+                      <p>点选一颗星，查看这项偏好从哪里来。</p>
+                      <span className="pj-star-empty-hint">调整重视程度时，可以先看星点怎么移动，再保存。</span>
                     </>
                   )}
                 </div>
